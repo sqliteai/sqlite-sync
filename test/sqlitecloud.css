@@ -1,0 +1,98 @@
+/* sqlitecloud.css - Custom styling for genhtml output */
+
+/* General layout adjustments */
+body {
+    font-family: Arial, sans-serif;
+    background-color: #f4f4f9;
+    color: #333;
+    margin: 0;
+    padding: 0;
+}
+
+h1, h2, h3 {
+    color: #1a73e8;
+    font-weight: 600;
+}
+
+/* Header styling */
+.header {
+    background-color: #1a73e8;
+    color: #fff;
+    padding: 10px 20px;
+}
+
+.header h1 {
+    font-size: 1.8em;
+    margin: 0;
+}
+
+/* Table styling */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 20px;
+}
+
+th, td {
+    padding: 10px;
+    text-align: left;
+    border-bottom: 1px solid #ddd;
+}
+
+th {
+    background-color: #333;
+    color: #fff;
+}
+
+td {
+    background-color: #fff;
+}
+
+/* Highlighting for coverage percentages */
+.coverage-low {
+    background-color: #e57373; /* Red for low coverage */
+    color: #fff;
+}
+
+.coverage-medium {
+    background-color: #ffb74d; /* Orange for medium coverage */
+    color: #fff;
+}
+
+.coverage-high {
+    background-color: #81c784; /* Green for high coverage */
+    color: #fff;
+}
+
+/* Links */
+a {
+    color: #1a73e8;
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+/* Footer styling */
+.footer {
+    text-align: center;
+    padding: 10px;
+    font-size: 0.9em;
+    color: #777;
+    border-top: 1px solid #ddd;
+    background-color: #f4f4f9;
+}
+
+/* Code blocks */
+pre {
+    background-color: #f7f7f9;
+    padding: 10px;
+    border-radius: 5px;
+    overflow-x: auto;
+}
+
+.code {
+    font-family: "Courier New", Courier, monospace;
+    color: #d63384;
+}

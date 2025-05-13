@@ -1,0 +1,219 @@
+name: build sqlitesync
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    name: build for ${{ matrix.name }}-${{ matrix.arch }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+            configure: --with-openssl
+            name: linux
+          - os: LinuxARM64
+            arch: arm64
+            configure: --with-openssl
+            name: linux
+          - os: macos-latest
+            arch: arm64
+            configure: --with-secure-transport
+            name: macos
+          - os: macos-13
+            arch: x86_64
+            configure: --with-secure-transport
+            name: macos
+          - os: windows-latest
+            arch: x86_64
+            configure: --with-schannel
+            name: windows
+          - os: ubuntu-latest
+            arch: arm64
+            configure:
+              --host aarch64-linux-android26
+              --with-openssl=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr
+              LIBS="-lssl -lcrypto -lc++"
+              AR=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+              AS=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-as
+              CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
+              CXX=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++
+              LD=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/ld
+              RANLIB=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
+              STRIP=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
+            name: android
+          - os: ubuntu-latest
+            arch: x86_64
+            configure:
+              --host x86_64-linux-android26
+              --with-openssl=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr
+              LIBS="-lssl -lcrypto -lc++"
+              AR=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+              AS=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-as
+              CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang
+              CXX=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang++
+              LD=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/ld
+              RANLIB=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
+              STRIP=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
+            name: android
+          - os: macos-latest
+            arch: arm64
+            configure:
+              --host=arm64-apple-darwin
+              --with-secure-transport
+              CFLAGS="-arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=11.0"
+            name: ios
+          - os: macos-latest
+            arch: arm64
+            configure:
+              --host=arm64-apple-darwin
+              --with-secure-transport
+              CFLAGS="-arch arm64 -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0"
+            name: isim
+          - os: macos-latest
+            arch: x86_64
+            configure:
+              --host=x86_64-apple-darwin
+              --with-secure-transport
+              CFLAGS="-arch x86_64 -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0"
+            name: isim
+
+    defaults:
+      run:
+        shell: ${{ matrix.os == 'windows-latest' && 'msys2 {0}' || 'bash' }}
+    env:
+      MAKEFLAGS: -j 8
+
+    steps:
+
+      - uses: actions/checkout@v4.2.2
+
+      - uses: msys2/setup-msys2@v2.27.0
+        if: matrix.os == 'windows-latest'
+        with:
+          msystem: mingw64
+          install: >-
+            mingw-w64-x86_64-cc
+            mingw-w64-x86_64-autotools make
+
+      - uses: robinraju/release-downloader@v1.12
+        with:
+          repository: curl/curl
+          tag: 'curl-8_12_1'
+          extract: true
+          fileName: curl-*.tar.gz
+
+      - name: build boringssl
+        if: matrix.name == 'android'
+        run: |
+          git clone https://boringssl.googlesource.com/boringssl
+          cd boringssl
+          mkdir build
+          cd build
+          cmake \
+            -DANDROID_ABI=${{ matrix.arch == 'arm64' && 'arm64-v8a' || 'x86_64' }} \
+            -DANDROID_PLATFORM=android-26 \
+            -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake \
+            -DOPENSSL_SMALL=1 \
+            -DCMAKE_BUILD_TYPE=Release \
+            ..
+          make
+
+          cd ..
+          TOOLCHAIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+          cp build/libssl.a $TOOLCHAIN/sysroot/usr/lib/
+          cp build/libcrypto.a $TOOLCHAIN/sysroot/usr/lib/
+          cp -r include/openssl $TOOLCHAIN/sysroot/usr/include/
+          
+      - name: build curl
+        run: |
+        
+          folder=$(ls -d curl-*/ 2>/dev/null | head -n 1)
+          cd $folder
+
+          ./configure \
+            --without-libpsl \
+            --disable-alt-svc \
+            --disable-ares \
+            --disable-cookies \
+            --disable-basic-auth \
+            --disable-digest-auth \
+            --disable-kerberos-auth \
+            --disable-negotiate-auth \
+            --disable-aws \
+            --disable-dateparse \
+            --disable-dnsshuffle \
+            --disable-doh \
+            --disable-form-api \
+            --disable-hsts \
+            --disable-ipv6 \
+            --disable-libcurl-option \
+            --disable-manual \
+            --disable-mime \
+            --disable-netrc \
+            --disable-ntlm \
+            --disable-ntlm-wb \
+            --disable-progress-meter \
+            --disable-proxy \
+            --disable-pthreads \
+            --disable-socketpair \
+            --disable-threaded-resolver \
+            --disable-tls-srp \
+            --disable-verbose \
+            --disable-versioned-symbols \
+            --enable-symbol-hiding \
+            --without-brotli \
+            --without-zstd \
+            --without-libidn2 \
+            --without-librtmp \
+            --without-zlib \
+            --without-nghttp2 \
+            --without-ngtcp2 \
+            --disable-shared \
+            --disable-ftp \
+            --disable-file \
+            --disable-ipfs \
+            --disable-ldap \
+            --disable-ldaps \
+            --disable-rtsp \
+            --disable-dict \
+            --disable-telnet \
+            --disable-tftp \
+            --disable-pop3 \
+            --disable-imap \
+            --disable-smb \
+            --disable-smtp \
+            --disable-gopher \
+            --disable-mqtt \
+            --disable-docs \
+            --enable-static \
+            ${{matrix.configure}}
+          make
+            
+            # save avg 1kb more with these options
+            # --disable-debug \
+            # --enable-optimize \
+            # --disable-curldebug \
+            # --disable-get-easy-options \
+            # --without-fish-functions-dir \
+            # --without-zsh-functions-dir \
+            # --without-libgsasl \
+
+          cd ..
+          mkdir -p network/curl/${{ matrix.name }}
+          mv $folder/lib/.libs/libcurl.a network/curl/${{ matrix.name }}/lib${{matrix.arch}}.a
+
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: libcurl-${{ matrix.name }}-${{ matrix.arch }}
+          path: network/curl/${{ matrix.name }}/lib${{matrix.arch}}.a
+          if-no-files-found: error
+
+      - name: build sqlitesync
+        run: |
+          echo "TODO: build sqlitesync"
