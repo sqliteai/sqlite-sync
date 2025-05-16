@@ -151,6 +151,29 @@ void cloudsync_rowid_decode (sqlite3_int64 rowid, sqlite3_int64 *db_version, sql
     *db_version = (sqlite3_int64)(urowid >> 30);
 }
 
+char *cloudsync_string_replace_prefix(const char *input, char *prefix, char *replacement) {
+    //const char *prefix = "sqlitecloud://";
+    //const char *replacement = "https://";
+    size_t prefix_len = strlen(prefix);
+    size_t replacement_len = strlen(replacement);
+
+    if (strncmp(input, prefix, prefix_len) == 0) {
+        // Allocate memory for new string
+        size_t input_len = strlen(input);
+        size_t new_len = input_len - prefix_len + replacement_len;
+        char *result = cloudsync_memory_alloc(new_len + 1); // +1 for null terminator
+        if (!result) return NULL;
+
+        // Copy replacement and the rest of the input string
+        strcpy(result, replacement);
+        strcpy(result + replacement_len, input + prefix_len);
+        return result;
+    }
+
+    // If no match, return the original string
+    return (char *)input;
+}
+
 uint64_t fnv1a_hash(const char *data, size_t len) {
     uint64_t hash = FNV_OFFSET_BASIS;
     for (size_t i = 0; i < len; ++i) {

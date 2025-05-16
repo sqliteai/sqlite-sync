@@ -1760,6 +1760,26 @@ abort_test:
     return result;
 }
 
+bool do_test_string_replace_prefix(void) {
+    char *host = "rejfwkr.sqlite.cloud";
+    char *prefix = "sqlitecloud://";
+    char *replacement = "https://";
+    
+    char string[512];
+    snprintf(string, sizeof(string), "%s%s", prefix, host);
+    char expected[512];
+    snprintf(expected, sizeof(expected), "%s%s", replacement, host);
+    
+    char *replaced = cloudsync_string_replace_prefix(string, prefix, replacement);
+    if (string == replaced || strcmp(replaced, expected) != 0) return false;
+    if (string != replaced) cloudsync_memory_free(replaced);
+    
+    replaced = cloudsync_string_replace_prefix(expected, prefix, replacement);
+    if (expected != replaced) return false;
+    
+    return true;
+}
+
 // MARK: -
 
 bool do_compare_queries (sqlite3 *db1, const char *sql1, sqlite3 *db2, const char *sql2, int col_to_skip, int col_tombstone, bool display_column) {
@@ -3094,6 +3114,9 @@ int main(int argc, const char * argv[]) {
     result = do_test_internal_functions();
     printf("%-24s %s\n", "Functions Test (Int):", (result) ? "OK" : "FAILED");
     
+    result = do_test_string_replace_prefix();
+    printf("%-24s %s\n", "String Func Test:", (result) ? "OK" : "FAILED");
+
     // close local database
     db = close_db(db);
         

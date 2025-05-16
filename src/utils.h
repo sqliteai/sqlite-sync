@@ -125,6 +125,7 @@ int cloudsync_uuid_v7 (uint8_t value[UUID_LEN]);
 int cloudsync_uuid_v7_compare (uint8_t value1[UUID_LEN], uint8_t value2[UUID_LEN]);
 char *cloudsync_uuid_v7_string (char value[UUID_STR_MAXLEN], bool dash_format);
 char *cloudsync_uuid_v7_stringify (uint8_t uuid[UUID_LEN], char value[UUID_STR_MAXLEN], bool dash_format);
+char *cloudsync_string_replace_prefix(const char *input, char *prefix, char *replacement);
 uint64_t fnv1a_hash(const char *data, size_t len);
 
 void *cloudsync_memory_zeroalloc (uint64_t size);

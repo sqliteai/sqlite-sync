@@ -1012,8 +1012,7 @@ int dbutils_update_schema_hash(sqlite3 *db, uint64_t *hash) {
     if (hash && *hash == h) return SQLITE_CONSTRAINT;
     
     char sql[1024];
-    //
-    snprintf(sql, sizeof(sql), "INSERT INTO %s (hash) VALUES (%lld);", CLOUDSYNC_SCHEMA_VERSIONS_NAME, h);
+    snprintf(sql, sizeof(sql), "INSERT INTO %s (hash) VALUES (%lld);", CLOUDSYNC_SCHEMA_VERSIONS_NAME, (sqlite3_int64)h);
     int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     
     if (hash) *hash = h;
