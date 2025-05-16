@@ -462,7 +462,7 @@ int cloudsync_changesvtab_rowid (sqlite3_vtab_cursor *cursor, sqlite3_int64 *row
     sqlite3_int64 seq = sqlite3_column_int64(c->vm, COL_SEQ_INDEX);
     sqlite3_int64 db_version = sqlite3_column_int64(c->vm, COL_DBVERSION_INDEX);
     
-    // for an explanation see https://github.com/sqlitecloud/cloudsync/blob/main/docs/RowID.md
+    // for an explanation see https://github.com/sqliteai/sqlite-sync/blob/main/docs/RowID.md
     *rowid = (db_version << 30) | seq;
     return SQLITE_OK;
 }

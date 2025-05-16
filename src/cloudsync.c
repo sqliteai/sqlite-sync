@@ -635,7 +635,7 @@ int table_add_stmts (sqlite3 *db, cloudsync_table_context *table, int ncols) {
     if (rc != SQLITE_OK) goto cleanup;
     
     // precompile the update rows from meta when pk changes
-    // see https://github.com/sqlitecloud/cloudsync/blob/main/docs/PriKey.md for more details
+    // see https://github.com/sqliteai/sqlite-sync/blob/main/docs/PriKey.md for more details
     sql = cloudsync_memory_mprintf("UPDATE OR REPLACE \"%w_cloudsync\" SET pk=?, db_version=?, col_version=1, seq=cloudsync_seq(), site_id=0 WHERE (pk=? AND col_name!='%s');", table->name, CLOUDSYNC_TOMBSTONE_VALUE);
     if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_update_move_stmt: %s", sql);
@@ -1763,7 +1763,7 @@ int local_update_move_meta (sqlite3 *db, cloudsync_table_context *table, const c
       * from OLD.pk to NEW.pk gets a distinct `seq` to maintain proper versioning and ordering of changes.
      */
     
-    // see https://github.com/sqlitecloud/cloudsync/blob/main/docs/PriKey.md for more details
+    // see https://github.com/sqliteai/sqlite-sync/blob/main/docs/PriKey.md for more details
     // pk2 is the old pk
     
     sqlite3_stmt *vm = table->meta_update_move_stmt;
@@ -2437,7 +2437,7 @@ void cloudsync_update (sqlite3_context *context, int argc, sqlite3_value **argv)
         
         // move non-sentinel metadata entries from OLD primary key to NEW primary key
         // handles the case where some metadata is retained across primary key change
-        // see https://github.com/sqlitecloud/cloudsync/blob/main/docs/PriKey.md for more details
+        // see https://github.com/sqliteai/sqlite-sync/blob/main/docs/PriKey.md for more details
         rc = local_update_move_meta(db, table, pk, pklen, oldpk, oldpklen, db_version);
         if (rc != SQLITE_OK) goto cleanup;
         

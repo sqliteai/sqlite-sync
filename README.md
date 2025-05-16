@@ -19,7 +19,7 @@ To use SQLiteSync, you need SQLite version 3.x or later.
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/sqlitecloud/sqlitesync.git
+   git clone https://github.com/sqliteai/sqlite-sync.git
    cd sqlitesync
    ```
 

@@ -1473,7 +1473,7 @@ finalize:
 
 bool do_test_rowid (int ntest, bool print_result) {
     for (int i=0; i<ntest; ++i) {
-        // for an explanation see https://github.com/sqlitecloud/cloudsync/blob/main/docs/RowID.md
+        // for an explanation see https://github.com/sqliteai/sqlite-sync/blob/main/docs/RowID.md
         sqlite3_int64 db_version = (sqlite3_int64)random_int64_range(1, 17179869183);
         sqlite3_int64 seq = (sqlite3_int64)random_int64_range(1, 1073741823);
         sqlite3_int64 rowid = (db_version << 30) | seq;
