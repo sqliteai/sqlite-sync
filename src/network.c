@@ -11,7 +11,7 @@
 #include "network.h"
 #include "dbutils.h"
 #include "utils.h"
-#include "curl/curl.h"
+#include "network/curl/curl.h"
 
 #define CLOUDSYNC_ENDPOINT_PREFIX           "v1/cloudsync"
 #define CLOUDSYNC_ENDPOINT_UPLOAD           "upload"
