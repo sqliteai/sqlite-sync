@@ -105,7 +105,7 @@ all: $(TARGET)
 
 # Loadable library
 $(TARGET): $(RELEASE_OBJ) $(DEF_FILE)
-	$(CC) $(LDFLAGS) $? -o $@
+	$(CC) $? -o $@ $(LDFLAGS)
 ifeq ($(PLATFORM),windows)
     # Generate import library for Windows
 	dlltool -D $@ -d $(DEF_FILE) -l $(DIST_DIR)/js.lib
