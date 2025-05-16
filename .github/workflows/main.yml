@@ -219,6 +219,10 @@ jobs:
           mkdir -p network/curl/${{ matrix.name }}
           mv $folder/lib/.libs/libcurl.a network/curl/${{ matrix.name }}/lib${{matrix.arch}}.a
 
+      - name: linux install uuid-dev
+        if: matrix.name == 'linux'
+        run: sudo apt-get install -y uuid-dev
+
       - name: build sqlite-sync
         run: make ${{ matrix.make && matrix.make || ''}}
 

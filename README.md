@@ -16,14 +16,21 @@ To use SQLiteSync, you need SQLite version 3.x or later.
 
 ### Build from Source
 
-1. Clone the repository:
+1. Install dependencies:
+
+   ```bash
+   #linux
+   sudo apt-get install -y uuid-dev
+   ```
+
+2. Clone the repository:
 
    ```bash
    git clone https://github.com/sqliteai/sqlite-sync.git
    cd sqlitesync
    ```
 
-2. Build the extension:
+3. Build the extension:
 
    ```bash
    make
