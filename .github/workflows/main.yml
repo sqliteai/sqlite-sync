@@ -225,6 +225,7 @@ jobs:
       - name: windows install sqlite3
         if: matrix.os == 'windows-latest'
         run: choco install sqlite -y
+        shell: bash
 
       - name: macos install sqlite3 without SQLITE_OMIT_LOAD_EXTENSION
         if: matrix.name == 'macos'
