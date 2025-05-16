@@ -18,7 +18,7 @@ CC = gcc
 CFLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(SQLITE_DIR) -I$(CURL_DIR)
 TEST_FLAGS = $(CFLAGS) -DSQLITE_CORE -DCLOUDSYNC_UNITTEST -DCLOUDSYNC_OMIT_NETWORK -DCLOUDSYNC_OMIT_PRINT_RESULT -fprofile-arcs -ftest-coverage
 EXTENSION_FLAGS = $(CFLAGS) -O3 -fPIC
-LDFLAGS = -lcurl
+LDFLAGS = -L/$(CURL_DIR)/$(PLATFORM) -lcurl
 COVERAGE = false
 
 # Directories
@@ -30,7 +30,7 @@ VPATH = $(SRC_DIR):$(SQLITE_DIR):$(TEST_DIR)
 BUILD_RELEASE = build/release
 BUILD_TEST = build/test
 BUILD_DIRS = $(BUILD_TEST) $(BUILD_RELEASE)
-CURL_DIR = network/curl/$(PLATFORM)
+CURL_DIR = network/curl
 COV_DIR = coverage
 CUSTOM_CSS = $(TEST_DIR)/sqliteai.css
 

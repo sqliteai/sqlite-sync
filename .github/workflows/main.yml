@@ -217,7 +217,6 @@ jobs:
 
           cd ..
           mkdir -p network/curl/${{ matrix.name }}
-          ls -lah $folder/lib/.libs/
           mv $folder/lib/.libs/libcurl.a network/curl/${{ matrix.name }}
 
       - name: linux install uuid-dev
