@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <objbase.h>
 #include <bcrypt.h>
+#include <ntstatus.h> //for STATUS_SUCCESS
 #else
 #include <uuid/uuid.h>
 #include <unistd.h>
