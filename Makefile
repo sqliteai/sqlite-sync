@@ -18,7 +18,7 @@ CC = gcc
 CFLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(SQLITE_DIR) -I$(CURL_DIR)/include
 TEST_FLAGS = $(CFLAGS) -DSQLITE_CORE -DCLOUDSYNC_UNITTEST -DCLOUDSYNC_OMIT_NETWORK -DCLOUDSYNC_OMIT_PRINT_RESULT -fprofile-arcs -ftest-coverage
 EXTENSION_FLAGS = $(CFLAGS) -O3 -fPIC
-LDFLAGS = -L./$(CURL_DIR)/$(PLATFORM) -lcurl -lssl -lcrypto
+LDFLAGS = -L./$(CURL_DIR)/$(PLATFORM) -lcurl
 COVERAGE = false
 
 # Directories
@@ -64,7 +64,7 @@ else ifeq ($(PLATFORM),android)
         $(error "CC must be set to the Android NDK's Clang compiler")
     endif
     TARGET := $(DIST_DIR)/cloudsync.so
-    LDFLAGS += -shared -lm
+    LDFLAGS += -shared -lm -lssl -lcrypto
     # Android-specific flags
     CFLAGS += -D__ANDROID__
 else ifeq ($(PLATFORM),ios)
@@ -81,7 +81,7 @@ else ifeq ($(PLATFORM),isim)
     CFLAGS += -arch x86_64 -arch arm64 $(SDK)
 else # linux
     TARGET := $(DIST_DIR)/cloudsync.so
-    LDFLAGS += -shared
+    LDFLAGS += -shared -lssl -lcrypto
     CFLAGS += -lm
     TEST_FLAGS += -lgcov
 endif
