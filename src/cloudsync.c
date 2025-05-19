@@ -2981,6 +2981,17 @@ rollback_finalize_alter:
     }
 }
 
+// MARK: -
+
+void cloudsync_uuid (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_uuid");
+    
+    char value[UUID_STR_MAXLEN];
+    char *uuid = cloudsync_uuid_v7_string(value, true);
+    sqlite3_result_text(context, uuid, -1, SQLITE_TRANSIENT);
+}
+
+
 // MARK: - Main Entrypoint -
 
 APIEXPORT int sqlite3_cloudsync_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi) {
@@ -3089,6 +3100,9 @@ APIEXPORT int sqlite3_cloudsync_init (sqlite3 *db, char **pzErrMsg, const sqlite
     if (rc != SQLITE_OK) return rc;
     
     rc = dbutils_register_function(db, "cloudsync_commit_alter", cloudsync_commit_alter, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    
+    rc = dbutils_register_function(db, "cloudsync_uuid", cloudsync_uuid, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
     // NETWORK LAYER

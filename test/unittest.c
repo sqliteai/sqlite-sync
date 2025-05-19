@@ -829,6 +829,11 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     rc = sqlite3_exec(db, "SELECT cloudsync_cleanup('*');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
+    char *uuid = dbutils_text_select(db, "SELECT cloudsync_uuid();");
+    if (uuid == NULL) goto abort_test_functions;
+    if (print_results) printf("New uuid: %s\n", uuid);
+    cloudsync_memory_free(uuid);
+    
     return true;
     
 abort_test_functions:
