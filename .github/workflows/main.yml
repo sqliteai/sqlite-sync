@@ -23,12 +23,9 @@ jobs:
             configure: --with-openssl
             name: linux
           - os: macos-latest
-            arch: arm64
-            configure: --with-secure-transport
-            name: macos
-          - os: macos-13
-            arch: x86_64
-            configure: --with-secure-transport
+            configure:
+              --with-secure-transport
+              CFLAGS="-arch x86_64 -arch arm64"
             name: macos
           - os: windows-latest
             arch: x86_64
@@ -78,19 +75,10 @@ jobs:
             name: ios
             make: PLATFORM=ios
           - os: macos-latest
-            arch: arm64
             configure:
               --host=arm64-apple-darwin
               --with-secure-transport
-              CFLAGS="-arch arm64 -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0"
-            name: isim
-            make: PLATFORM=isim
-          - os: macos-latest
-            arch: x86_64
-            configure:
-              --host=x86_64-apple-darwin
-              --with-secure-transport
-              CFLAGS="-arch x86_64 -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0"
+              CFLAGS="-arch x86_64 -arch arm64 -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0"
             name: isim
             make: PLATFORM=isim
 
@@ -333,4 +321,3 @@ jobs:
             cloudsync-*-${{ steps.tag.outputs.version }}.tar.xz
             cloudsync-*-${{ steps.tag.outputs.version }}.tar.gz
           make_latest: true
-
