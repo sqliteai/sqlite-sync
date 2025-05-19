@@ -663,6 +663,15 @@ void cloudsync_network_check_changes (sqlite3_context *context, int argc, sqlite
     cloudsync_network_check_internal(context, argc, argv);
 }
 
+void cloudsync_network_reset_check_version (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_network_reset_check_version");
+    
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    char *buf = "0";
+    dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
+    dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_CHECK_SEQ, buf);
+}
+
 // MARK: -
 
 int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
@@ -686,7 +695,7 @@ int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
     rc = dbutils_register_function(db, "cloudsync_network_check_changes", cloudsync_network_check_changes, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_check_changes_sync", cloudsync_network_check_changes_sync, 2, pzErrMsg, ctx, NULL);
+    rc = dbutils_register_function(db, "cloudsync_network_reset_check_version", cloudsync_network_reset_check_version, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
     return rc;
