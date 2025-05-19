@@ -23,8 +23,13 @@
 #include "utils.h"
 #include "dbutils.h"
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>     // for htonl, htons, ntohl, ntohs
 #include <netinet/in.h>    // for struct sockaddr_in, INADDR_ANY, etc. (if needed)
+#endif
 
 #ifndef htonll
 #if __BIG_ENDIAN__
