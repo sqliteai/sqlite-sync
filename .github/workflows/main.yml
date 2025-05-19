@@ -209,7 +209,7 @@ jobs:
 
       - name: linux install uuid-dev
         if: matrix.name == 'linux'
-        run: sudo apt update && sudo apt install -y uuid-dev sqlite3
+        run: sudo apt install -y uuid-dev
 
       - name: build sqlite-sync
         run: make ${{ matrix.make && matrix.make || ''}}
