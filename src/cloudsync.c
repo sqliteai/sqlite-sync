@@ -36,8 +36,13 @@
 #define htonll(x)                                   (x)
 #define ntohll(x)                                   (x)
 #else
+#ifndef htobe64
+#define htonll(x)                                   ((uint64_t)htonl((x) & 0xFFFFFFFF) << 32 | (uint64_t)htonl((x) >> 32))
+#define ntohll(x)                                   ((uint64_t)ntohl((x) & 0xFFFFFFFF) << 32 | (uint64_t)ntohl((x) >> 32))
+#else
 #define htonll(x)                                   htobe64(x)
 #define ntohll(x)                                   be64toh(x)
+#endif
 #endif
 #endif
 
