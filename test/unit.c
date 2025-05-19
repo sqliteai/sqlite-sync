@@ -10,12 +10,12 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <fcntl.h>
 #include "sqlite3.h"
 
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include <fcntl.h>
 #include <unistd.h>
 #endif
 
