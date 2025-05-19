@@ -267,6 +267,7 @@ jobs:
         run: make test
 
       - uses: actions/upload-artifact@v4.6.2
+        if: always()
         with:
           name: cloudsync-${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
           path: dist/cloudsync.*
