@@ -15,10 +15,10 @@ endif
 
 # Compiler and flags
 CC = gcc
-CFLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(SQLITE_DIR) -I$(CURL_DIR)
+CFLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(SQLITE_DIR) -I$(CURL_DIR)/include
 TEST_FLAGS = $(CFLAGS) -DSQLITE_CORE -DCLOUDSYNC_UNITTEST -DCLOUDSYNC_OMIT_NETWORK -DCLOUDSYNC_OMIT_PRINT_RESULT -fprofile-arcs -ftest-coverage
 EXTENSION_FLAGS = $(CFLAGS) -O3 -fPIC
-LDFLAGS = -L/$(CURL_DIR)/$(PLATFORM) -lcurl
+LDFLAGS = -L./$(CURL_DIR)/$(PLATFORM) -lcurl
 COVERAGE = false
 
 # Directories
