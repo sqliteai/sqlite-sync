@@ -108,7 +108,7 @@ void *cloudsync_memory_zeroalloc (uint64_t size) {
     void *ptr = (void *)cloudsync_memory_alloc((sqlite3_uint64)size);
     if (!ptr) return NULL;
     
-    bzero(ptr, (size_t)size);
+    memset(ptr, 0, (size_t)size);
     return ptr;
 }
 

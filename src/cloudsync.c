@@ -1800,7 +1800,7 @@ cleanup:
 bool cloudsync_buffer_free (cloudsync_network_payload *payload) {
     if (payload) {
         if (payload->buffer) cloudsync_memory_free(payload->buffer);
-        bzero(payload, sizeof(cloudsync_network_payload));
+        memset(payload, 0, sizeof(cloudsync_network_payload));
     }
         
     return false;
@@ -1825,7 +1825,7 @@ bool cloudsync_buffer_check (cloudsync_network_payload *payload, size_t needed) 
 }
 
 void cloudsync_network_header_init (cloudsync_network_header *header, uint32_t expanded_size, uint16_t ncols, uint32_t nrows, uint64_t hash) {
-    bzero(header, sizeof(cloudsync_network_header));
+    memset(header, 0, sizeof(cloudsync_network_header));
     assert(sizeof(cloudsync_network_header)==32);
     
     int major, minor, patch;

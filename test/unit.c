@@ -2010,7 +2010,7 @@ bool do_test_merge (int nclients, bool print_result, bool cleanup_databases) {
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2083,7 +2083,7 @@ bool do_test_merge_2 (int nclients, int table_mask, bool print_result, bool clea
     int rc = SQLITE_OK;
     int nrows = NINSERT;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2194,7 +2194,7 @@ bool do_test_merge_4 (int nclients, bool print_result, bool cleanup_databases) {
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2282,7 +2282,7 @@ bool do_test_merge_5 (int nclients, bool print_result, bool cleanup_databases, b
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2365,7 +2365,7 @@ bool do_test_merge_alter_schema_1 (int nclients, bool print_result, bool cleanup
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2453,7 +2453,7 @@ bool do_test_merge_alter_schema_2 (int nclients, bool print_result, bool cleanup
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2542,7 +2542,7 @@ bool do_test_prikey (int nclients, bool print_result, bool cleanup_databases) {
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2660,7 +2660,7 @@ bool do_test_gos (int nclients, bool print_result, bool cleanup_databases) {
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2747,7 +2747,7 @@ bool do_test_network_encode_decode (int nclients, bool print_result, bool cleanu
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2840,7 +2840,7 @@ bool do_test_fill_initial_data(int nclients, bool print_result, bool cleanup_dat
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2925,7 +2925,7 @@ bool do_test_alter(int nclients, int alter_version, bool print_result, bool clea
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
