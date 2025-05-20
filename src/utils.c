@@ -23,6 +23,10 @@
 #endif
 #endif
 
+#ifndef SQLITE_CORE
+SQLITE_EXTENSION_INIT3
+#endif
+
 #define FNV_OFFSET_BASIS    0xcbf29ce484222325ULL
 #define FNV_PRIME           0x100000001b3ULL
 
