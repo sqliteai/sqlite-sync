@@ -121,7 +121,7 @@ endif
 
 # Test executable
 $(TEST_TARGET): $(TEST_OBJ)
-	$(CC) $(TEST_FLAGS) $? -o $@
+	$(CC) $? -o $@ $(TEST_FLAGS)
 
 # Object files
 $(BUILD_RELEASE)/%.o: %.c
