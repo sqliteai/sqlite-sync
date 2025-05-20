@@ -16,20 +16,11 @@
 #include <ntstatus.h> //for STATUS_SUCCESS
 #else
 #include <unistd.h>
-#ifdef __linux__
-#include <sys/random.h>
-#elif defined (__APPLE__)
+#if defined(__APPLE__)
 #include <Security/Security.h>
-#else //other platforms like Android
-int timespec_get(struct timespec *ts, int base) {
-    if (base != TIME_UTC) return 0;
-    return clock_gettime(CLOCK_REALTIME, ts) == 0 ? base : 0;
-}
+#elif !defined(__ANDROID__)
+#include <sys/random.h>
 #endif
-#endif
-
-#ifndef SQLITE_CORE
-SQLITE_EXTENSION_INIT3
 #endif
 
 #define FNV_OFFSET_BASIS    0xcbf29ce484222325ULL
@@ -58,17 +49,20 @@ int cloudsync_uuid_v7 (uint8_t value[UUID_LEN]) {
     #elif defined(__APPLE__)
     // Use SecRandomCopyBytes for macOS/iOS
     if (SecRandomCopyBytes(kSecRandomDefault, UUID_LEN, value) != errSecSuccess) return -1;
-    #elif defined(__linux__)
-    if (getentropy(value, UUID_LEN) != 0) return -1;
-    #else
-    //Fallback to arc4random_buf for other platforms such as Android
+    #elif defined(__ANDROID__)
     //arc4random_buf doesn't have a return value to check for success
     arc4random_buf(value, UUID_LEN);
+    #else
+    if (getentropy(value, UUID_LEN) != 0) return -1;
     #endif
     
     // get current timestamp in ms
     struct timespec ts;
+    #ifdef __ANDROID__
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return -1;
+    #else
     if (timespec_get(&ts, TIME_UTC) == 0) return -1;
+    #endif
     
     // add timestamp part to UUID
     uint64_t timestamp = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
