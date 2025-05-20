@@ -15,7 +15,6 @@
 #include <bcrypt.h>
 #include <ntstatus.h> //for STATUS_SUCCESS
 #else
-#include <uuid/uuid.h>
 #include <unistd.h>
 #if defined(__linux__)
 #include <sys/random.h>
