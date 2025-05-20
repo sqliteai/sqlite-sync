@@ -16,11 +16,15 @@
 #include <ntstatus.h> //for STATUS_SUCCESS
 #else
 #include <unistd.h>
-#if defined(__linux__) || defined(__ANDROID__)
+#ifdef __linux__
 #include <sys/random.h>
-#endif
-#if defined(__APPLE__)
+#elif defined (__APPLE__)
 #include <Security/Security.h>
+#else //other platforms like Android
+int timespec_get(struct timespec *ts, int base) {
+    if (base != TIME_UTC) return 0;
+    return clock_gettime(CLOCK_REALTIME, ts) == 0 ? base : 0;
+}
 #endif
 #endif
 
@@ -54,8 +58,12 @@ int cloudsync_uuid_v7 (uint8_t value[UUID_LEN]) {
     #elif defined(__APPLE__)
     // Use SecRandomCopyBytes for macOS/iOS
     if (SecRandomCopyBytes(kSecRandomDefault, UUID_LEN, value) != errSecSuccess) return -1;
-    #else
+    #elif defined(__linux__)
     if (getentropy(value, UUID_LEN) != 0) return -1;
+    #else
+    //Fallback to arc4random_buf for other platforms such as Android
+    //arc4random_buf doesn't have a return value to check for success
+    arc4random_buf(value, UUID_LEN);
     #endif
     
     // get current timestamp in ms
