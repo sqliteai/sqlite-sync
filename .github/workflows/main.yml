@@ -208,6 +208,8 @@ jobs:
           cd ..
           mkdir -p network/curl/${{ matrix.name }}
           ls -lah $folder
+          ls -lah $folder/winbuild
+          ls -lah $folder
           ls -lah $folder/lib
           ls -lah $folder/lib/.libs
           mv $folder/lib/.libs/libcurl.a network/curl/${{ matrix.name }}
