@@ -19,6 +19,9 @@
 #if defined(__linux__) || defined(__ANDROID__)
 #include <sys/random.h>
 #endif
+#if defined(__APPLE__)
+#include <Security/Security.h>
+#endif
 #endif
 
 #ifndef SQLITE_CORE
@@ -49,8 +52,8 @@ int cloudsync_uuid_v7 (uint8_t value[UUID_LEN]) {
     #ifdef _WIN32
     if (BCryptGenRandom(NULL, (BYTE*)value, UUID_LEN, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != STATUS_SUCCESS) return -1;
     #elif defined(__APPLE__)
-    // Use arc4random_buf for macOS/iOS
-    arc4random_buf(value, UUID_LEN);
+    // Use SecRandomCopyBytes for macOS/iOS
+    if (SecRandomCopyBytes(kSecRandomDefault, UUID_LEN, value) != errSecSuccess) return -1;
     #else
     if (getentropy(value, UUID_LEN) != 0) return -1;
     #endif
