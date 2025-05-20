@@ -52,6 +52,7 @@ ifeq ($(PLATFORM),windows)
     LDFLAGS += -shared -lws2_32
     # Create .def file for Windows
     DEF_FILE := $(BUILD_RELEASE)/cloudsync.def
+    CFLAGS += -DCURL_STATICLIB
 else ifeq ($(PLATFORM),macos)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     LDFLAGS += -arch x86_64 -arch arm64 -framework Security -dynamiclib -undefined dynamic_lookup
