@@ -72,13 +72,13 @@ else ifeq ($(PLATFORM),android)
 else ifeq ($(PLATFORM),ios)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     SDK := -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=11.0
-    LDFLAGS += -framework Security -dynamiclib $(SDK)
+    LDFLAGS += -framework Security -framework CoreFoundation -dynamiclib $(SDK)
     # iOS-specific flags
     CFLAGS += -arch arm64 $(SDK)
 else ifeq ($(PLATFORM),isim)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     SDK := -isysroot $(shell xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0
-    LDFLAGS += -arch x86_64 -arch arm64 -framework Security -dynamiclib $(SDK)
+    LDFLAGS += -arch x86_64 -arch arm64 -framework Security -framework CoreFoundation -dynamiclib $(SDK)
     # iphonesimulator-specific flags
     CFLAGS += -arch x86_64 -arch arm64 $(SDK)
 else # linux
