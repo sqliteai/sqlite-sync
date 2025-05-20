@@ -49,7 +49,7 @@ COV_FILES = $(filter-out $(SRC_DIR)/lz4.c $(SRC_DIR)/network.c, $(SRC_FILES))
 # Platform-specific settings
 ifeq ($(PLATFORM),windows)
     TARGET := $(DIST_DIR)/cloudsync.dll
-    LDFLAGS += -shared -lws2_32
+    LDFLAGS += -shared -lbcrypt -lcrypt32 -lsecur32 -lws2_32
     # Create .def file for Windows
     DEF_FILE := $(BUILD_RELEASE)/cloudsync.def
     CFLAGS += -DCURL_STATICLIB
