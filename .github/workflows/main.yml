@@ -69,7 +69,6 @@ jobs:
               CC=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang
             sqlite-amalgamation-zip: https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
           - os: macos-latest
-            arch: arm64
             configure:
               --host=arm64-apple-darwin
               --with-secure-transport
