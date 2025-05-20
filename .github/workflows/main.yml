@@ -29,7 +29,9 @@ jobs:
             name: macos
           - os: windows-latest
             arch: x86_64
-            configure: --with-schannel
+            configure:
+              --with-schannel
+              CFLAGS="-DCURL_STATICLIB"
             name: windows
           - os: ubuntu-latest
             arch: arm64-v8a
@@ -205,6 +207,9 @@ jobs:
 
           cd ..
           mkdir -p network/curl/${{ matrix.name }}
+          ls -lah $folder
+          ls -lah $folder/lib
+          ls -lah $folder/lib/.libs
           mv $folder/lib/.libs/libcurl.a network/curl/${{ matrix.name }}
 
       - name: linux install uuid-dev
