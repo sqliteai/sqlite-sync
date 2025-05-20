@@ -17,7 +17,9 @@
 #else
 #include <uuid/uuid.h>
 #include <unistd.h>
+#if defined(__linux__)
 #include <sys/random.h>
+#endif
 #endif
 
 #ifndef SQLITE_CORE
@@ -47,6 +49,9 @@ int cloudsync_uuid_v7 (uint8_t value[UUID_LEN]) {
     // fill the buffer with high-quality random data
     #ifdef _WIN32
     if (BCryptGenRandom(NULL, (BYTE*)value, UUID_LEN, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != STATUS_SUCCESS) return -1;
+    #elif defined(__APPLE__)
+    // Use arc4random_buf for macOS/iOS
+    arc4random_buf(value, UUID_LEN);
     #else
     if (getentropy(value, UUID_LEN) != 0) return -1;
     #endif
