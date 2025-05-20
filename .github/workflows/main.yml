@@ -257,6 +257,7 @@ jobs:
           script: |
             adb root
             adb remount
+            adb shell mount | grep system
             adb push ${{ github.workspace }}/. /data/local/tmp/
             adb shell "sh /data/local/tmp/commands.sh"
 
