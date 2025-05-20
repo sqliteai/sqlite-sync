@@ -16,7 +16,7 @@
 #include <ntstatus.h> //for STATUS_SUCCESS
 #else
 #include <unistd.h>
-#if defined(__linux__)
+#if defined(__linux__) || defined(__ANDROID__)
 #include <sys/random.h>
 #endif
 #endif
