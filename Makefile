@@ -57,7 +57,7 @@ ifeq ($(PLATFORM),windows)
 else ifeq ($(PLATFORM),macos)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     LDFLAGS += -arch x86_64 -arch arm64 -framework Security -dynamiclib -undefined dynamic_lookup
-    # macOS-specific flags
+    TEST_FLAGS += -framework Security
     CFLAGS += -arch x86_64 -arch arm64
 else ifeq ($(PLATFORM),android)
     # Use Android NDK's Clang compiler, the user should set the CC
@@ -73,13 +73,13 @@ else ifeq ($(PLATFORM),ios)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     SDK := -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=11.0
     LDFLAGS += -framework Security -framework CoreFoundation -dynamiclib $(SDK)
-    # iOS-specific flags
+    TEST_FLAGS += -framework Security
     CFLAGS += -arch arm64 $(SDK)
 else ifeq ($(PLATFORM),isim)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     SDK := -isysroot $(shell xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0
     LDFLAGS += -arch x86_64 -arch arm64 -framework Security -framework CoreFoundation -dynamiclib $(SDK)
-    # iphonesimulator-specific flags
+    TEST_FLAGS += -framework Security
     CFLAGS += -arch x86_64 -arch arm64 $(SDK)
 else # linux
     TARGET := $(DIST_DIR)/cloudsync.so
