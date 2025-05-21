@@ -62,9 +62,7 @@ else ifeq ($(PLATFORM),macos)
 else ifeq ($(PLATFORM),android)
     # Use Android NDK's Clang compiler, the user should set the CC
     # example CC=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
-    ifeq ($(filter %-clang,$(CC)),)
-        $(error "CC must be set to the Android NDK's Clang compiler")
-    endif
+    
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lcrypto -lssl -lc++
 else ifeq ($(PLATFORM),ios)
