@@ -305,7 +305,7 @@ jobs:
         uses: actions/configure-pages@v5
 
       - name: deploy coverage to GitHub Pages
-        uses: actions/deploy-pages@v4.0.5
+        uses: actions/deploy-pages@v3.0.1
 
   release:
     runs-on: ubuntu-latest
