@@ -293,7 +293,7 @@ jobs:
     runs-on: ubuntu-latest
     name: release
     needs: build
-    if: github.ref == 'refs/heads/main'
+    #if: github.ref == 'refs/heads/main'
 
     env:
       GH_TOKEN: ${{ github.token }}
@@ -345,6 +345,7 @@ jobs:
           artifact_name: coverage
 
       - uses: softprops/action-gh-release@v2.2.1
+        if: false
         with:
           generate_release_notes: true
           tag_name: ${{ steps.tag.outputs.version }}
