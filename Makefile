@@ -143,6 +143,7 @@ ifneq ($(COVERAGE),false)
 	mkdir -p $(COV_DIR)
 	lcov --capture --directory . --output-file $(COV_DIR)/coverage.info $(subst src, --include src,${COV_FILES})
 	genhtml $(COV_DIR)/coverage.info --output-directory $(COV_DIR)
+	rm -rf $(COV_DIR)/coverage.info
 endif
 
 # Clean up generated files
