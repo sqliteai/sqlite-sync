@@ -275,7 +275,7 @@ jobs:
       - uses: actions/upload-artifact@v4.6.2
         if: matrix.name == 'macos'
         with:
-          name: coverage
+          name: github-pages
           path: coverage
           if-no-files-found: error
 
@@ -296,7 +296,7 @@ jobs:
       - name: download coverage artifact
         uses: actions/download-artifact@v4.2.1
         with:
-          name: coverage
+          name: github-pages
 
       - name: debug
         run: ls -lah
