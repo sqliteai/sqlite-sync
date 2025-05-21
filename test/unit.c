@@ -3105,9 +3105,7 @@ int main(int argc, const char * argv[]) {
     result += test_report("VTab Test: ", do_test_vtab(db));
     result += test_report("Functions Test:", do_test_functions(db, print_result));
     result += test_report("Functions Test (Int):", do_test_internal_functions());
-    
-    result = do_test_string_replace_prefix();
-    printf("%-24s %s\n", "String Func Test:", (result) ? "OK" : "FAILED");
+    result += test_report("String Func Test:", do_test_string_replace_prefix());
 
     // close local database
     db = close_db(db);
