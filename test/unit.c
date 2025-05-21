@@ -3046,10 +3046,9 @@ int test_report(const char *description, bool result){
 
 int main(int argc, const char * argv[]) {
     sqlite3 *db = NULL;
-    bool result = false;
+    int result = 0;
     bool print_result = false;
     bool cleanup_databases = true;
-    int fail = 0;
     
     // test in an in-memory database
     int rc = sqlite3_open(":memory:", &db);
@@ -3061,14 +3060,14 @@ int main(int argc, const char * argv[]) {
     printf("Testing CloudSync version %s\n", CLOUDSYNC_VERSION);
     printf("===============================\n");
 
-    fail += test_report("PK Test:", do_test_pk(db, 10000, print_result));
-    fail += test_report("UUID Test:", do_test_uuid(db, 1000, print_result));
-    fail += test_report("Comparison Test:", do_test_compare(db, print_result));
-    fail += test_report("RowID Test:", do_test_rowid(50000, print_result));
-    fail += test_report("Algo Names Test:", do_test_algo_names());
-    fail += test_report("DBUtils Test:", do_test_dbutils());
-    fail += test_report("Minor Test:", do_test_others(db));
-    fail += test_report("Test Error Cases:", do_test_error_cases(db));
+    result += test_report("PK Test:", do_test_pk(db, 10000, print_result));
+    result += test_report("UUID Test:", do_test_uuid(db, 1000, print_result));
+    result += test_report("Comparison Test:", do_test_compare(db, print_result));
+    result += test_report("RowID Test:", do_test_rowid(50000, print_result));
+    result += test_report("Algo Names Test:", do_test_algo_names());
+    result += test_report("DBUtils Test:", do_test_dbutils());
+    result += test_report("Minor Test:", do_test_others(db));
+    result += test_report("Test Error Cases:", do_test_error_cases(db));
     
     int test_mask = TEST_INSERT | TEST_UPDATE | TEST_DELETE;
     int table_mask = TEST_PRIKEYS | TEST_NOCOLS;
@@ -3077,38 +3076,38 @@ int main(int argc, const char * argv[]) {
     #endif
     
     // test local changes
-    fail += test_report("Local Test:", do_test_local(test_mask, table_mask, db, print_result));
-    fail += test_report("VTab Test: ", do_test_vtab(db));
-    fail += test_report("Functions Test:", do_test_functions(db, print_result));
-    fail += test_report("Functions Test (Int):", do_test_internal_functions());
+    result += test_report("Local Test:", do_test_local(test_mask, table_mask, db, print_result));
+    result += test_report("VTab Test: ", do_test_vtab(db));
+    result += test_report("Functions Test:", do_test_functions(db, print_result));
+    result += test_report("Functions Test (Int):", do_test_internal_functions());
     
     // close local database
     db = close_db(db);
     
     // simulate remote merge
-    fail += test_report("Merge Test:", do_test_merge(3, print_result, cleanup_databases));
-    fail += test_report("Merge Test 2:", do_test_merge_2(3, TEST_PRIKEYS, print_result, cleanup_databases));
-    fail += test_report("Merge Test 3:", do_test_merge_2(3, TEST_NOCOLS, print_result, cleanup_databases));
-    fail += test_report("Merge Test 4:", do_test_merge_4(2, print_result, cleanup_databases));
-    fail += test_report("Merge Test 5:", do_test_merge_5(2, print_result, cleanup_databases, false));
-    fail += test_report("Merge Alter Schema 1:", do_test_merge_alter_schema_1(2, print_result, cleanup_databases, false));
-    fail += test_report("Merge Alter Schema 2:", do_test_merge_alter_schema_2(2, print_result, cleanup_databases, false));
-    fail += test_report("PriKey NULL Test:", do_test_prikey(2, print_result, cleanup_databases));
-    fail += test_report("Test Double Init:", do_test_double_init(2, cleanup_databases));
+    result += test_report("Merge Test:", do_test_merge(3, print_result, cleanup_databases));
+    result += test_report("Merge Test 2:", do_test_merge_2(3, TEST_PRIKEYS, print_result, cleanup_databases));
+    result += test_report("Merge Test 3:", do_test_merge_2(3, TEST_NOCOLS, print_result, cleanup_databases));
+    result += test_report("Merge Test 4:", do_test_merge_4(2, print_result, cleanup_databases));
+    result += test_report("Merge Test 5:", do_test_merge_5(2, print_result, cleanup_databases, false));
+    result += test_report("Merge Alter Schema 1:", do_test_merge_alter_schema_1(2, print_result, cleanup_databases, false));
+    result += test_report("Merge Alter Schema 2:", do_test_merge_alter_schema_2(2, print_result, cleanup_databases, false));
+    result += test_report("PriKey NULL Test:", do_test_prikey(2, print_result, cleanup_databases));
+    result += test_report("Test Double Init:", do_test_double_init(2, cleanup_databases));
     
     // test grow-only set
-    fail += test_report("Test GrowOnlySet:", do_test_gos(6, print_result, cleanup_databases));
-    fail += test_report("Test Network Enc/Dec:", do_test_network_encode_decode(2, print_result, cleanup_databases, false));
-    fail += test_report("Test Network Enc/Dec 2:", do_test_network_encode_decode(2, print_result, cleanup_databases, true));
-    fail += test_report("Test Fill Initial Data:", do_test_fill_initial_data(3, print_result, cleanup_databases));
-    fail += test_report("Test Alter Table 1:", do_test_alter(3, 1, print_result, cleanup_databases));
-    fail += test_report("Test Alter Table 2:", do_test_alter(3, 2, print_result, cleanup_databases));
-    fail += test_report("Test Alter Table 3:", do_test_alter(3, 3, print_result, cleanup_databases));
+    result += test_report("Test GrowOnlySet:", do_test_gos(6, print_result, cleanup_databases));
+    result += test_report("Test Network Enc/Dec:", do_test_network_encode_decode(2, print_result, cleanup_databases, false));
+    result += test_report("Test Network Enc/Dec 2:", do_test_network_encode_decode(2, print_result, cleanup_databases, true));
+    result += test_report("Test Fill Initial Data:", do_test_fill_initial_data(3, print_result, cleanup_databases));
+    result += test_report("Test Alter Table 1:", do_test_alter(3, 1, print_result, cleanup_databases));
+    result += test_report("Test Alter Table 2:", do_test_alter(3, 2, print_result, cleanup_databases));
+    result += test_report("Test Alter Table 3:", do_test_alter(3, 3, print_result, cleanup_databases));
     
 finalize:
     printf("\n");
     if (rc != SQLITE_OK) printf("%s (%d)\n", (db) ? sqlite3_errmsg(db) : "N/A", rc);
     db = close_db(db);
     
-    return fail;
+    return result;
 }
