@@ -275,8 +275,15 @@ jobs:
       - uses: actions/upload-pages-artifact@v3.0.1
         if: matrix.name == 'macos'
         with:
-          name: github-pages
           path: coverage
+
+      - name: setup GitHub Pages
+        if: matrix.name == 'macos'
+        uses: actions/configure-pages@v5
+
+      - name: deploy coverage to GitHub Pages
+        if: matrix.name == 'macos'
+        uses: actions/deploy-pages@v4.0.5
 
       - uses: actions/upload-artifact@v4.6.2
         if: always()
@@ -284,27 +291,6 @@ jobs:
           name: cloudsync-${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
           path: dist/cloudsync.*
           if-no-files-found: error
-
-  deploy_coverage:
-    name: deploy coverage
-    runs-on: ubuntu-latest
-    needs: build
-
-    steps:
-
-      - name: download coverage artifact
-        uses: actions/download-artifact@v4.2.1
-        with:
-          name: github-pages
-
-      - name: debug
-        run: ls -lah
-
-      - name: setup GitHub Pages
-        uses: actions/configure-pages@v5
-
-      - name: deploy coverage to GitHub Pages
-        uses: actions/deploy-pages@v4.0.5
 
   release:
     runs-on: ubuntu-latest
@@ -340,7 +326,7 @@ jobs:
           for folder in "artifacts"/*; do
             if [ -d "$folder" ]; then
               name=$(basename "$folder")
-              if [[ "$name" != "coverage" ]]; then
+              if [[ "$name" != "github-pages" ]]; then
                 zip -jq "${name}-${{ steps.tag.outputs.version }}.zip" "$folder"/*
                 tar -cJf "${name}-${{ steps.tag.outputs.version }}.tar.xz" -C "$folder" .
                 tar -czf "${name}-${{ steps.tag.outputs.version }}.tar.gz" -C "$folder" .
