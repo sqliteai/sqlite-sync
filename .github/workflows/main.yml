@@ -27,6 +27,7 @@ jobs:
               --with-secure-transport
               CFLAGS="-arch x86_64 -arch arm64"
             name: macos
+            test: brew install lcov && COVERAGE=true
           - os: windows-latest
             arch: x86_64
             configure:
@@ -264,7 +265,7 @@ jobs:
 
       - name: test sqlite-sync
         if: matrix.name == 'linux' || matrix.name == 'macos' || matrix.name == 'windows'
-        run: make test COVERAGE=true
+        run: ${{ matrix.test }} make test
         shell: bash
 
       - uses: actions/upload-artifact@v4.6.2
