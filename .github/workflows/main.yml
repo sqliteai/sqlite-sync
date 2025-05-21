@@ -336,6 +336,7 @@ jobs:
         uses: actions/deploy-pages@v3
         id: deployment
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           artifact_name: coverage
 
       - uses: softprops/action-gh-release@v2.2.1
