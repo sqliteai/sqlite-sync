@@ -67,8 +67,6 @@ else ifeq ($(PLATFORM),android)
     endif
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lcrypto -lssl -lc++
-    # Android-specific flags
-    CFLAGS += -D__ANDROID__
 else ifeq ($(PLATFORM),ios)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     SDK := -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=11.0
