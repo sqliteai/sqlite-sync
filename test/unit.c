@@ -1983,7 +1983,11 @@ sqlite3 *do_create_database (void) {
 }
 
 void do_build_database_path (char buf[256], int i, time_t timestamp, int ntest) {
+    #ifdef __ANDROID__
+    sprintf(buf, "%s/cloudsync-test-%ld-%d-%d.sqlite", ".", timestamp, ntest, i);
+    #else
     sprintf(buf, "%s/cloudsync-test-%ld-%d-%d.sqlite", getenv("HOME"), timestamp, ntest, i);
+    #endif
 }
 
 sqlite3 *do_create_database_file (int i, time_t timestamp, int ntest) {
