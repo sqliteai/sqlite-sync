@@ -272,12 +272,11 @@ jobs:
         if: matrix.name == 'macos'
         run: brew install lcov && make test COVERAGE=true
 
-      - uses: actions/upload-artifact@v4.6.2
+      - uses: actions/upload-pages-artifact@v3.0.1
         if: matrix.name == 'macos'
         with:
           name: github-pages
           path: coverage
-          if-no-files-found: error
 
       - uses: actions/upload-artifact@v4.6.2
         if: always()
@@ -305,7 +304,7 @@ jobs:
         uses: actions/configure-pages@v5
 
       - name: deploy coverage to GitHub Pages
-        uses: actions/deploy-pages@v3.0.1
+        uses: actions/deploy-pages@v4.0.5
 
   release:
     runs-on: ubuntu-latest

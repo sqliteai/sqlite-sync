@@ -116,7 +116,7 @@ all: $(TARGET)
 
 # Loadable library
 $(TARGET): $(RELEASE_OBJ) $(DEF_FILE)
-	$(CC) $? -o $@ $(LDFLAGS)
+	$(CC) $(RELEASE_OBJ) $(DEF_FILE) -o $@ $(LDFLAGS)
 ifeq ($(PLATFORM),windows)
     # Generate import library for Windows
 	dlltool -D $@ -d $(DEF_FILE) -l $(DIST_DIR)/js.lib
@@ -124,7 +124,7 @@ endif
 
 # Test executable
 $(TEST_TARGET): $(TEST_OBJ)
-	$(CC) $? -o $@ $(T_LDFLAGS)
+	$(CC) $(TEST_OBJ) -o $@ $(T_LDFLAGS)
 
 # Object files
 $(BUILD_RELEASE)/%.o: %.c
