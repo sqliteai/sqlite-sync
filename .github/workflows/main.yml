@@ -275,9 +275,20 @@ jobs:
       - uses: actions/upload-artifact@v4.6.2
         if: matrix.name == 'macos'
         with:
-          name: coverage/src
+          name: coverage
           path: coverage
           if-no-files-found: error
+
+      - name: setup GitHub Pages
+        if: matrix.name == 'macos'
+        uses: actions/configure-pages@v5
+
+      - name: deploy coverage to GitHub Pages
+        if: matrix.name == 'macos'
+        uses: actions/deploy-pages@v3
+        id: deployment
+        with:
+          artifact_name: coverage
 
       - uses: actions/upload-artifact@v4.6.2
         if: always()
@@ -328,16 +339,6 @@ jobs:
               fi
             fi
           done
-
-      - name: setup GitHub Pages
-        uses: actions/configure-pages@v5
-
-      - name: deploy coverage to GitHub Pages
-        uses: actions/deploy-pages@v3
-        id: deployment
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          artifact_name: coverage
 
       - uses: softprops/action-gh-release@v2.2.1
         if: false
