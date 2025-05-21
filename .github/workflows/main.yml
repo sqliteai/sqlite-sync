@@ -275,7 +275,7 @@ jobs:
       - uses: actions/upload-artifact@v4.6.2
         if: matrix.name == 'macos'
         with:
-          name: coverage
+          name: coverage/src
           path: coverage
           if-no-files-found: error
 
