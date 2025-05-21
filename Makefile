@@ -66,10 +66,9 @@ else ifeq ($(PLATFORM),android)
         $(error "CC must be set to the Android NDK's Clang compiler")
     endif
     TARGET := $(DIST_DIR)/cloudsync.so
-    LDFLAGS += -shared -lm -lssl -lcrypto
+    LDFLAGS += -shared
     # Android-specific flags
-    CFLAGS += -D__ANDROID__ -fno-exceptions
-    TEST_FLAGS += -fno-exceptions
+    CFLAGS += -D__ANDROID__
 else ifeq ($(PLATFORM),ios)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     SDK := -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=11.0
