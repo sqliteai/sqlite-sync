@@ -279,17 +279,6 @@ jobs:
           path: coverage
           if-no-files-found: error
 
-      - name: setup GitHub Pages
-        if: matrix.name == 'macos'
-        uses: actions/configure-pages@v5
-
-      - name: deploy coverage to GitHub Pages
-        if: matrix.name == 'macos'
-        uses: actions/deploy-pages@v3
-        id: deployment
-        with:
-          artifact_name: coverage
-
       - uses: actions/upload-artifact@v4.6.2
         if: always()
         with:
@@ -297,12 +286,32 @@ jobs:
           path: dist/cloudsync.*
           if-no-files-found: error
 
+  deploy_coverage:
+    name: deploy coverage
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+
+      - name: download coverage artifact
+        uses: actions/download-artifact@v4.2.1
+        with:
+          name: coverage
+
+      - name: debug
+        run: ls -lah
+
+      - name: setup GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: deploy coverage to GitHub Pages
+        uses: actions/deploy-pages@v4.0.5
+
   release:
     runs-on: ubuntu-latest
     name: release
     needs: build
-    if: always()
-    #github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main'
 
     env:
       GH_TOKEN: ${{ github.token }}
