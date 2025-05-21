@@ -29,7 +29,7 @@ VPATH = $(SRC_DIR):$(SQLITE_DIR):$(TEST_DIR)
 BUILD_RELEASE = build/release
 BUILD_TEST = build/test
 BUILD_DIRS = $(BUILD_TEST) $(BUILD_RELEASE)
-CURL_DIR = network/curl
+CURL_DIR = curl
 COV_DIR = coverage
 CUSTOM_CSS = $(TEST_DIR)/sqliteai.css
 
