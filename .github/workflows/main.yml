@@ -40,7 +40,7 @@ jobs:
             configure:
               --host aarch64-linux-android26
               --with-openssl=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr
-              LIBS="-lssl -lcrypto -lc++"
+              LIBS="-lssl -lcrypto"
               AR=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
               AS=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-as
               CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
@@ -57,7 +57,7 @@ jobs:
             configure:
               --host x86_64-linux-android26
               --with-openssl=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr
-              LIBS="-lssl -lcrypto -lc++"
+              LIBS="-lssl -lcrypto"
               AR=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
               AS=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-as
               CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang
@@ -110,30 +110,29 @@ jobs:
           extract: true
           fileName: curl-*.tar.gz
 
-      - name: build boringssl
+      - name: build openssl
         if: matrix.name == 'android'
         run: |
-          git clone https://boringssl.googlesource.com/boringssl
-          cd boringssl
-          mkdir build
-          cd build
-          cmake \
-            -DANDROID_ABI=${{ matrix.arch }} \
-            -DANDROID_PLATFORM=android-26 \
-            -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake \
-            -DOPENSSL_SMALL=1 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_POSITION_INDEPENDENT_CODE=TRUE \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DCMAKE_EXE_LINKER_FLAGS="-static" \
-            ..
-          make
+          git clone https://github.com/openssl/openssl.git
+          cd openssl
+          export TOOLCHAIN=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64
+          export ANDROID_API=26
+          export ARCH=${{ matrix.arch }}
+          export PATH=$TOOLCHAIN/bin:$PATH
+          TARGET=android-${{ matrix.arch == 'arm64-v8a' && 'arm64' || matrix.arch }}
 
-          cd ..
-          TOOLCHAIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
-          cp build/libssl.a $TOOLCHAIN/sysroot/usr/lib/
-          cp build/libcrypto.a $TOOLCHAIN/sysroot/usr/lib/
-          cp -r include/openssl $TOOLCHAIN/sysroot/usr/include/
+          ./Configure $TARGET \
+            --prefix=$PWD/build \
+            --openssldir=$PWD/build/ssl \
+            no-shared \
+            no-unit-test \
+            -D__ANDROID_API__=$ANDROID_API
+          make
+          make install_sw
+
+          cp build/lib/libssl.a $TOOLCHAIN/sysroot/usr/lib/
+          cp build/lib/libcrypto.a $TOOLCHAIN/sysroot/usr/lib/
+          cp -r build/include/openssl $TOOLCHAIN/sysroot/usr/include/
           
       - name: build curl
         run: |
@@ -242,7 +241,7 @@ jobs:
           export ${{ matrix.make }}
           $CC sqlite-amalgamation-*/shell.c sqlite-amalgamation-*/sqlite3.c -o sqlite3 -ldl
           # remove unused folders to save up space
-          rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-* curl-* boringssl
+          rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-* curl-* openssl
           echo "::endgroup::"
 
           echo "::group::prepare the test script"
@@ -296,7 +295,8 @@ jobs:
     runs-on: ubuntu-latest
     name: release
     needs: build
-    #if: github.ref == 'refs/heads/main'
+    if: always()
+    #github.ref == 'refs/heads/main'
 
     env:
       GH_TOKEN: ${{ github.token }}
