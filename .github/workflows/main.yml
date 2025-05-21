@@ -4,6 +4,8 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
   build:
@@ -260,6 +262,8 @@ jobs:
             adb root
             adb remount
             adb push ${{ github.workspace }}/. /data/local/tmp/
+            adb push $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64/libc++_shared.so /data/local/tmp/
+            adb shell "ls -lah /data/local/tmp/"
             adb shell "sh /data/local/tmp/commands.sh"
 
       - name: test sqlite-sync
@@ -270,6 +274,13 @@ jobs:
       - name: test sqlite-sync + coverage
         if: matrix.name == 'macos'
         run: brew install lcov && make test COVERAGE=true
+
+      - uses: actions/upload-artifact@v4.6.2
+        if: matrix.name == 'macos'
+        with:
+          name: coverage
+          path: coverage
+          if-no-files-found: error
 
       - uses: actions/upload-artifact@v4.6.2
         if: always()
@@ -286,6 +297,10 @@ jobs:
 
     env:
       GH_TOKEN: ${{ github.token }}
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
 
@@ -312,11 +327,22 @@ jobs:
           for folder in "artifacts"/*; do
             if [ -d "$folder" ]; then
               name=$(basename "$folder")
-              zip -jq "${name}-${{ steps.tag.outputs.version }}.zip" "$folder"/*
-              tar -cJf "${name}-${{ steps.tag.outputs.version }}.tar.xz" -C "$folder" .
-              tar -czf "${name}-${{ steps.tag.outputs.version }}.tar.gz" -C "$folder" .
+              if [[ "$name" != "coverage" ]]; then
+                zip -jq "${name}-${{ steps.tag.outputs.version }}.zip" "$folder"/*
+                tar -cJf "${name}-${{ steps.tag.outputs.version }}.tar.xz" -C "$folder" .
+                tar -czf "${name}-${{ steps.tag.outputs.version }}.tar.gz" -C "$folder" .
+              fi
             fi
           done
+
+      - name: setup GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: deploy coverage to GitHub Pages
+        uses: actions/deploy-pages@v4.0.5
+        id: deployment
+        with:
+          artifact_name: coverage
 
       - uses: softprops/action-gh-release@v2.2.1
         with:
