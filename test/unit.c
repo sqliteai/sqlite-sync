@@ -829,6 +829,11 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     rc = sqlite3_exec(db, "SELECT cloudsync_cleanup('*');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
+    char *uuid = dbutils_text_select(db, "SELECT cloudsync_uuid();");
+    if (uuid == NULL) goto abort_test_functions;
+    if (print_results) printf("New uuid: %s\n", uuid);
+    cloudsync_memory_free(uuid);
+    
     return true;
     
 abort_test_functions:
@@ -1758,6 +1763,26 @@ abort_test:
     if (vm) sqlite3_finalize(vm);
     if (db) sqlite3_close(db);
     return result;
+}
+
+bool do_test_string_replace_prefix(void) {
+    char *host = "rejfwkr.sqlite.cloud";
+    char *prefix = "sqlitecloud://";
+    char *replacement = "https://";
+    
+    char string[512];
+    snprintf(string, sizeof(string), "%s%s", prefix, host);
+    char expected[512];
+    snprintf(expected, sizeof(expected), "%s%s", replacement, host);
+    
+    char *replaced = cloudsync_string_replace_prefix(string, prefix, replacement);
+    if (string == replaced || strcmp(replaced, expected) != 0) return false;
+    if (string != replaced) cloudsync_memory_free(replaced);
+    
+    replaced = cloudsync_string_replace_prefix(expected, prefix, replacement);
+    if (expected != replaced) return false;
+    
+    return true;
 }
 
 // MARK: -
@@ -3081,6 +3106,9 @@ int main(int argc, const char * argv[]) {
     result += test_report("Functions Test:", do_test_functions(db, print_result));
     result += test_report("Functions Test (Int):", do_test_internal_functions());
     
+    result = do_test_string_replace_prefix();
+    printf("%-24s %s\n", "String Func Test:", (result) ? "OK" : "FAILED");
+
     // close local database
     db = close_db(db);
     

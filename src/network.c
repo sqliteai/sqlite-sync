@@ -334,7 +334,7 @@ int extract_query_param(const char *query, const char *key, char *output, size_t
     return -3; // Key not found
 }
 
-bool network_compute_endpoints (sqlite3_context *context, network_data *data, const char *connection_string) {
+bool network_compute_endpoints (sqlite3_context *context, network_data *data, const char *conn_string) {
     // compute endpoints
     bool result = false;
     
@@ -348,12 +348,16 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     char *check_endpoint = NULL;
     char *upload_endpoint = NULL;
     
+    char *conn_string_https = NULL;
+    
     CURLUcode rc = CURLUE_OUT_OF_MEMORY;
     CURLU *url = curl_url();
     if (!url) goto finalize;
     
+    conn_string_https = cloudsync_string_replace_prefix(conn_string, "sqlitecloud://", "https://");
+    
     // set URL: https://UUID.g5.sqlite.cloud:443/chinook.sqlite?apikey=hWDanFolRT9WDK0p54lufNrIyfgLZgtMw6tb6fbPmpo
-    rc = curl_url_set(url, CURLUPART_URL, connection_string, 0);
+    rc = curl_url_set(url, CURLUPART_URL, conn_string_https, 0);
     if (rc != CURLE_OK) goto finalize;
     
     // https (MANDATORY)
@@ -421,6 +425,7 @@ finalize:
     if (database) curl_free(database);
     if (query) curl_free(query);
     if (url) curl_url_cleanup(url);
+    if (conn_string_https && conn_string_https != conn_string) cloudsync_memory_free(conn_string_https);
     
     return result;
 }
@@ -658,6 +663,15 @@ void cloudsync_network_check_changes (sqlite3_context *context, int argc, sqlite
     cloudsync_network_check_internal(context, argc, argv);
 }
 
+void cloudsync_network_reset_check_version (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_network_reset_check_version");
+    
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    char *buf = "0";
+    dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
+    dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_CHECK_SEQ, buf);
+}
+
 // MARK: -
 
 int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
@@ -681,7 +695,7 @@ int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
     rc = dbutils_register_function(db, "cloudsync_network_check_changes", cloudsync_network_check_changes, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_check_changes_sync", cloudsync_network_check_changes_sync, 2, pzErrMsg, ctx, NULL);
+    rc = dbutils_register_function(db, "cloudsync_network_reset_check_version", cloudsync_network_reset_check_version, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
     return rc;
