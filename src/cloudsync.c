@@ -2031,17 +2031,14 @@ int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int 
         stmt_reset(vm);
     }
     
-    if (rc == SQLITE_DONE) rc = SQLITE_OK;
-    if (rc == SQLITE_OK) {
-        char buf[256];
-        if (xdata.dbversion != dbversion) {
-            snprintf(buf, sizeof(buf), "%lld", xdata.dbversion);
-            dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
-        }
-        if (xdata.seq != seq) {
-            snprintf(buf, sizeof(buf), "%lld", xdata.seq);
-            dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_CHECK_SEQ, buf);
-        }
+    char buf[256];
+    if (xdata.dbversion != dbversion) {
+        snprintf(buf, sizeof(buf), "%lld", xdata.dbversion);
+        dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
+    }
+    if (xdata.seq != seq) {
+        snprintf(buf, sizeof(buf), "%lld", xdata.seq);
+        dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_CHECK_SEQ, buf);
     }
 
     // cleanup vm
@@ -2051,7 +2048,6 @@ int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int 
     if (clone) cloudsync_memory_free(clone);
     
     if (rc != SQLITE_DONE) {
-        sqlite3_result_error(context, sqlite3_errmsg(db), -1);
         sqlite3_result_error_code(context, SQLITE_MISUSE);
         return -1;
     }
