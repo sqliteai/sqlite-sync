@@ -247,6 +247,7 @@ jobs:
             cd /data/local/tmp
             $(make test CC=$CC PLATFORM=$PLATFORM -n)
           EOF
+          find . -type f -exec du -h {} + | sort -h
           echo "::endgroup::"
 
       - name: android test sqlite-sync
