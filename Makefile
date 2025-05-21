@@ -16,7 +16,7 @@ endif
 # Compiler and flags
 CC = gcc
 CFLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(SQLITE_DIR) -I$(CURL_DIR)/include
-TEST_FLAGS = $(CFLAGS) -DSQLITE_CORE -DCLOUDSYNC_UNITTEST -DCLOUDSYNC_OMIT_NETWORK -DCLOUDSYNC_OMIT_PRINT_RESULT -fprofile-arcs -ftest-coverage
+TEST_FLAGS = $(CFLAGS) -DSQLITE_CORE -DCLOUDSYNC_UNITTEST -DCLOUDSYNC_OMIT_NETWORK -DCLOUDSYNC_OMIT_PRINT_RESULT
 EXTENSION_FLAGS = $(CFLAGS) -O3 -fPIC
 LDFLAGS = -L./$(CURL_DIR)/$(PLATFORM) -lcurl
 COVERAGE = false
@@ -83,7 +83,10 @@ else # linux
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lssl -lcrypto
     CFLAGS += -lm
-    TEST_FLAGS += -lgcov
+endif
+
+ifneq ($(COVERAGE),false)
+    TEST_FLAGS += -lgcov -fprofile-arcs -ftest-coverage
 endif
 
 # Windows .def file generation
