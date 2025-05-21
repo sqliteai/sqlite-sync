@@ -236,8 +236,8 @@ jobs:
           unzip sqlite-amalgamation-*.zip
           export ${{ matrix.make }}
           $CC sqlite-amalgamation-*/shell.c sqlite-amalgamation-*/sqlite3.c -o sqlite3 -ldl
-          rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-*
-          rm -rf curl-* # remove unused curl folder to save up space
+          # remove unused folders to save up space
+          rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-* curl-* boringssl
           echo "::endgroup::"
 
           echo "::group::prepare the test script"
