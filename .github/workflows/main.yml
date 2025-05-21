@@ -127,7 +127,6 @@ jobs:
             no-unit-test \
             -D__ANDROID_API__=26
           make
-          make install_sw
 
           cp build/lib/libssl.a $TOOLCHAIN/sysroot/usr/lib/
           cp build/lib/libcrypto.a $TOOLCHAIN/sysroot/usr/lib/
@@ -249,6 +248,7 @@ jobs:
             mv -f /data/local/tmp/sqlite3 /system/xbin
             cd /data/local/tmp
             rm -rf .git .github build docs network sqlite #remove unused folders to save up space
+            df -h
             $(make test CC=$CC PLATFORM=$PLATFORM -n)
           EOF
           echo "::endgroup::"
