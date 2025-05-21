@@ -245,9 +245,9 @@ jobs:
           cat > commands.sh << EOF
             mv -f /data/local/tmp/sqlite3 /system/xbin
             cd /data/local/tmp
+            sqlite3 ":memory:" -cmd ".bail on" ".load ./dist/cloudsync" "SELECT cloudsync_version();"
             $(make test CC=$CC PLATFORM=$PLATFORM -n)
           EOF
-          find . -type f -exec du -h {} + | sort -h
           echo "::endgroup::"
 
       - name: android test sqlite-sync
@@ -259,7 +259,6 @@ jobs:
           script: |
             adb root
             adb remount
-            adb shell mount | grep system
             adb push ${{ github.workspace }}/. /data/local/tmp/
             adb shell "sh /data/local/tmp/commands.sh"
 
@@ -271,6 +270,14 @@ jobs:
       - name: test sqlite-sync + coverage
         if: matrix.name == 'macos'
         run: brew install lcov && make test COVERAGE=true
+
+      - name: deploy coverage HTML to GitHub Pages
+        if: matrix.name == 'macos'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./coverage
+          force_orphan: true
 
       - uses: actions/upload-artifact@v4.6.2
         if: always()
