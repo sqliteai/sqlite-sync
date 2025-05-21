@@ -263,7 +263,7 @@ jobs:
 
       - name: test sqlite-sync
         if: matrix.name == 'linux' || matrix.name == 'macos' || matrix.name == 'windows'
-        run: make test
+        run: make test COVERAGE=true
         shell: bash
 
       - uses: actions/upload-artifact@v4.6.2
