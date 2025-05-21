@@ -16,8 +16,7 @@ endif
 # Compiler and flags
 CC = gcc
 CFLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(SQLITE_DIR) -I$(CURL_DIR)/include
-TEST_FLAGS = $(CFLAGS) -DSQLITE_CORE -DCLOUDSYNC_UNITTEST -DCLOUDSYNC_OMIT_NETWORK -DCLOUDSYNC_OMIT_PRINT_RESULT
-EXTENSION_FLAGS = $(CFLAGS) -O3 -fPIC
+T_CFLAGS = $(CFLAGS) -DSQLITE_CORE -DCLOUDSYNC_UNITTEST -DCLOUDSYNC_OMIT_NETWORK -DCLOUDSYNC_OMIT_PRINT_RESULT
 LDFLAGS = -L./$(CURL_DIR)/$(PLATFORM) -lcurl
 COVERAGE = false
 
@@ -50,14 +49,14 @@ COV_FILES = $(filter-out $(SRC_DIR)/lz4.c $(SRC_DIR)/network.c, $(SRC_FILES))
 ifeq ($(PLATFORM),windows)
     TARGET := $(DIST_DIR)/cloudsync.dll
     LDFLAGS += -shared -lbcrypt -lcrypt32 -lsecur32 -lws2_32
-    TEST_FLAGS += -lws2_32 -lbcrypt
+    T_LDFLAGS = -lws2_32 -lbcrypt
     # Create .def file for Windows
     DEF_FILE := $(BUILD_RELEASE)/cloudsync.def
     CFLAGS += -DCURL_STATICLIB
 else ifeq ($(PLATFORM),macos)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     LDFLAGS += -arch x86_64 -arch arm64 -framework Security -dynamiclib -undefined dynamic_lookup
-    TEST_FLAGS += -framework Security
+    T_LDFLAGS = -framework Security
     CFLAGS += -arch x86_64 -arch arm64
 else ifeq ($(PLATFORM),android)
     # Use Android NDK's Clang compiler, the user should set the CC
@@ -71,25 +70,24 @@ else ifeq ($(PLATFORM),ios)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     SDK := -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=11.0
     LDFLAGS += -framework Security -framework CoreFoundation -dynamiclib $(SDK)
-    TEST_FLAGS += -framework Security
+    T_LDFLAGS = -framework Security
     CFLAGS += -arch arm64 $(SDK)
 else ifeq ($(PLATFORM),isim)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     SDK := -isysroot $(shell xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0
     LDFLAGS += -arch x86_64 -arch arm64 -framework Security -framework CoreFoundation -dynamiclib $(SDK)
-    TEST_FLAGS += -framework Security
+    T_LDFLAGS = -framework Security
     CFLAGS += -arch x86_64 -arch arm64 $(SDK)
 else # linux
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lssl -lcrypto
-    CFLAGS += -lm
 endif
 
 ifneq ($(COVERAGE),false)
 ifneq (,$(filter $(platform),linux windows))
-    TEST_FLAGS += -lgcov
+    T_LDFLAGS += -lgcov
 endif
-    TEST_FLAGS += -fprofile-arcs -ftest-coverage
+    T_LDFLAGS += -fprofile-arcs -ftest-coverage
 endif
 
 # Windows .def file generation
@@ -125,15 +123,15 @@ endif
 
 # Test executable
 $(TEST_TARGET): $(TEST_OBJ)
-	$(CC) $? -o $@ $(TEST_FLAGS)
+	$(CC) $? -o $@ $(T_LDFLAGS)
 
 # Object files
 $(BUILD_RELEASE)/%.o: %.c
-	$(CC) $(EXTENSION_FLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -O3 -fPIC -c $< -o $@
 $(BUILD_TEST)/sqlite3.o: $(SQLITE_DIR)/sqlite3.c
 	$(CC) $(CFLAGS) -DSQLITE_CORE=1 -c $< -o $@
 $(BUILD_TEST)/%.o: %.c
-	$(CC) $(TEST_FLAGS) -c $< -o $@
+	$(CC) $(T_CFLAGS) -c $< -o $@
 
 # Run code coverage (--css-file $(CUSTOM_CSS))
 test: $(TARGET) $(TEST_TARGET)
@@ -143,7 +141,6 @@ ifneq ($(COVERAGE),false)
 	mkdir -p $(COV_DIR)
 	lcov --capture --directory . --output-file $(COV_DIR)/coverage.info $(subst src, --include src,${COV_FILES})
 	genhtml $(COV_DIR)/coverage.info --output-directory $(COV_DIR)
-	rm -rf $(COV_DIR)/coverage.info
 endif
 
 # Clean up generated files
