@@ -116,19 +116,16 @@ jobs:
           git clone https://github.com/openssl/openssl.git
           cd openssl
           export TOOLCHAIN=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64
-          export ANDROID_API=26
           export ARCH=${{ matrix.arch }}
           export PATH=$TOOLCHAIN/bin:$PATH
-          TARGET=android-${{ matrix.arch == 'arm64-v8a' && 'arm64' || matrix.arch }}
 
-          ./Configure $TARGET \
+          ./Configure android-${{ matrix.arch == 'arm64-v8a' && 'arm64' || matrix.arch }} \
             --prefix=$PWD/build \
             --openssldir=$PWD/build/ssl \
             no-shared \
             no-unit-test \
-            -D__ANDROID_API__=$ANDROID_API
+            -D__ANDROID_API__=26
           make
-          make install_sw
 
           cp build/lib/libssl.a $TOOLCHAIN/sysroot/usr/lib/
           cp build/lib/libcrypto.a $TOOLCHAIN/sysroot/usr/lib/
@@ -249,6 +246,7 @@ jobs:
           cat > commands.sh << EOF
             mv -f /data/local/tmp/sqlite3 /system/xbin
             cd /data/local/tmp
+            rm -rf .git .github build docs network sqlite #remove unused folders to save up space
             $(make test CC=$CC PLATFORM=$PLATFORM -n)
           EOF
           echo "::endgroup::"
@@ -263,7 +261,6 @@ jobs:
             adb root
             adb remount
             adb push ${{ github.workspace }}/. /data/local/tmp/
-            adb push $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/libc++_shared.so /data/local/tmp/
             adb shell "ls -lah /data/local/tmp/"
             adb shell "sh /data/local/tmp/commands.sh"
 

@@ -86,7 +86,10 @@ else # linux
 endif
 
 ifneq ($(COVERAGE),false)
-    TEST_FLAGS += -lgcov -fprofile-arcs -ftest-coverage
+ifneq (,$(filter $(platform),linux windows))
+    TEST_FLAGS += -lgcov
+endif
+    TEST_FLAGS += -fprofile-arcs -ftest-coverage
 endif
 
 # Windows .def file generation
