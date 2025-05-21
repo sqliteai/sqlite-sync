@@ -276,7 +276,7 @@ jobs:
         if: matrix.name == 'macos'
         with:
           name: coverage
-          path: coverage/src
+          path: coverage
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4.6.2
@@ -333,7 +333,7 @@ jobs:
         uses: actions/configure-pages@v5
 
       - name: deploy coverage to GitHub Pages
-        uses: actions/deploy-pages@v4.0.5
+        uses: actions/deploy-pages@v3
         id: deployment
         with:
           artifact_name: coverage
