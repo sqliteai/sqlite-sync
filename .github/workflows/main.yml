@@ -38,7 +38,7 @@ jobs:
             configure:
               --host aarch64-linux-android26
               --with-openssl=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr
-              LIBS="-lssl -lcrypto -lc++"
+              LIBS="-lssl -lcrypto"
               AR=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
               AS=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-as
               CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
@@ -55,7 +55,7 @@ jobs:
             configure:
               --host x86_64-linux-android26
               --with-openssl=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr
-              LIBS="-lssl -lcrypto -lc++"
+              LIBS="-lssl -lcrypto"
               AR=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
               AS=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-as
               CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang
