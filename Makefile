@@ -87,7 +87,7 @@ ifneq ($(COVERAGE),false)
 ifneq (,$(filter $(platform),linux windows))
     T_LDFLAGS += -lgcov
 endif
-    T_LDFLAGS += -fprofile-arcs -ftest-coverage
+    T_CFLAGS += -fprofile-arcs -ftest-coverage
 endif
 
 # Windows .def file generation
