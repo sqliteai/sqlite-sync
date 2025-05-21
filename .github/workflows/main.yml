@@ -247,8 +247,6 @@ jobs:
           cat > commands.sh << EOF
             mv -f /data/local/tmp/sqlite3 /system/xbin
             cd /data/local/tmp
-            rm -rf .git .github build docs network sqlite #remove unused folders to save up space
-            df -h
             $(make test CC=$CC PLATFORM=$PLATFORM -n)
           EOF
           echo "::endgroup::"
@@ -279,7 +277,7 @@ jobs:
         if: matrix.name == 'macos'
         with:
           name: coverage
-          path: coverage
+          path: coverage/src
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4.6.2
