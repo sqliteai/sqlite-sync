@@ -66,7 +66,7 @@ else ifeq ($(PLATFORM),android)
         $(error "CC must be set to the Android NDK's Clang compiler")
     endif
     TARGET := $(DIST_DIR)/cloudsync.so
-    LDFLAGS += -shared -lcrypto -lssl
+    LDFLAGS += -shared -lcrypto -lssl -lc++
     # Android-specific flags
     CFLAGS += -D__ANDROID__
 else ifeq ($(PLATFORM),ios)
