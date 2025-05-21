@@ -118,15 +118,15 @@ jobs:
           export TOOLCHAIN=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64
           export ARCH=${{ matrix.arch }}
           export PATH=$TOOLCHAIN/bin:$PATH
-          TARGET=android-${{ matrix.arch == 'arm64-v8a' && 'arm64' || matrix.arch }}
 
-          ./Configure $TARGET \
+          ./Configure android-${{ matrix.arch == 'arm64-v8a' && 'arm64' || matrix.arch }} \
             --prefix=$PWD/build \
             --openssldir=$PWD/build/ssl \
             no-shared \
             no-unit-test \
             -D__ANDROID_API__=26
           make
+          make install_sw
 
           cp build/lib/libssl.a $TOOLCHAIN/sysroot/usr/lib/
           cp build/lib/libcrypto.a $TOOLCHAIN/sysroot/usr/lib/
