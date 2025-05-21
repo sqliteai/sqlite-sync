@@ -261,7 +261,6 @@ jobs:
             adb root
             adb remount
             adb push ${{ github.workspace }}/. /data/local/tmp/
-            adb shell "ls -lah /data/local/tmp/"
             adb shell "sh /data/local/tmp/commands.sh"
 
       - name: test sqlite-sync
