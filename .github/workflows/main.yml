@@ -277,14 +277,6 @@ jobs:
         with:
           path: coverage
 
-      - name: setup GitHub Pages
-        if: matrix.name == 'macos'
-        uses: actions/configure-pages@v5
-
-      - name: deploy coverage to GitHub Pages
-        if: matrix.name == 'macos'
-        uses: actions/deploy-pages@v4.0.5
-
       - uses: actions/upload-artifact@v4.6.2
         if: always()
         with:
@@ -296,7 +288,7 @@ jobs:
     runs-on: ubuntu-latest
     name: release
     needs: build
-    if: github.ref == 'refs/heads/main'
+    #if: github.ref == 'refs/heads/main'
 
     env:
       GH_TOKEN: ${{ github.token }}
@@ -308,6 +300,12 @@ jobs:
       - uses: actions/download-artifact@v4.2.1
         with:
           path: artifacts
+
+      - name: setup GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: deploy coverage to GitHub Pages
+        uses: actions/deploy-pages@v4.0.5
 
       - name: release tag version from cloudsync.h
         id: tag
