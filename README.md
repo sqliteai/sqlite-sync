@@ -6,34 +6,32 @@ SQLiteSync is a powerful SQLite extension that provides a local-first experience
 
 ## Key Features
 
-- **Local-First Approach**: Work offline with confidence. SQLiteSync ensures data integrity and merges changes effortlessly when devices reconnect.
-- **CRDT Algorithms**: Resolve conflicts automatically with proven CRDT techniques, eliminating the need for manual resolution.
-- **Lightweight and Efficient**: As a SQLite extension, SQLiteSync retains the minimal overhead and speed SQLite is known for.
-- **Flexible Integration**: Add synchronization capabilities to existing SQLite-based applications with minimal modifications.
-- **Reliable Data Sharing**: Enable collaboration across devices and users without compromising performance or data consistency.
+- **Offline-First by Design**: Works seamlessly even when devices are offline. Changes are queued locally and synced automatically when connectivity is restored.
+- **CRDT-Based Conflict Resolution**: Merges updates deterministically and efficiently, ensuring eventual consistency across all replicas without the need for complex merge logic.
+- **Embedded Network Layer**: No external libraries or sync servers required. SQLiteSync handles connection setup, message encoding, retries, and state reconciliation internally.
+- **Drop-in Simplicity**: Just load the extension into SQLite and start syncing. No need to implement custom protocols or state machines.
+- **Efficient and Resilient**: Optimized binary encoding, automatic batching, and robust retry logic make synchronization fast and reliable even on flaky networks.
+
+Whether you're building a mobile app, IoT device, or desktop tool, SQLiteSync simplifies distributed data management and unlocks the full potential of SQLite in decentralized environments.
 
 ## Installation
 
-To use SQLiteSync, you need SQLite version 3.x or later.
+### Pre-built Binaries
 
-### Build from Source
+Download the appropriate pre-built binary for your platform from the official [Releases](https://github.com/sqliteai/sqlite-sync/releases) page:
 
-1. Install dependencies:
+- Linux: x86 and ARM
+- macOS: x86 and ARM
+- Windows: x86
+- Android
+- iOS
 
-   ```bash
-   #linux
-   sudo apt-get install -y uuid-dev
-   ```
+### Loading the Extension
 
-2. Clone the repository:
+```sql
+-- In SQLite CLI
+.load ./js
 
-   ```bash
-   git clone https://github.com/sqliteai/sqlite-sync.git
-   cd sqlitesync
-   ```
-
-3. Build the extension:
-
-   ```bash
-   make
-   ```
+-- In SQL
+SELECT load_extension('./cloudsync');
+```
