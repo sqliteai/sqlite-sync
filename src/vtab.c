@@ -127,6 +127,8 @@ char *build_changes_sql (sqlite3 *db, const char *idxs) {
      * cloud sync tables, filtered and ordered based on the `db_version` and
      * `seq` fields.
      */
+    
+    //  tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq
 
     const char *query =
     "WITH table_names AS ( "
@@ -148,7 +150,7 @@ char *build_changes_sql (sqlite3 *db, const char *idxs) {
     "        COALESCE(t2.col_version, 1) AS cl "
     "     FROM \"' || \"table_meta\" || '\" AS t1 "
     "     LEFT JOIN cloudsync_site_id AS site_tbl ON t1.site_id = site_tbl.rowid "
-    "     LEFT JOIN \"' || \"table_meta\" || '\" AS t2 ON t1.pk = t2.pk AND t2.col_name = ''" CLOUDSYNC_TOMBSTONE_VALUE "''' "
+    "     LEFT JOIN \"' || \"table_meta\" || '\" AS t2 ON t1.pk = t2.pk AND t2.col_name = ''" CLOUDSYNC_TOMBSTONE_VALUE "'' WHERE col_value != ''" CLOUDSYNC_RLS_RESTRICTED_VALUE "''' "
     "    AS query_string FROM table_names "
     "), "
     "union_query AS ( "

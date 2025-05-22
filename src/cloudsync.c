@@ -2247,7 +2247,7 @@ void cloudsync_col_value (sqlite3_context *context, int argc, sqlite3_value **ar
     rc = sqlite3_step(vm);
     if (rc == SQLITE_DONE) {
         rc = SQLITE_OK;
-        sqlite3_result_null(context);
+        sqlite3_result_text(context, CLOUDSYNC_RLS_RESTRICTED_VALUE, -1, SQLITE_STATIC);
     } else if (rc == SQLITE_ROW) {
         // store value result
         rc = SQLITE_OK;
