@@ -30,7 +30,7 @@ Download the appropriate pre-built binary for your platform from the official [R
 
 ```sql
 -- In SQLite CLI
-.load ./js
+.load ./cloudsync
 
 -- In SQL
 SELECT load_extension('./cloudsync');
