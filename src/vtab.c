@@ -128,8 +128,6 @@ char *build_changes_sql (sqlite3 *db, const char *idxs) {
      * `seq` fields.
      */
     
-    //  tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq
-
     const char *query =
     "WITH table_names AS ( "
     "    SELECT SUBSTR(tbl_name, 1, LENGTH(tbl_name) - 10) AS table_name, tbl_name AS table_meta "
