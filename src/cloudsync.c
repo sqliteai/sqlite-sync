@@ -23,16 +23,26 @@
 #include "utils.h"
 #include "dbutils.h"
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>     // for htonl, htons, ntohl, ntohs
 #include <netinet/in.h>    // for struct sockaddr_in, INADDR_ANY, etc. (if needed)
+#endif
 
 #ifndef htonll
 #if __BIG_ENDIAN__
 #define htonll(x)                                   (x)
 #define ntohll(x)                                   (x)
 #else
+#ifndef htobe64
+#define htonll(x)                                   ((uint64_t)htonl((x) & 0xFFFFFFFF) << 32 | (uint64_t)htonl((x) >> 32))
+#define ntohll(x)                                   ((uint64_t)ntohl((x) & 0xFFFFFFFF) << 32 | (uint64_t)ntohl((x) >> 32))
+#else
 #define htonll(x)                                   htobe64(x)
 #define ntohll(x)                                   be64toh(x)
+#endif
 #endif
 #endif
 
@@ -635,7 +645,7 @@ int table_add_stmts (sqlite3 *db, cloudsync_table_context *table, int ncols) {
     if (rc != SQLITE_OK) goto cleanup;
     
     // precompile the update rows from meta when pk changes
-    // see https://github.com/sqlitecloud/cloudsync/blob/main/docs/PriKey.md for more details
+    // see https://github.com/sqliteai/sqlite-sync/blob/main/docs/PriKey.md for more details
     sql = cloudsync_memory_mprintf("UPDATE OR REPLACE \"%w_cloudsync\" SET pk=?, db_version=?, col_version=1, seq=cloudsync_seq(), site_id=0 WHERE (pk=? AND col_name!='%s');", table->name, CLOUDSYNC_TOMBSTONE_VALUE);
     if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_update_move_stmt: %s", sql);
@@ -1763,7 +1773,7 @@ int local_update_move_meta (sqlite3 *db, cloudsync_table_context *table, const c
       * from OLD.pk to NEW.pk gets a distinct `seq` to maintain proper versioning and ordering of changes.
      */
     
-    // see https://github.com/sqlitecloud/cloudsync/blob/main/docs/PriKey.md for more details
+    // see https://github.com/sqliteai/sqlite-sync/blob/main/docs/PriKey.md for more details
     // pk2 is the old pk
     
     sqlite3_stmt *vm = table->meta_update_move_stmt;
@@ -1795,7 +1805,7 @@ cleanup:
 bool cloudsync_buffer_free (cloudsync_network_payload *payload) {
     if (payload) {
         if (payload->buffer) cloudsync_memory_free(payload->buffer);
-        bzero(payload, sizeof(cloudsync_network_payload));
+        memset(payload, 0, sizeof(cloudsync_network_payload));
     }
         
     return false;
@@ -1820,7 +1830,7 @@ bool cloudsync_buffer_check (cloudsync_network_payload *payload, size_t needed) 
 }
 
 void cloudsync_network_header_init (cloudsync_network_header *header, uint32_t expanded_size, uint16_t ncols, uint32_t nrows, uint64_t hash) {
-    bzero(header, sizeof(cloudsync_network_header));
+    memset(header, 0, sizeof(cloudsync_network_header));
     assert(sizeof(cloudsync_network_header)==32);
     
     int major, minor, patch;
@@ -2040,7 +2050,7 @@ int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int 
     // cleanup memory
     if (clone) cloudsync_memory_free(clone);
     
-    if (rc != SQLITE_DONE) {
+    if (rc != SQLITE_OK) {
         sqlite3_result_error(context, sqlite3_errmsg(db), -1);
         sqlite3_result_error_code(context, SQLITE_MISUSE);
         return -1;
@@ -2441,7 +2451,7 @@ void cloudsync_update (sqlite3_context *context, int argc, sqlite3_value **argv)
         
         // move non-sentinel metadata entries from OLD primary key to NEW primary key
         // handles the case where some metadata is retained across primary key change
-        // see https://github.com/sqlitecloud/cloudsync/blob/main/docs/PriKey.md for more details
+        // see https://github.com/sqliteai/sqlite-sync/blob/main/docs/PriKey.md for more details
         rc = local_update_move_meta(db, table, pk, pklen, oldpk, oldpklen, db_version);
         if (rc != SQLITE_OK) goto cleanup;
         

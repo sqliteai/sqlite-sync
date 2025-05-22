@@ -1,13 +1,16 @@
-name: build sqlitesync
+name: build, test and release sqlite-sync
 on:
   push:
-    branches:
-      - main
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
 
 jobs:
   build:
     runs-on: ${{ matrix.os }}
-    name: build for ${{ matrix.name }}-${{ matrix.arch }}
+    name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }} build${{ matrix.arch != 'arm64-v8a' && matrix.name != 'isim' && matrix.name != 'ios' && ' + test' || ''}}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -22,23 +25,22 @@ jobs:
             configure: --with-openssl
             name: linux
           - os: macos-latest
-            arch: arm64
-            configure: --with-secure-transport
-            name: macos
-          - os: macos-13
-            arch: x86_64
-            configure: --with-secure-transport
+            configure:
+              --with-secure-transport
+              CFLAGS="-arch x86_64 -arch arm64"
             name: macos
           - os: windows-latest
             arch: x86_64
-            configure: --with-schannel
+            configure:
+              --with-schannel
+              CFLAGS="-DCURL_STATICLIB"
             name: windows
           - os: ubuntu-latest
-            arch: arm64
+            arch: arm64-v8a
             configure:
               --host aarch64-linux-android26
               --with-openssl=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr
-              LIBS="-lssl -lcrypto -lc++"
+              LIBS="-lssl -lcrypto"
               AR=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
               AS=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-as
               CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
@@ -47,12 +49,15 @@ jobs:
               RANLIB=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
               STRIP=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
             name: android
+            make:
+              PLATFORM=android
+              CC=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
           - os: ubuntu-latest
             arch: x86_64
             configure:
               --host x86_64-linux-android26
               --with-openssl=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr
-              LIBS="-lssl -lcrypto -lc++"
+              LIBS="-lssl -lcrypto"
               AR=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
               AS=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-as
               CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang
@@ -61,27 +66,24 @@ jobs:
               RANLIB=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
               STRIP=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
             name: android
+            make:
+              PLATFORM=android
+              CC=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang
+            sqlite-amalgamation-zip: https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
           - os: macos-latest
-            arch: arm64
             configure:
               --host=arm64-apple-darwin
               --with-secure-transport
               CFLAGS="-arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=11.0"
             name: ios
+            make: PLATFORM=ios
           - os: macos-latest
-            arch: arm64
             configure:
               --host=arm64-apple-darwin
               --with-secure-transport
-              CFLAGS="-arch arm64 -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0"
+              CFLAGS="-arch x86_64 -arch arm64 -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0"
             name: isim
-          - os: macos-latest
-            arch: x86_64
-            configure:
-              --host=x86_64-apple-darwin
-              --with-secure-transport
-              CFLAGS="-arch x86_64 -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0"
-            name: isim
+            make: PLATFORM=isim
 
     defaults:
       run:
@@ -108,27 +110,27 @@ jobs:
           extract: true
           fileName: curl-*.tar.gz
 
-      - name: build boringssl
+      - name: build openssl
         if: matrix.name == 'android'
         run: |
-          git clone https://boringssl.googlesource.com/boringssl
-          cd boringssl
-          mkdir build
-          cd build
-          cmake \
-            -DANDROID_ABI=${{ matrix.arch == 'arm64' && 'arm64-v8a' || 'x86_64' }} \
-            -DANDROID_PLATFORM=android-26 \
-            -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake \
-            -DOPENSSL_SMALL=1 \
-            -DCMAKE_BUILD_TYPE=Release \
-            ..
-          make
+          git clone https://github.com/openssl/openssl.git
+          cd openssl
+          export TOOLCHAIN=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64
+          export ARCH=${{ matrix.arch }}
+          export PATH=$TOOLCHAIN/bin:$PATH
 
-          cd ..
-          TOOLCHAIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
-          cp build/libssl.a $TOOLCHAIN/sysroot/usr/lib/
-          cp build/libcrypto.a $TOOLCHAIN/sysroot/usr/lib/
-          cp -r include/openssl $TOOLCHAIN/sysroot/usr/include/
+          ./Configure android-${{ matrix.arch == 'arm64-v8a' && 'arm64' || matrix.arch }} \
+            --prefix=$PWD/build \
+            --openssldir=$PWD/build/ssl \
+            no-shared \
+            no-unit-test \
+            -D__ANDROID_API__=26
+          make
+          make install_sw
+
+          cp build/lib/libssl.a $TOOLCHAIN/sysroot/usr/lib/
+          cp build/lib/libcrypto.a $TOOLCHAIN/sysroot/usr/lib/
+          cp -r build/include/openssl $TOOLCHAIN/sysroot/usr/include/
           
       - name: build curl
         run: |
@@ -205,15 +207,137 @@ jobs:
             # --without-libgsasl \
 
           cd ..
-          mkdir -p network/curl/${{ matrix.name }}
-          mv $folder/lib/.libs/libcurl.a network/curl/${{ matrix.name }}/lib${{matrix.arch}}.a
+          mkdir -p curl/${{ matrix.name }}
+          mv $folder/lib/.libs/libcurl.a curl/${{ matrix.name }}
+
+      - name: build sqlite-sync
+        run: make ${{ matrix.make && matrix.make || ''}}
+        shell: bash
+
+      - name: windows install sqlite3
+        if: matrix.os == 'windows-latest'
+        run: choco install sqlite -y
+        shell: bash
+
+      - name: macos install sqlite3 without SQLITE_OMIT_LOAD_EXTENSION
+        if: matrix.name == 'macos'
+        run: brew link sqlite --force
+
+      - name: android setup test environment
+        if: matrix.name == 'android' && matrix.arch != 'arm64-v8a'
+        run: |
+
+          echo "::group::enable kvm group perms"
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          echo "::endgroup::"
+
+          echo "::group::download and build sqlite3 without SQLITE_OMIT_LOAD_EXTENSION"
+          curl -O ${{ matrix.sqlite-amalgamation-zip }}
+          unzip sqlite-amalgamation-*.zip
+          export ${{ matrix.make }}
+          $CC sqlite-amalgamation-*/shell.c sqlite-amalgamation-*/sqlite3.c -o sqlite3 -ldl
+          # remove unused folders to save up space
+          rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-* curl-* openssl
+          echo "::endgroup::"
+
+          echo "::group::prepare the test script"
+          make test CC=$CC PLATFORM=$PLATFORM || echo "It should fail. Running remaining commands in the emulator"
+          cat > commands.sh << EOF
+            mv -f /data/local/tmp/sqlite3 /system/xbin
+            cd /data/local/tmp
+            $(make test CC=$CC PLATFORM=$PLATFORM -n)
+          EOF
+          echo "::endgroup::"
+
+      - name: android test sqlite-sync
+        if: matrix.name == 'android' && matrix.arch != 'arm64-v8a'
+        uses: reactivecircus/android-emulator-runner@v2.34.0
+        with:
+          api-level: 26
+          arch: ${{ matrix.arch }}
+          script: |
+            adb root
+            adb remount
+            adb push ${{ github.workspace }}/. /data/local/tmp/
+            adb shell "sh /data/local/tmp/commands.sh"
+
+      - name: test sqlite-sync
+        if: matrix.name == 'linux' || matrix.name == 'windows'
+        run: make test
+        shell: bash
+
+      - name: test sqlite-sync + coverage
+        if: matrix.name == 'macos'
+        run: brew install lcov && make test COVERAGE=true
+
+      - uses: actions/upload-pages-artifact@v3.0.1
+        if: matrix.name == 'macos'
+        with:
+          path: coverage
 
       - uses: actions/upload-artifact@v4.6.2
+        if: always()
         with:
-          name: libcurl-${{ matrix.name }}-${{ matrix.arch }}
-          path: network/curl/${{ matrix.name }}/lib${{matrix.arch}}.a
+          name: cloudsync-${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
+          path: dist/cloudsync.*
           if-no-files-found: error
 
-      - name: build sqlitesync
+  release:
+    runs-on: ubuntu-latest
+    name: release
+    needs: build
+    if: github.ref == 'refs/heads/main'
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+
+      - uses: actions/checkout@v4.2.2
+
+      - uses: actions/download-artifact@v4.2.1
+        with:
+          path: artifacts
+
+      - name: setup GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: deploy coverage to GitHub Pages
+        uses: actions/deploy-pages@v4.0.5
+
+      - name: release tag version from cloudsync.h
+        id: tag
         run: |
-          echo "TODO: build sqlitesync"
+          FILE="src/cloudsync.h"
+          VERSION=$(grep -oP '#define CLOUDSYNC_VERSION\s+"\K[^"]+' "$FILE")
+          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "❌ CLOUDSYNC_VERSION not found in cloudsync.h"
+          exit 1
+          
+      - name: zip artifacts
+        run: |
+          for folder in "artifacts"/*; do
+            if [ -d "$folder" ]; then
+              name=$(basename "$folder")
+              if [[ "$name" != "github-pages" ]]; then
+                zip -jq "${name}-${{ steps.tag.outputs.version }}.zip" "$folder"/*
+                tar -cJf "${name}-${{ steps.tag.outputs.version }}.tar.xz" -C "$folder" .
+                tar -czf "${name}-${{ steps.tag.outputs.version }}.tar.gz" -C "$folder" .
+              fi
+            fi
+          done
+
+      - uses: softprops/action-gh-release@v2.2.1
+        with:
+          generate_release_notes: true
+          tag_name: ${{ steps.tag.outputs.version }}
+          files: |
+            cloudsync-*-${{ steps.tag.outputs.version }}.zip
+            cloudsync-*-${{ steps.tag.outputs.version }}.tar.xz
+            cloudsync-*-${{ steps.tag.outputs.version }}.tar.gz
+          make_latest: true

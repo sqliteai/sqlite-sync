@@ -1,132 +1,171 @@
-# Makefile
+# Makefile for SQLite Sync Extension
+# Supports compilation for Linux, macOS, Windows, Android and iOS
+
+# Set default platform if not specified
+ifeq ($(OS),Windows_NT)
+    PLATFORM := windows
+else
+    UNAME_S := $(shell uname -s)
+    ifeq ($(UNAME_S),Darwin)
+        PLATFORM := macos
+    else
+        PLATFORM := linux
+    endif
+endif
 
 # Compiler and flags
 CC = gcc
-NO_COVERAGE_FLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(TEST_DIR) -I$(SQLITE_DIR) -I$(CURL_DIR)
-CFLAGS = $(NO_COVERAGE_FLAGS) -DCLOUDSYNC_OMIT_NETWORK=1 -DCLOUDSYNC_OMIT_PRINT_RESULT=1 -fprofile-arcs -ftest-coverage 
-EXTENSION_FLAGS = $(NO_COVERAGE_FLAGS) -O3 -fPIC 
+CFLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(SQLITE_DIR) -I$(CURL_DIR)/include
+T_CFLAGS = $(CFLAGS) -DSQLITE_CORE -DCLOUDSYNC_UNITTEST -DCLOUDSYNC_OMIT_NETWORK -DCLOUDSYNC_OMIT_PRINT_RESULT
+LDFLAGS = -L./$(CURL_DIR)/$(PLATFORM) -lcurl
+COVERAGE = false
 
-ifeq ($(shell uname -s),Darwin)
-CONFIG_DARWIN=y
-else ifeq ($(OS),Windows_NT)
-CONFIG_WINDOWS=y
-else
-CONFIG_LINUX=y
-endif
-
-ifdef CONFIG_DARWIN
-LOADABLE_EXTENSION=dylib
-endif
-
-ifdef CONFIG_LINUX
-LOADABLE_EXTENSION=so
-CFLAGS += -lm
-endif
-
-ifdef CONFIG_WINDOWS
-LOADABLE_EXTENSION=dll
-endif
-
-LDFLAGS = -lcurl
-
-# setting the -lgcov flag on macOS leads to a linker error
-ifeq ($(shell uname), Linux)
-    LDFLAGS += -lgcov
-	DYLIB_LDFLAGS = 
-else
-    LDFLAGS += 
-	DYLIB_LDFLAGS = -dynamiclib
-endif
-
-# Directories and files
+# Directories
 SRC_DIR = src
+DIST_DIR = dist
 TEST_DIR = test
 SQLITE_DIR = sqlite
-OBJ_DIR = obj
-CURL_DIR = network/curl/macos
+VPATH = $(SRC_DIR):$(SQLITE_DIR):$(TEST_DIR)
+BUILD_RELEASE = build/release
+BUILD_TEST = build/test
+BUILD_DIRS = $(BUILD_TEST) $(BUILD_RELEASE)
+CURL_DIR = curl
 COV_DIR = coverage
-CUSTOM_CSS = $(TEST_DIR)/sqlitecloud.css
-TARGET_PREFIX=dist
-	
-TARGET_NAME=cloudsync
-TARGET_LOADABLE=$(TARGET_PREFIX)/$(TARGET_NAME).$(LOADABLE_EXTENSION)
-TARGET_STATIC=$(TARGET_PREFIX)/libsqlite_$(TARGET_NAME)0.a
-TARGET_STATIC_H=$(TARGET_PREFIX)/sqlite-$(TARGET_NAME).h
-TARGET_CLI=$(TARGET_PREFIX)/sqlite3
+CUSTOM_CSS = $(TEST_DIR)/sqliteai.css
 
 # Files and objects
-LIB_HEADERS = $(wildcard $(SRC_DIR)/*.h) $(wildcard $(SQLITE_DIR)/*.h)
-SRC_FILES = $(filter-out $(SQLITE_DIR)/sqlite3.c $(TEST_DIR)/unittest.c $(SRC_DIR)/lz4.c, $(wildcard $(SRC_DIR)/*.c) $(wildcard $(TEST_DIR)/*.c) $(wildcard $(SQLITE_DIR)/*.c))
-LIB_OBJ_FILES = $(patsubst %.c, $(TARGET_PREFIX)/$(OBJ_DIR)/%.o, $(notdir $(SRC_FILES)))
-LIB_SQLITE_OBJ = $(TARGET_PREFIX)/$(OBJ_DIR)/sqlite3.o
+ifeq ($(PLATFORM),windows)
+    TEST_TARGET := $(DIST_DIR)/test.exe
+else
+    TEST_TARGET := $(DIST_DIR)/test
+endif
+SRC_FILES = $(wildcard $(SRC_DIR)/*.c)
+TEST_FILES = $(SRC_FILES) $(wildcard $(TEST_DIR)/*.c) $(wildcard $(SQLITE_DIR)/*.c)
+RELEASE_OBJ = $(patsubst %.c, $(BUILD_RELEASE)/%.o, $(notdir $(SRC_FILES)))
+TEST_OBJ = $(patsubst %.c, $(BUILD_TEST)/%.o, $(notdir $(TEST_FILES)))
+COV_FILES = $(filter-out $(SRC_DIR)/lz4.c $(SRC_DIR)/network.c, $(SRC_FILES))
 
-SRC_FILES = $(filter-out $(SQLITE_DIR)/sqlite3.c $(TEST_DIR)/unittest.c $(SRC_DIR)/lz4.c, $(wildcard $(SRC_DIR)/*.c) $(wildcard $(TEST_DIR)/*.c) $(wildcard $(SQLITE_DIR)/*.c))
-OBJ_FILES = $(patsubst %.c, $(OBJ_DIR)/%.o, $(notdir $(SRC_FILES)))
-LZ4_OBJ = $(OBJ_DIR)/lz4.o
-SQLITE_OBJ = $(OBJ_DIR)/sqlite3.o
-UNIT_TEST_OBJ = $(OBJ_DIR)/unittest.o
-HEADERS = $(wildcard $(SRC_DIR)/*.h) $(wildcard $(TEST_DIR)/*.h) $(wildcard $(SQLITE_DIR)/*.h)
+# Platform-specific settings
+ifeq ($(PLATFORM),windows)
+    TARGET := $(DIST_DIR)/cloudsync.dll
+    LDFLAGS += -shared -lbcrypt -lcrypt32 -lsecur32 -lws2_32
+    T_LDFLAGS = -lws2_32 -lbcrypt
+    # Create .def file for Windows
+    DEF_FILE := $(BUILD_RELEASE)/cloudsync.def
+    CFLAGS += -DCURL_STATICLIB
+else ifeq ($(PLATFORM),macos)
+    TARGET := $(DIST_DIR)/cloudsync.dylib
+    LDFLAGS += -arch x86_64 -arch arm64 -framework Security -dynamiclib -undefined dynamic_lookup
+    T_LDFLAGS = -framework Security
+    CFLAGS += -arch x86_64 -arch arm64
+else ifeq ($(PLATFORM),android)
+    # Use Android NDK's Clang compiler, the user should set the CC
+    # example CC=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
+    ifeq ($(filter %-clang,$(CC)),)
+        $(error "CC must be set to the Android NDK's Clang compiler")
+    endif
+    TARGET := $(DIST_DIR)/cloudsync.so
+    LDFLAGS += -shared -lcrypto -lssl
+else ifeq ($(PLATFORM),ios)
+    TARGET := $(DIST_DIR)/cloudsync.dylib
+    SDK := -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=11.0
+    LDFLAGS += -framework Security -framework CoreFoundation -dynamiclib $(SDK)
+    T_LDFLAGS = -framework Security
+    CFLAGS += -arch arm64 $(SDK)
+else ifeq ($(PLATFORM),isim)
+    TARGET := $(DIST_DIR)/cloudsync.dylib
+    SDK := -isysroot $(shell xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0
+    LDFLAGS += -arch x86_64 -arch arm64 -framework Security -framework CoreFoundation -dynamiclib $(SDK)
+    T_LDFLAGS = -framework Security
+    CFLAGS += -arch x86_64 -arch arm64 $(SDK)
+else # linux
+    TARGET := $(DIST_DIR)/cloudsync.so
+    LDFLAGS += -shared -lssl -lcrypto
+endif
+
+ifneq ($(COVERAGE),false)
+ifneq (,$(filter $(platform),linux windows))
+    T_LDFLAGS += -lgcov
+endif
+    T_CFLAGS += -fprofile-arcs -ftest-coverage
+    T_LDFLAGS += -fprofile-arcs -ftest-coverage
+endif
+
+# Windows .def file generation
+$(DEF_FILE):
+ifeq ($(PLATFORM),windows)
+	@echo "LIBRARY js.dll" > $@
+	@echo "EXPORTS" >> $@
+	@echo "    sqlite3_cloudsync_init" >> $@
+	@echo "    cloudsync_config_exists" >> $@
+	@echo "    cloudsync_context_init" >> $@
+	@echo "    cloudsync_merge_insert" >> $@
+	@echo "    cloudsync_sync_key" >> $@
+	@echo "    cloudsync_sync_table_key" >> $@
+	@echo "    cloudsync_get_auxdata" >> $@
+	@echo "    cloudsync_set_auxdata" >> $@
+	@echo "    cloudsync_payload_apply" >> $@
+endif
+
+# Make sure the build and dist directories exist
+$(shell mkdir -p $(BUILD_DIRS) $(DIST_DIR))
 
 # Default target
-extension: $(TARGET_LOADABLE)
-all: $(TARGET_LOADABLE) 
+extension: $(TARGET)
+all: $(TARGET) 
 
 # Loadable library
-$(TARGET_LOADABLE): $(LIB_OBJ_FILES) $(LIB_SQLITE_OBJ) $(LZ4_OBJ) $(TARGET_PREFIX) 
-	$(CC) $(LIB_OBJ_FILES) $(LZ4_OBJ) $(LIB_SQLITE_OBJ) -o $@ $(LDFLAGS) $(DYLIB_LDFLAGS)
+$(TARGET): $(RELEASE_OBJ) $(DEF_FILE)
+	$(CC) $(RELEASE_OBJ) $(DEF_FILE) -o $@ $(LDFLAGS)
+ifeq ($(PLATFORM),windows)
+    # Generate import library for Windows
+	dlltool -D $@ -d $(DEF_FILE) -l $(DIST_DIR)/js.lib
+endif
 
-# Object files for the lib (with coverage flags)
-$(TARGET_PREFIX)/$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c $(LIB_HEADERS) | $(TARGET_PREFIX)/$(OBJ_DIR)
-	$(CC) $(EXTENSION_FLAGS) -c $< -o $@
-$(LIB_SQLITE_OBJ): $(SQLITE_DIR)/sqlite3.c $(LIB_HEADERS) | $(TARGET_PREFIX)/$(OBJ_DIR)
-	$(CC) $(EXTENSION_FLAGS) -c $< -o $@
+# Test executable
+$(TEST_TARGET): $(TEST_OBJ)
+	$(CC) $(TEST_OBJ) -o $@ $(T_LDFLAGS)
 
-# Object files (with coverage flags)
-$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c $(HEADERS) | $(OBJ_DIR)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJ_DIR)/%.o: $(TEST_DIR)/%.c $(HEADERS) | $(OBJ_DIR)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJ_DIR)/%.o: $(SQLITE_DIR)/%.c $(HEADERS) | $(OBJ_DIR)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Compile lz4.c without coverage flags
-$(LZ4_OBJ): $(SRC_DIR)/lz4.c $(HEADERS) | $(OBJ_DIR)
-	$(CC) $(NO_COVERAGE_FLAGS) -c $< -o $@
-	
-# Compile sqlite3.c without coverage flags
-$(SQLITE_OBJ): $(SQLITE_DIR)/sqlite3.c $(HEADERS) | $(OBJ_DIR)
-	$(CC) $(NO_COVERAGE_FLAGS) -DSQLITE_CORE=1 -c $< -o $@
-
-# Compile unittest.c without coverage flags
-$(UNIT_TEST_OBJ): $(TEST_DIR)/unittest.c $(HEADERS) | $(OBJ_DIR)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Create object directory if not exists
-$(OBJ_DIR):
-	mkdir -p $(OBJ_DIR)
-$(TARGET_PREFIX)/$(OBJ_DIR):
-	mkdir -p $(TARGET_PREFIX)/$(OBJ_DIR)
-
-$(TARGET_PREFIX):
-	mkdir -p $(TARGET_PREFIX)
-
-# Build unit test executable
-UNIT_TEST = unittest
-$(UNIT_TEST): CFLAGS += -DSQLITE_CORE=1 -DCLOUDSYNC_UNITTEST=1
-$(UNIT_TEST): $(OBJ_FILES) $(SQLITE_OBJ) $(LZ4_OBJ) $(UNIT_TEST_OBJ)
-	$(CC) $(CFLAGS) $(OBJ_FILES) $(LZ4_OBJ) $(SQLITE_OBJ) $(UNIT_TEST_OBJ) -o $@ $(LDFLAGS)
+# Object files
+$(BUILD_RELEASE)/%.o: %.c
+	$(CC) $(CFLAGS) -O3 -fPIC -c $< -o $@
+$(BUILD_TEST)/sqlite3.o: $(SQLITE_DIR)/sqlite3.c
+	$(CC) $(CFLAGS) -DSQLITE_CORE=1 -c $< -o $@
+$(BUILD_TEST)/%.o: %.c
+	$(CC) $(T_CFLAGS) -c $< -o $@
 
 # Run code coverage (--css-file $(CUSTOM_CSS))
-coverage: $(UNIT_TEST)
-	./$(UNIT_TEST)
+test: $(TARGET) $(TEST_TARGET)
+	sqlite3 ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();"
+	./$(TEST_TARGET)
+ifneq ($(COVERAGE),false)
 	mkdir -p $(COV_DIR)
-	lcov --capture --directory . --output-file $(COV_DIR)/coverage.info
+	lcov --capture --directory . --output-file $(COV_DIR)/coverage.info $(subst src, --include src,${COV_FILES})
 	genhtml $(COV_DIR)/coverage.info --output-directory $(COV_DIR)
+endif
 
 # Clean up generated files
 clean:
-	rm -rf $(OBJ_DIR) $(UNIT_TEST) $(COV_DIR) *.gcda *.gcno *.gcov dist/*
+	rm -rf $(BUILD_DIRS) $(DIST_DIR)/* $(COV_DIR) *.gcda *.gcno *.gcov
 
-.PHONY: all clean coverage extension $(DEPS)
+# Help message
+help:
+	@echo "SQLite Sync Extension Makefile"
+	@echo "Usage:"
+	@echo "  make [PLATFORM=platform] [target]"
+	@echo ""
+	@echo "Platforms:"
+	@echo "  linux (default on Linux)"
+	@echo "  macos (default on macOS)"
+	@echo "  windows (default on Windows)"
+	@echo "  android (needs CC to be set to Android NDK's Clang compiler)"
+	@echo "  ios (only on macOS)"
+	@echo "  isim (only on macOS)"
+	@echo ""
+	@echo "Targets:"
+	@echo "  all       				- Build the extension (default)"
+	@echo "  clean     				- Remove built files"
+	@echo "  test [COVERAGE=true]	- Test the extension with optional coverage output"
+	@echo "  help      				- Display this help message"
+
+.PHONY: all clean test extension help

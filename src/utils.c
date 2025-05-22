@@ -13,10 +13,14 @@
 #include <windows.h>
 #include <objbase.h>
 #include <bcrypt.h>
+#include <ntstatus.h> //for STATUS_SUCCESS
 #else
-#include <uuid/uuid.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <Security/Security.h>
+#elif !defined(__ANDROID__)
 #include <sys/random.h>
+#endif
 #endif
 
 #ifndef SQLITE_CORE
@@ -46,13 +50,23 @@ int cloudsync_uuid_v7 (uint8_t value[UUID_LEN]) {
     // fill the buffer with high-quality random data
     #ifdef _WIN32
     if (BCryptGenRandom(NULL, (BYTE*)value, UUID_LEN, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != STATUS_SUCCESS) return -1;
+    #elif defined(__APPLE__)
+    // Use SecRandomCopyBytes for macOS/iOS
+    if (SecRandomCopyBytes(kSecRandomDefault, UUID_LEN, value) != errSecSuccess) return -1;
+    #elif defined(__ANDROID__)
+    //arc4random_buf doesn't have a return value to check for success
+    arc4random_buf(value, UUID_LEN);
     #else
     if (getentropy(value, UUID_LEN) != 0) return -1;
     #endif
     
     // get current timestamp in ms
     struct timespec ts;
+    #ifdef __ANDROID__
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return -1;
+    #else
     if (timespec_get(&ts, TIME_UTC) == 0) return -1;
+    #endif
     
     // add timestamp part to UUID
     uint64_t timestamp = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
@@ -108,7 +122,7 @@ void *cloudsync_memory_zeroalloc (uint64_t size) {
     void *ptr = (void *)cloudsync_memory_alloc((sqlite3_uint64)size);
     if (!ptr) return NULL;
     
-    bzero(ptr, (size_t)size);
+    memset(ptr, 0, (size_t)size);
     return ptr;
 }
 

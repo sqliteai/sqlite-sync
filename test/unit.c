@@ -10,12 +10,12 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <fcntl.h>
 #include "sqlite3.h"
 
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -1478,7 +1478,7 @@ finalize:
 
 bool do_test_rowid (int ntest, bool print_result) {
     for (int i=0; i<ntest; ++i) {
-        // for an explanation see https://github.com/sqlitecloud/cloudsync/blob/main/docs/RowID.md
+        // for an explanation see https://github.com/sqliteai/sqlite-sync/blob/main/docs/RowID.md
         sqlite3_int64 db_version = (sqlite3_int64)random_int64_range(1, 17179869183);
         sqlite3_int64 seq = (sqlite3_int64)random_int64_range(1, 1073741823);
         sqlite3_int64 rowid = (db_version << 30) | seq;
@@ -2008,7 +2008,11 @@ sqlite3 *do_create_database (void) {
 }
 
 void do_build_database_path (char buf[256], int i, time_t timestamp, int ntest) {
+    #ifdef __ANDROID__
+    sprintf(buf, "%s/cloudsync-test-%ld-%d-%d.sqlite", ".", timestamp, ntest, i);
+    #else
     sprintf(buf, "%s/cloudsync-test-%ld-%d-%d.sqlite", getenv("HOME"), timestamp, ntest, i);
+    #endif
 }
 
 sqlite3 *do_create_database_file (int i, time_t timestamp, int ntest) {
@@ -2035,7 +2039,7 @@ bool do_test_merge (int nclients, bool print_result, bool cleanup_databases) {
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2108,7 +2112,7 @@ bool do_test_merge_2 (int nclients, int table_mask, bool print_result, bool clea
     int rc = SQLITE_OK;
     int nrows = NINSERT;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2219,7 +2223,7 @@ bool do_test_merge_4 (int nclients, bool print_result, bool cleanup_databases) {
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2307,7 +2311,7 @@ bool do_test_merge_5 (int nclients, bool print_result, bool cleanup_databases, b
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2390,7 +2394,7 @@ bool do_test_merge_alter_schema_1 (int nclients, bool print_result, bool cleanup
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2478,7 +2482,7 @@ bool do_test_merge_alter_schema_2 (int nclients, bool print_result, bool cleanup
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2567,7 +2571,7 @@ bool do_test_prikey (int nclients, bool print_result, bool cleanup_databases) {
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2685,7 +2689,7 @@ bool do_test_gos (int nclients, bool print_result, bool cleanup_databases) {
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2772,7 +2776,7 @@ bool do_test_network_encode_decode (int nclients, bool print_result, bool cleanu
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2865,7 +2869,7 @@ bool do_test_fill_initial_data(int nclients, bool print_result, bool cleanup_dat
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -2950,7 +2954,7 @@ bool do_test_alter(int nclients, int alter_version, bool print_result, bool clea
     bool result = false;
     int rc = SQLITE_OK;
     
-    bzero(db, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
     if (nclients >= MAX_SIMULATED_CLIENTS) {
         nclients = MAX_SIMULATED_CLIENTS;
         printf("Number of test merge reduced to %d clients\n", MAX_SIMULATED_CLIENTS);
@@ -3060,9 +3064,14 @@ finalize:
 
 // MARK: -
 
+int test_report(const char *description, bool result){
+    printf("%-24s %s\n", description, (result) ? "OK" : "FAILED");
+    return result ? 0 : 1;
+}
+
 int main(int argc, const char * argv[]) {
     sqlite3 *db = NULL;
-    bool result = false;
+    int result = 0;
     bool print_result = false;
     bool cleanup_databases = true;
     
@@ -3075,30 +3084,15 @@ int main(int argc, const char * argv[]) {
     
     printf("Testing CloudSync version %s\n", CLOUDSYNC_VERSION);
     printf("===============================\n");
-    
-    result = do_test_pk(db, 10000, print_result);
-    printf("%-24s %s\n", "PK Test:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_uuid(db, 1000, print_result);
-    printf("%-24s %s\n", "UUID Test:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_compare(db, print_result);
-    printf("%-24s %s\n", "Comparison Test:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_rowid(50000, print_result);
-    printf("%-24s %s\n", "RowID Test:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_algo_names();
-    printf("%-24s %s\n", "Algo Names Test:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_dbutils();
-    printf("%-24s %s\n", "DBUtils Test:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_others(db);
-    printf("%-24s %s\n", "Minor Test:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_error_cases(db);
-    printf("%-24s %s\n", "Test Error Cases:", (result) ? "OK" : "FAILED");
+
+    result += test_report("PK Test:", do_test_pk(db, 10000, print_result));
+    result += test_report("UUID Test:", do_test_uuid(db, 1000, print_result));
+    result += test_report("Comparison Test:", do_test_compare(db, print_result));
+    result += test_report("RowID Test:", do_test_rowid(50000, print_result));
+    result += test_report("Algo Names Test:", do_test_algo_names());
+    result += test_report("DBUtils Test:", do_test_dbutils());
+    result += test_report("Minor Test:", do_test_others(db));
+    result += test_report("Test Error Cases:", do_test_error_cases(db));
     
     int test_mask = TEST_INSERT | TEST_UPDATE | TEST_DELETE;
     int table_mask = TEST_PRIKEYS | TEST_NOCOLS;
@@ -3107,79 +3101,39 @@ int main(int argc, const char * argv[]) {
     #endif
     
     // test local changes
-    result = do_test_local(test_mask, table_mask, db, print_result);
-    printf("%-24s %s\n", "Local Test:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_vtab(db);
-    printf("%-24s %s\n", "VTab Test: ", (result) ? "OK" : "FAILED");
-    
-    result = do_test_functions(db, print_result);
-    printf("%-24s %s\n", "Functions Test:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_internal_functions();
-    printf("%-24s %s\n", "Functions Test (Int):", (result) ? "OK" : "FAILED");
-    
-    result = do_test_string_replace_prefix();
-    printf("%-24s %s\n", "String Func Test:", (result) ? "OK" : "FAILED");
+    result += test_report("Local Test:", do_test_local(test_mask, table_mask, db, print_result));
+    result += test_report("VTab Test: ", do_test_vtab(db));
+    result += test_report("Functions Test:", do_test_functions(db, print_result));
+    result += test_report("Functions Test (Int):", do_test_internal_functions());
+    result += test_report("String Func Test:", do_test_string_replace_prefix());
 
     // close local database
     db = close_db(db);
-        
+    
     // simulate remote merge
-    result = do_test_merge(3, print_result, cleanup_databases);
-    printf("%-24s %s\n", "Merge Test:", (result) ? "OK" : "FAILED");
-
-    result = do_test_merge_2(3, TEST_PRIKEYS, print_result, cleanup_databases);
-    printf("%-24s %s\n", "Merge Test 2:", (result) ? "OK" : "FAILED");
-
-    result = do_test_merge_2(3, TEST_NOCOLS, print_result, cleanup_databases);
-    printf("%-24s %s\n", "Merge Test 3:", (result) ? "OK" : "FAILED");
-
-    result = do_test_merge_4(2, print_result, cleanup_databases);
-    printf("%-24s %s\n", "Merge Test 4:", (result) ? "OK" : "FAILED");
-
-    result = do_test_merge_5(2, print_result, cleanup_databases, false);
-    printf("%-24s %s\n", "Merge Test 5:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_merge_alter_schema_1(2, print_result, cleanup_databases, false);
-    printf("%-24s %s\n", "Merge Alter Schema 1:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_merge_alter_schema_2(2, print_result, cleanup_databases, false);
-    printf("%-24s %s\n", "Merge Alter Schema 2:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_prikey(2, print_result, cleanup_databases);
-    printf("%-24s %s\n", "PriKey NULL Test:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_double_init(2, cleanup_databases);
-    printf("%-24s %s\n", "Test Double Init:", (result) ? "OK" : "FAILED");
+    result += test_report("Merge Test:", do_test_merge(3, print_result, cleanup_databases));
+    result += test_report("Merge Test 2:", do_test_merge_2(3, TEST_PRIKEYS, print_result, cleanup_databases));
+    result += test_report("Merge Test 3:", do_test_merge_2(3, TEST_NOCOLS, print_result, cleanup_databases));
+    result += test_report("Merge Test 4:", do_test_merge_4(2, print_result, cleanup_databases));
+    result += test_report("Merge Test 5:", do_test_merge_5(2, print_result, cleanup_databases, false));
+    result += test_report("Merge Alter Schema 1:", do_test_merge_alter_schema_1(2, print_result, cleanup_databases, false));
+    result += test_report("Merge Alter Schema 2:", do_test_merge_alter_schema_2(2, print_result, cleanup_databases, false));
+    result += test_report("PriKey NULL Test:", do_test_prikey(2, print_result, cleanup_databases));
+    result += test_report("Test Double Init:", do_test_double_init(2, cleanup_databases));
     
     // test grow-only set
-    result = do_test_gos(6, print_result, cleanup_databases);
-    printf("%-24s %s\n", "Test GrowOnlySet:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_network_encode_decode(2, print_result, cleanup_databases, false);
-    printf("%-24s %s\n", "Test Network Enc/Dec:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_network_encode_decode(2, print_result, cleanup_databases, true);
-    printf("%-24s %s\n", "Test Network Enc/Dec 2:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_fill_initial_data(3, print_result, cleanup_databases);
-    printf("%-24s %s\n", "Test Fill Initial Data:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_alter(3, 1, print_result, cleanup_databases);
-    printf("%-24s %s\n", "Test Alter Table 1:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_alter(3, 2, print_result, cleanup_databases);
-    printf("%-24s %s\n", "Test Alter Table 2:", (result) ? "OK" : "FAILED");
-    
-    result = do_test_alter(3, 3, print_result, cleanup_databases);
-    printf("%-24s %s\n", "Test Alter Table 3:", (result) ? "OK" : "FAILED");
-
+    result += test_report("Test GrowOnlySet:", do_test_gos(6, print_result, cleanup_databases));
+    result += test_report("Test Network Enc/Dec:", do_test_network_encode_decode(2, print_result, cleanup_databases, false));
+    result += test_report("Test Network Enc/Dec 2:", do_test_network_encode_decode(2, print_result, cleanup_databases, true));
+    result += test_report("Test Fill Initial Data:", do_test_fill_initial_data(3, print_result, cleanup_databases));
+    result += test_report("Test Alter Table 1:", do_test_alter(3, 1, print_result, cleanup_databases));
+    result += test_report("Test Alter Table 2:", do_test_alter(3, 2, print_result, cleanup_databases));
+    result += test_report("Test Alter Table 3:", do_test_alter(3, 3, print_result, cleanup_databases));
     
 finalize:
     printf("\n");
     if (rc != SQLITE_OK) printf("%s (%d)\n", (db) ? sqlite3_errmsg(db) : "N/A", rc);
     db = close_db(db);
     
-    return 0;
+    return result;
 }
