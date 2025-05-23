@@ -9,3 +9,4 @@
 *.sqlite
 *.a
 unittest
+/curl-src
