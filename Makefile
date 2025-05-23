@@ -1,6 +1,10 @@
 # Makefile for SQLite Sync Extension
 # Supports compilation for Linux, macOS, Windows, Android and iOS
 
+# customize sqlite3 executable with 
+# make test SQLITE3=/opt/homebrew/Cellar/sqlite/3.49.1/bin/sqlite3
+SQLITE3 ?= sqlite3
+
 # Set default platform if not specified
 ifeq ($(OS),Windows_NT)
     PLATFORM := windows
@@ -136,13 +140,88 @@ $(BUILD_TEST)/%.o: %.c
 
 # Run code coverage (--css-file $(CUSTOM_CSS))
 test: $(TARGET) $(TEST_TARGET)
-	sqlite3 ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();"
+	$(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();"
 	./$(TEST_TARGET)
 ifneq ($(COVERAGE),false)
 	mkdir -p $(COV_DIR)
 	lcov --capture --directory . --output-file $(COV_DIR)/coverage.info $(subst src, --include src,${COV_FILES})
 	genhtml $(COV_DIR)/coverage.info --output-directory $(COV_DIR)
 endif
+
+deps:
+	brew install autoconf automake libtool pkg-config
+
+curl-src:
+	@if [ ! -d curl-src ]; then \
+		git clone --depth 1 --branch curl-8_12_1 https://github.com/curl/curl.git curl-src; \
+	fi
+
+libcurl-macos: deps curl-src
+	@if [ ! -f $(CONFIGURED_MARKER) ]; then \
+		cd curl-src && ./buildconf && ./configure \
+			--without-libpsl \
+			--disable-alt-svc \
+			--disable-ares \
+			--disable-cookies \
+			--disable-basic-auth \
+			--disable-digest-auth \
+			--disable-kerberos-auth \
+			--disable-negotiate-auth \
+			--disable-aws \
+			--disable-dateparse \
+			--disable-dnsshuffle \
+			--disable-doh \
+			--disable-form-api \
+			--disable-hsts \
+			--disable-ipv6 \
+			--disable-libcurl-option \
+			--disable-manual \
+			--disable-mime \
+			--disable-netrc \
+			--disable-ntlm \
+			--disable-ntlm-wb \
+			--disable-progress-meter \
+			--disable-proxy \
+			--disable-pthreads \
+			--disable-socketpair \
+			--disable-threaded-resolver \
+			--disable-tls-srp \
+			--disable-verbose \
+			--disable-versioned-symbols \
+			--enable-symbol-hiding \
+			--without-brotli \
+			--without-zstd \
+			--without-libidn2 \
+			--without-librtmp \
+			--without-zlib \
+			--without-nghttp2 \
+			--without-ngtcp2 \
+			--disable-shared \
+			--disable-ftp \
+			--disable-file \
+			--disable-ipfs \
+			--disable-ldap \
+			--disable-ldaps \
+			--disable-rtsp \
+			--disable-dict \
+			--disable-telnet \
+			--disable-tftp \
+			--disable-pop3 \
+			--disable-imap \
+			--disable-smb \
+			--disable-smtp \
+			--disable-gopher \
+			--disable-mqtt \
+			--disable-docs \
+			--enable-static \
+			--with-secure-transport \
+			CFLAGS="-arch x86_64 -arch arm64" \
+	else \
+		echo "Skipping configure: already configured."; \
+	fi
+	cd curl-src && make
+	mkdir -p curl/macos
+	mv curl-src/lib/.libs/libcurl.a curl/macos
 
 # Clean up generated files
 clean:
