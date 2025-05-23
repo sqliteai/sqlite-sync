@@ -695,6 +695,9 @@ int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
     rc = dbutils_register_function(db, "cloudsync_network_check_changes", cloudsync_network_check_changes, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
+    rc = dbutils_register_function(db, "cloudsync_network_check_changes_sync", cloudsync_network_check_changes_sync, 2, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
     rc = dbutils_register_function(db, "cloudsync_network_reset_check_version", cloudsync_network_reset_check_version, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
