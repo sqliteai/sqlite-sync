@@ -80,31 +80,9 @@ else ifeq ($(PLATFORM),android)
     BIN = $$ANDROID_NDK/toolchains/llvm/prebuilt/$(HOST)-x86_64/bin
     
     ifeq ($(ARCH),x86_64)
-        define CURL_CONFIG
-        --host x86_64-$(HOST)-android26 \
-        --with-openssl=$$ANDROID_NDK/toolchains/llvm/prebuilt/$(HOST)-x86_64/sysroot/usr \
-        LIBS="-lssl -lcrypto" \
-        AR=$(BIN)/llvm-ar \
-        AS=$(BIN)/llvm-as \
-        CC=$(BIN)/x86_64-linux-android26-clang \
-        CXX=$(BIN)/x86_64-linux-android26-clang++ \
-        LD=$(HOST)/ld \
-        RANLIB=$(HOST)/llvm-ranlib \
-        STRIP=$(HOST)/llvm-strip \
-        endef
+        CURL_CONFIG = --host x86_64-$(HOST)-android26 --with-openssl=$$ANDROID_NDK/toolchains/llvm/prebuilt/$(HOST)-x86_64/sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(BIN)/x86_64-linux-android26-clang CXX=$(BIN)/x86_64-linux-android26-clang++ LD=$(HOST)/ld RANLIB=$(HOST)/llvm-ranlib STRIP=$(HOST)/llvm-strip
     else ifeq ($(ARCH),arm64-v8a)
-        define CURL_CONFIG
-        --host aarch64-linux-android26 \
-        --with-openssl=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr \
-        LIBS="-lssl -lcrypto" \
-        AR=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar \
-        AS=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-as \
-        CC=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang \
-        CXX=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++ \
-        LD=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/ld \
-        RANLIB=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib \
-        STRIP=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip \
-        endef
+        CURL_CONFIG = --host aarch64-linux-android26 --with-openssl=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr LIBS="-lssl -lcrypto" AR=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar AS=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-as CC=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang CXX=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++ LD=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/ld RANLIB=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib STRIP=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
     else
         $(error "Unsupported Android ARCH: $(ARCH)")
     endif
