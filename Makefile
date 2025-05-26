@@ -5,6 +5,9 @@
 # make test SQLITE3=/opt/homebrew/Cellar/sqlite/3.49.1/bin/sqlite3
 SQLITE3 ?= sqlite3
 
+# set curl version to download and build
+CURL_VERSION ?= 8.12.1
+
 # Set default platform if not specified
 ifeq ($(OS),Windows_NT)
     PLATFORM := windows
@@ -34,6 +37,7 @@ BUILD_RELEASE = build/release
 BUILD_TEST = build/test
 BUILD_DIRS = $(BUILD_TEST) $(BUILD_RELEASE)
 CURL_DIR = curl
+CURL_SRC = $(CURL_DIR)/src/curl-$(CURL_VERSION)
 COV_DIR = coverage
 CUSTOM_CSS = $(TEST_DIR)/sqliteai.css
 
@@ -48,6 +52,7 @@ TEST_FILES = $(SRC_FILES) $(wildcard $(TEST_DIR)/*.c) $(wildcard $(SQLITE_DIR)/*
 RELEASE_OBJ = $(patsubst %.c, $(BUILD_RELEASE)/%.o, $(notdir $(SRC_FILES)))
 TEST_OBJ = $(patsubst %.c, $(BUILD_TEST)/%.o, $(notdir $(TEST_FILES)))
 COV_FILES = $(filter-out $(SRC_DIR)/lz4.c $(SRC_DIR)/network.c, $(SRC_FILES))
+CURL_LIB = $(CURL_DIR)/$(PLATFORM)/libcurl.a
 
 # Platform-specific settings
 ifeq ($(PLATFORM),windows)
@@ -57,17 +62,50 @@ ifeq ($(PLATFORM),windows)
     # Create .def file for Windows
     DEF_FILE := $(BUILD_RELEASE)/cloudsync.def
     CFLAGS += -DCURL_STATICLIB
+    CURL_CONFIG = --with-schannel CFLAGS="-DCURL_STATICLIB"
 else ifeq ($(PLATFORM),macos)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     LDFLAGS += -arch x86_64 -arch arm64 -framework Security -dynamiclib -undefined dynamic_lookup
     T_LDFLAGS = -framework Security
     CFLAGS += -arch x86_64 -arch arm64
+    CURL_CONFIG = --with-secure-transport CFLAGS="-arch x86_64 -arch arm64"
 else ifeq ($(PLATFORM),android)
-    # Use Android NDK's Clang compiler, the user should set the CC
+    # Set ARCH to find Android NDK's Clang compiler, the user should set the ARCH
     # example CC=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
-    ifeq ($(filter %-clang,$(CC)),)
-        $(error "CC must be set to the Android NDK's Clang compiler")
+    ifeq ($(filter %,$(ARCH)),)
+        $(error "Android ARCH must be set to ARCH=x86_64 or ARCH=arm64-v8a")
     endif
+    
+    ifeq ($(ARCH),x86_64)
+        define CURL_CONFIG
+        --host x86_64-linux-android26
+        --with-openssl=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr
+        LIBS="-lssl -lcrypto"
+        AR=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+        AS=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-as
+        CC=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang
+        CXX=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang++
+        LD=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/ld
+        RANLIB=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
+        STRIP=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
+        endef
+    else ifeq ($(ARCH),arm64-v8a)
+        define CURL_CONFIG
+        --host aarch64-linux-android26
+        --with-openssl=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr
+        LIBS="-lssl -lcrypto"
+        AR=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+        AS=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-as
+        CC=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
+        CXX=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++
+        LD=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/ld
+        RANLIB=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
+        STRIP=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
+        endef
+    else
+        $(error "Unsupported Android ARCH: $(ARCH)")
+    endif
+
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lcrypto -lssl
 else ifeq ($(PLATFORM),ios)
@@ -76,15 +114,18 @@ else ifeq ($(PLATFORM),ios)
     LDFLAGS += -framework Security -framework CoreFoundation -dynamiclib $(SDK)
     T_LDFLAGS = -framework Security
     CFLAGS += -arch arm64 $(SDK)
+    CURL_CONFIG = --host=arm64-apple-darwin --with-secure-transport CFLAGS="-arch arm64 -isysroot $$(xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=11.0"
 else ifeq ($(PLATFORM),isim)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     SDK := -isysroot $(shell xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0
     LDFLAGS += -arch x86_64 -arch arm64 -framework Security -framework CoreFoundation -dynamiclib $(SDK)
     T_LDFLAGS = -framework Security
     CFLAGS += -arch x86_64 -arch arm64 $(SDK)
+    CURL_CONFIG = --host=arm64-apple-darwin --with-secure-transport CFLAGS="-arch x86_64 -arch arm64 -isysroot $$(xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0"
 else # linux
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lssl -lcrypto
+    CURL_CONFIG = --with-openssl
 endif
 
 ifneq ($(COVERAGE),false)
@@ -119,7 +160,7 @@ extension: $(TARGET)
 all: $(TARGET) 
 
 # Loadable library
-$(TARGET): $(RELEASE_OBJ) $(DEF_FILE)
+$(TARGET): $(RELEASE_OBJ) $(DEF_FILE) $(CURL_LIB)
 	$(CC) $(RELEASE_OBJ) $(DEF_FILE) -o $@ $(LDFLAGS)
 ifeq ($(PLATFORM),windows)
     # Generate import library for Windows
@@ -148,80 +189,83 @@ ifneq ($(COVERAGE),false)
 	genhtml $(COV_DIR)/coverage.info --output-directory $(COV_DIR)
 endif
 
-deps:
-	brew install autoconf automake libtool pkg-config
+$(CURL_LIB):
+	mkdir -p $(CURL_DIR)/src
+	curl -L -o $(CURL_DIR)/src/curl.zip "https://github.com/curl/curl/releases/download/curl-$(subst .,_,${CURL_VERSION})/curl-$(CURL_VERSION).zip"
+	unzip $(CURL_DIR)/src/curl.zip -d $(CURL_DIR)/src/.
+	
+	cd $(CURL_SRC) && ./configure \
+	--without-libpsl \
+	--disable-alt-svc \
+	--disable-ares \
+	--disable-cookies \
+	--disable-basic-auth \
+	--disable-digest-auth \
+	--disable-kerberos-auth \
+	--disable-negotiate-auth \
+	--disable-aws \
+	--disable-dateparse \
+	--disable-dnsshuffle \
+	--disable-doh \
+	--disable-form-api \
+	--disable-hsts \
+	--disable-ipv6 \
+	--disable-libcurl-option \
+	--disable-manual \
+	--disable-mime \
+	--disable-netrc \
+	--disable-ntlm \
+	--disable-ntlm-wb \
+	--disable-progress-meter \
+	--disable-proxy \
+	--disable-pthreads \
+	--disable-socketpair \
+	--disable-threaded-resolver \
+	--disable-tls-srp \
+	--disable-verbose \
+	--disable-versioned-symbols \
+	--enable-symbol-hiding \
+	--without-brotli \
+	--without-zstd \
+	--without-libidn2 \
+	--without-librtmp \
+	--without-zlib \
+	--without-nghttp2 \
+	--without-ngtcp2 \
+	--disable-shared \
+	--disable-ftp \
+	--disable-file \
+	--disable-ipfs \
+	--disable-ldap \
+	--disable-ldaps \
+	--disable-rtsp \
+	--disable-dict \
+	--disable-telnet \
+	--disable-tftp \
+	--disable-pop3 \
+	--disable-imap \
+	--disable-smb \
+	--disable-smtp \
+	--disable-gopher \
+	--disable-mqtt \
+	--disable-docs \
+	--enable-static \
+	$(CURL_CONFIG)
 
-curl-src:
-	@if [ ! -d curl-src ]; then \
-		git clone --depth 1 --branch curl-8_12_1 https://github.com/curl/curl.git curl-src; \
-	fi
+	# save avg 1kb more with these options
+	# --disable-debug \
+	# --enable-optimize \
+	# --disable-curldebug \
+	# --disable-get-easy-options \
+	# --without-fish-functions-dir \
+	# --without-zsh-functions-dir \
+	# --without-libgsasl \
+	
+	cd $(CURL_SRC) && make
 
-libcurl-macos: deps curl-src
-	@if [ ! -f $(CONFIGURED_MARKER) ]; then \
-		cd curl-src && ./buildconf && ./configure \
-			--without-libpsl \
-			--disable-alt-svc \
-			--disable-ares \
-			--disable-cookies \
-			--disable-basic-auth \
-			--disable-digest-auth \
-			--disable-kerberos-auth \
-			--disable-negotiate-auth \
-			--disable-aws \
-			--disable-dateparse \
-			--disable-dnsshuffle \
-			--disable-doh \
-			--disable-form-api \
-			--disable-hsts \
-			--disable-ipv6 \
-			--disable-libcurl-option \
-			--disable-manual \
-			--disable-mime \
-			--disable-netrc \
-			--disable-ntlm \
-			--disable-ntlm-wb \
-			--disable-progress-meter \
-			--disable-proxy \
-			--disable-pthreads \
-			--disable-socketpair \
-			--disable-threaded-resolver \
-			--disable-tls-srp \
-			--disable-verbose \
-			--disable-versioned-symbols \
-			--enable-symbol-hiding \
-			--without-brotli \
-			--without-zstd \
-			--without-libidn2 \
-			--without-librtmp \
-			--without-zlib \
-			--without-nghttp2 \
-			--without-ngtcp2 \
-			--disable-shared \
-			--disable-ftp \
-			--disable-file \
-			--disable-ipfs \
-			--disable-ldap \
-			--disable-ldaps \
-			--disable-rtsp \
-			--disable-dict \
-			--disable-telnet \
-			--disable-tftp \
-			--disable-pop3 \
-			--disable-imap \
-			--disable-smb \
-			--disable-smtp \
-			--disable-gopher \
-			--disable-mqtt \
-			--disable-docs \
-			--enable-static \
-			--with-secure-transport \
-			CFLAGS="-arch x86_64 -arch arm64" \
-	else \
-		echo "Skipping configure: already configured."; \
-	fi
-	cd curl-src && make
-	mkdir -p curl/macos
-	mv curl-src/lib/.libs/libcurl.a curl/macos
+	mkdir -p $(CURL_DIR)/$(PLATFORM)
+	mv $(CURL_SRC)/lib/.libs/libcurl.a $(CURL_DIR)/$(PLATFORM)
+	rm -rf $(CURL_DIR)/src
 
 # Clean up generated files
 clean:
