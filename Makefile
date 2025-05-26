@@ -245,7 +245,7 @@ $(CURL_LIB):
 	# --without-libgsasl \
 	
     ifeq ($(PLATFORM),windows)
-	"C:/msys64/usr/bin/bash.exe" "cd $(CURL_SRC) && make"
+	cd $(CURL_SRC) && C:\msys64\usr\bin\make.exe
     else
 	cd $(CURL_SRC) && make
     endif
