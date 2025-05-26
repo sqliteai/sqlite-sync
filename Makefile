@@ -71,13 +71,17 @@ else ifeq ($(PLATFORM),macos)
     CURL_CONFIG = --with-secure-transport CFLAGS="-arch x86_64 -arch arm64"
 else ifeq ($(PLATFORM),android)
     # Set ARCH to find Android NDK's Clang compiler, the user should set the ARCH
-    # example CC=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
     ifeq ($(filter %,$(ARCH)),)
         $(error "Android ARCH must be set to ARCH=x86_64 or ARCH=arm64-v8a")
     endif
+    # Set ANDROID_NDK path to find android build tools
+    # e.g. on MacOS: export ANDROID_NDK=/Users/username/Library/Android/sdk/ndk/25.2.9519653
+    ifeq ($(filter %,$(ANDROID_NDK)),)
+        $(error "Android NDK must be set")
+    endif
 
     HOST = $(shell uname -s | tr '[:upper:]' '[:lower:]')
-    BIN = $$ANDROID_NDK/toolchains/llvm/prebuilt/$(HOST)-x86_64/bin
+    BIN = $(ANDROID_NDK)/toolchains/llvm/prebuilt/$(HOST)-x86_64/bin
 
     ifneq (,$(filter $(ARCH),arm64 arm64-v8a))
         override ARCH := aarch64
@@ -258,13 +262,13 @@ clean:
 help:
 	@echo "SQLite Sync Extension Makefile"
 	@echo "Usage:"
-	@echo "  make [PLATFORM=platform] [ARCH=arch] [target]"
+	@echo "  make [PLATFORM=platform] [ARCH=arch] [ANDROID_NDK=\$$ANDROID_HOME/ndk/26.1.10909125] [target]"
 	@echo ""
 	@echo "Platforms:"
 	@echo "  linux (default on Linux)"
 	@echo "  macos (default on macOS)"
 	@echo "  windows (default on Windows)"
-	@echo "  android (needs ARCH to be set to x86_64 or arm64-v8a)"
+	@echo "  android (needs ARCH to be set to x86_64 or arm64-v8a and ANDROID_NDK to be set)"
 	@echo "  ios (only on macOS)"
 	@echo "  isim (only on macOS)"
 	@echo ""
