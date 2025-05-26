@@ -30,17 +30,11 @@ jobs:
           - os: ubuntu-latest
             arch: arm64-v8a
             name: android
-            make:
-              PLATFORM=android
-              CC=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
-              ARCH=arm64-v8a
+            make: PLATFORM=android ARCH=arm64-v8a
           - os: ubuntu-latest
             arch: x86_64
             name: android
-            make:
-              PLATFORM=android
-              CC=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang
-              ARCH=x86_64
+            make: PLATFORM=android ARCH=x86_64
             sqlite-amalgamation-zip: https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
           - os: macos-latest
             name: ios
@@ -116,17 +110,17 @@ jobs:
           curl -O ${{ matrix.sqlite-amalgamation-zip }}
           unzip sqlite-amalgamation-*.zip
           export ${{ matrix.make }}
-          $CC sqlite-amalgamation-*/shell.c sqlite-amalgamation-*/sqlite3.c -o sqlite3 -ldl
+          $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.arch }}-linux-android26-clang sqlite-amalgamation-*/shell.c sqlite-amalgamation-*/sqlite3.c -o sqlite3 -ldl
           # remove unused folders to save up space
           rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-* openssl
           echo "::endgroup::"
 
           echo "::group::prepare the test script"
-          make test CC=$CC PLATFORM=$PLATFORM || echo "It should fail. Running remaining commands in the emulator"
+          make test PLATFORM=$PLATFORM ARCH=$ARCH || echo "It should fail. Running remaining commands in the emulator"
           cat > commands.sh << EOF
             mv -f /data/local/tmp/sqlite3 /system/xbin
             cd /data/local/tmp
-            $(make test CC=$CC PLATFORM=$PLATFORM ARCH=$ARCH -n)
+            $(make test PLATFORM=$PLATFORM ARCH=$ARCH -n)
           EOF
           echo "::endgroup::"
 

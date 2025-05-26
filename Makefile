@@ -82,7 +82,8 @@ else ifeq ($(PLATFORM),android)
     ifneq (,$(filter $(ARCH),arm64 arm64-v8a))
         override ARCH := aarch64
     endif
-    
+
+    CC = $(BIN)/$(ARCH)-linux-android26-clang
     CURL_CONFIG = --host $(ARCH)-$(HOST)-android26 --with-openssl=$$ANDROID_NDK/toolchains/llvm/prebuilt/$(HOST)-x86_64/sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(BIN)/$(ARCH)-linux-android26-clang CXX=$(BIN)/$(ARCH)-linux-android26-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lcrypto -lssl
@@ -257,13 +258,13 @@ clean:
 help:
 	@echo "SQLite Sync Extension Makefile"
 	@echo "Usage:"
-	@echo "  make [PLATFORM=platform] [target]"
+	@echo "  make [PLATFORM=platform] [ARCH=arch] [target]"
 	@echo ""
 	@echo "Platforms:"
 	@echo "  linux (default on Linux)"
 	@echo "  macos (default on macOS)"
 	@echo "  windows (default on Windows)"
-	@echo "  android (needs CC to be set to Android NDK's Clang compiler)"
+	@echo "  android (needs ARCH to be set to x86_64 or arm64-v8a)"
 	@echo "  ios (only on macOS)"
 	@echo "  isim (only on macOS)"
 	@echo ""
