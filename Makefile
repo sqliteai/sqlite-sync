@@ -11,12 +11,13 @@ CURL_VERSION ?= 8.12.1
 # Set default platform if not specified
 ifeq ($(OS),Windows_NT)
     PLATFORM := windows
+    HOST:= windows
 else
-    UNAME_S := $(shell uname -s)
-    ifeq ($(UNAME_S),Darwin)
+    HOST = $(shell uname -s | tr '[:upper:]' '[:lower:]')
+    ifeq ($(HOST),darwin)
         PLATFORM := macos
     else
-        PLATFORM := linux
+        PLATFORM := $(HOST)
     endif
 endif
 
@@ -80,7 +81,6 @@ else ifeq ($(PLATFORM),android)
         $(error "Android NDK must be set")
     endif
 
-    HOST = $(shell uname -s | tr '[:upper:]' '[:lower:]')
     BIN = $(ANDROID_NDK)/toolchains/llvm/prebuilt/$(HOST)-x86_64/bin
 
     ifneq (,$(filter $(ARCH),arm64 arm64-v8a))
@@ -244,7 +244,11 @@ $(CURL_LIB):
 	# --without-zsh-functions-dir \
 	# --without-libgsasl \
 	
+    ifeq ($(PLATFORM),windows)
+	"C:/msys64/usr/bin/bash.exe" "cd $(CURL_SRC) && make"
+    else
 	cd $(CURL_SRC) && make
+    endif
 
 	mkdir -p $(CURL_DIR)/$(PLATFORM)
 	mv $(CURL_SRC)/lib/.libs/libcurl.a $(CURL_DIR)/$(PLATFORM)

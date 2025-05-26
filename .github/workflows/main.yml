@@ -85,6 +85,7 @@ jobs:
 
       - name: build sqlite-sync
         run: make ${{ matrix.make && matrix.make || ''}}
+        shell: bash
 
       - name: windows install sqlite3
         if: matrix.os == 'windows-latest'
