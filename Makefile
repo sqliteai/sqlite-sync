@@ -83,14 +83,7 @@ else ifeq ($(PLATFORM),android)
         override ARCH := aarch64
     endif
     
-    ifeq ($(ARCH),x86_64)
-        CURL_CONFIG = --host x86_64-$(HOST)-android26 --with-openssl=$$ANDROID_NDK/toolchains/llvm/prebuilt/$(HOST)-x86_64/sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(BIN)/x86_64-linux-android26-clang CXX=$(BIN)/x86_64-linux-android26-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
-    else ifeq ($(ARCH),aarch64)
-        CURL_CONFIG = --host aarch64-linux-android26 --with-openssl=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr LIBS="-lssl -lcrypto" AR=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar AS=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-as CC=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang CXX=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++ LD=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/ld RANLIB=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib STRIP=$$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
-    else
-        $(error "Unsupported Android ARCH: $(ARCH)")
-    endif
-
+    CURL_CONFIG = --host $(ARCH)-$(HOST)-android26 --with-openssl=$$ANDROID_NDK/toolchains/llvm/prebuilt/$(HOST)-x86_64/sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(BIN)/$(ARCH)-linux-android26-clang CXX=$(BIN)/$(ARCH)-linux-android26-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lcrypto -lssl
 else ifeq ($(PLATFORM),ios)
