@@ -80,7 +80,7 @@ else ifeq ($(PLATFORM),android)
     BIN = $$ANDROID_NDK/toolchains/llvm/prebuilt/$(HOST)-x86_64/bin
 
     ifneq (,$(filter $(ARCH),arm64 arm64-v8a))
-        ARCH := aarch64
+        override ARCH := aarch64
     endif
     
     ifeq ($(ARCH),x86_64)
