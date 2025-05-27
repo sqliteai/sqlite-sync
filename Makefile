@@ -260,11 +260,11 @@ endif
 	# --without-zsh-functions-dir \
 	# --without-libgsasl \
 	
-	ifeq ($(PLATFORM),windows)
+    ifeq ($(PLATFORM),windows)
 	/c/msys64/usr/bin/bash.exe -lc "cd $(CURL_SRC) && make"
-	else
+    else
 	cd $(CURL_SRC) && make
-	endif
+    endif
 
 	mkdir -p $(CURL_DIR)/$(PLATFORM)
 	mv $(CURL_SRC)/lib/.libs/libcurl.a $(CURL_DIR)/$(PLATFORM)
