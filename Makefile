@@ -88,8 +88,12 @@ else ifeq ($(PLATFORM),android)
         override ARCH := aarch64
     endif
 
+    SSL := $(BIN)/../sysroot/usr/lib/libssl.a
+    CRYPTO := $(BIN)/../sysroot/usr/lib/libcrypto.a
+    OPENSSL := $(BIN)/../sysroot/usr/include/openssl
+
     CC = $(BIN)/$(ARCH)-linux-android26-clang
-    CURL_CONFIG = --host $(ARCH)-$(HOST)-android26 --with-openssl=$$ANDROID_NDK/toolchains/llvm/prebuilt/$(HOST)-x86_64/sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(BIN)/$(ARCH)-linux-android26-clang CXX=$(BIN)/$(ARCH)-linux-android26-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
+    CURL_CONFIG = --host $(ARCH)-$(HOST)-android26 --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(BIN)/$(ARCH)-linux-android26-clang CXX=$(BIN)/$(ARCH)-linux-android26-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lcrypto -lssl
 else ifeq ($(PLATFORM),ios)
@@ -173,7 +177,7 @@ ifneq ($(COVERAGE),false)
 	genhtml $(COV_DIR)/coverage.info --output-directory $(COV_DIR)
 endif
 
-openssl:
+$(SSL) $(CRYPTO) $(OPENSSL):
 	git clone https://github.com/openssl/openssl.git $(CURL_DIR)/src/openssl
 
 	cd $(CURL_DIR)/src/openssl && \
@@ -184,7 +188,7 @@ openssl:
 	make && make install_sw
 
 ifeq ($(PLATFORM),android)
-$(CURL_LIB): openssl
+$(CURL_LIB): $(SSL) $(CRYPTO) $(OPENSSL)
 else
 $(CURL_LIB):
 endif
