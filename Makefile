@@ -177,7 +177,7 @@ ifneq ($(COVERAGE),false)
 	genhtml $(COV_DIR)/coverage.info --output-directory $(COV_DIR)
 endif
 
-$(SSL) $(CRYPTO) $(OPENSSL):
+openssl:
 	git clone https://github.com/openssl/openssl.git $(CURL_DIR)/src/openssl
 
 	cd $(CURL_DIR)/src/openssl && \
@@ -186,6 +186,8 @@ $(SSL) $(CRYPTO) $(OPENSSL):
 	    no-shared no-unit-test \
 	    -D__ANDROID_API__=26 && \
 	make && make install_sw
+
+$(SSL) $(CRYPTO) $(OPENSSL): openssl
 
 ifeq ($(PLATFORM),android)
 $(CURL_LIB): $(SSL) $(CRYPTO) $(OPENSSL)
