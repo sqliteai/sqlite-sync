@@ -178,7 +178,7 @@ openssl:
 
 	cd $(CURL_DIR)/src/openssl && \
 	./Configure android-$(if $(filter aarch64,$(ARCH)),arm64,$(ARCH)) \
-	    --prefix=$(ANDROID_NDK)/toolchains/sysroot/usr \
+	    --prefix=$(BIN)/../sysroot/usr \
 	    no-shared no-unit-test \
 	    -D__ANDROID_API__=26 && \
 	make && make install_sw
