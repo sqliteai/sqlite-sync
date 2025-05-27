@@ -261,7 +261,7 @@ endif
 	# --without-libgsasl \
 	
     ifeq ($(PLATFORM),windows)
-	/c/msys64/usr/bin/bash.exe -lc "cd $(CURL_SRC) && make"
+	cd $(CURL_SRC) && /c/mingw64/bin/make.exe
     else
 	cd $(CURL_SRC) && make
     endif
