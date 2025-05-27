@@ -82,6 +82,7 @@ else ifeq ($(PLATFORM),android)
     endif
 
     BIN = $(ANDROID_NDK)/toolchains/llvm/prebuilt/$(HOST)-x86_64/bin
+    PATH := $(BIN):$(PATH)
 
     ifneq (,$(filter $(ARCH),arm64 arm64-v8a))
         override ARCH := aarch64
@@ -172,7 +173,21 @@ ifneq ($(COVERAGE),false)
 	genhtml $(COV_DIR)/coverage.info --output-directory $(COV_DIR)
 endif
 
+openssl:
+	git clone https://github.com/openssl/openssl.git $(CURL_DIR)/src/openssl
+
+	cd $(CURL_DIR)/src/openssl && \
+	./Configure android-$(if $(filter aarch64,$(ARCH)),arm64,$(ARCH)) \
+	    --prefix=$(ANDROID_NDK)/toolchains/sysroot/usr \
+	    no-shared no-unit-test \
+	    -D__ANDROID_API__=26 && \
+	make && make install_sw
+
+ifeq ($(PLATFORM),android)
+$(CURL_LIB): openssl
+else
 $(CURL_LIB):
+endif
 	mkdir -p $(CURL_DIR)/src
 	curl -L -o $(CURL_DIR)/src/curl.zip "https://github.com/curl/curl/releases/download/curl-$(subst .,_,${CURL_VERSION})/curl-$(CURL_VERSION).zip"
 	unzip $(CURL_DIR)/src/curl.zip -d $(CURL_DIR)/src/.
