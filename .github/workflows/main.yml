@@ -46,8 +46,6 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
-      MAKEFLAGS: -j 8
 
     steps:
 
@@ -63,11 +61,11 @@ jobs:
 
       - name: windows build curl
         if: matrix.os == 'windows-latest'
-        run: make curl/windows/libcurl.a
+        run: make curl/windows/libcurl.a -j4
         shell: msys2 {0}
 
       - name: build sqlite-sync
-        run: make ${{ matrix.make && matrix.make || ''}}
+        run: make extension ${{ matrix.make && matrix.make || ''}} -j4
 
       - name: windows install sqlite3
         if: matrix.os == 'windows-latest'
@@ -97,7 +95,7 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::prepare the test script"
-          make test PLATFORM=$PLATFORM ARCH=$ARCH || echo "It should fail. Running remaining commands in the emulator"
+          make test PLATFORM=$PLATFORM ARCH=$ARCH -j4 || echo "It should fail. Running remaining commands in the emulator"
           cat > commands.sh << EOF
             mv -f /data/local/tmp/sqlite3 /system/xbin
             cd /data/local/tmp
@@ -119,7 +117,7 @@ jobs:
 
       - name: test sqlite-sync
         if: matrix.name == 'linux' || matrix.name == 'windows'
-        run: make test
+        run: make test -j4
 
       - name: test sqlite-sync + coverage
         if: matrix.name == 'macos'

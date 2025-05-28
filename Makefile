@@ -265,7 +265,7 @@ endif
 	# --without-zsh-functions-dir \
 	# --without-libgsasl \
 	
-	cd $(CURL_SRC) && make
+	cd $(CURL_SRC) && $(MAKE)
 
 	mkdir -p $(CURL_DIR)/$(PLATFORM)
 	mv $(CURL_SRC)/lib/.libs/libcurl.a $(CURL_DIR)/$(PLATFORM)
