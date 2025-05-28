@@ -252,6 +252,16 @@ sqlite3 *close_db (sqlite3 *db) {
     return NULL;
 }
 
+int close_db_v2 (sqlite3 *db) {
+    int counter = 0;
+    if (db) {
+        sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+        counter = dbutils_debug_stmt(db, true);
+        sqlite3_close(db);
+    }
+    return counter;
+}
+
 bool file_delete (const char *path) {
     #ifdef _WIN32
     if (DeleteFile(path) == 0) return false;
@@ -261,6 +271,142 @@ bool file_delete (const char *path) {
     
     return true;
 }
+
+// MARK: -
+
+#ifndef UNITTEST_OMIT_RLS_VALIDATION
+typedef struct {
+    bool    in_savepoint;
+    bool    is_approved;
+    bool    last_is_delete;
+    char    *last_tbl;
+    void    *last_pk;
+    int64_t last_pk_len;
+    int64_t last_db_version;
+} unittest_payload_apply_rls_status;
+
+bool unittest_validate_changed_row(sqlite3 *db, cloudsync_context *data, char *tbl_name, void *pk, int64_t pklen) {
+    // verify row
+    bool ret = false;
+    bool vm_persistent;
+    sqlite3_stmt *vm = cloudsync_col_value_stmt(db, data, tbl_name, &vm_persistent);
+    if (!vm) goto cleanup;
+    
+    // bind primary key values (the return code is the pk count)
+    int rc = pk_decode_prikey((char *)pk, (size_t)pklen, pk_decode_bind_callback, (void *)vm);
+    if (rc < 0) goto cleanup;
+    
+    // execute vm
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_DONE) {
+        rc = SQLITE_OK;
+    } else if (rc == SQLITE_ROW) {
+        rc = SQLITE_OK;
+        ret = true;
+    }
+    
+cleanup:
+    if (vm_persistent) sqlite3_reset(vm);
+    else sqlite3_finalize(vm);
+    
+    return ret;
+}
+
+int unittest_payload_apply_reset_transaction(sqlite3 *db, unittest_payload_apply_rls_status *s, bool create_new) {
+    int rc = SQLITE_OK;
+    
+    if (s->in_savepoint == true) {
+        if (s->is_approved) rc = sqlite3_exec(db, "RELEASE unittest_payload_apply_transaction", NULL, NULL, NULL);
+        else rc = sqlite3_exec(db, "ROLLBACK TO unittest_payload_apply_transaction; RELEASE unittest_payload_apply_transaction", NULL, NULL, NULL);
+        if (rc == SQLITE_OK) s->in_savepoint = false;
+    }
+    if (create_new) {
+        rc = sqlite3_exec(db, "SAVEPOINT unittest_payload_apply_transaction", NULL, NULL, NULL);
+        if (rc == SQLITE_OK) s->in_savepoint = true;
+    }
+    return rc;
+}
+
+bool unittest_payload_apply_rls_callback(void **xdata, cloudsync_pk_decode_bind_context *d, sqlite3 *db, cloudsync_context *data, int step, int rc) {
+    unittest_payload_apply_rls_status *s;
+    if (*xdata) {
+        s = (unittest_payload_apply_rls_status *)*xdata;
+    } else {
+        s = cloudsync_memory_zeroalloc(sizeof(unittest_payload_apply_rls_status));
+        s->is_approved = true;
+        *xdata = s;
+    }
+    
+    switch (step) {
+        case CLOUDSYNC_PAYLOAD_APPLY_WILL_APPLY: {
+            // if the tbl name or the prikey has changed, then verify if the row is valid
+            // must use strncmp because strings in xdata are not zero-terminated
+            bool tbl_changed = (s->last_tbl && (strlen(s->last_tbl) != (size_t)d->tbl_len || strncmp(s->last_tbl, d->tbl, (size_t)d->tbl_len) != 0));
+            bool pk_changed = (s->last_pk && d->pk && cloudsync_blob_compare(s->last_pk,  s->last_pk_len, d->pk, d->pk_len) != 0);
+            if (s->is_approved
+                && !s->last_is_delete
+                && (tbl_changed || pk_changed)) {
+                s->is_approved = unittest_validate_changed_row(db, data, s->last_tbl, s->last_pk, s->last_pk_len);
+            }
+            
+            s->last_is_delete = ((size_t)d->col_name_len == strlen(CLOUDSYNC_TOMBSTONE_VALUE) &&
+                                 strncmp(d->col_name, CLOUDSYNC_TOMBSTONE_VALUE, (size_t)d->col_name_len) == 0
+                                 ) && d->cl % 2 == 0;
+            
+            // update the last_tbl value, if needed
+            if (!s->last_tbl ||
+                !d->tbl ||
+                (strlen(s->last_tbl) != (size_t)d->tbl_len) ||
+                strncmp(s->last_tbl, d->tbl, (size_t)d->tbl_len) != 0) {
+                if (s->last_tbl) cloudsync_memory_free(s->last_tbl);
+                if (d->tbl && d->tbl_len > 0) s->last_tbl = cloudsync_string_ndup(d->tbl, d->tbl_len, false);
+                else s->last_tbl = NULL;
+            }
+            
+            // update the last_prikey and len values, if needed
+            if (!s->last_pk || !d->pk || cloudsync_blob_compare(s->last_pk, s->last_pk_len, d->pk, d->pk_len) != 0) {
+                if (s->last_pk) cloudsync_memory_free(s->last_pk);
+                if (d->pk && d->pk_len > 0) {
+                    s->last_pk = cloudsync_memory_alloc(d->pk_len);
+                    memcpy(s->last_pk, d->pk, d->pk_len);
+                    s->last_pk_len = d->pk_len;
+                } else {
+                    s->last_pk = NULL;
+                    s->last_pk_len = 0;
+                }
+            }
+            
+            // commit the previous transaction, if any
+            // begin new transacion, if needed
+            if (s->last_db_version != d->db_version) {
+                rc = unittest_payload_apply_reset_transaction(db, s, true);
+                if (rc != SQLITE_OK) printf("unittest_payload_apply error in reset_transaction: (%d) %s\n", rc, sqlite3_errmsg(db));
+                
+                // reset local variables
+                s->last_db_version = d->db_version;
+                s->is_approved = true;
+            }
+            break;
+        }
+        case CLOUDSYNC_PAYLOAD_APPLY_DID_APPLY:
+            break;
+        case CLOUDSYNC_PAYLOAD_APPLY_CLEANUP:
+            if (s->is_approved && !s->last_is_delete) s->is_approved = unittest_validate_changed_row(db, data, s->last_tbl, s->last_pk, s->last_pk_len);
+            rc = unittest_payload_apply_reset_transaction(db, s, false);
+            if (s->last_tbl) cloudsync_memory_free(s->last_tbl);
+            if (s->last_pk) {
+                cloudsync_memory_free(s->last_pk);
+                s->last_pk_len = 0;
+            }
+            
+            cloudsync_memory_free(s);
+            *xdata = NULL;
+            break;
+    }
+   
+    return s->is_approved;
+}
+#endif
 
 // MARK: -
 
@@ -2028,6 +2174,8 @@ sqlite3 *do_create_database_file (int i, time_t timestamp, int ntest) {
         return NULL;
     }
     
+    sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+    
     // manually load extension
     sqlite3_cloudsync_init(db, NULL, NULL);
     
@@ -2093,8 +2241,24 @@ bool do_test_merge (int nclients, bool print_result, bool cleanup_databases) {
     
 finalize:
     for (int i=0; i<nclients; ++i) {
-        if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK)) printf("do_test_merge error: %s\n", sqlite3_errmsg(db[i]));
-        if (db[i]) close_db(db[i]);
+        if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK)) {
+            result = false;
+            printf("do_test_merge error: %s\n", sqlite3_errmsg(db[i]));
+        }
+        
+        if (db[i]) {
+            if (sqlite3_get_autocommit(db[i]) == 0) {
+                result = false;
+                printf("do_test_merge error: db %d is in transaction\n", i);
+            }
+            
+            int counter = close_db_v2(db[i]);
+            if (counter > 0) {
+                result = false;
+                printf("do_test_merge error: db %d has %d unterminated statements\n", i, counter);
+            }
+        }
+        
         if (cleanup_databases) {
             char buf[256];
             do_build_database_path(buf, i, timestamp, saved_counter++);
@@ -2171,12 +2335,12 @@ bool do_test_merge_2 (int nclients, int table_mask, bool print_result, bool clea
     
     // deleta data in the first customer
     do_delete(db[0], table_mask, print_result);
-    
+        
     // merge all changes
     if (do_merge(db, nclients, false) == false) {
         goto finalize;
     }
-        
+            
     // compare results
     for (int i=1; i<nclients; ++i) {
         if (table_mask & TEST_PRIKEYS) {
@@ -2206,7 +2370,18 @@ bool do_test_merge_2 (int nclients, int table_mask, bool print_result, bool clea
 finalize:
     for (int i=0; i<nclients; ++i) {
         if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK)) printf("do_test_merge error: %s\n", sqlite3_errmsg(db[i]));
-        if (db[i]) close_db(db[i]);
+        if (db[i]) {
+            if (sqlite3_get_autocommit(db[i]) == 0) {
+                result = false;
+                printf("do_test_merge error: db %d is in transaction\n", i);
+            }
+            
+            int counter = close_db_v2(db[i]);
+            if (counter > 0) {
+                result = false;
+                printf("do_test_merge error: db %d has %d unterminated statements\n", i, counter);
+            }
+        }
         if (cleanup_databases) {
             char buf[256];
             do_build_database_path(buf, i, timestamp, saved_counter++);
@@ -2939,7 +3114,20 @@ bool do_test_fill_initial_data(int nclients, bool print_result, bool cleanup_dat
 finalize:
     for (int i=0; i<nclients; ++i) {
         if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK)) printf("do_test_merge error: %s\n", sqlite3_errmsg(db[i]));
-        if (db[i]) close_db(db[i]);
+        
+        if (db[i]) {
+            if (sqlite3_get_autocommit(db[i]) == 0) {
+                result = false;
+                printf("do_test_merge error: db %d is in transaction\n", i);
+            }
+            
+            int counter = close_db_v2(db[i]);
+            if (counter > 0) {
+                result = false;
+                printf("do_test_merge error: db %d has %d unterminated statements\n", i, counter);
+            }
+        }
+        
         if (cleanup_databases) {
             char buf[256];
             do_build_database_path(buf, i, timestamp, saved_counter++);
@@ -3081,6 +3269,7 @@ int main(int argc, const char * argv[]) {
     
     // manually load extension
     sqlite3_cloudsync_init(db, NULL, NULL);
+    cloudsync_payload_apply_callback(unittest_payload_apply_rls_callback);
     
     printf("Testing CloudSync version %s\n", CLOUDSYNC_VERSION);
     printf("===============================\n");
