@@ -182,7 +182,7 @@ $(OPENSSL):
 	    --prefix=$(BIN)/../sysroot/usr \
 	    no-shared no-unit-test \
 	    -D__ANDROID_API__=26 && \
-	make && make install_sw
+	$(MAKE) && $(MAKE) install_sw
 
 ifeq ($(PLATFORM),android)
 $(CURL_LIB): $(OPENSSL)
