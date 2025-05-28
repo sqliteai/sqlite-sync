@@ -43,6 +43,9 @@ jobs:
             name: isim
             make: PLATFORM=isim
 
+    defaults:
+      run:
+        shell: bash
     env:
       MAKEFLAGS: -j 8
 
