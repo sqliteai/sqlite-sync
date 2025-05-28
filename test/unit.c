@@ -1669,6 +1669,7 @@ bool do_test_dbutils (void) {
     
     // manually load extension
     sqlite3_cloudsync_init(db, NULL, NULL);
+    cloudsync_set_payload_apply_callback(db, unittest_payload_apply_rls_callback);
 
     const char *sql = "CREATE TABLE IF NOT EXISTS foo (name TEXT PRIMARY KEY NOT NULL, age INTEGER, note TEXT, stamp TEXT DEFAULT CURRENT_TIME);"
     "CREATE TABLE IF NOT EXISTS bar (name TEXT PRIMARY KEY NOT NULL, age INTEGER, note TEXT, stamp TEXT DEFAULT CURRENT_TIME);"
@@ -2149,7 +2150,8 @@ sqlite3 *do_create_database (void) {
     
     // manually load extension
     sqlite3_cloudsync_init(db, NULL, NULL);
-    
+    cloudsync_set_payload_apply_callback(db, unittest_payload_apply_rls_callback);
+
     return db;
 }
 
@@ -2178,7 +2180,8 @@ sqlite3 *do_create_database_file (int i, time_t timestamp, int ntest) {
     
     // manually load extension
     sqlite3_cloudsync_init(db, NULL, NULL);
-    
+    cloudsync_set_payload_apply_callback(db, unittest_payload_apply_rls_callback);
+
     return db;
 }
 
@@ -3269,8 +3272,8 @@ int main(int argc, const char * argv[]) {
     
     // manually load extension
     sqlite3_cloudsync_init(db, NULL, NULL);
-    cloudsync_payload_apply_callback(unittest_payload_apply_rls_callback);
-    
+    cloudsync_set_payload_apply_callback(db, unittest_payload_apply_rls_callback);
+
     printf("Testing CloudSync version %s\n", CLOUDSYNC_VERSION);
     printf("===============================\n");
 

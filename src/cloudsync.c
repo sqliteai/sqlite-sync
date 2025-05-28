@@ -64,13 +64,14 @@ SQLITE_EXTENSION_INIT1
 #define APIEXPORT
 #endif
 
-#define CLOUDSYNC_DEFAULT_ALGO              "cls"
-#define CLOUDSYNC_INIT_NTABLES              128
-#define CLOUDSYNC_VALUE_NOTSET              -1
-#define CLOUDSYNC_MIN_DB_VERSION            0
-#define CLOUDSYNC_PAYLOAD_MINBUF_SIZE       512*1024
-#define CLOUDSYNC_PAYLOAD_VERSION           1
-#define CLOUDSYNC_PAYLOAD_SIGNATURE         'CLSY'
+#define CLOUDSYNC_DEFAULT_ALGO                  "cls"
+#define CLOUDSYNC_INIT_NTABLES                  128
+#define CLOUDSYNC_VALUE_NOTSET                  -1
+#define CLOUDSYNC_MIN_DB_VERSION                0
+#define CLOUDSYNC_PAYLOAD_MINBUF_SIZE           512*1024
+#define CLOUDSYNC_PAYLOAD_VERSION               1
+#define CLOUDSYNC_PAYLOAD_SIGNATURE             'CLSY'
+#define CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY    "cloudsync_payload_apply_callback"
 
 #ifndef MAX
 #define MAX(a, b)                                   (((a)>(b))?(a):(b))
@@ -217,8 +218,6 @@ typedef struct PACKED {
 int db_version_rebuild_stmt (sqlite3 *db, cloudsync_context *data);
 int cloudsync_load_siteid (sqlite3 *db, cloudsync_context *data);
 int local_mark_insert_or_update_meta (sqlite3 *db, cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, sqlite3_int64 db_version, int seq);
-
-static cloudsync_payload_apply_callback_t payload_apply_callback;
 
 // MARK: - STMT Utils -
 
@@ -1928,6 +1927,14 @@ void cloudsync_network_encode_final (sqlite3_context *context) {
     if (!use_uncompressed_buffer) cloudsync_memory_free(buffer);
 }
 
+cloudsync_payload_apply_callback_t cloudsync_get_payload_apply_callback(sqlite3 *db) {
+    return sqlite3_get_clientdata(db, CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY);
+}
+
+void cloudsync_set_payload_apply_callback(sqlite3 *db, cloudsync_payload_apply_callback_t callback) {
+    sqlite3_set_clientdata(db, CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY, (void*)callback, NULL);
+}
+
 int cloudsync_pk_decode_bind_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
     cloudsync_pk_decode_bind_context *decode_context = (cloudsync_pk_decode_bind_context*)xdata;
     int rc = pk_decode_bind_callback(decode_context->vm, index, type, ival, dval, pval);
@@ -2046,6 +2053,7 @@ int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int 
     int seq = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_CHECK_SEQ);
     cloudsync_pk_decode_bind_context decoded_context = {.vm = vm};
     void *payload_apply_xdata = NULL;
+    cloudsync_payload_apply_callback_t payload_apply_callback = cloudsync_get_payload_apply_callback(db);
     
     for (uint32_t i=0; i<nrows; ++i) {
         size_t seek = 0;
@@ -2103,10 +2111,6 @@ int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int 
     // return the number of processed rows
     sqlite3_result_int(context, nrows);
     return nrows;
-}
-
-void cloudsync_payload_apply_callback(cloudsync_payload_apply_callback_t callback) {
-    payload_apply_callback = callback;
 }
 
 sqlite3_stmt *cloudsync_col_value_stmt (sqlite3 *db, cloudsync_context *data, const char *tbl_name, bool *persistent) {

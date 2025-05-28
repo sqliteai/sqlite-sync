@@ -55,7 +55,7 @@ void cloudsync_sync_table_key (cloudsync_context *data, const char *table, const
 void *cloudsync_get_auxdata (sqlite3_context *context);
 void cloudsync_set_auxdata (sqlite3_context *context, void *xdata);
 int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int blen);
-void cloudsync_payload_apply_callback(cloudsync_payload_apply_callback_t callback);
+void cloudsync_set_payload_apply_callback(sqlite3 *db, cloudsync_payload_apply_callback_t callback);
 sqlite3_stmt *cloudsync_col_value_stmt (sqlite3 *db, cloudsync_context *data, const char *tbl_name, bool *persistent);
 
 #endif
