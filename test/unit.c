@@ -1674,7 +1674,9 @@ bool do_test_dbutils (void) {
     const char *sql = "CREATE TABLE IF NOT EXISTS foo (name TEXT PRIMARY KEY NOT NULL, age INTEGER, note TEXT, stamp TEXT DEFAULT CURRENT_TIME);"
     "CREATE TABLE IF NOT EXISTS bar (name TEXT PRIMARY KEY NOT NULL, age INTEGER, note TEXT, stamp TEXT DEFAULT CURRENT_TIME);"
     "CREATE TABLE IF NOT EXISTS rowid_table (name TEXT, age INTEGER);"
-    "CREATE TABLE IF NOT EXISTS nonnull_prikey_table (name TEXT PRIMARY KEY, age INTEGER);";
+    "CREATE TABLE IF NOT EXISTS nonnull_prikey_table (name TEXT PRIMARY KEY, age INTEGER);"
+    "CREATE TABLE IF NOT EXISTS nonnull_nodefault_table (name TEXT PRIMARY KEY NOT NULL, stamp TEXT NOT NULL);"
+    "CREATE TABLE IF NOT EXISTS nonnull_default_table (name TEXT PRIMARY KEY NOT NULL, stamp TEXT NOT NULL DEFAULT CURRENT_TIME);";
     
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
@@ -1731,6 +1733,10 @@ bool do_test_dbutils (void) {
     if (b == true) goto finalize;
     b = dbutils_table_sanity_check(db, NULL, "nonnull_prikey_table");
     if (b == true) goto finalize;
+    b = dbutils_table_sanity_check(db, NULL, "nonnull_nodefault_table");
+    if (b == true) goto finalize;
+    b = dbutils_table_sanity_check(db, NULL, "nonnull_default_table");
+    if (b == false) goto finalize;
     
     // create huge dummy_table table
     rc = sqlite3_exec(db, build_huge_table(), NULL, NULL, NULL);

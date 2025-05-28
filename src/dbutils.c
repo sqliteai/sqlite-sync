@@ -416,6 +416,15 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
         }
     }
     
+    // check for columns declared as NOT NULL without a DEFAULT value.
+    // Otherwise, col_merge_stmt would fail if changes to other columns are inserted first.
+    sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%w') WHERE pk=0 AND \"notnull\"=1 AND \"dflt_value\" IS NULL;", name);
+    sqlite3_int64 count3 = dbutils_int_select(db, sql);
+    if (count3 > 0) {
+        dbutils_context_result_error(context, "All non-primary key columns declared as NOT NULL must have a DEFAULT value. (table %s)", name);
+        return false;
+    }
+    
     return true;
 }
 
