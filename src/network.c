@@ -369,7 +369,7 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     // 443 (OPTIONAL)
     rc = curl_url_get(url, CURLUPART_PORT, &port, 0);
     if (rc != CURLE_OK && rc != CURLUE_NO_PORT) goto finalize;
-    char *port_or_default = port ? port : CLOUDSYNC_DEFAULT_ENDPOINT_PORT;
+    char *port_or_default = port && strcmp(port, "8860") != 0 ? port : CLOUDSYNC_DEFAULT_ENDPOINT_PORT;
 
     // /chinook.sqlite (MANDATORY)
     rc = curl_url_get(url, CURLUPART_PATH, &database, 0);
