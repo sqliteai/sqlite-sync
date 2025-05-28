@@ -21,7 +21,30 @@
 #define CLOUDSYNC_RLS_RESTRICTED_VALUE          "__[RLS]__"
 #define CLOUDSYNC_DISABLE_ROWIDONLY_TABLES      1
 
+typedef enum {
+    CLOUDSYNC_PAYLOAD_APPLY_WILL_APPLY   = 1,
+    CLOUDSYNC_PAYLOAD_APPLY_DID_APPLY    = 2,
+    CLOUDSYNC_PAYLOAD_APPLY_CLEANUP      = 3
+} CLOUDSYNC_PAYLOAD_APPLY_STEPS;
+
+typedef struct {
+    sqlite3_stmt *vm;
+    char         *tbl;
+    int64_t      tbl_len;
+    const void   *pk;
+    int64_t      pk_len;
+    char         *col_name;
+    int64_t      col_name_len;
+    int64_t      col_version;
+    int64_t      db_version;
+    const void   *site_id;
+    int64_t      site_id_len;
+    int64_t      cl;
+    int64_t      seq;
+} cloudsync_pk_decode_bind_context;
+
 typedef struct cloudsync_context cloudsync_context;
+typedef bool (*cloudsync_payload_apply_callback_t)(void **xdata, cloudsync_pk_decode_bind_context *decoded_change, sqlite3 *db, cloudsync_context *data, int step, int rc);
 
 int sqlite3_cloudsync_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi);
 bool cloudsync_config_exists (sqlite3 *db);
@@ -32,5 +55,7 @@ void cloudsync_sync_table_key (cloudsync_context *data, const char *table, const
 void *cloudsync_get_auxdata (sqlite3_context *context);
 void cloudsync_set_auxdata (sqlite3_context *context, void *xdata);
 int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int blen);
+void cloudsync_payload_apply_callback(cloudsync_payload_apply_callback_t callback);
+sqlite3_stmt *cloudsync_col_value_stmt (sqlite3 *db, cloudsync_context *data, const char *tbl_name, bool *persistent);
 
 #endif
