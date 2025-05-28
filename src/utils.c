@@ -126,10 +126,9 @@ void *cloudsync_memory_zeroalloc (uint64_t size) {
     return ptr;
 }
 
-char *cloudsync_string_dup (const char *str, bool lowercase) {
+char *cloudsync_string_ndup (const char *str, size_t len, bool lowercase) {
     if (str == NULL) return NULL;
     
-    size_t len = strlen(str);
     char *s = (char *)cloudsync_memory_alloc((sqlite3_uint64)(len + 1));
     if (!s) return NULL;
     
@@ -146,6 +145,20 @@ char *cloudsync_string_dup (const char *str, bool lowercase) {
     s[len] = '\0';
     
     return s;
+}
+
+char *cloudsync_string_dup (const char *str, bool lowercase) {
+    if (str == NULL) return NULL;
+    
+    size_t len = strlen(str);
+    return cloudsync_string_ndup(str, len, lowercase);
+}
+
+int cloudsync_blob_compare(const char *blob1, size_t size1, const char *blob2, size_t size2) {
+    if (size1 != size2) {
+        return (int)(size1 - size2); // Blobs are different if sizes are different
+    }
+    return memcmp(blob1, blob2, size1); // Use memcmp for byte-by-byte comparison
 }
 
 void cloudsync_rowid_decode (sqlite3_int64 rowid, sqlite3_int64 *db_version, sqlite3_int64 *seq) {

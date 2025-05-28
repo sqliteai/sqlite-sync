@@ -129,7 +129,10 @@ char *cloudsync_string_replace_prefix(const char *input, char *prefix, char *rep
 uint64_t fnv1a_hash(const char *data, size_t len);
 
 void *cloudsync_memory_zeroalloc (uint64_t size);
+char *cloudsync_string_ndup (const char *str, size_t len, bool lowercase);
 char *cloudsync_string_dup (const char *str, bool lowercase);
+int cloudsync_blob_compare(const char *blob1, size_t size1, const char *blob2, size_t size2);
+
 void cloudsync_rowid_decode (sqlite3_int64 rowid, sqlite3_int64 *db_version, sqlite3_int64 *seq);
 
 #endif
