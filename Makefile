@@ -191,7 +191,12 @@ $(CURL_LIB):
 endif
 	mkdir -p $(CURL_DIR)/src
 	curl -L -o $(CURL_DIR)/src/curl.zip "https://github.com/curl/curl/releases/download/curl-$(subst .,_,${CURL_VERSION})/curl-$(CURL_VERSION).zip"
+
+    ifeq ($(HOST),windows)
+	powershell -Command "Expand-Archive -Path '$(CURL_DIR)\src\curl.zip' -DestinationPath '$(CURL_DIR)\src\'"
+    else
 	unzip $(CURL_DIR)/src/curl.zip -d $(CURL_DIR)/src/.
+    endif
 	
 	cd $(CURL_SRC) && ./configure \
 	--without-libpsl \
@@ -260,11 +265,7 @@ endif
 	# --without-zsh-functions-dir \
 	# --without-libgsasl \
 	
-    ifeq ($(PLATFORM),windows)
-	cd $(CURL_SRC) && /c/mingw64/bin/make.exe
-    else
 	cd $(CURL_SRC) && make
-    endif
 
 	mkdir -p $(CURL_DIR)/$(PLATFORM)
 	mv $(CURL_SRC)/lib/.libs/libcurl.a $(CURL_DIR)/$(PLATFORM)
@@ -272,7 +273,7 @@ endif
 
 # Clean up generated files
 clean:
-	rm -rf $(BUILD_DIRS) $(DIST_DIR)/* $(COV_DIR) *.gcda *.gcno *.gcov
+	rm -rf $(BUILD_DIRS) $(DIST_DIR)/* $(COV_DIR) *.gcda *.gcno *.gcov $(CURL_DIR)/src
 
 # Help message
 help:
