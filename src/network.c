@@ -286,10 +286,8 @@ char *network_authentication_token(const char *key, const char *value) {
     if (!buffer) return NULL;
     
     // build new token
-    // apikey: just write the key for retrocompatibility
-    // other keys, like token: add a prefix, i.e. token=
-    if (strcmp(key, "apikey") == 0) snprintf(buffer, len, "%s", value);
-    else snprintf(buffer, len, "%s=%s", key, value);
+    // we don't need a prefix because the token alreay include a prefix "sqa_"
+    snprintf(buffer, len, "%s", value);
     
     return buffer;
 }
