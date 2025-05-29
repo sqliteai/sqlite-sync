@@ -74,7 +74,7 @@ SQLITE_EXTENSION_INIT1
 #define CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY    "cloudsync_payload_apply_callback"
 
 #ifndef MAX
-#define MAX(a, b)                                   (((a)>(b))?(a):(b))
+#define MAX(a, b)                               (((a)>(b))?(a):(b))
 #endif
 
 #define DEBUG_SQLITE_ERROR(_rc, _fn, _db)   do {if (_rc != SQLITE_OK) printf("Error in %s: %s\n", _fn, sqlite3_errmsg(_db));} while (0)
@@ -170,15 +170,17 @@ struct cloudsync_context {
     int             schema_version;
     uint64_t        schema_hash;
     
-    // set at the start of each transaction on the first invocation and re-set on transaction commit or rollback
+    // set at the start of each transaction on the first invocation and
+    // re-set on transaction commit or rollback
     sqlite3_int64   db_version;
-    // the version that the db will be set to at the end of the transaction if that transaction were to commit at the time this value is checked
+    // the version that the db will be set to at the end of the transaction
+    // if that transaction were to commit at the time this value is checked
     sqlite3_int64   pending_db_version;
     // used to set an order inside each transaction
     int             seq;
     
-    // augmented tables are stored in-memory so we do not need to retrieve information about col names and cid from the disk each time
-    // a write statement is performed
+    // augmented tables are stored in-memory so we do not need to retrieve information about col names and cid
+    // from the disk each time a write statement is performed
     // we do also not need to use an hash map here because for few tables the direct in-memory comparison with table name is faster
     cloudsync_table_context **tables;
     int tables_count;
@@ -1309,7 +1311,7 @@ int cloudsync_merge_insert (sqlite3_vtab *vtab, int argc, sqlite3_value **argv, 
     // perform different logic for each different table algorithm
     if (table->algo == table_algo_crdt_gos) return cloudsync_merge_insert_gos(vtab, data, table, insert_pk, insert_pk_len, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
     
-    // TODO: handle DWS and AWS algorithms
+    // Handle DWS and AWS algorithms here
     // Delete-Wins Set (DWS): table_algo_crdt_dws
     // Add-Wins Set (AWS): table_algo_crdt_aws
     
@@ -2345,7 +2347,7 @@ void cloudsync_pk_encode (sqlite3_context *context, int argc, sqlite3_value **ar
     cloudsync_memory_free(buffer);
 }
 
-int pk_decode_set_result_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
+int cloudsync_pk_decode_set_result_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
     cloudsync_pk_decode_context *decode_context = (cloudsync_pk_decode_context *)xdata;
     // decode_context->index is 1 based
     // index is 0 based
@@ -2384,7 +2386,7 @@ void cloudsync_pk_decode (sqlite3_context *context, int argc, sqlite3_value **ar
     int i = sqlite3_value_int(argv[1]);
     
     cloudsync_pk_decode_context xdata = {.context = context, .index = i};
-    pk_decode_prikey((char *)pk, strlen(pk), pk_decode_set_result_callback, &xdata);
+    pk_decode_prikey((char *)pk, strlen(pk), cloudsync_pk_decode_set_result_callback, &xdata);
 }
 
 // MARK: -
@@ -2638,9 +2640,6 @@ int cloudsync_cleanup_internal (sqlite3_context *context, const char *table_name
     
     return SQLITE_OK;
 }
-
-#define MAX_TABLES 1000
-#define MAX_NAME_LENGTH 128
 
 void cloudsync_cleanup_all (sqlite3_context *context) {
     char *sql = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'cloudsync_%' AND name NOT LIKE '%_cloudsync';";

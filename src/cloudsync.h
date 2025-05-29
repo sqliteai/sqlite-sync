@@ -16,7 +16,7 @@
 #include "sqlite3.h"
 #endif
 
-#define CLOUDSYNC_VERSION                       "0.7.1"
+#define CLOUDSYNC_VERSION                       "0.7.2"
 #define CLOUDSYNC_TOMBSTONE_VALUE               "__[RIP]__"
 #define CLOUDSYNC_RLS_RESTRICTED_VALUE          "__[RLS]__"
 #define CLOUDSYNC_DISABLE_ROWIDONLY_TABLES      1
