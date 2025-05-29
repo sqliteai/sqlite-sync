@@ -929,20 +929,22 @@ bool table_remove_from_context (cloudsync_context *data, cloudsync_table_context
 }
 
 sqlite3_stmt *cloudsync_colvalue_stmt (sqlite3 *db, cloudsync_context *data, const char *tbl_name, bool *persistent) {
-    sqlite3_stmt *vm;
+    sqlite3_stmt *vm = NULL;
     
     cloudsync_table_context *table = table_lookup(data, tbl_name);
-    char *col_name = NULL;
-    if (table->ncols > 0) {
-        col_name = table->col_name[0];
-        // retrieve col_value precompiled statement
-        vm = table_column_lookup(table, col_name, false, NULL);
-        *persistent = true;
-    } else {
-        char *sql = table_build_value_sql(db, table, "*");
-        sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
-        cloudsync_memory_free(sql);
-        *persistent = false;
+    if (table) {
+        char *col_name = NULL;
+        if (table->ncols > 0) {
+            col_name = table->col_name[0];
+            // retrieve col_value precompiled statement
+            vm = table_column_lookup(table, col_name, false, NULL);
+            *persistent = true;
+        } else {
+            char *sql = table_build_value_sql(db, table, "*");
+            sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+            cloudsync_memory_free(sql);
+            *persistent = false;
+        }
     }
     
     return vm;
@@ -1612,6 +1614,8 @@ finalize:
 
 int cloudsync_refill_metatable (sqlite3 *db, cloudsync_context *data, const char *table_name) {
     cloudsync_table_context *table = table_lookup(data, table_name);
+    if (!table) return SQLITE_INTERNAL;
+    
     sqlite3_stmt *vm = NULL;
     sqlite3_int64 db_version = db_version_next(db, data, CLOUDSYNC_VALUE_NOTSET);
 
