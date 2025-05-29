@@ -13,20 +13,20 @@
 #include "utils.h"
 #include "curl/curl.h"
 
-#define CLOUDSYNC_ENDPOINT_PREFIX           "v1/cloudsync"
-#define CLOUDSYNC_ENDPOINT_UPLOAD           "upload"
-#define CLOUDSYNC_ENDPOINT_CHECK            "check"
-#define CLOUDSYNC_DEFAULT_ENDPOINT_PORT     "443"
-#define CLOUDSYNC_HEADER_SQLITECLOUD        "Accept: sqlc/plain"
+#define CLOUDSYNC_ENDPOINT_PREFIX               "v1/cloudsync"
+#define CLOUDSYNC_ENDPOINT_UPLOAD               "upload"
+#define CLOUDSYNC_ENDPOINT_CHECK                "check"
+#define CLOUDSYNC_DEFAULT_ENDPOINT_PORT         "443"
+#define CLOUDSYNC_HEADER_SQLITECLOUD            "Accept: sqlc/plain"
 
-#define CLOUDSYNC_NETWORK_MINBUF_SIZE       512
-#define CLOUDSYNC_SESSION_TOKEN_MAXSIZE     4096
+#define CLOUDSYNC_NETWORK_MINBUF_SIZE           512
+#define CLOUDSYNC_SESSION_TOKEN_MAXSIZE         4096
 
-#define CLOUDSYNC_NETWORK_OK                1
-#define CLOUDSYNC_NETWORK_ERROR             2
-#define CLOUDSYNC_NETWORK_BUFFER            3
+#define CLOUDSYNC_NETWORK_OK                    1
+#define CLOUDSYNC_NETWORK_ERROR                 2
+#define CLOUDSYNC_NETWORK_BUFFER                3
 
-#define MAX_QUERY_VALUE_LEN                 256
+#define MAX_QUERY_VALUE_LEN                     256
 
 #ifndef SQLITE_CORE
 SQLITE_EXTENSION_INIT3
@@ -35,10 +35,10 @@ SQLITE_EXTENSION_INIT3
 // MARK: -
 
 typedef struct {
-    char    site_id[UUID_STR_MAXLEN];
-    char    *authentication; // apikey or token
-    char    *check_endpoint;
-    char    *upload_endpoint;
+    char        site_id[UUID_STR_MAXLEN];
+    char        *authentication; // apikey or token
+    char        *check_endpoint;
+    char        *upload_endpoint;
 } network_data;
 
 typedef struct {
@@ -56,11 +56,11 @@ typedef struct {
 
 typedef struct {
     const char *data;
-    size_t size;
-    size_t read_pos;
+    size_t      size;
+    size_t      read_pos;
 } network_read_data;
 
-// MARK: -
+// MARK: - Utils -
 
 static bool network_buffer_check (network_buffer *data, size_t needed) {
     // alloc/resize buffer
@@ -434,7 +434,7 @@ void network_result_to_sqlite_error (sqlite3_context *context, NETWORK_RESULT re
     if (res.buffer) cloudsync_memory_free(res.buffer);
 }
 
-// MARK: -
+// MARK: - Init / Cleanup -
 
 void cloudsync_network_init (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_init");
@@ -504,7 +504,7 @@ void cloudsync_network_cleanup (sqlite3_context *context, int argc, sqlite3_valu
     curl_global_cleanup();
 }
 
-// MARK: -
+// MARK: - Public -
 
 bool cloudsync_network_set_authentication_token (sqlite3_context *context, const char *value, bool is_token) {
     network_data *data = (network_data *)cloudsync_get_auxdata(context);
@@ -555,7 +555,7 @@ void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3
     // retrieve BLOB
     char sql[1024];
     snprintf(sql, sizeof(sql), "WITH max_db_version AS (SELECT MAX(db_version) AS max_db_version FROM cloudsync_changes) "
-                               "SELECT cloudsync_network_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq), max_db_version AS max_db_version, MAX(IIF(db_version = max_db_version, seq, NULL)) FROM cloudsync_changes, max_db_version WHERE site_id=cloudsync_siteid() AND (db_version>%d OR (db_version=%d AND seq>%d))", db_version, db_version, seq);
+                               "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq), max_db_version AS max_db_version, MAX(IIF(db_version = max_db_version, seq, NULL)) FROM cloudsync_changes, max_db_version WHERE site_id=cloudsync_siteid() AND (db_version>%d OR (db_version=%d AND seq>%d))", db_version, db_version, seq);
     int blob_size = 0;
     char *blob = NULL;
     sqlite3_int64 new_db_version = 0;
