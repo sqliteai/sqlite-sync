@@ -54,6 +54,12 @@ typedef struct {
     size_t      blen;       // blen if code is SQLITE_OK, rc in case of error
 } NETWORK_RESULT;
 
+typedef struct {
+    const char *data;
+    size_t size;
+    size_t read_pos;
+} network_read_data;
+
 // MARK: -
 
 static bool network_buffer_check (network_buffer *data, size_t needed) {
@@ -154,12 +160,6 @@ cleanup:
     
     return result;
 }
-
-typedef struct {
-    const char *data;
-    size_t size;
-    size_t read_pos;
-} network_read_data;
 
 static size_t network_read_callback(char *buffer, size_t size, size_t nitems, void *userdata) {
     network_read_data *rd = (network_read_data *)userdata;
@@ -292,7 +292,7 @@ char *network_authentication_token(const char *key, const char *value) {
     return buffer;
 }
 
-int extract_query_param(const char *query, const char *key, char *output, size_t output_size) {
+int network_extract_query_param(const char *query, const char *key, char *output, size_t output_size) {
     if (!query || !key || !output || output_size == 0) {
         return -1; // Invalid input
     }
@@ -380,10 +380,10 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     if (rc != CURLE_OK && rc != CURLUE_NO_QUERY) goto finalize;
     if (query != NULL) {
         char value[MAX_QUERY_VALUE_LEN];
-        if (!authentication && extract_query_param(query, "apikey", value, sizeof(value)) == 0) {
+        if (!authentication && network_extract_query_param(query, "apikey", value, sizeof(value)) == 0) {
             authentication = network_authentication_token("apikey", value);
         }
-        if (!authentication && extract_query_param(query, "token", value, sizeof(value)) == 0) {
+        if (!authentication && network_extract_query_param(query, "token", value, sizeof(value)) == 0) {
             authentication = network_authentication_token("token", value);
         }
     }
@@ -426,6 +426,12 @@ finalize:
     if (conn_string_https && conn_string_https != conn_string) cloudsync_memory_free(conn_string_https);
     
     return result;
+}
+
+void network_result_to_sqlite_error (sqlite3_context *context, NETWORK_RESULT res, const char *default_error_message) {
+    sqlite3_result_error(context, ((res.code == CLOUDSYNC_NETWORK_ERROR) && (res.buffer)) ? res.buffer : default_error_message, -1);
+    sqlite3_result_error_code(context, ((res.code == CLOUDSYNC_NETWORK_ERROR) && (res.blen)) ? (int)res.blen : SQLITE_ERROR);
+    if (res.buffer) cloudsync_memory_free(res.buffer);
 }
 
 // MARK: -
@@ -531,12 +537,6 @@ void cloudsync_network_set_apikey (sqlite3_context *context, int argc, sqlite3_v
 }
 
 // MARK: -
-
-void network_result_to_sqlite_error (sqlite3_context *context, NETWORK_RESULT res, const char *default_error_message) {
-    sqlite3_result_error(context, ((res.code == CLOUDSYNC_NETWORK_ERROR) && (res.buffer)) ? res.buffer : default_error_message, -1);
-    sqlite3_result_error_code(context, ((res.code == CLOUDSYNC_NETWORK_ERROR) && (res.blen)) ? (int)res.blen : SQLITE_ERROR);
-    if (res.buffer) cloudsync_memory_free(res.buffer);
-}
 
 void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_send_changes");

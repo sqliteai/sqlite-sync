@@ -3156,6 +3156,15 @@ APIEXPORT int sqlite3_cloudsync_init (sqlite3 *db, char **pzErrMsg, const sqlite
     rc = dbutils_register_function(db, "cloudsync_network_decode", cloudsync_network_decode, -1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
+    rc = dbutils_register_function(db, "cloudsync_begin_alter", cloudsync_begin_alter, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    
+    rc = dbutils_register_function(db, "cloudsync_commit_alter", cloudsync_commit_alter, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    
+    rc = dbutils_register_function(db, "cloudsync_uuid", cloudsync_uuid, 0, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    
     // PRIVATE functions
     rc = dbutils_register_function(db, "cloudsync_is_sync", cloudsync_is_sync, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
@@ -3179,15 +3188,6 @@ APIEXPORT int sqlite3_cloudsync_init (sqlite3 *db, char **pzErrMsg, const sqlite
     if (rc != SQLITE_OK) return rc;
     
     rc = dbutils_register_function(db, "cloudsync_seq", cloudsync_seq, 0, pzErrMsg, ctx, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
-    rc = dbutils_register_function(db, "cloudsync_begin_alter", cloudsync_begin_alter, 1, pzErrMsg, ctx, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
-    rc = dbutils_register_function(db, "cloudsync_commit_alter", cloudsync_commit_alter, 1, pzErrMsg, ctx, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
-    rc = dbutils_register_function(db, "cloudsync_uuid", cloudsync_uuid, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
     // NETWORK LAYER
