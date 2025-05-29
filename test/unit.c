@@ -289,7 +289,7 @@ bool unittest_validate_changed_row(sqlite3 *db, cloudsync_context *data, char *t
     // verify row
     bool ret = false;
     bool vm_persistent;
-    sqlite3_stmt *vm = cloudsync_col_value_stmt(db, data, tbl_name, &vm_persistent);
+    sqlite3_stmt *vm = cloudsync_colvalue_stmt(db, data, tbl_name, &vm_persistent);
     if (!vm) goto cleanup;
     
     // bind primary key values (the return code is the pk count)
@@ -2078,13 +2078,13 @@ bool do_merge_enc_dec_values (sqlite3 *srcdb, sqlite3 *destdb, bool only_local, 
     
     // select changes
     const char *sql;
-    if (only_local) sql = "SELECT cloudsync_network_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes WHERE site_id=cloudsync_siteid();";
-    else sql = "SELECT cloudsync_network_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes;";
+    if (only_local) sql = "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes WHERE site_id=cloudsync_siteid();";
+    else sql = "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes;";
     int rc = sqlite3_prepare_v2(srcdb, sql, -1, &select_stmt, NULL);
     if (rc != SQLITE_OK) goto finalize;
     
     // write changes
-    sql = "SELECT cloudsync_network_decode(?);";
+    sql = "SELECT cloudsync_payload_decode(?);";
     rc = sqlite3_prepare_v2(destdb, sql, -1, &insert_stmt, NULL);
     if (rc != SQLITE_OK) goto finalize;
     
@@ -2111,7 +2111,7 @@ bool do_merge_enc_dec_values (sqlite3 *srcdb, sqlite3 *destdb, bool only_local, 
             goto finalize;
         }
         
-        // perform the INSERT statement (SELECT cloudsync_network_decode, it returns a row)
+        // perform the INSERT statement (SELECT cloudsync_payload_decode, it returns a row)
         rc = sqlite3_step(insert_stmt);
         if (rc != SQLITE_ROW) {
             goto finalize;
@@ -2996,8 +2996,8 @@ bool do_test_network_encode_decode (int nclients, bool print_result, bool cleanu
     if (force_uncompressed) force_uncompressed_blob = true;
     
     // merge all changes (loop extracted from do_merge and do_merge_values)
-    const char *src_sql = "SELECT cloudsync_network_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes WHERE site_id=cloudsync_siteid();";
-    const char *dest_sql = "SELECT cloudsync_network_decode(?);";
+    const char *src_sql = "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes WHERE site_id=cloudsync_siteid();";
+    const char *dest_sql = "SELECT cloudsync_payload_decode(?);";
     
     for (int i=0; i<nclients; ++i) {
         int target = i;
