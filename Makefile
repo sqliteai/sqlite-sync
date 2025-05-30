@@ -127,14 +127,6 @@ ifeq ($(PLATFORM),windows)
 	@echo "LIBRARY js.dll" > $@
 	@echo "EXPORTS" >> $@
 	@echo "    sqlite3_cloudsync_init" >> $@
-	@echo "    cloudsync_config_exists" >> $@
-	@echo "    cloudsync_context_init" >> $@
-	@echo "    cloudsync_merge_insert" >> $@
-	@echo "    cloudsync_sync_key" >> $@
-	@echo "    cloudsync_sync_table_key" >> $@
-	@echo "    cloudsync_get_auxdata" >> $@
-	@echo "    cloudsync_set_auxdata" >> $@
-	@echo "    cloudsync_payload_apply" >> $@
 endif
 
 # Make sure the build and dist directories exist
