@@ -22,6 +22,7 @@
 #include "pk.h"
 #include "dbutils.h"
 #include "cloudsync.h"
+#include "cloudsync_private.h"
 
 // declared only if macro CLOUDSYNC_UNITTEST is defined 
 extern char *OUT_OF_MEMORY_BUFFER;
@@ -337,39 +338,52 @@ bool unittest_payload_apply_rls_callback(void **xdata, cloudsync_pk_decode_bind_
         *xdata = s;
     }
     
+    // extract context info
+    int64_t colname_len = 0;
+    char *colname = cloudsync_pk_context_colname(d, &colname_len);
+    
+    int64_t tbl_len = 0;
+    char *tbl = cloudsync_pk_context_tbl(d, &tbl_len);
+    
+    int64_t pk_len = 0;
+    void *pk = cloudsync_pk_context_pk(d, &pk_len);
+    
+    int64_t cl = cloudsync_pk_context_cl(d);
+    int64_t db_version = cloudsync_pk_context_dbversion(d);
+    
     switch (step) {
         case CLOUDSYNC_PAYLOAD_APPLY_WILL_APPLY: {
             // if the tbl name or the prikey has changed, then verify if the row is valid
             // must use strncmp because strings in xdata are not zero-terminated
-            bool tbl_changed = (s->last_tbl && (strlen(s->last_tbl) != (size_t)d->tbl_len || strncmp(s->last_tbl, d->tbl, (size_t)d->tbl_len) != 0));
-            bool pk_changed = (s->last_pk && d->pk && cloudsync_blob_compare(s->last_pk,  s->last_pk_len, d->pk, d->pk_len) != 0);
+            bool tbl_changed = (s->last_tbl && (strlen(s->last_tbl) != (size_t)tbl_len || strncmp(s->last_tbl, tbl, (size_t)tbl_len) != 0));
+            bool pk_changed = (s->last_pk && pk && cloudsync_blob_compare(s->last_pk,  s->last_pk_len, pk, pk_len) != 0);
             if (s->is_approved
                 && !s->last_is_delete
                 && (tbl_changed || pk_changed)) {
                 s->is_approved = unittest_validate_changed_row(db, data, s->last_tbl, s->last_pk, s->last_pk_len);
             }
             
-            s->last_is_delete = ((size_t)d->col_name_len == strlen(CLOUDSYNC_TOMBSTONE_VALUE) &&
-                                 strncmp(d->col_name, CLOUDSYNC_TOMBSTONE_VALUE, (size_t)d->col_name_len) == 0
-                                 ) && d->cl % 2 == 0;
+            s->last_is_delete = ((size_t)colname_len == strlen(CLOUDSYNC_TOMBSTONE_VALUE) &&
+                                 strncmp(colname, CLOUDSYNC_TOMBSTONE_VALUE, (size_t)colname_len) == 0
+                                 ) && cl % 2 == 0;
             
             // update the last_tbl value, if needed
             if (!s->last_tbl ||
-                !d->tbl ||
-                (strlen(s->last_tbl) != (size_t)d->tbl_len) ||
-                strncmp(s->last_tbl, d->tbl, (size_t)d->tbl_len) != 0) {
+                !tbl ||
+                (strlen(s->last_tbl) != (size_t)tbl_len) ||
+                strncmp(s->last_tbl, tbl, (size_t)tbl_len) != 0) {
                 if (s->last_tbl) cloudsync_memory_free(s->last_tbl);
-                if (d->tbl && d->tbl_len > 0) s->last_tbl = cloudsync_string_ndup(d->tbl, d->tbl_len, false);
+                if (tbl && tbl_len > 0) s->last_tbl = cloudsync_string_ndup(tbl, tbl_len, false);
                 else s->last_tbl = NULL;
             }
             
             // update the last_prikey and len values, if needed
-            if (!s->last_pk || !d->pk || cloudsync_blob_compare(s->last_pk, s->last_pk_len, d->pk, d->pk_len) != 0) {
+            if (!s->last_pk || !pk || cloudsync_blob_compare(s->last_pk, s->last_pk_len, pk, pk_len) != 0) {
                 if (s->last_pk) cloudsync_memory_free(s->last_pk);
-                if (d->pk && d->pk_len > 0) {
-                    s->last_pk = cloudsync_memory_alloc(d->pk_len);
-                    memcpy(s->last_pk, d->pk, d->pk_len);
-                    s->last_pk_len = d->pk_len;
+                if (pk && pk_len > 0) {
+                    s->last_pk = cloudsync_memory_alloc(pk_len);
+                    memcpy(s->last_pk, pk, pk_len);
+                    s->last_pk_len = pk_len;
                 } else {
                     s->last_pk = NULL;
                     s->last_pk_len = 0;
@@ -378,12 +392,12 @@ bool unittest_payload_apply_rls_callback(void **xdata, cloudsync_pk_decode_bind_
             
             // commit the previous transaction, if any
             // begin new transacion, if needed
-            if (s->last_db_version != d->db_version) {
+            if (s->last_db_version != db_version) {
                 rc = unittest_payload_apply_reset_transaction(db, s, true);
                 if (rc != SQLITE_OK) printf("unittest_payload_apply error in reset_transaction: (%d) %s\n", rc, sqlite3_errmsg(db));
                 
                 // reset local variables
-                s->last_db_version = d->db_version;
+                s->last_db_version = db_version;
                 s->is_approved = true;
             }
             break;
