@@ -845,8 +845,9 @@ int dbutils_table_settings_set_key_value (sqlite3 *db, sqlite3_context *context,
         rc = dbutils_write(db, context, sql, values, types, lens, 3);
     }
     
-    cloudsync_context *data = (context) ? (cloudsync_context *)sqlite3_user_data(context) : NULL;
-    if (rc == SQLITE_OK && data) cloudsync_sync_table_key(data, table, column, key, value);
+    // unused in this version
+    // cloudsync_context *data = (context) ? (cloudsync_context *)sqlite3_user_data(context) : NULL;
+    // if (rc == SQLITE_OK && data) cloudsync_sync_table_key(data, table, column, key, value);
     return rc;
 }
 

@@ -9,6 +9,7 @@
 #define __CLOUDSYNC_VTAB__
 
 #include "cloudsync.h"
+#include "cloudsync_private.h"
 
 int cloudsync_vtab_register_changes (sqlite3 *db, cloudsync_context *xdata);
 cloudsync_context *cloudsync_vtab_get_context (sqlite3_vtab *vtab);

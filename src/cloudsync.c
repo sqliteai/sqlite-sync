@@ -17,6 +17,7 @@
 #include <math.h>
 
 #include "cloudsync.h"
+#include "cloudsync_private.h"
 #include "lz4.h"
 #include "pk.h"
 #include "vtab.h"
@@ -144,6 +145,22 @@ typedef struct {
     sqlite3_stmt    *real_merge_sentinel_stmt;
     
 } cloudsync_table_context;
+
+struct cloudsync_pk_decode_bind_context {
+    sqlite3_stmt    *vm;
+    char            *tbl;
+    int64_t         tbl_len;
+    const void      *pk;
+    int64_t         pk_len;
+    char            *col_name;
+    int64_t         col_name_len;
+    int64_t         col_version;
+    int64_t         db_version;
+    const void      *site_id;
+    int64_t         site_id_len;
+    int64_t         cl;
+    int64_t         seq;
+};
 
 struct cloudsync_context {
     char            *libversion;
@@ -421,6 +438,31 @@ void *cloudsync_get_auxdata (sqlite3_context *context) {
 void cloudsync_set_auxdata (sqlite3_context *context, void *xdata) {
     cloudsync_context *data = (context) ? (cloudsync_context *)sqlite3_user_data(context) : NULL;
     if (data) data->aux_data = xdata;
+}
+
+// MARK: - PK Context -
+
+char *cloudsync_pk_context_tbl (cloudsync_pk_decode_bind_context *ctx, int64_t *tbl_len) {
+    *tbl_len = ctx->tbl_len;
+    return ctx->tbl;
+}
+
+void *cloudsync_pk_context_pk (cloudsync_pk_decode_bind_context *ctx, int64_t *pk_len) {
+    *pk_len = ctx->pk_len;
+    return (void *)ctx->pk;
+}
+
+char *cloudsync_pk_context_colname (cloudsync_pk_decode_bind_context *ctx, int64_t *colname_len) {
+    *colname_len = ctx->col_name_len;
+    return ctx->col_name;
+}
+
+int64_t cloudsync_pk_context_cl (cloudsync_pk_decode_bind_context *ctx) {
+    return ctx->cl;
+}
+
+int64_t cloudsync_pk_context_dbversion (cloudsync_pk_decode_bind_context *ctx) {
+    return ctx->db_version;
 }
 
 // MARK: - Table Utils -
@@ -1496,11 +1538,13 @@ void cloudsync_sync_key(cloudsync_context *data, const char *key, const char *va
     }
 }
 
+#if 0
 void cloudsync_sync_table_key(cloudsync_context *data, const char *table, const char *column, const char *key, const char *value) {
     DEBUG_SETTINGS("cloudsync_sync_table_key table: %s column: %s key: %s value: %s", table, column, key, value);
-    // TODO: implement me
+    // Unused in this version
     return;
 }
+#endif
 
 int cloudsync_commit_hook (void *ctx) {
     cloudsync_context *data = (cloudsync_context *)ctx;
@@ -2834,8 +2878,8 @@ int cloudsync_init_internal (sqlite3_context *context, const char *table_name, c
     // It is safe to call the following function multiple times, if there is nothing to update nothing will be changed.
     // After an alter table, in contrast, all the cloudsync triggers, tables and stmts must be recreated.
     
-    // sync algo with table
-    cloudsync_sync_table_key(data, table_name, "*", CLOUDSYNC_KEY_ALGO, crdt_algo_name(algo_new));
+    // sync algo with table (unused in this version)
+    // cloudsync_sync_table_key(data, table_name, "*", CLOUDSYNC_KEY_ALGO, crdt_algo_name(algo_new));
     
     // check triggers
     dbutils_check_triggers(db, table_name, algo_new);
