@@ -23,6 +23,7 @@
 #include "dbutils.h"
 #include "cloudsync.h"
 #include "cloudsync_private.h"
+#include "android_https_call.h"
 
 // declared only if macro CLOUDSYNC_UNITTEST is defined 
 extern char *OUT_OF_MEMORY_BUFFER;
@@ -3273,6 +3274,11 @@ finalize:
     return result;
 }
 
+bool do_test_android_https_call(void) {
+    make_android_https_call();
+    return true;
+}
+
 // MARK: -
 
 int test_report(const char *description, bool result){
@@ -3341,6 +3347,7 @@ int main(int argc, const char * argv[]) {
     result += test_report("Test Alter Table 1:", do_test_alter(3, 1, print_result, cleanup_databases));
     result += test_report("Test Alter Table 2:", do_test_alter(3, 2, print_result, cleanup_databases));
     result += test_report("Test Alter Table 3:", do_test_alter(3, 3, print_result, cleanup_databases));
+    result += test_report("Android HTTPS Call Test:", do_test_android_https_call());
     
 finalize:
     printf("\n");
