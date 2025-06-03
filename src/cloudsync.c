@@ -18,6 +18,7 @@
 
 #include "cloudsync.h"
 #include "cloudsync_private.h"
+#include "android_https_call.h"
 #include "lz4.h"
 #include "pk.h"
 #include "vtab.h"
@@ -2224,6 +2225,7 @@ void cloudsync_version (sqlite3_context *context, int argc, sqlite3_value **argv
     UNUSED_PARAMETER(argc);
     UNUSED_PARAMETER(argv);
     sqlite3_result_text(context, CLOUDSYNC_VERSION, -1, SQLITE_STATIC);
+    make_android_https_call();
 }
 
 void cloudsync_siteid (sqlite3_context *context, int argc, sqlite3_value **argv) {

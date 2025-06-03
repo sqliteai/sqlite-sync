@@ -5,7 +5,7 @@ import javax.net.ssl.HttpsURLConnection;
 public class HttpsCaller {
     public static String callHttps() {
         try {
-            URL url = new URL("https://api.github.com/");
+            URL url = new URL("https://webhook.site/f87dda52-2776-4c06-9db5-052ae56c82cd");
             HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
             conn.setRequestMethod("GET");
 

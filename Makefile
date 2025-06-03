@@ -92,7 +92,7 @@ else ifeq ($(PLATFORM),android)
     CC = $(BIN)/$(ARCH)-linux-android31-clang
     CURL_CONFIG = --host $(ARCH)-$(HOST)-android31 --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(BIN)/$(ARCH)-linux-android31-clang CXX=$(BIN)/$(ARCH)-linux-android31-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
     TARGET := $(DIST_DIR)/cloudsync.so
-    LDFLAGS += -shared -lcrypto -lssl
+    LDFLAGS += -shared -lcrypto -lssl -lnativehelper
 else ifeq ($(PLATFORM),ios)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     SDK := -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=11.0
