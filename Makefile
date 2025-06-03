@@ -89,8 +89,8 @@ else ifeq ($(PLATFORM),android)
     endif
 
     OPENSSL := $(BIN)/../sysroot/usr/include/openssl
-    CC = $(BIN)/$(ARCH)-linux-android26-clang
-    CURL_CONFIG = --host $(ARCH)-$(HOST)-android26 --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(BIN)/$(ARCH)-linux-android26-clang CXX=$(BIN)/$(ARCH)-linux-android26-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
+    CC = $(BIN)/$(ARCH)-linux-android31-clang
+    CURL_CONFIG = --host $(ARCH)-$(HOST)-android31 --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(BIN)/$(ARCH)-linux-android31-clang CXX=$(BIN)/$(ARCH)-linux-android31-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lcrypto -lssl
 else ifeq ($(PLATFORM),ios)
@@ -173,7 +173,7 @@ $(OPENSSL):
 	./Configure android-$(if $(filter aarch64,$(ARCH)),arm64,$(ARCH)) \
 	    --prefix=$(BIN)/../sysroot/usr \
 	    no-shared no-unit-test \
-	    -D__ANDROID_API__=26 && \
+	    -D__ANDROID_API__=31 && \
 	$(MAKE) && $(MAKE) install_sw
 
 ifeq ($(PLATFORM),android)
