@@ -2862,6 +2862,19 @@ bool do_test_double_init(int nclients, bool cleanup_databases) {
     if (do_create_tables(table_mask, db[0]) == false) goto finalize;
     if (do_augment_tables(table_mask, db[0], table_algo_crdt_cls) == false) goto finalize;
     
+    // double load
+    sqlite3_cloudsync_init(db[0], NULL, NULL);
+    sqlite3_cloudsync_init(db[0], NULL, NULL);
+    
+    // double cloudsync-init
+    if (do_augment_tables(table_mask, db[0], table_algo_crdt_cls) == false) goto finalize;
+    if (do_augment_tables(table_mask, db[0], table_algo_crdt_cls) == false) goto finalize;
+
+    // double terminate
+    if (sqlite3_exec(db[0], "SELECT cloudsync_terminate();", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+    if (do_augment_tables(table_mask, db[0], table_algo_crdt_cls) == false) goto finalize;
+    if (sqlite3_exec(db[0], "SELECT cloudsync_terminate();", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+
     db[1] = do_create_database_file(0, timestamp, test_counter);
 
     result = true;
