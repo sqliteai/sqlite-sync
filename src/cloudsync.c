@@ -1489,22 +1489,14 @@ void *cloudsync_context_create (void) {
     return data;
 }
 
-void cloudsync_context_free (cloudsync_context *data, sqlite3 *db) {
+void cloudsync_context_free (void *ptr) {
     DEBUG_SETTINGS("cloudsync_context_free %p", data);
-    if (!data) return;
+    if (!ptr) return;
         
-    for (int i=0; i<data->tables_count; ++i) {
-        if (data->tables[i]) table_free(data->tables[i]);
-        data->tables[i] = NULL;
-    }
-    
-    if (data->schema_version_stmt) sqlite3_finalize(data->schema_version_stmt);
-    if (data->data_version_stmt) sqlite3_finalize(data->data_version_stmt);
-    if (data->db_version_stmt) sqlite3_finalize(data->db_version_stmt);
-    if (data->getset_siteid_stmt) sqlite3_finalize(data->getset_siteid_stmt);
-    
+    cloudsync_context *data = (cloudsync_context*)ptr;
     cloudsync_memory_free(data->tables);
     cloudsync_memory_free(data);
+    cloudsync_memory_finalize();
 }
 
 const char *cloudsync_context_init (sqlite3 *db, cloudsync_context *data, sqlite3_context *context) {
@@ -2804,10 +2796,26 @@ void cloudsync_is_enabled (sqlite3_context *context, int argc, sqlite3_value **a
 void cloudsync_terminate (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_terminate");
     
-    sqlite3 *db = sqlite3_context_db_handle(context);
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    cloudsync_context_free(data, db);
-    cloudsync_memory_finalize();
+    
+    for (int i=0; i<data->tables_count; ++i) {
+        if (data->tables[i]) table_free(data->tables[i]);
+        data->tables[i] = NULL;
+    }
+    
+    if (data->schema_version_stmt) sqlite3_finalize(data->schema_version_stmt);
+    if (data->data_version_stmt) sqlite3_finalize(data->data_version_stmt);
+    if (data->db_version_stmt) sqlite3_finalize(data->db_version_stmt);
+    if (data->getset_siteid_stmt) sqlite3_finalize(data->getset_siteid_stmt);
+    
+    data->schema_version_stmt = NULL;
+    data->data_version_stmt = NULL;
+    data->db_version_stmt = NULL;
+    data->getset_siteid_stmt = NULL;
+    
+    // reset the site_id so the cloudsync_context_init will be executed again
+    // if any other cloudsync function is called after terminate
+    data->site_id[0] = 0;
 }
 
 // MARK: -
@@ -3151,7 +3159,7 @@ APIEXPORT int sqlite3_cloudsync_init (sqlite3 *db, char **pzErrMsg, const sqlite
     // register functions
     
     // PUBLIC functions
-    rc = dbutils_register_function(db, "cloudsync_version", cloudsync_version, 0, pzErrMsg, ctx, NULL);
+    rc = dbutils_register_function(db, "cloudsync_version", cloudsync_version, 0, pzErrMsg, ctx, cloudsync_context_free);
     if (rc != SQLITE_OK) return rc;
     
     rc = dbutils_register_function(db, "cloudsync_init", cloudsync_init, 1, pzErrMsg, ctx, NULL);
