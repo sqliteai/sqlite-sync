@@ -2,49 +2,56 @@
 #include <jni.h>
 #include "android_https_call.h"
 
-void make_android_https_call(void) {
+int make_android_https_call(void) {
     JavaVM *vms[1];
     jsize num_vms;
     JNIEnv *env = NULL;
+    jint attached_here = 0;
 
-    // Get the Java VM (assumes one has been created)
-    if (JNI_GetCreatedJavaVMs(vms, 1, &num_vms) != JNI_OK || num_vms == 0) {
+    JNI_GetCreatedJavaVMs(vms, 1, &num_vms);
+
+    if (num_vms == 0) {
         printf("No Java VM available\n");
-        return;
+        return 0;
     }
 
     JavaVM *jvm = vms[0];
 
-    // Attach the current thread to the JVM
-    if ((*jvm)->AttachCurrentThread(jvm, (void**)&env, NULL) != JNI_OK) {
-        printf("Failed to attach current thread to JVM\n");
-        return;
+    // Try to get the environment
+    if ((*jvm)->GetEnv(jvm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) {
+        // Not attached, attach it now
+        if ((*jvm)->AttachCurrentThread(jvm, (void**)&env, NULL) != JNI_OK) {
+            printf("Failed to attach current thread to JVM\n");
+            return 0;
+        }
+        attached_here = 1;
     }
-
-    // Locate the HttpsCaller class
-    jclass cls = (*env)->FindClass(env, "HttpsCaller");
+    // // Locate the HttpsCaller class
+    jclass cls = (*env)->FindClass(env, "com/example/testcloudsync/HttpsCaller");
     if (cls == NULL) {
         printf("Could not find HttpsCaller class\n");
-        (*jvm)->DetachCurrentThread(jvm);
-        return;
+        if (attached_here) (*jvm)->DetachCurrentThread(jvm);
+        return 0;
     }
 
-    // Find the static method ID for `callHttps`
     jmethodID mid = (*env)->GetStaticMethodID(env, cls, "callHttps", "()Ljava/lang/String;");
     if (mid == NULL) {
         printf("Could not find method callHttps\n");
-        (*jvm)->DetachCurrentThread(jvm);
-        return;
+        if (attached_here) (*jvm)->DetachCurrentThread(jvm);
+        return 0;
     }
 
-    // Call the static method
     jstring result = (jstring)(*env)->CallStaticObjectMethod(env, cls, mid);
+    if (result != NULL) {
+        const char *str = (*env)->GetStringUTFChars(env, result, NULL);
+        printf("HTTPS result: %s\n", str);
+        (*env)->ReleaseStringUTFChars(env, result, str);
+    }
 
-    // Convert Java string to C string
-    const char *str = (*env)->GetStringUTFChars(env, result, NULL);
-    printf("HTTPS result: %s\n", str);
-    (*env)->ReleaseStringUTFChars(env, result, str);
+    // Detach thread ONLY if we attached it
+    if (attached_here) {
+        (*jvm)->DetachCurrentThread(jvm);
+    }
 
-    // Detach thread from JVM
-    (*jvm)->DetachCurrentThread(jvm);
+    return (int)num_vms;
 }
