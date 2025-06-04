@@ -954,10 +954,10 @@ bool table_add_to_context (sqlite3 *db, cloudsync_context *data, table_algo algo
     for (int i=0; i<data->tables_alloc; ++i) {
         if (data->tables[i] == NULL) {
             data->tables[i] = table;
+            if (i > data->tables_count - 1) ++data->tables_count;
             break;
         }
     }
-    ++data->tables_count;
     
     return true;
     
