@@ -2729,9 +2729,13 @@ void cloudsync_cleanup (sqlite3_context *context, int argc, sqlite3_value **argv
     DEBUG_FUNCTION("cloudsync_cleanup");
     
     const char *table = (const char *)sqlite3_value_text(argv[0]);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    sqlite3 *db = sqlite3_context_db_handle(context);
     
     if (dbutils_is_star_table(table)) cloudsync_cleanup_all(context);
     else cloudsync_cleanup_internal(context, table);
+    
+    if (dbutils_table_exists(db, CLOUDSYNC_TABLE_SETTINGS_NAME) == true) dbutils_update_schema_hash(db, &data->schema_hash);
 }
 
 void cloudsync_enable_disable (sqlite3_context *context, const char *table_name, bool value) {
@@ -2967,7 +2971,6 @@ void cloudsync_init (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_init");
     
     const char *table = (const char *)sqlite3_value_text(argv[0]);
-    
     
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     sqlite3 *db = sqlite3_context_db_handle(context);

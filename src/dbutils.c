@@ -988,11 +988,10 @@ int dbutils_settings_init (sqlite3 *db, void *cloudsync_data, sqlite3_context *c
     if (schema_versions_exists == false) {
         DEBUG_SETTINGS("cloudsync_schema_versions does not exist (creating a new one)");
         
-        char sql[1024];
         int rc = SQLITE_OK;
         
         // create table
-        snprintf(sql, sizeof(sql), "CREATE TABLE IF NOT EXISTS %s (hash INTEGER PRIMARY KEY NOT NULL, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP); CREATE INDEX idx_timestamp ON %s (timestamp);", CLOUDSYNC_SCHEMA_VERSIONS_NAME, CLOUDSYNC_SCHEMA_VERSIONS_NAME);
+        char *sql = "CREATE TABLE IF NOT EXISTS cloudsync_schema_versions (hash INTEGER PRIMARY KEY, seq INTEGER NOT NULL)";
         rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
         if (rc != SQLITE_OK) {if (context) sqlite3_result_error(context, sqlite3_errmsg(db), -1); return rc;}
     }
@@ -1013,7 +1012,7 @@ int dbutils_settings_init (sqlite3 *db, void *cloudsync_data, sqlite3_context *c
 
 int dbutils_update_schema_hash(sqlite3 *db, uint64_t *hash) {
     char *schemasql = "SELECT group_concat(LOWER(sql)) FROM sqlite_master "
-            "WHERE type = 'table' AND name IN (SELECT tbl_name FROM cloudsync_table_settings) "
+            "WHERE type = 'table' AND name IN (SELECT tbl_name FROM cloudsync_table_settings ORDER BY tbl_name) "
             "ORDER BY name;";
     char *schema = dbutils_text_select(db, schemasql);
     if (!schema) return SQLITE_ERROR;
@@ -1022,17 +1021,19 @@ int dbutils_update_schema_hash(sqlite3 *db, uint64_t *hash) {
     if (hash && *hash == h) return SQLITE_CONSTRAINT;
     
     char sql[1024];
-    snprintf(sql, sizeof(sql), "INSERT INTO %s (hash) VALUES (%lld);", CLOUDSYNC_SCHEMA_VERSIONS_NAME, (sqlite3_int64)h);
+    snprintf(sql, sizeof(sql), "INSERT INTO cloudsync_schema_versions (hash, seq) "
+                               "VALUES (%lld, COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
+                               "ON CONFLICT(hash) DO UPDATE SET "
+                               "  seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);", (sqlite3_int64)h);
     int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-    
-    if (hash) *hash = h;
+    if (rc == SQLITE_OK && hash) *hash = h;
     return rc;
 }
 
 sqlite3_uint64 dbutils_schema_hash (sqlite3 *db) {
     DEBUG_DBFUNCTION("dbutils_schema_version");
     
-    return (sqlite3_uint64)dbutils_int_select(db, "SELECT hash FROM cloudsync_schema_versions ORDER BY timestamp DESC limit 1;");
+    return (sqlite3_uint64)dbutils_int_select(db, "SELECT hash FROM cloudsync_schema_versions ORDER BY seq DESC limit 1;");
 }
 
 bool dbutils_check_schema_hash (sqlite3 *db, sqlite3_uint64 hash) {
@@ -1052,6 +1053,6 @@ bool dbutils_check_schema_hash (sqlite3 *db, sqlite3_uint64 hash) {
 
 
 int dbutils_settings_cleanup (sqlite3 *db) {
-    const char *sql = "DROP TABLE IF EXISTS cloudsync_settings; DROP TABLE IF EXISTS cloudsync_site_id; DROP TABLE IF EXISTS cloudsync_table_settings";
+    const char *sql = "DROP TABLE IF EXISTS cloudsync_settings; DROP TABLE IF EXISTS cloudsync_site_id; DROP TABLE IF EXISTS cloudsync_table_settings; DROP TABLE IF EXISTS cloudsync_schema_versions; ";
     return sqlite3_exec(db, sql, NULL, NULL, NULL);
 }
