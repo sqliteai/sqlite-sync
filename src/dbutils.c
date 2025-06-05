@@ -364,7 +364,7 @@ bool dbutils_trigger_exists (sqlite3 *db, const char *name) {
     return dbutils_system_exists(db, name, "trigger");
 }
 
-bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const char *name) {
+bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const char *name, bool skip_int_pk_check) {
     DEBUG_DBFUNCTION("dbutils_table_sanity_check %s", name);
     
     char buffer[2048];
@@ -405,7 +405,21 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
         return false;
     }
     #endif
-    
+        
+    if (!skip_int_pk_check) {
+        if (count == 1) {
+            // the affinity of a column is determined by the declared type of the column,
+            // according to the following rules in the order shown:
+            // 1. If the declared type contains the string "INT" then it is assigned INTEGER affinity.
+            sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%w') WHERE pk=1 AND \"type\" LIKE \"%%INT%%\";", name);
+            sqlite3_int64 count2 = dbutils_int_select(db, sql);
+            if (count == count2) {
+                dbutils_context_result_error(context, "Table %s uses an single-column INTEGER primary key. For CRDT replication, primary keys must be globally unique. Consider using a TEXT primary key with UUIDs or ULID to avoid conflicts across nodes. If you understand the risk and still want to use this INTEGER primary key, set the third argument of the cloudsync_init function to 1 to skip this check.", name);
+                return false;
+            }
+        }
+    }
+        
     // if user declared explicit primary key(s) then make sure they are all declared as NOT NULL
     if (count > 0) {
         sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%w') WHERE pk>0 AND \"notnull\"=1;", name);
@@ -798,7 +812,9 @@ finalize_get_value:
     #if CLOUDSYNC_UNITTEST
     if ((rc == SQLITE_NOMEM) && (size == SQLITE_MAX_ALLOCATION_SIZE + 1)) rc = SQLITE_OK;
     #endif
-    if (rc != SQLITE_OK) DEBUG_ALWAYS("cloudsync_table_settings error %s", sqlite3_errmsg(db));
+    if (rc != SQLITE_OK) {
+        DEBUG_ALWAYS("cloudsync_table_settings error %s", sqlite3_errmsg(db));
+    }
     if (vm) sqlite3_finalize(vm);
     
     return buffer;

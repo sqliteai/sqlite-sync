@@ -1690,7 +1690,10 @@ bool do_test_dbutils (void) {
     "CREATE TABLE IF NOT EXISTS rowid_table (name TEXT, age INTEGER);"
     "CREATE TABLE IF NOT EXISTS nonnull_prikey_table (name TEXT PRIMARY KEY, age INTEGER);"
     "CREATE TABLE IF NOT EXISTS nonnull_nodefault_table (name TEXT PRIMARY KEY NOT NULL, stamp TEXT NOT NULL);"
-    "CREATE TABLE IF NOT EXISTS nonnull_default_table (name TEXT PRIMARY KEY NOT NULL, stamp TEXT NOT NULL DEFAULT CURRENT_TIME);";
+    "CREATE TABLE IF NOT EXISTS nonnull_default_table (name TEXT PRIMARY KEY NOT NULL, stamp TEXT NOT NULL DEFAULT CURRENT_TIME);"
+    "CREATE TABLE IF NOT EXISTS integer_pk (id INTEGER PRIMARY KEY NOT NULL, value);"
+    "CREATE TABLE IF NOT EXISTS int_pk (id INT PRIMARY KEY NOT NULL, value);";
+;
     
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
@@ -1737,19 +1740,27 @@ bool do_test_dbutils (void) {
     if (b == true) goto finalize;
     
     // test dbutils_table_sanity_check
-    b = dbutils_table_sanity_check(db, NULL, NULL);
+    b = dbutils_table_sanity_check(db, NULL, NULL, false);
     if (b == true) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, "rowid_table");
+    b = dbutils_table_sanity_check(db, NULL, "rowid_table", false);
     if (b == true) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, "foo2");
+    b = dbutils_table_sanity_check(db, NULL, "foo2", false);
     if (b == true) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, build_long_tablename());
+    b = dbutils_table_sanity_check(db, NULL, build_long_tablename(), false);
     if (b == true) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, "nonnull_prikey_table");
+    b = dbutils_table_sanity_check(db, NULL, "nonnull_prikey_table", false);
     if (b == true) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, "nonnull_nodefault_table");
+    b = dbutils_table_sanity_check(db, NULL, "nonnull_nodefault_table", false);
     if (b == true) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, "nonnull_default_table");
+    b = dbutils_table_sanity_check(db, NULL, "nonnull_default_table", false);
+    if (b == false) goto finalize;
+    b = dbutils_table_sanity_check(db, NULL, "integer_pk", false);
+    if (b == true) goto finalize;
+    b = dbutils_table_sanity_check(db, NULL, "integer_pk", true);
+    if (b == false) goto finalize;
+    b = dbutils_table_sanity_check(db, NULL, "int_pk", false);
+    if (b == true) goto finalize;
+    b = dbutils_table_sanity_check(db, NULL, "int_pk", true);
     if (b == false) goto finalize;
     
     // create huge dummy_table table
@@ -1757,7 +1768,7 @@ bool do_test_dbutils (void) {
     if (rc != SQLITE_OK) goto finalize;
     
     // sanity check the huge dummy_table table
-    b = dbutils_table_sanity_check(db, NULL, "dummy_table");
+    b = dbutils_table_sanity_check(db, NULL, "dummy_table", false);
     if (b == true) goto finalize;
     
     // de-augment bar with cloudsync
@@ -2789,7 +2800,7 @@ bool do_test_prikey (int nclients, bool print_result, bool cleanup_databases) {
         rc = sqlite3_exec(db[i], sql, NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto finalize;
         
-        sql = "SELECT cloudsync_init('foo');";
+        sql = "SELECT cloudsync_init('foo', 'cls', 1);";
         rc = sqlite3_exec(db[i], sql, NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto finalize;
     }
@@ -2920,7 +2931,7 @@ bool do_test_gos (int nclients, bool print_result, bool cleanup_databases) {
         rc = sqlite3_exec(db[i], sql, NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto finalize;
         
-        sql = "SELECT cloudsync_init('log', 'gos');";
+        sql = "SELECT cloudsync_init('log', 'gos', 0);";
         rc = sqlite3_exec(db[i], sql, NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto finalize;
     }

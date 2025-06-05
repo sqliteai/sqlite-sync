@@ -104,6 +104,11 @@ typedef struct {
     int             index;
 } cloudsync_pk_decode_context;
 
+typedef struct {
+    sqlite3_context *context;
+    bool             skip_int_pk_check;
+} cloudsync_init_all_context;
+
 #define SYNCBIT_SET(_data)                  _data->insync = 1
 #define SYNCBIT_RESET(_data)                _data->insync = 0
 #define BUMP_SEQ(_data)                     ((_data)->seq += 1, (_data)->seq - 1)
@@ -1502,8 +1507,11 @@ void cloudsync_context_free (void *ptr) {
 const char *cloudsync_context_init (sqlite3 *db, cloudsync_context *data, sqlite3_context *context) {
     if (!data && context) data = (cloudsync_context *)sqlite3_user_data(context);
 
-    // perform init just the first time, if the site_id field is not set
-    if (data->site_id[0] == 0) {
+    // perform init just the first time, if the site_id field is not set.
+    // The data->site_id value could exists while settings tables don't exists if the
+    // cloudsync_context_init was previously called in init transaction that was rolled back
+    // because of an error during the init process.
+    if (data->site_id[0] == 0 || !dbutils_table_exists(db, CLOUDSYNC_SITEID_NAME)) {
         if (dbutils_settings_init(db, data, context) != SQLITE_OK) return NULL;
         if (stmts_add_tocontext(db, data) != SQLITE_OK) return NULL;
         if (cloudsync_load_siteid(db, data) != SQLITE_OK) return NULL;
@@ -2836,7 +2844,7 @@ int cloudsync_load_siteid (sqlite3 *db, cloudsync_context *data) {
     return SQLITE_OK;
 }
 
-int cloudsync_init_internal (sqlite3_context *context, const char *table_name, const char *algo_name) {
+int cloudsync_init_internal (sqlite3_context *context, const char *table_name, const char *algo_name, bool skip_int_pk_check) {
     DEBUG_FUNCTION("cloudsync_init_internal");
     
     // get database reference
@@ -2846,7 +2854,7 @@ int cloudsync_init_internal (sqlite3_context *context, const char *table_name, c
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     
     // sanity check table and its primary key(s)
-    if (dbutils_table_sanity_check(db, context, table_name) == false) {
+    if (dbutils_table_sanity_check(db, context, table_name, skip_int_pk_check) == false) {
         return SQLITE_MISUSE;
     }
     
@@ -2920,13 +2928,15 @@ int cloudsync_init_internal (sqlite3_context *context, const char *table_name, c
 }
 
 int cloudsync_init_all_callback (void *xdata, int ncols, char **values, char **names) {
-    sqlite3_context *context = (sqlite3_context *)xdata;
+    cloudsync_init_all_context *init_ctx = (cloudsync_init_all_context *)xdata;
+    sqlite3_context *context = init_ctx->context;
+    bool skip_int_pk_check = init_ctx->skip_int_pk_check;
     
     for (int i=0; i<ncols; i+=2) {
         const char *table = values[i];
         const char *algo = values[i+1];
         
-        int rc = cloudsync_init_internal(context, table, algo);
+        int rc = cloudsync_init_internal(context, table, algo, skip_int_pk_check);
         if (rc != SQLITE_OK) {
             cloudsync_cleanup_internal(context, table);
             return rc;
@@ -2936,50 +2946,17 @@ int cloudsync_init_all_callback (void *xdata, int ncols, char **values, char **n
     return SQLITE_OK;
 }
 
-int cloudsync_init_all (sqlite3_context *context, const char *algo_name) {
+int cloudsync_init_all (sqlite3_context *context, const char *algo_name, bool skip_int_pk_check) {
     char sql[1024];
     snprintf(sql, sizeof(sql), "SELECT name, '%s' FROM sqlite_master WHERE type='table' and name NOT LIKE 'sqlite_%%' AND name NOT LIKE 'cloudsync_%%' AND name NOT LIKE '%%_cloudsync';", (algo_name) ? algo_name : CLOUDSYNC_DEFAULT_ALGO);
     
     sqlite3 *db = sqlite3_context_db_handle(context);
-    int rc = sqlite3_exec(db, sql, cloudsync_init_all_callback, context, NULL);
+    cloudsync_init_all_context init_ctx = {.context = context, .skip_int_pk_check = skip_int_pk_check};
+    int rc = sqlite3_exec(db, sql, cloudsync_init_all_callback, &init_ctx, NULL);
     return rc;
 }
 
-void cloudsync_init_algo (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    DEBUG_FUNCTION("cloudsync_init_algo");
-    
-    const char *table = (const char *)sqlite3_value_text(argv[0]);
-    const char *algo = (const char *)sqlite3_value_text(argv[1]);
-    
-    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    sqlite3 *db = sqlite3_context_db_handle(context);
-    int rc = sqlite3_exec(db, "SAVEPOINT cloudsync_init_algo;", NULL, NULL, NULL);
-    if (rc != SQLITE_OK) {
-        dbutils_context_result_error(context, "Unable to create cloudsync_init_algo savepoint. %s", sqlite3_errmsg(db));
-        sqlite3_result_error_code(context, rc);
-        return;
-    }
-    
-    if (dbutils_is_star_table(table)) cloudsync_init_all(context, algo);
-    else cloudsync_init_internal(context, table, algo);
-    
-    if (rc == SQLITE_OK) {
-        rc = sqlite3_exec(db, "RELEASE cloudsync_init_algo", NULL, NULL, NULL);
-        if (rc != SQLITE_OK) {
-            dbutils_context_result_error(context, "Unable to release cloudsync_init_algo savepoint. %s", sqlite3_errmsg(db));
-            sqlite3_result_error_code(context, rc);
-        }
-    }
-    
-    if (rc == SQLITE_OK) dbutils_update_schema_hash(db, &data->schema_hash);
-    else sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-}
-
-void cloudsync_init (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    DEBUG_FUNCTION("cloudsync_init");
-    
-    const char *table = (const char *)sqlite3_value_text(argv[0]);
-    
+void cloudsync_init (sqlite3_context *context, const char *table, const char *algo, bool skip_int_pk_check) {
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     sqlite3 *db = sqlite3_context_db_handle(context);
     int rc = sqlite3_exec(db, "SAVEPOINT cloudsync_init;", NULL, NULL, NULL);
@@ -2988,9 +2965,9 @@ void cloudsync_init (sqlite3_context *context, int argc, sqlite3_value **argv) {
         sqlite3_result_error_code(context, rc);
         return;
     }
-
-    if (dbutils_is_star_table(table)) rc = cloudsync_init_all(context, NULL);
-    else rc = cloudsync_init_internal(context, table, NULL);
+    
+    if (dbutils_is_star_table(table)) rc = cloudsync_init_all(context, algo, skip_int_pk_check);
+    else rc = cloudsync_init_internal(context, table, algo, skip_int_pk_check);
     
     if (rc == SQLITE_OK) {
         rc = sqlite3_exec(db, "RELEASE cloudsync_init", NULL, NULL, NULL);
@@ -3002,6 +2979,33 @@ void cloudsync_init (sqlite3_context *context, int argc, sqlite3_value **argv) {
     
     if (rc == SQLITE_OK) dbutils_update_schema_hash(db, &data->schema_hash);
     else sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+}
+
+void cloudsync_init3 (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_init2");
+    
+    const char *table = (const char *)sqlite3_value_text(argv[0]);
+    const char *algo = (const char *)sqlite3_value_text(argv[1]);
+    bool skip_int_pk_check = (bool)sqlite3_value_int(argv[2]);
+
+    cloudsync_init(context, table, algo, skip_int_pk_check);
+}
+
+void cloudsync_init2 (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_init2");
+    
+    const char *table = (const char *)sqlite3_value_text(argv[0]);
+    const char *algo = (const char *)sqlite3_value_text(argv[1]);
+    
+    cloudsync_init(context, table, algo, false);
+}
+
+void cloudsync_init1 (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_init1");
+    
+    const char *table = (const char *)sqlite3_value_text(argv[0]);
+    
+    cloudsync_init(context, table, NULL, false);
 }
 
 // MARK: -
@@ -3108,7 +3112,7 @@ void cloudsync_commit_alter (sqlite3_context *context, int argc, sqlite3_value *
     // init again cloudsync for the table
     table_algo algo_current = dbutils_table_settings_get_algo(db, table_name);
     if (algo_current == table_algo_none) algo_current = dbutils_table_settings_get_algo(db, "*");
-    rc = cloudsync_init_internal(context, table_name, crdt_algo_name(algo_current));
+    rc = cloudsync_init_internal(context, table_name, crdt_algo_name(algo_current), true);
     if (rc != SQLITE_OK) goto rollback_finalize_alter;
 
     // release savepoint
@@ -3162,11 +3166,15 @@ APIEXPORT int sqlite3_cloudsync_init (sqlite3 *db, char **pzErrMsg, const sqlite
     rc = dbutils_register_function(db, "cloudsync_version", cloudsync_version, 0, pzErrMsg, ctx, cloudsync_context_free);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_init", cloudsync_init, 1, pzErrMsg, ctx, NULL);
+    rc = dbutils_register_function(db, "cloudsync_init", cloudsync_init1, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_init", cloudsync_init_algo, 2, pzErrMsg, ctx, NULL);
+    rc = dbutils_register_function(db, "cloudsync_init", cloudsync_init2, 2, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
+    
+    rc = dbutils_register_function(db, "cloudsync_init", cloudsync_init3, 3, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
     
     rc = dbutils_register_function(db, "cloudsync_enable", cloudsync_enable, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;

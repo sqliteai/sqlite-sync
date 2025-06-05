@@ -47,7 +47,7 @@ void dbutils_context_result_error (sqlite3_context *context, const char *format,
 bool dbutils_system_exists (sqlite3 *db, const char *name, const char *type);
 bool dbutils_table_exists (sqlite3 *db, const char *name);
 bool dbutils_trigger_exists (sqlite3 *db, const char *name);
-bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const char *name);
+bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const char *name, bool skip_int_pk_check);
 bool dbutils_is_star_table (const char *table_name);
 
 int dbutils_delete_triggers (sqlite3 *db, const char *table);
