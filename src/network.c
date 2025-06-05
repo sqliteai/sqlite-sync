@@ -23,6 +23,9 @@
 #define CLOUDSYNC_NETWORK_MINBUF_SIZE           512
 #define CLOUDSYNC_SESSION_TOKEN_MAXSIZE         4096
 
+#define DEFAULT_SYNC_WAIT_MS                   100
+#define DEFAULT_SYNC_MAX_RETRIES                3
+
 #define CLOUDSYNC_NETWORK_OK                    1
 #define CLOUDSYNC_NETWORK_ERROR                 2
 #define CLOUDSYNC_NETWORK_BUFFER                3
@@ -627,7 +630,7 @@ void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3
     if (res.buffer) cloudsync_memory_free(res.buffer);
 }
 
-int cloudsync_network_check_internal(sqlite3_context *context, int argc, sqlite3_value **argv) {
+int cloudsync_network_check_internal(sqlite3_context *context) {
     network_data *data = (network_data *)cloudsync_get_auxdata(context);
     if (!data) {sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1); return -1;}
      
@@ -655,27 +658,39 @@ int cloudsync_network_check_internal(sqlite3_context *context, int argc, sqlite3
     return rc;
 }
 
-void cloudsync_network_check_changes_sync (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    DEBUG_FUNCTION("cloudsync_network_check_changes_sync");
-
-    int sleep_ms = sqlite3_value_int(argv[0]);
-    int max_retries = sqlite3_value_int(argv[1]);
-
-    int nrows = 0;
+void cloudsync_network_sync (sqlite3_context *context, int wait_ms, int max_retries) {
+    cloudsync_network_send_changes(context, 0, NULL);
+    
     int retries = 0;
     while (retries < max_retries) {
-        nrows = cloudsync_network_check_internal(context, argc, argv);
+        int nrows = cloudsync_network_check_internal(context);
         if (nrows > 0) break;
-        else sqlite3_sleep(sleep_ms);
+        else sqlite3_sleep(wait_ms);
         retries++;
     }
+}
+
+void cloudsync_network_sync0 (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_network_sync2");
+
+    cloudsync_network_sync(context, DEFAULT_SYNC_WAIT_MS, DEFAULT_SYNC_MAX_RETRIES);
+}
+
+
+void cloudsync_network_sync2 (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_network_sync2");
+
+    int wait_ms = sqlite3_value_int(argv[0]);
+    int max_retries = sqlite3_value_int(argv[1]);
+
+    cloudsync_network_sync(context, wait_ms, max_retries);
 }
 
 
 void cloudsync_network_check_changes (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_check_changes");
     
-    cloudsync_network_check_internal(context, argc, argv);
+    cloudsync_network_check_internal(context);
 }
 
 void cloudsync_network_reset_check_version (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -710,7 +725,10 @@ int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
     rc = dbutils_register_function(db, "cloudsync_network_check_changes", cloudsync_network_check_changes, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_check_changes_sync", cloudsync_network_check_changes_sync, 2, pzErrMsg, ctx, NULL);
+    rc = dbutils_register_function(db, "cloudsync_network_sync", cloudsync_network_sync0, 0, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbutils_register_function(db, "cloudsync_network_sync", cloudsync_network_sync2, 2, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
 
     rc = dbutils_register_function(db, "cloudsync_network_reset_check_version", cloudsync_network_reset_check_version, 0, pzErrMsg, ctx, NULL);
