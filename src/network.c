@@ -248,7 +248,7 @@ int network_set_sqlite_result (sqlite3_context *context, NETWORK_RESULT *result)
             
         case CLOUDSYNC_NETWORK_ERROR:
             sqlite3_result_error(context, (result->buffer) ? result->buffer : "Memory error.", -1);
-            sqlite3_result_error_code(context, (int)result->blen);
+            sqlite3_result_error_code(context, SQLITE_ERROR);
             len = -1;
             break;
             
