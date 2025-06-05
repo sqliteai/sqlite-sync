@@ -412,8 +412,15 @@ finalize:
     }
         
     if (result) {
-        data->authentication = authentication;
+        if (authentication) {
+            if (data->authentication) cloudsync_memory_free(data->authentication);
+            data->authentication = authentication;
+        }
+        
+        if (data->check_endpoint) cloudsync_memory_free(data->check_endpoint);
         data->check_endpoint = check_endpoint;
+        
+        if (data->upload_endpoint) cloudsync_memory_free(data->upload_endpoint);
         data->upload_endpoint = upload_endpoint;
     }
     
@@ -437,6 +444,15 @@ void network_result_to_sqlite_error (sqlite3_context *context, NETWORK_RESULT re
 
 // MARK: - Init / Cleanup -
 
+network_data *cloudsync_network_data(sqlite3_context *context) {
+    network_data *data = (network_data *)cloudsync_get_auxdata(context);
+    if (data) return data;
+    
+    data = (network_data *)cloudsync_memory_zeroalloc(sizeof(network_data));
+    if (data) cloudsync_set_auxdata(context, data);
+    return data;
+}
+
 void cloudsync_network_init (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_init");
     
@@ -444,7 +460,7 @@ void cloudsync_network_init (sqlite3_context *context, int argc, sqlite3_value *
     
     // no real network operations here
     // just setup the network_data struct
-    network_data *data = (network_data *)cloudsync_memory_zeroalloc(sizeof(network_data));
+    network_data *data = cloudsync_network_data(context);
     if (!data) goto abort_memory;
     
     // init context
@@ -508,7 +524,7 @@ void cloudsync_network_cleanup (sqlite3_context *context, int argc, sqlite3_valu
 // MARK: - Public -
 
 bool cloudsync_network_set_authentication_token (sqlite3_context *context, const char *value, bool is_token) {
-    network_data *data = (network_data *)cloudsync_get_auxdata(context);
+    network_data *data = cloudsync_network_data(context);
     if (!data) return false;
    
     const char *key = (is_token) ? "token" : "apikey";
