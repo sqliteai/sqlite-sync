@@ -713,10 +713,10 @@ int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
     rc = dbutils_register_function(db, "cloudsync_network_cleanup", cloudsync_network_cleanup, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_set_token", cloudsync_network_set_token, 1, pzErrMsg, ctx, NULL);
+    rc = dbutils_register_function(db, "cloudsync_network_set_token", cloudsync_network_set_token, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_set_apikey", cloudsync_network_set_apikey, 1, pzErrMsg, ctx, NULL);
+    rc = dbutils_register_function(db, "cloudsync_network_set_apikey", cloudsync_network_set_apikey, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
     rc = dbutils_register_function(db, "cloudsync_network_send_changes", cloudsync_network_send_changes, 0, pzErrMsg, ctx, NULL);
