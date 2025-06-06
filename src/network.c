@@ -23,8 +23,8 @@
 #define CLOUDSYNC_NETWORK_MINBUF_SIZE           512
 #define CLOUDSYNC_SESSION_TOKEN_MAXSIZE         4096
 
-#define DEFAULT_SYNC_WAIT_MS                   100
-#define DEFAULT_SYNC_MAX_RETRIES                3
+#define DEFAULT_SYNC_WAIT_MS                    100
+#define DEFAULT_SYNC_MAX_RETRIES                10
 
 #define CLOUDSYNC_NETWORK_OK                    1
 #define CLOUDSYNC_NETWORK_ERROR                 2
