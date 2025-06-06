@@ -450,7 +450,15 @@ int dbutils_delete_triggers (sqlite3 *db, const char *table) {
     size_t blen = sizeof(buffer);
     int rc = SQLITE_ERROR;
     
-    char *sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS cloudsync_after_insert_%w;", table);
+    char *sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS cloudsync_before_update_%w;", table);
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    
+    sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS cloudsync_before_delete_%w;", table);
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    
+    sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS cloudsync_after_insert_%w;", table);
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
     
