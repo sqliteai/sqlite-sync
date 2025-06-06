@@ -104,11 +104,6 @@ typedef struct {
     int             index;
 } cloudsync_pk_decode_context;
 
-typedef struct {
-    sqlite3_context *context;
-    bool             skip_int_pk_check;
-} cloudsync_init_all_context;
-
 #define SYNCBIT_SET(_data)                  _data->insync = 1
 #define SYNCBIT_RESET(_data)                _data->insync = 0
 #define BUMP_SEQ(_data)                     ((_data)->seq += 1, (_data)->seq - 1)
@@ -2927,32 +2922,29 @@ int cloudsync_init_internal (sqlite3_context *context, const char *table_name, c
     return SQLITE_OK;
 }
 
-int cloudsync_init_all_callback (void *xdata, int ncols, char **values, char **names) {
-    cloudsync_init_all_context *init_ctx = (cloudsync_init_all_context *)xdata;
-    sqlite3_context *context = init_ctx->context;
-    bool skip_int_pk_check = init_ctx->skip_int_pk_check;
-    
-    for (int i=0; i<ncols; i+=2) {
-        const char *table = values[i];
-        const char *algo = values[i+1];
-        
-        int rc = cloudsync_init_internal(context, table, algo, skip_int_pk_check);
-        if (rc != SQLITE_OK) {
-            cloudsync_cleanup_internal(context, table);
-            return rc;
-        }
-    }
-    
-    return SQLITE_OK;
-}
-
 int cloudsync_init_all (sqlite3_context *context, const char *algo_name, bool skip_int_pk_check) {
     char sql[1024];
     snprintf(sql, sizeof(sql), "SELECT name, '%s' FROM sqlite_master WHERE type='table' and name NOT LIKE 'sqlite_%%' AND name NOT LIKE 'cloudsync_%%' AND name NOT LIKE '%%_cloudsync';", (algo_name) ? algo_name : CLOUDSYNC_DEFAULT_ALGO);
     
     sqlite3 *db = sqlite3_context_db_handle(context);
-    cloudsync_init_all_context init_ctx = {.context = context, .skip_int_pk_check = skip_int_pk_check};
-    int rc = sqlite3_exec(db, sql, cloudsync_init_all_callback, &init_ctx, NULL);
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto abort_init_all;
+    
+    while (1) {
+        rc = sqlite3_step(vm);
+        if (rc == SQLITE_DONE) break;
+        else if (rc != SQLITE_ROW) goto abort_init_all;
+        
+        const char *table = (const char *)sqlite3_column_text(vm, 0);
+        const char *algo = (const char *)sqlite3_column_text(vm, 1);
+        rc = cloudsync_init_internal(context, table, algo, skip_int_pk_check);
+        if (rc != SQLITE_OK) {cloudsync_cleanup_internal(context, table); goto abort_init_all;}
+    }
+    rc = SQLITE_OK;
+     
+abort_init_all:
+    if (vm) sqlite3_finalize(vm);
     return rc;
 }
 
