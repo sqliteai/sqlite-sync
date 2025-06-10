@@ -1490,7 +1490,7 @@ void *cloudsync_context_create (void) {
 }
 
 void cloudsync_context_free (void *ptr) {
-    DEBUG_SETTINGS("cloudsync_context_free %p", data);
+    DEBUG_SETTINGS("cloudsync_context_free %p", ptr);
     if (!ptr) return;
         
     cloudsync_context *data = (cloudsync_context*)ptr;
