@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include "sqlite3.h"
 
+#define PEERS 50
 #define DB_PATH         "health-track.sqlite"
 #define EXT_PATH       "./dist/cloudsync"
 #define ABORT_TEST abort_test: if (rc != SQLITE_OK) printf("Error: %s\n", sqlite3_errmsg(db)); if (db) sqlite3_close(db); return rc;
@@ -135,34 +136,41 @@ int db_init (const char *db_path){
     if (rc != SQLITE_OK) goto abort_test;
 
     rc = db_exec(db, "\
-CREATE TABLE IF NOT EXISTS users (\
-  id TEXT PRIMARY KEY NOT NULL,\
-  name TEXT UNIQUE NOT NULL DEFAULT ''\
-);\
-CREATE TABLE IF NOT EXISTS activities (\
-  id TEXT PRIMARY KEY NOT NULL,\
-  user_id TEXT,\
-  km REAL,\
-  bpm INTEGER,\
-  time TEXT,\
-  activity_type TEXT NOT NULL DEFAULT 'running',\
-  FOREIGN KEY(user_id) REFERENCES users(id)\
-);\
-CREATE TABLE IF NOT EXISTS workouts (\
-  id TEXT PRIMARY KEY NOT NULL,\
-  assigned_user_id TEXT,\
-  day_of_week TEXT,\
-  km REAL,\
-  max_time TEXT\
-);");
+        CREATE TABLE IF NOT EXISTS users (\
+            id TEXT PRIMARY KEY NOT NULL,\
+            name TEXT UNIQUE NOT NULL DEFAULT ''\
+        );\
+        CREATE TABLE IF NOT EXISTS activities (\
+            id TEXT PRIMARY KEY NOT NULL,\
+            user_id TEXT,\
+            km REAL,\
+            bpm INTEGER,\
+            time TEXT,\
+            activity_type TEXT NOT NULL DEFAULT 'running',\
+            FOREIGN KEY(user_id) REFERENCES users(id)\
+        );\
+        CREATE TABLE IF NOT EXISTS workouts (\
+            id TEXT PRIMARY KEY NOT NULL,\
+            assigned_user_id TEXT,\
+            day_of_week TEXT,\
+            km REAL,\
+            max_time TEXT\
+        );\
+    ");
     if (rc != SQLITE_OK) goto abort_test;
 
 ABORT_TEST
 }
 
-int test_init (const char *db_path) {
+int test_init (const char *db_path, int init) {
+    int rc = SQLITE_OK;
+    
+    if(init){
+        rc = db_init(db_path);
+    }
+
     sqlite3 *db = NULL;
-    int rc = open_load_ext(db_path, &db);
+    rc = open_load_ext(db_path, &db);
     
     rc = db_exec(db, "SELECT cloudsync_init('users');"); if (rc != SQLITE_OK) goto abort_test;
     rc = db_exec(db, "SELECT cloudsync_init('activities');"); if (rc != SQLITE_OK) goto abort_test;
@@ -251,11 +259,18 @@ int main (void) {
     printf("===========================================\n");
     test_report("Version Test:", rc);
 
-    //rc += db_init(DB_PATH); // fix first the schema hash comparison
-    rc += test_report("Init+Sync Test:", test_init(DB_PATH));
+    rc += db_init(DB_PATH);
+    rc += test_report("Init+Sync Test:", test_init(DB_PATH, 0));
     rc += test_report("Is Enabled Test:", test_is_enabled(DB_PATH));
     rc += test_report("DB Version Test:", test_db_version(DB_PATH));
     rc += test_report("Enable Disable Test:", test_enable_disable(DB_PATH));
+
+    for(int i=0; i<PEERS; i++){
+        remove(DB_PATH); // clean previous db
+        char description[32];
+        snprintf(description, sizeof(description), "%d/%d Peer Test", i+1, PEERS);
+        rc += test_report(description, test_init(DB_PATH, 1));
+    }
 
     remove(DB_PATH); // clean up the database file
     printf("\n");

@@ -161,7 +161,6 @@ $(BUILD_TEST)/%.o: %.c
 
 # Run code coverage (--css-file $(CUSTOM_CSS))
 test: $(TARGET) $(TEST_TARGET)
-	sqlite3 health-track.sqlite < test/health-track-schema.sql
 	$(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();"
 	set -e; for t in $(TEST_TARGET); do ./$$t; done
 ifneq ($(COVERAGE),false)
