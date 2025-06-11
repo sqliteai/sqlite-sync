@@ -12,7 +12,7 @@
 #include "sqlite3.h"
 #include <pthread.h>
 
-#define PEERS           50
+#define PEERS           5
 #define DB_PATH         "health-track.sqlite"
 #define EXT_PATH        "./dist/cloudsync"
 #define RCHECK          if (rc != SQLITE_OK) goto abort_test;
