@@ -29,6 +29,7 @@ SQLITE_EXTENSION_INIT3
 
 #define FNV_OFFSET_BASIS    0xcbf29ce484222325ULL
 #define FNV_PRIME           0x100000001b3ULL
+#define HASH_CHAR(_c)       do { h ^= (uint8_t)(_c); h *= FNV_PRIME; h_final = h;} while (0)
 
 // MARK: UUIDv7 -
 
@@ -201,15 +202,84 @@ char *cloudsync_string_replace_prefix(const char *input, char *prefix, char *rep
     return (char *)input;
 }
 
-uint64_t fnv1a_hash(const char *data, size_t len) {
-    uint64_t hash = FNV_OFFSET_BASIS;
-    for (size_t i = 0; i < len; ++i) {
-        hash ^= (uint8_t)data[i];
-        hash *= FNV_PRIME;
+/*
+ Compute a normalized hash of a SQLite CREATE TABLE statement.
+ 
+ * Normalization:
+  * - Skips comments (-- and / * )
+  * - Skips non-printable characters
+  * - Collapses runs of whitespace to single space
+  * - Case-insensitive outside quotes
+  * - Preserves quoted string content exactly
+  * - Handles escaped quotes
+  * - Trims trailing spaces and semicolons from the effective hash
+ */
+uint64_t fnv1a_hash (const char *data, size_t len) {
+    uint64_t h = FNV_OFFSET_BASIS;
+    int q = 0;              // quote state: 0 / '\'' / '"'
+    int cmt = 0;            // comment state: 0 / 1=line / 2=block
+    int last_space = 1;     // prevent leading space
+    uint64_t h_final = h;   // hash state after last non-space, non-semicolon char
+    
+    for (size_t i = 0; i < len; i++) {
+        int c = data[i];
+        int next = (i + 1 < len) ? data[i + 1] : 0;
+        
+        // detect start of comments
+        if (!q && !cmt && c == '-' && next == '-') {cmt = 1; i += 1; continue;}
+        if (!q && !cmt && c == '/' && next == '*') {cmt = 2; i += 1; continue;}
+        
+        // skip comments
+        if (cmt == 1) {if (c == '\n') cmt = 0; continue;}
+        if (cmt == 2) {if (c == '*' && next == '/') { cmt = 0; i += 1; } continue;}
+        
+        // handle quotes
+        if (c == '\'' || c == '"') {
+            if (q == c) {
+                if (next == c) {HASH_CHAR(c); i += 1; continue;}
+                q = 0;
+            } else if (!q) q = c;
+            HASH_CHAR(c);
+            last_space = 0;
+            continue;
+        }
+        
+        // inside quote → hash exactly
+        if (q) {HASH_CHAR(c); last_space = 0; continue;}
+        
+        // skip non-printable
+        if (!isprint((unsigned char)c)) continue;
+        
+        // whitespace normalization
+        if (isspace((unsigned char)c)) {
+            // look ahead to next non-space, non-comment char
+            size_t j = i + 1;
+            while (j < len && isspace((unsigned char)data[j])) j++;
+            
+            int next_c = (j < len) ? data[j] : 0;
+            
+            // if next char is punctuation where space is irrelevant → skip space
+            if (next_c == '(' || next_c == ')' || next_c == ',' || next_c == ';' || next_c == 0) {
+                // skip inserting space
+                last_space = 1;
+                continue;
+            }
+            
+            // else, insert one space
+            if (!last_space) {HASH_CHAR(' '); last_space = 1;}
+            continue;
+        }
+        
+        // skip semicolons at end
+        if (c == ';') {last_space = 1; continue;}
+        
+        // normal visible char
+        HASH_CHAR(tolower(c));
+        last_space = 0;
     }
-    return hash;
+    
+    return h_final;
 }
-
 // MARK: - CRDT algos -
 
 table_algo crdt_algo_from_name (const char *algo_name) {
