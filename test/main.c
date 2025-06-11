@@ -194,11 +194,11 @@ int test_init (const char *db_path, int init) {
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM users;", 1); RCHECK
     if(init){
         rc = db_exec(db, "SELECT cloudsync_network_sync();"); RCHECK
+        rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM users;"); RCHECK //tofix
+        rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM activities;"); RCHECK //tofix
     } else {
         rc = db_expect_gt0(db, "SELECT cloudsync_network_sync();"); RCHECK
     }
-    rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM users;"); RCHECK
-    rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM activities;"); RCHECK
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM workouts;", 0); RCHECK
     rc = db_exec(db, "SELECT cloudsync_terminate();");
     
