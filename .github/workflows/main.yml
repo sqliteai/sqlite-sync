@@ -1,6 +1,7 @@
 name: build, test and release sqlite-sync
 on:
   push:
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -165,7 +166,7 @@ jobs:
           VERSION=$(grep -oP '#define CLOUDSYNC_VERSION\s+"\K[^"]+' "$FILE")
           if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             LATEST=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/latest | jq -r '.name')
-            if [[ "$VERSION" != "$LATEST" ]]; then
+            if [[ "$VERSION" != "$LATEST" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
               echo "version=$VERSION" >> $GITHUB_OUTPUT
             else
               echo "::warning file=src/cloudsync.h::To release a new version, please update the CLOUDSYNC_VERSION in src/cloudsync.h to be different than the latest $LATEST"
