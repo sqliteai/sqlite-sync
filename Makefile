@@ -11,15 +11,21 @@ CURL_VERSION ?= 8.12.1
 # Set default platform if not specified
 ifeq ($(OS),Windows_NT)
     PLATFORM := windows
-    HOST:= windows
+    HOST := windows
+    CPUS := $(shell powershell -Command "[Environment]::ProcessorCount")
 else
     HOST = $(shell uname -s | tr '[:upper:]' '[:lower:]')
     ifeq ($(HOST),darwin)
         PLATFORM := macos
+        CPUS := $(shell sysctl -n hw.ncpu)
     else
         PLATFORM := $(HOST)
+        CPUS := $(shell nproc)
     endif
 endif
+
+# Speed up builds by using all available CPU cores
+MAKEFLAGS += -j$(CPUS)
 
 # Compiler and flags
 CC = gcc
@@ -87,7 +93,7 @@ else ifeq ($(PLATFORM),android)
 
     OPENSSL := $(BIN)/../sysroot/usr/include/openssl
     CC = $(BIN)/$(ARCH)-linux-android26-clang
-    CURL_CONFIG = --host $(ARCH)-$(HOST)-android26 --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(BIN)/$(ARCH)-linux-android26-clang CXX=$(BIN)/$(ARCH)-linux-android26-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
+    CURL_CONFIG = --host $(ARCH)-$(HOST)-android26 --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(CC) CXX=$(BIN)/$(ARCH)-linux-android26-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lcrypto -lssl
 else ifeq ($(PLATFORM),ios)
@@ -263,7 +269,7 @@ endif
 
 # Clean up generated files
 clean:
-	rm -rf $(BUILD_DIRS) $(DIST_DIR)/* $(COV_DIR) *.gcda *.gcno *.gcov $(CURL_DIR)/src
+	rm -rf $(BUILD_DIRS) $(DIST_DIR)/* $(COV_DIR) *.gcda *.gcno *.gcov $(CURL_DIR)/src *.sqlite
 
 # Help message
 help:
