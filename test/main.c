@@ -10,10 +10,12 @@
 #include <stdlib.h>
 #include "sqlite3.h"
 
-#define PEERS 50
+#define PEERS           50
 #define DB_PATH         "health-track.sqlite"
-#define EXT_PATH       "./dist/cloudsync"
-#define ABORT_TEST abort_test: if (rc != SQLITE_OK) printf("Error: %s\n", sqlite3_errmsg(db)); if (db) sqlite3_close(db); return rc;
+#define EXT_PATH        "./dist/cloudsync"
+#define RCHECK          if (rc != SQLITE_OK) goto abort_test;
+#define ERROR_MSG       if (rc != SQLITE_OK) printf("Error: %s\n", sqlite3_errmsg(db));
+#define ABORT_TEST      abort_test: ERROR_MSG if (db) sqlite3_close(db); return rc;
 
 typedef enum { PRINT, NOPRINT, INT, GT0 } expected_type;
 
@@ -113,14 +115,14 @@ int db_expect_gt0 (sqlite3 *db, const char *sql) {
 int open_load_ext(const char *db_path, sqlite3 **out_db) {
     sqlite3 *db = NULL;
     int rc = sqlite3_open(db_path, &db);
-    if (rc != SQLITE_OK) goto abort_test;
+    RCHECK
     
     // enable load extension
     rc = sqlite3_enable_load_extension(db, 1);
-    if (rc != SQLITE_OK) goto abort_test;
+    RCHECK
 
     rc = db_exec(db, "SELECT load_extension('"EXT_PATH"');");
-    if (rc != SQLITE_OK) goto abort_test;
+    RCHECK
 
     *out_db = db;
     return rc;
@@ -130,12 +132,9 @@ ABORT_TEST
 
 // MARK: -
 
-int db_init (const char *db_path){
-    sqlite3 *db = NULL;
-    int rc = sqlite3_open(db_path, &db);
-    if (rc != SQLITE_OK) goto abort_test;
+int db_init (sqlite3 *db){
 
-    rc = db_exec(db, "\
+    int rc = db_exec(db, "\
         CREATE TABLE IF NOT EXISTS users (\
             id TEXT PRIMARY KEY NOT NULL,\
             name TEXT UNIQUE NOT NULL DEFAULT ''\
@@ -157,37 +156,40 @@ int db_init (const char *db_path){
             max_time TEXT\
         );\
     ");
-    if (rc != SQLITE_OK) goto abort_test;
 
-ABORT_TEST
+ERROR_MSG
+    return SQLITE_OK;
+
 }
 
 int test_init (const char *db_path, int init) {
     int rc = SQLITE_OK;
     
+    sqlite3 *db = NULL;
+    rc = open_load_ext(db_path, &db); RCHECK
+
     if(init){
-        rc = db_init(db_path);
+        rc = db_init(db);
+        RCHECK
     }
 
-    sqlite3 *db = NULL;
-    rc = open_load_ext(db_path, &db);
-    
-    rc = db_exec(db, "SELECT cloudsync_init('users');"); if (rc != SQLITE_OK) goto abort_test;
-    rc = db_exec(db, "SELECT cloudsync_init('activities');"); if (rc != SQLITE_OK) goto abort_test;
-    rc = db_exec(db, "SELECT cloudsync_init('workouts');"); if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT cloudsync_init('users');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_init('activities');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_init('workouts');"); RCHECK
 
     // init network with connection string + apikey
     char network_init[512];
     snprintf(network_init, sizeof(network_init), "SELECT cloudsync_network_init('%s?apikey=%s');", getenv("CONNECTION_STRING"), getenv("APIKEY"));
-    rc = db_exec(db, network_init); if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, network_init); RCHECK
 
-    rc = db_expect_int(db, "SELECT COUNT(*) as count FROM users;", 0); if (rc != SQLITE_OK) goto abort_test;
-    rc = db_expect_int(db, "SELECT COUNT(*) as count FROM activities;", 0); if (rc != SQLITE_OK) goto abort_test;
-    rc = db_expect_int(db, "SELECT COUNT(*) as count FROM workouts;", 0); if (rc != SQLITE_OK) goto abort_test;
-    rc = db_expect_gt0(db, "SELECT cloudsync_network_sync();"); if (rc != SQLITE_OK) goto abort_test;
-    rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM users;"); if (rc != SQLITE_OK) goto abort_test;
-    rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM activities;"); if (rc != SQLITE_OK) goto abort_test;
-    rc = db_expect_int(db, "SELECT COUNT(*) as count FROM workouts;", 0); if (rc != SQLITE_OK) goto abort_test;
+    rc = db_expect_int(db, "SELECT COUNT(*) as count FROM users;", 0); RCHECK
+    rc = db_expect_int(db, "SELECT COUNT(*) as count FROM activities;", 0); RCHECK
+    rc = db_expect_int(db, "SELECT COUNT(*) as count FROM workouts;", 0); RCHECK
+    //rc = db_exec(db, "INSERT INTO users (id, name) VALUES ('test', 'test')"); RCHECK
+    rc = db_expect_gt0(db, "SELECT cloudsync_network_sync();"); RCHECK
+    rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM users;"); RCHECK
+    rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM activities;"); RCHECK
+    rc = db_expect_int(db, "SELECT COUNT(*) as count FROM workouts;", 0); RCHECK
     rc = db_exec(db, "SELECT cloudsync_terminate();");
     
 ABORT_TEST
@@ -197,8 +199,8 @@ int test_is_enabled(const char *db_path) {
     sqlite3 *db = NULL;
     int rc = open_load_ext(db_path, &db);
 
-    rc = db_expect_int(db, "SELECT cloudsync_is_enabled('users');", 1); if (rc != SQLITE_OK) goto abort_test;
-    rc = db_expect_int(db, "SELECT cloudsync_is_enabled('activities');", 1); if (rc != SQLITE_OK) goto abort_test;
+    rc = db_expect_int(db, "SELECT cloudsync_is_enabled('users');", 1); RCHECK
+    rc = db_expect_int(db, "SELECT cloudsync_is_enabled('activities');", 1); RCHECK
     rc = db_expect_int(db, "SELECT cloudsync_is_enabled('workouts');", 1);
 
 ABORT_TEST
@@ -208,7 +210,7 @@ int test_db_version(const char *db_path) {
     sqlite3 *db = NULL;
     int rc = open_load_ext(db_path, &db);
     
-    rc = db_expect_gt0(db, "SELECT cloudsync_db_version();"); if (rc != SQLITE_OK) goto abort_test;
+    rc = db_expect_gt0(db, "SELECT cloudsync_db_version();"); RCHECK
     rc = db_expect_gt0(db, "SELECT cloudsync_db_version_next();");
 
 ABORT_TEST
@@ -218,17 +220,17 @@ int test_enable_disable(const char *db_path) {
     sqlite3 *db = NULL;
     int rc = open_load_ext(db_path, &db);
 
-    rc = db_exec(db, "SELECT cloudsync_init('*');"); if (rc != SQLITE_OK) goto abort_test;
-    rc = db_exec(db, "SELECT cloudsync_disable('users');"); if (rc != SQLITE_OK) goto abort_test;
-    rc = db_exec(db, "INSERT INTO users (id, name) VALUES ('12afb', 'provaCmeaakbefa');"); if (rc != SQLITE_OK) goto abort_test;
-    rc = db_exec(db, "SELECT cloudsync_enable('users');"); if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT cloudsync_init('*');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_disable('users');"); RCHECK
+    rc = db_exec(db, "INSERT INTO users (id, name) VALUES ('12afb', 'provaCmeaakbefa');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_enable('users');"); RCHECK
 
     // init network with connection string + apikey
     char network_init[512];
     snprintf(network_init, sizeof(network_init), "SELECT cloudsync_network_init('%s?apikey=%s');", getenv("CONNECTION_STRING"), getenv("APIKEY"));
-    rc = db_exec(db, network_init); if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, network_init); RCHECK
 
-    rc = db_exec(db, "SELECT cloudsync_network_sync();"); if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT cloudsync_network_sync();"); RCHECK
     rc = db_exec(db, "SELECT cloudsync_cleanup('*');");
 
 ABORT_TEST
@@ -239,7 +241,7 @@ int version(){
     int rc = open_load_ext(":memory:", &db);
 
     rc = db_print(db, "SELECT cloudsync_version();");
-    if (rc != SQLITE_OK) goto abort_test;
+    RCHECK
 
 ABORT_TEST
 }
@@ -259,20 +261,23 @@ int main (void) {
     printf("===========================================\n");
     test_report("Version Test:", rc);
 
-    rc += db_init(DB_PATH);
+    sqlite3 *db = NULL;
+    rc += open_load_ext(DB_PATH, &db);
+    rc += db_init(db);
+
     rc += test_report("Init+Sync Test:", test_init(DB_PATH, 0));
     rc += test_report("Is Enabled Test:", test_is_enabled(DB_PATH));
     rc += test_report("DB Version Test:", test_db_version(DB_PATH));
     rc += test_report("Enable Disable Test:", test_enable_disable(DB_PATH));
 
+    remove(DB_PATH); // remove the database file
+
     for(int i=0; i<PEERS; i++){
-        remove(DB_PATH); // clean previous db
         char description[32];
         snprintf(description, sizeof(description), "%d/%d Peer Test", i+1, PEERS);
-        rc += test_report(description, test_init(DB_PATH, 1));
+        rc += test_report(description, test_init(":memory:", 1));
     }
 
-    remove(DB_PATH); // clean up the database file
     printf("\n");
     return rc;
 }
