@@ -8,7 +8,9 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <utils.h>
 #include "sqlite3.h"
+#include <pthread.h>
 
 #define PEERS           50
 #define DB_PATH         "health-track.sqlite"
@@ -182,10 +184,14 @@ int test_init (const char *db_path, int init) {
     snprintf(network_init, sizeof(network_init), "SELECT cloudsync_network_init('%s?apikey=%s');", getenv("CONNECTION_STRING"), getenv("APIKEY"));
     rc = db_exec(db, network_init); RCHECK
 
-    rc = db_expect_int(db, "SELECT COUNT(*) as count FROM users;", 0); RCHECK
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM activities;", 0); RCHECK
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM workouts;", 0); RCHECK
-    //rc = db_exec(db, "INSERT INTO users (id, name) VALUES ('test', 'test')"); RCHECK
+    char value[UUID_STR_MAXLEN];
+    cloudsync_uuid_v7_string(value, true);
+    char sql[256];
+    snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s', '%s');", value, value);
+    rc = db_exec(db, sql); RCHECK
+    rc = db_expect_int(db, "SELECT COUNT(*) as count FROM users;", 1); RCHECK
     rc = db_expect_gt0(db, "SELECT cloudsync_network_sync();"); RCHECK
     rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM users;"); RCHECK
     rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM activities;"); RCHECK
@@ -253,6 +259,19 @@ int test_report(const char *description, int rc){
     return rc;
 }
 
+void* worker(void* arg) {
+    int thread_id = *(int*)arg;
+
+    char description[32];
+    snprintf(description, sizeof(description), "%d/%d Peer Test", thread_id, PEERS);
+    if(test_report(description, test_init(":memory:", 1))){
+        printf("PEER %d FAIL.\n", thread_id);
+        exit(thread_id+1);
+    }
+
+    return NULL;
+}
+
 int main (void) {
     int rc = SQLITE_OK;
     
@@ -272,10 +291,20 @@ int main (void) {
 
     remove(DB_PATH); // remove the database file
 
-    for(int i=0; i<PEERS; i++){
-        char description[32];
-        snprintf(description, sizeof(description), "%d/%d Peer Test", i+1, PEERS);
-        rc += test_report(description, test_init(":memory:", 1));
+    pthread_t threads[PEERS];
+    int thread_ids[PEERS];
+
+    for (int i = 0; i < PEERS; i++) {
+        thread_ids[i] = i;
+        if (pthread_create(&threads[i], NULL, worker, &thread_ids[i]) != 0) {
+            perror("pthread_create");
+            exit(1);
+        }
+    }
+
+    // Wait for all threads to finish
+    for (int i = 0; i < PEERS; i++) {
+        pthread_join(threads[i], NULL);
     }
 
     printf("\n");
