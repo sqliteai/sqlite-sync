@@ -10,7 +10,11 @@
 #include <stdlib.h>
 #include <utils.h>
 #include "sqlite3.h"
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <pthread.h>
+#endif
 
 #define PEERS           5
 #define DB_PATH         "health-track.sqlite"
@@ -263,7 +267,11 @@ int test_report(const char *description, int rc){
     return rc;
 }
 
+#ifdef _WIN32
+DWORD WINAPI worker(LPVOID arg) {
+#else
 void* worker(void* arg) {
+#endif
     int thread_id = *(int*)arg;
 
     char description[32];
@@ -295,20 +303,39 @@ int main (void) {
 
     remove(DB_PATH); // remove the database file
 
+    #ifdef _WIN32
+    HANDLE threads[PEERS];
+    #else
     pthread_t threads[PEERS];
+    #endif
     int thread_ids[PEERS];
 
     for (int i = 0; i < PEERS; i++) {
         thread_ids[i] = i;
+        #ifdef _WIN32
+        threads[i] = CreateThread(NULL, 0, worker, &thread_ids[i], 0, NULL);
+        if (threads[i] == NULL) {
+            fprintf(stderr, "CreateThread failed\n");
+            return 1;
+        }
+        #else
         if (pthread_create(&threads[i], NULL, worker, &thread_ids[i]) != 0) {
             perror("pthread_create");
             exit(1);
         }
+        #endif
     }
 
     // Wait for all threads to finish
+    #ifdef _WIN32
+    WaitForMultipleObjects(PEERS, threads, TRUE, INFINITE);
+    #endif
     for (int i = 0; i < PEERS; i++) {
+        #ifdef _WIN32
+        CloseHandle(threads[i]);
+        #else
         pthread_join(threads[i], NULL);
+        #endif
     }
 
     printf("\n");
