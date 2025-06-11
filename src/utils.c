@@ -29,7 +29,7 @@ SQLITE_EXTENSION_INIT3
 
 #define FNV_OFFSET_BASIS    0xcbf29ce484222325ULL
 #define FNV_PRIME           0x100000001b3ULL
-#define HASH_CHAR(_c)       do { h ^= (uint8_t)(_c); h *= FNV_PRIME; h_final = h; } while (0)
+#define HASH_CHAR(_c)       do { h ^= (uint8_t)(_c); h *= FNV_PRIME; h_final = h;} while (0)
 
 // MARK: UUIDv7 -
 
@@ -252,6 +252,20 @@ uint64_t fnv1a_hash (const char *data, size_t len) {
         
         // whitespace normalization
         if (isspace((unsigned char)c)) {
+            // look ahead to next non-space, non-comment char
+            size_t j = i + 1;
+            while (j < len && isspace((unsigned char)data[j])) j++;
+            
+            int next_c = (j < len) ? data[j] : 0;
+            
+            // if next char is punctuation where space is irrelevant → skip space
+            if (next_c == '(' || next_c == ')' || next_c == ',' || next_c == ';' || next_c == 0) {
+                // skip inserting space
+                last_space = 1;
+                continue;
+            }
+            
+            // else, insert one space
             if (!last_space) {HASH_CHAR(' '); last_space = 1;}
             continue;
         }
