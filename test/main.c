@@ -23,7 +23,7 @@
 #define ERROR_MSG       if (rc != SQLITE_OK) printf("Error: %s\n", sqlite3_errmsg(db));
 #define ABORT_TEST      abort_test: ERROR_MSG if (db) sqlite3_close(db); return rc;
 
-typedef enum { PRINT, NOPRINT, INT, GT0 } expected_type;
+typedef enum { PRINT, NOPRINT, INTGR, GT0 } expected_type;
 
 typedef struct {
     expected_type type;
@@ -45,7 +45,7 @@ static int callback(void *data, int argc, char **argv, char **names) {
             printf("\n");
             return SQLITE_OK;
 
-        case INT:
+        case INTGR:
             if(argc == 1){
                 int res = atoi(argv[0]);
 
@@ -101,7 +101,7 @@ int db_print (sqlite3 *db, const char *sql) {
 
 int db_expect_int (sqlite3 *db, const char *sql, int expect) {
     expected_t data;
-    data.type = INT;
+    data.type = INTGR;
     data.value.i = expect;
 
     int rc = sqlite3_exec(db, sql, callback, &data, NULL);
