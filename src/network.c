@@ -267,46 +267,51 @@ cleanup:
 }
 
 int network_set_sqlite_result (sqlite3_context *context, NETWORK_RESULT *result) {
-    int len = 0;
+    int rc = 0;
     switch (result->code) {
         case CLOUDSYNC_NETWORK_OK:
-            sqlite3_result_int(context, SQLITE_OK);
-            len = 0;
+            sqlite3_result_error_code(context, SQLITE_OK);
+            rc = 0;
             break;
             
         case CLOUDSYNC_NETWORK_ERROR:
             sqlite3_result_error(context, (result->buffer) ? result->buffer : "Memory error.", -1);
             sqlite3_result_error_code(context, SQLITE_ERROR);
-            len = -1;
+            rc = -1;
             break;
             
         case CLOUDSYNC_NETWORK_BUFFER:
+            sqlite3_result_error_code(context, SQLITE_OK);
             sqlite3_result_text(context, result->buffer, (int)result->blen, SQLITE_TRANSIENT);
-            len = (int)result->blen;
+            rc = (int)result->blen;
             break;
     }
     
     if (result->buffer) cloudsync_memory_free(result->buffer);
     
-    return len;
+    return rc;
 }
 
 int network_download_changes (sqlite3_context *context, const char *download_url) {
     DEBUG_FUNCTION("network_download_changes");
     
-    int nrows = 0;
     network_data *data = (network_data *)cloudsync_get_auxdata(context);
-    if (!data) {sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1); return -1;}
-    
-    NETWORK_RESULT result = network_receive_buffer(data, download_url, NULL, false, false, NULL, NULL);
-    if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
-        nrows = cloudsync_payload_apply(context, result.buffer, (int)result.blen);
-        cloudsync_memory_free(result.buffer);
-    } else {
-        nrows = network_set_sqlite_result(context, &result);
+    if (!data) {
+        sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1);
+        return -1;
     }
     
-    return nrows;
+    NETWORK_RESULT result = network_receive_buffer(data, download_url, NULL, false, false, NULL, NULL);
+    
+    int rc = SQLITE_OK;
+    if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
+        rc = cloudsync_payload_apply(context, result.buffer, (int)result.blen);
+        cloudsync_memory_free(result.buffer);
+    } else {
+        rc = network_set_sqlite_result(context, &result);
+    }
+    
+    return rc;
 }
 
 char *network_authentication_token(const char *key, const char *value) {
@@ -695,7 +700,8 @@ void cloudsync_network_sync (sqlite3_context *context, int wait_ms, int max_retr
         retries++;
     }
     
-    sqlite3_result_int(context, nrows);
+    sqlite3_result_error_code(context, (nrows == -1) ? SQLITE_ERROR : SQLITE_OK);
+    if (nrows >= 0) sqlite3_result_int(context, nrows);
 }
 
 void cloudsync_network_sync0 (sqlite3_context *context, int argc, sqlite3_value **argv) {
