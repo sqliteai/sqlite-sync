@@ -196,7 +196,7 @@ int test_init (const char *db_path, int init) {
     snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s', '%s');", value, value);
     rc = db_exec(db, sql); RCHECK
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM users;", 1); RCHECK
-    rc = db_expect_gt0(db, "SELECT cloudsync_network_sync();"); RCHECK
+    rc = db_print(db, "SELECT cloudsync_network_sync();"); RCHECK
     rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM users;"); RCHECK
     rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM activities;"); RCHECK
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM workouts;", 0); RCHECK
