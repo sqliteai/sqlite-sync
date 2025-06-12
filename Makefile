@@ -162,7 +162,8 @@ $(BUILD_TEST)/%.o: %.c
 # Run code coverage (--css-file $(CUSTOM_CSS))
 test: $(TARGET) $(TEST_TARGET)
 	$(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();"
-	set -e; for t in $(TEST_TARGET); do ./$$t; done
+	./dist/unit
+	./dist/main
 ifneq ($(COVERAGE),false)
 	mkdir -p $(COV_DIR)
 	lcov --capture --directory . --output-file $(COV_DIR)/coverage.info $(subst src, --include src,${COV_FILES})
