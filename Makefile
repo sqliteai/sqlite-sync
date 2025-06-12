@@ -70,7 +70,7 @@ ifeq ($(PLATFORM),windows)
 else ifeq ($(PLATFORM),macos)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     LDFLAGS += -arch x86_64 -arch arm64 -framework Security -dynamiclib -undefined dynamic_lookup
-    T_LDFLAGS = -framework Security
+    T_LDFLAGS = -framework Security -lpthread
     CFLAGS += -arch x86_64 -arch arm64
     CURL_CONFIG = --with-secure-transport CFLAGS="-arch x86_64 -arch arm64"
 else ifeq ($(PLATFORM),android)
@@ -96,6 +96,7 @@ else ifeq ($(PLATFORM),android)
     CURL_CONFIG = --host $(ARCH)-$(HOST)-android26 --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(CC) CXX=$(BIN)/$(ARCH)-linux-android26-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lcrypto -lssl
+    T_LDFLAGS = -lpthread
 else ifeq ($(PLATFORM),ios)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     SDK := -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=11.0
@@ -114,6 +115,7 @@ else # linux
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lssl -lcrypto
     CURL_CONFIG = --with-openssl
+    T_LDFLAGS = -lpthread
 endif
 
 ifneq ($(COVERAGE),false)
@@ -162,8 +164,7 @@ $(BUILD_TEST)/%.o: %.c
 # Run code coverage (--css-file $(CUSTOM_CSS))
 test: $(TARGET) $(TEST_TARGET)
 	$(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();"
-	./dist/unit
-	./dist/main
+	set -e; for t in $(TEST_TARGET); do ./$$t; done
 ifneq ($(COVERAGE),false)
 	mkdir -p $(COV_DIR)
 	lcov --capture --directory . --output-file $(COV_DIR)/coverage.info $(subst src, --include src,${COV_FILES})
