@@ -687,12 +687,15 @@ void cloudsync_network_sync (sqlite3_context *context, int wait_ms, int max_retr
     cloudsync_network_send_changes(context, 0, NULL);
     
     int retries = 0;
+    int nrows = 0;
     while (retries < max_retries) {
-        int nrows = cloudsync_network_check_internal(context);
+        nrows = cloudsync_network_check_internal(context);
         if (nrows > 0) break;
         else sqlite3_sleep(wait_ms);
         retries++;
     }
+    
+    sqlite3_result_int(context, nrows);
 }
 
 void cloudsync_network_sync0 (sqlite3_context *context, int argc, sqlite3_value **argv) {
