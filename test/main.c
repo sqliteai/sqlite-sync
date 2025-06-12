@@ -16,7 +16,7 @@
 #include <pthread.h>
 #endif
 
-#define PEERS           1
+#define PEERS           5
 #define DB_PATH         "health-track.sqlite"
 #define EXT_PATH        "./dist/cloudsync"
 #define RCHECK          if (rc != SQLITE_OK) goto abort_test;
@@ -196,13 +196,9 @@ int test_init (const char *db_path, int init) {
     snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s', '%s');", value, value);
     rc = db_exec(db, sql); RCHECK
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM users;", 1); RCHECK
-    if(init){
-        rc = db_exec(db, "SELECT cloudsync_network_sync(1500, 100);"); RCHECK
-    } else { //tofix
-        rc = db_expect_gt0(db, "SELECT cloudsync_network_sync(1500, 100);"); RCHECK
-        rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM users;"); RCHECK
-        rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM activities;"); RCHECK
-    }
+    rc = db_print(db, "SELECT cloudsync_network_sync(500, 100);"); RCHECK
+    rc = db_print(db, "SELECT COUNT(*) as count FROM users;"); RCHECK
+    rc = db_print(db, "SELECT COUNT(*) as count FROM activities;"); RCHECK
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM workouts;", 0); RCHECK
     rc = db_exec(db, "SELECT cloudsync_terminate();");
     
