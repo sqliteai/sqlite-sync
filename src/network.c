@@ -15,8 +15,8 @@
 #include "cloudsync_private.h"
 
 #ifdef __ANDROID__
-#include "android_cert.h"
-static size_t cacert_len = 0;
+#include "cacert.h"
+static size_t cacert_len = sizeof(cacert_pem) - 1;
 #endif
 
 #define CLOUDSYNC_ENDPOINT_PREFIX               "v1/cloudsync"
@@ -119,10 +119,11 @@ static NETWORK_RESULT network_receive_buffer (network_data *data, const char *en
     
     // set PEM
     #ifdef __ANDROID__
-    struct curl_blob pem_blob;
-    pem_blob.data = cacert_pem;
-    pem_blob.len = cacert_len;
-    pem_blob.flags = CURL_BLOB_NOCOPY;
+    struct curl_blob pem_blob = {
+        .data = (void *)cacert_pem,
+        .len = cacert_len,
+        .flags = CURL_BLOB_NOCOPY
+    };
     curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &pem_blob);
     #endif
     
@@ -208,10 +209,11 @@ static bool network_send_buffer (network_data *data, const char *endpoint, const
     
     // set PEM
     #ifdef __ANDROID__
-    struct curl_blob pem_blob;
-    pem_blob.data = cacert_pem;
-    pem_blob.len = cacert_len;
-    pem_blob.flags = CURL_BLOB_NOCOPY;
+    struct curl_blob pem_blob = {
+        .data = (void *)cacert_pem,
+        .len = cacert_len,
+        .flags = CURL_BLOB_NOCOPY
+    };
     curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &pem_blob);
     #endif
     
@@ -685,12 +687,15 @@ void cloudsync_network_sync (sqlite3_context *context, int wait_ms, int max_retr
     cloudsync_network_send_changes(context, 0, NULL);
     
     int retries = 0;
+    int nrows = 0;
     while (retries < max_retries) {
-        int nrows = cloudsync_network_check_internal(context);
+        nrows = cloudsync_network_check_internal(context);
         if (nrows > 0) break;
         else sqlite3_sleep(wait_ms);
         retries++;
     }
+    
+    sqlite3_result_int(context, nrows);
 }
 
 void cloudsync_network_sync0 (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -758,10 +763,6 @@ int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
 
     rc = dbutils_register_function(db, "cloudsync_network_reset_sync_version", cloudsync_network_reset_sync_version, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
-    
-    #ifdef __ANDROID__
-    cacert_len = strlen(cacert_pem);
-    #endif
     
     return rc;
 }

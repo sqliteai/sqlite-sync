@@ -164,10 +164,11 @@ int dbutils_write_simple (sqlite3 *db, const char *sql) {
 }
 
 sqlite3_int64 dbutils_int_select (sqlite3 *db, const char *sql) {
+    // used only for cound(*), hash, or 1, so return -1 to signal an error
     DATABASE_RESULT results[1] = {0};
     int expected_types[1] = {SQLITE_INTEGER};
     dbutils_exec(NULL, db, sql, NULL, NULL, NULL, 0, results, expected_types, 1);
-    return results[0].value.intValue;
+    return (results[0].rc == SQLITE_OK) ? results[0].value.intValue : -1;
 }
 
 char *dbutils_text_select (sqlite3 *db, const char *sql) {
@@ -177,11 +178,12 @@ char *dbutils_text_select (sqlite3 *db, const char *sql) {
     return results[0].value.stringValue;
 }
 
-char *dbutils_blob_select (sqlite3 *db, const char *sql, int *size) {
+char *dbutils_blob_select (sqlite3 *db, const char *sql, int *size, sqlite3_context *context, int *rc) {
     DATABASE_RESULT results[1] = {0};
     int expected_types[1] = {SQLITE_BLOB};
-    dbutils_exec(NULL, db, sql, NULL, NULL, NULL, 0, results, expected_types, 1);
+    dbutils_exec(context, db, sql, NULL, NULL, NULL, 0, results, expected_types, 1);
     *size = results[0].len;
+    *rc = results[0].rc;
     return results[0].value.stringValue;
 }
 
@@ -197,6 +199,7 @@ int dbutils_blob_int_int_select (sqlite3 *db, const char *sql, char **blob, int 
 }
 
 sqlite3_int64 dbutils_select (sqlite3 *db, const char *sql, const char **values, int types[], int lens[], int count, int expected_type) {
+    // used only in unit-test
     DATABASE_RESULT results[1] = {0};
     int expected_types[1] = {expected_type};
     dbutils_exec(NULL, db, sql, values, types, lens, count, results, expected_types, 1);
@@ -396,6 +399,9 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
     if (count > 128) {
         dbutils_context_result_error(context, "No more than 128 columns can be used to form a composite primary key");
         return false;
+    } else if (count == -1) {
+        dbutils_context_result_error(context, "%s", sqlite3_errmsg(db));
+        return false;
     }
     
     #if CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
@@ -417,6 +423,10 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
                 dbutils_context_result_error(context, "Table %s uses an single-column INTEGER primary key. For CRDT replication, primary keys must be globally unique. Consider using a TEXT primary key with UUIDs or ULID to avoid conflicts across nodes. If you understand the risk and still want to use this INTEGER primary key, set the third argument of the cloudsync_init function to 1 to skip this check.", name);
                 return false;
             }
+            if (count2 == -1) {
+                dbutils_context_result_error(context, "%s", sqlite3_errmsg(db));
+                return false;
+            }
         }
     }
         
@@ -424,6 +434,10 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
     if (count > 0) {
         sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%w') WHERE pk>0 AND \"notnull\"=1;", name);
         sqlite3_int64 count2 = dbutils_int_select(db, sql);
+        if (count2 == -1) {
+            dbutils_context_result_error(context, "%s", sqlite3_errmsg(db));
+            return false;
+        }
         if (count != count2) {
             dbutils_context_result_error(context, "All primary keys must be explicitly declared as NOT NULL (table %s)", name);
             return false;
@@ -434,6 +448,10 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
     // Otherwise, col_merge_stmt would fail if changes to other columns are inserted first.
     sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%w') WHERE pk=0 AND \"notnull\"=1 AND \"dflt_value\" IS NULL;", name);
     sqlite3_int64 count3 = dbutils_int_select(db, sql);
+    if (count3 == -1) {
+        dbutils_context_result_error(context, "%s", sqlite3_errmsg(db));
+        return false;
+    }
     if (count3 > 0) {
         dbutils_context_result_error(context, "All non-primary key columns declared as NOT NULL must have a DEFAULT value. (table %s)", name);
         return false;
@@ -1026,7 +1044,7 @@ int dbutils_settings_init (sqlite3 *db, void *cloudsync_data, sqlite3_context *c
     // check if some process changed schema outside of the lib
     /*
     if ((settings_exists == true) && (data->schema_version != dbutils_schema_version(db))) {
-        // TODO: SOMEONE CHANGED SCHEMAs SO WE NEED TO RECHECK AUGMENTED TABLES and RELATED TRIGGERS
+        // SOMEONE CHANGED SCHEMAs SO WE NEED TO RECHECK AUGMENTED TABLES and RELATED TRIGGERS
         assert(0);
     }
      */
@@ -1072,7 +1090,7 @@ bool dbutils_check_schema_hash (sqlite3 *db, sqlite3_uint64 hash) {
     char sql[1024];
     snprintf(sql, sizeof(sql), "SELECT 1 FROM cloudsync_schema_versions WHERE hash = (%lld)", hash);
     
-    return dbutils_int_select(db, sql) == 1;
+    return (dbutils_int_select(db, sql) == 1);
 }
 
 

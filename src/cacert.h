@@ -1,3 +1,4 @@
+<<<<<<< HEAD:src/android_cert.h
 /*
  ##
  ## Bundle of CA Root Certificates
@@ -22,6 +23,29 @@
  */
 
 static const char cacert_pem[] = "\n"
+=======
+static const char cacert_pem[] = "##\n"
+"## Bundle of CA Root Certificates\n"
+"##\n"
+"## Certificate data from Mozilla as of: Tue May 20 03:12:02 2025 GMT\n"
+"##\n"
+"## Find updated versions here: https://curl.se/docs/caextract.html\n"
+"##\n"
+"## This is a bundle of X.509 certificates of public Certificate Authorities\n"
+"## (CA). These were automatically extracted from Mozilla's root certificates\n"
+"## file (certdata.txt).  This file can be found in the mozilla source tree:\n"
+"## https://raw.githubusercontent.com/mozilla-firefox/firefox/refs/heads/release/security/nss/lib/ckfw/builtins/certdata.txt\n"
+"##\n"
+"## It contains the certificates in PEM format and therefore\n"
+"## can be directly used with curl / libcurl / php_curl, or with\n"
+"## an Apache+mod_ssl webserver for SSL client authentication.\n"
+"## Just configure this file as the SSLCACertificateFile.\n"
+"##\n"
+"## Conversion done with mk-ca-bundle.pl version 1.29.\n"
+"## SHA256: 8944ec6b572b577daee4fc681a425881f841ec2660e4cb5f0eee727f84620697\n"
+"##\n"
+"\n"
+>>>>>>> main:src/cacert.h
 "\n"
 "Entrust Root Certification Authority\n"
 "====================================\n"
@@ -3480,5 +3504,9 @@ static const char cacert_pem[] = "\n"
 "S5THaJQXfuKOKD62xur1NGyfN4gHONuGcfrNlUhDbqNPgofXNJhuS5N5YHVpD/Aa1VP6IQzCP+k/\n"
 "HxiMkl14p3ZnGbuy6n/pcAlWVqOwDAstNl7F6cTVg8uGF5csbBNvh1qvSaYd2804BC5f4ko1Di1L\n"
 "+KIkBI3Y4WNeApI02phhXBxvWHZks/wCuPWdCg==\n"
+<<<<<<< HEAD:src/android_cert.h
 "-----END CERTIFICATE-----\n"
 "";
+=======
+"-----END CERTIFICATE-----\n";
+>>>>>>> main:src/cacert.h
