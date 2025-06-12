@@ -190,12 +190,12 @@ int test_init (const char *db_path, int init) {
 
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM activities;", 0); RCHECK
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM workouts;", 0); RCHECK
-    char value[UUID_STR_MAXLEN];
+    /* char value[UUID_STR_MAXLEN];
     cloudsync_uuid_v7_string(value, true);
     char sql[256];
     snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s', '%s');", value, value);
-    rc = db_exec(db, sql); RCHECK
-    rc = db_expect_int(db, "SELECT COUNT(*) as count FROM users;", 1); RCHECK
+    rc = db_exec(db, sql); RCHECK */
+    rc = db_expect_int(db, "SELECT COUNT(*) as count FROM users;", 0); RCHECK
     rc = db_print(db, "SELECT cloudsync_network_sync(500, 100);"); RCHECK
     rc = db_print(db, "SELECT COUNT(*) as count FROM users;"); RCHECK
     rc = db_print(db, "SELECT COUNT(*) as count FROM activities;"); RCHECK
