@@ -198,6 +198,14 @@ int dbutils_blob_int_int_select (sqlite3 *db, const char *sql, char **blob, int 
     return results[0].rc;
 }
 
+sqlite3_int64 dbutils_select (sqlite3 *db, const char *sql, const char **values, int types[], int lens[], int count, int expected_type) {
+    // used only in unit-test
+    DATABASE_RESULT results[1] = {0};
+    int expected_types[1] = {expected_type};
+    dbutils_exec(NULL, db, sql, values, types, lens, count, results, expected_types, 1);
+    return results[0].value.intValue;
+}
+
 // MARK: -
 
 // compares two SQLite values and returns an integer indicating the comparison result

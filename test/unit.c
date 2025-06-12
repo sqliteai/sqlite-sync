@@ -921,8 +921,8 @@ finalize:
 }
 
 bool do_test_functions (sqlite3 *db, bool print_results) {
-    int size = 0;
-    char *site_id = dbutils_blob_select(db, "SELECT cloudsync_siteid();", &size);
+    int size = 0, rc2;
+    char *site_id = dbutils_blob_select(db, "SELECT cloudsync_siteid();", &size, NULL, &rc2);
     if (site_id == NULL || size != 16) goto abort_test_functions;
     cloudsync_memory_free(site_id);
     
@@ -3042,8 +3042,8 @@ bool do_test_network_encode_decode (int nclients, bool print_result, bool cleanu
         for (int j=0; j<nclients; ++j) {
             if (target == j) continue;
             
-            int blob_size = 0;
-            char *blob = dbutils_blob_select (db[target], src_sql, &blob_size);
+            int blob_size = 0, rc;
+            char *blob = dbutils_blob_select (db[target], src_sql, &blob_size, NULL, &rc);
             if (!blob) goto finalize;
             
             const char *values[] = {blob};
