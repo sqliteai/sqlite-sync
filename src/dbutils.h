@@ -31,7 +31,7 @@ int dbutils_write_simple (sqlite3 *db, const char *sql);
 int dbutils_write (sqlite3 *db, sqlite3_context *context, const char *sql, const char **values, int types[], int len[], int count);
 sqlite3_int64 dbutils_int_select (sqlite3 *db, const char *sql);
 char *dbutils_text_select (sqlite3 *db, const char *sql);
-char *dbutils_blob_select (sqlite3 *db, const char *sql, int *size);
+char *dbutils_blob_select (sqlite3 *db, const char *sql, int *size, sqlite3_context *context, int *rc);
 int dbutils_blob_int_int_select (sqlite3 *db, const char *sql, char **blob, int *size, sqlite3_int64 *int1, sqlite3_int64 *int2);
 
 int dbutils_register_function (sqlite3 *db, const char *name, void (*ptr)(sqlite3_context*,int,sqlite3_value**), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *));

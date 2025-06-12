@@ -163,6 +163,8 @@ struct cloudsync_pk_decode_bind_context {
 };
 
 struct cloudsync_context {
+    sqlite3_context *sqlite_ctx;
+    
     char            *libversion;
     uint8_t         site_id[UUID_LEN];
     int             insync;
@@ -379,7 +381,12 @@ int db_version_rebuild_stmt (sqlite3 *db, cloudsync_context *data) {
         data->db_version_stmt = NULL;
     }
     
-    if (dbutils_table_settings_count_tables(db) == 0) return SQLITE_OK;
+    sqlite3_int64 count = dbutils_table_settings_count_tables(db);
+    if (count == 0) return SQLITE_OK;
+    else if (count == -1) {
+        dbutils_context_result_error(data->sqlite_ctx, "%s", sqlite3_errmsg(db));
+        return SQLITE_ERROR;
+    }
     
     char *sql = db_version_build_query(db);
     if (!sql) return SQLITE_NOMEM;
@@ -912,6 +919,11 @@ bool table_add_to_context (sqlite3 *db, cloudsync_context *data, table_algo algo
     if (!sql) goto abort_add_table;
     table->npks = (int)dbutils_int_select(db, sql);
     cloudsync_memory_free(sql);
+    if (table->npks == -1) {
+        dbutils_context_result_error(data->sqlite_ctx, "%s", sqlite3_errmsg(db));
+        goto abort_add_table;
+    }
+    
     if (table->npks == 0) {
         #if CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
         return false;
@@ -925,6 +937,10 @@ bool table_add_to_context (sqlite3 *db, cloudsync_context *data, table_algo algo
     if (!sql) goto abort_add_table;
     int64_t ncols = (int64_t)dbutils_int_select(db, sql);
     cloudsync_memory_free(sql);
+    if (ncols == -1) {
+        dbutils_context_result_error(data->sqlite_ctx, "%s", sqlite3_errmsg(db));
+        goto abort_add_table;
+    }
     
     int rc = table_add_stmts(db, table, (int)ncols);
     if (rc != SQLITE_OK) goto abort_add_table;
@@ -1511,6 +1527,7 @@ const char *cloudsync_context_init (sqlite3 *db, cloudsync_context *data, sqlite
         if (stmts_add_tocontext(db, data) != SQLITE_OK) return NULL;
         if (cloudsync_load_siteid(db, data) != SQLITE_OK) return NULL;
         
+        data->sqlite_ctx = context;
         data->schema_hash = dbutils_schema_hash(db);
     }
     
@@ -2828,9 +2845,9 @@ int cloudsync_load_siteid (sqlite3 *db, cloudsync_context *data) {
     if (data->site_id[0] != 0) return SQLITE_OK;
     
     // load site_id
-    int size;
-    char *buffer = dbutils_blob_select(db, "SELECT site_id FROM cloudsync_site_id WHERE rowid=0;", &size);
-    if (!buffer) return SQLITE_NOMEM;
+    int size, rc;
+    char *buffer = dbutils_blob_select(db, "SELECT site_id FROM cloudsync_site_id WHERE rowid=0;", &size, data->sqlite_ctx, &rc);
+    if (!buffer) return rc;
     if (size != UUID_LEN) return SQLITE_MISUSE;
     
     memcpy(data->site_id, buffer, UUID_LEN);
@@ -2950,6 +2967,8 @@ abort_init_all:
 
 void cloudsync_init (sqlite3_context *context, const char *table, const char *algo, bool skip_int_pk_check) {
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    data->sqlite_ctx = context;
+    
     sqlite3 *db = sqlite3_context_db_handle(context);
     int rc = sqlite3_exec(db, "SAVEPOINT cloudsync_init;", NULL, NULL, NULL);
     if (rc != SQLITE_OK) {
