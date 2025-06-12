@@ -291,6 +291,7 @@ int main (void) {
     sqlite3 *db = NULL;
     rc += open_load_ext(DB_PATH, &db);
     rc += db_init(db);
+    if (db) sqlite3_close(db);
 
     rc += test_report("Init+Sync Test:", test_init(DB_PATH, 0));
     rc += test_report("Is Enabled Test:", test_is_enabled(DB_PATH));
