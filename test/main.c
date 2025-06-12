@@ -164,7 +164,7 @@ int db_init (sqlite3 *db){
     ");
 
 ERROR_MSG
-    return SQLITE_OK;
+    return rc;
 
 }
 
