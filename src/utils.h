@@ -21,9 +21,9 @@
 #include "sqlite3.h"
 #endif
 
-#define CLOUDSYNC_DEBUG_FUNCTIONS           1
+#define CLOUDSYNC_DEBUG_FUNCTIONS           0
 #define CLOUDSYNC_DEBUG_DBFUNCTIONS         0
-#define CLOUDSYNC_DEBUG_SETTINGS            1
+#define CLOUDSYNC_DEBUG_SETTINGS            0
 #define CLOUDSYNC_DEBUG_SQL                 0
 #define CLOUDSYNC_DEBUG_VTAB                0
 #define CLOUDSYNC_DEBUG_MEMORY              0
