@@ -11,15 +11,21 @@ CURL_VERSION ?= 8.12.1
 # Set default platform if not specified
 ifeq ($(OS),Windows_NT)
     PLATFORM := windows
-    HOST:= windows
+    HOST := windows
+    CPUS := $(shell powershell -Command "[Environment]::ProcessorCount")
 else
     HOST = $(shell uname -s | tr '[:upper:]' '[:lower:]')
     ifeq ($(HOST),darwin)
         PLATFORM := macos
+        CPUS := $(shell sysctl -n hw.ncpu)
     else
         PLATFORM := $(HOST)
+        CPUS := $(shell nproc)
     endif
 endif
+
+# Speed up builds by using all available CPU cores
+MAKEFLAGS += -j$(CPUS)
 
 # Compiler and flags
 CC = gcc
@@ -42,18 +48,14 @@ CURL_SRC = $(CURL_DIR)/src/curl-$(CURL_VERSION)
 COV_DIR = coverage
 CUSTOM_CSS = $(TEST_DIR)/sqliteai.css
 
-# Files and objects
-ifeq ($(PLATFORM),windows)
-    TEST_TARGET := $(DIST_DIR)/test.exe
-else
-    TEST_TARGET := $(DIST_DIR)/test
-endif
 SRC_FILES = $(wildcard $(SRC_DIR)/*.c)
-TEST_FILES = $(SRC_FILES) $(wildcard $(TEST_DIR)/*.c) $(wildcard $(SQLITE_DIR)/*.c)
+TEST_SRC = $(wildcard $(TEST_DIR)/*.c)
+TEST_FILES = $(SRC_FILES) $(TEST_SRC) $(wildcard $(SQLITE_DIR)/*.c)
 RELEASE_OBJ = $(patsubst %.c, $(BUILD_RELEASE)/%.o, $(notdir $(SRC_FILES)))
 TEST_OBJ = $(patsubst %.c, $(BUILD_TEST)/%.o, $(notdir $(TEST_FILES)))
 COV_FILES = $(filter-out $(SRC_DIR)/lz4.c $(SRC_DIR)/network.c, $(SRC_FILES))
 CURL_LIB = $(CURL_DIR)/$(PLATFORM)/libcurl.a
+TEST_TARGET = $(patsubst %.c,$(DIST_DIR)/%$(EXE), $(notdir $(TEST_SRC)))
 
 # Platform-specific settings
 ifeq ($(PLATFORM),windows)
@@ -64,6 +66,7 @@ ifeq ($(PLATFORM),windows)
     DEF_FILE := $(BUILD_RELEASE)/cloudsync.def
     CFLAGS += -DCURL_STATICLIB
     CURL_CONFIG = --with-schannel CFLAGS="-DCURL_STATICLIB"
+    EXE = .exe
 else ifeq ($(PLATFORM),macos)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     LDFLAGS += -arch x86_64 -arch arm64 -framework Security -dynamiclib -undefined dynamic_lookup
@@ -90,7 +93,7 @@ else ifeq ($(PLATFORM),android)
 
     OPENSSL := $(BIN)/../sysroot/usr/include/openssl
     CC = $(BIN)/$(ARCH)-linux-android26-clang
-    CURL_CONFIG = --host $(ARCH)-$(HOST)-android26 --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(BIN)/$(ARCH)-linux-android26-clang CXX=$(BIN)/$(ARCH)-linux-android26-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
+    CURL_CONFIG = --host $(ARCH)-$(HOST)-android26 --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(CC) CXX=$(BIN)/$(ARCH)-linux-android26-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lcrypto -lssl
 else ifeq ($(PLATFORM),ios)
@@ -146,20 +149,20 @@ endif
 
 # Test executable
 $(TEST_TARGET): $(TEST_OBJ)
-	$(CC) $(TEST_OBJ) -o $@ $(T_LDFLAGS)
+	$(CC) $(filter-out $(patsubst $(DIST_DIR)/%$(EXE),$(BUILD_TEST)/%.o, $(filter-out $@,$(TEST_TARGET))), $(TEST_OBJ)) -o $@ $(T_LDFLAGS)
 
 # Object files
 $(BUILD_RELEASE)/%.o: %.c
 	$(CC) $(CFLAGS) -O3 -fPIC -c $< -o $@
 $(BUILD_TEST)/sqlite3.o: $(SQLITE_DIR)/sqlite3.c
-	$(CC) $(CFLAGS) -DSQLITE_CORE=1 -c $< -o $@
+	$(CC) $(CFLAGS) -DSQLITE_CORE -c $< -o $@
 $(BUILD_TEST)/%.o: %.c
 	$(CC) $(T_CFLAGS) -c $< -o $@
 
 # Run code coverage (--css-file $(CUSTOM_CSS))
 test: $(TARGET) $(TEST_TARGET)
 	$(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();"
-	./$(TEST_TARGET)
+	set -e; for t in $(TEST_TARGET); do ./$$t; done
 ifneq ($(COVERAGE),false)
 	mkdir -p $(COV_DIR)
 	lcov --capture --directory . --output-file $(COV_DIR)/coverage.info $(subst src, --include src,${COV_FILES})
@@ -265,7 +268,7 @@ endif
 
 # Clean up generated files
 clean:
-	rm -rf $(BUILD_DIRS) $(DIST_DIR)/* $(COV_DIR) *.gcda *.gcno *.gcov $(CURL_DIR)/src
+	rm -rf $(BUILD_DIRS) $(DIST_DIR)/* $(COV_DIR) *.gcda *.gcno *.gcov $(CURL_DIR)/src *.sqlite
 
 # Help message
 help:

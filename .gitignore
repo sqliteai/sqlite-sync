@@ -10,3 +10,4 @@
 *.a
 unittest
 /curl/src
+.vscode
