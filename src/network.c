@@ -298,6 +298,7 @@ int network_set_sqlite_result (sqlite3_context *context, NETWORK_RESULT *result)
     switch (result->code) {
         case CLOUDSYNC_NETWORK_OK:
             sqlite3_result_error_code(context, SQLITE_OK);
+            sqlite3_result_int(context, 0);
             rc = 0;
             break;
             
