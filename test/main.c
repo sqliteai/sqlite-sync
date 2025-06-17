@@ -196,7 +196,7 @@ int test_init (const char *db_path, int init) {
     snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s', '%s');", value, value);
     rc = db_exec(db, sql); RCHECK
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM users;", 1); RCHECK
-    rc = db_expect_gt0(db, "SELECT cloudsync_network_sync(250, 10);"); RCHECK
+    rc = db_expect_gt0(db, "SELECT cloudsync_network_sync(250,10);"); RCHECK
     rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM users;"); RCHECK
     rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM activities;"); RCHECK
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM workouts;", 0); RCHECK
@@ -228,20 +228,49 @@ ABORT_TEST
 
 int test_enable_disable(const char *db_path) {
     sqlite3 *db = NULL;
-    int rc = open_load_ext(db_path, &db);
+    int rc = open_load_ext(db_path, &db); RCHECK
+
+    char value[UUID_STR_MAXLEN];
+    cloudsync_uuid_v7_string(value, true);
+    char sql[256];
 
     rc = db_exec(db, "SELECT cloudsync_init('*');"); RCHECK
     rc = db_exec(db, "SELECT cloudsync_disable('users');"); RCHECK
-    rc = db_exec(db, "INSERT INTO users (id, name) VALUES ('12afb', 'provaCmeaakbefa');"); RCHECK
+
+    snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s', '%s');", value, value);
+    rc = db_exec(db, sql); RCHECK
+
     rc = db_exec(db, "SELECT cloudsync_enable('users');"); RCHECK
+
+    snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s-should-sync', '%s-should-sync');", value, value);
+    rc = db_exec(db, sql); RCHECK
 
     // init network with connection string + apikey
     char network_init[512];
     snprintf(network_init, sizeof(network_init), "SELECT cloudsync_network_init('%s?apikey=%s');", getenv("CONNECTION_STRING"), getenv("APIKEY"));
     rc = db_exec(db, network_init); RCHECK
 
-    rc = db_exec(db, "SELECT cloudsync_network_sync();"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_network_send_changes();"); RCHECK
     rc = db_exec(db, "SELECT cloudsync_cleanup('*');");
+
+    sqlite3 *db2 = NULL;
+    rc = open_load_ext(":memory:", &db2); RCHECK
+    rc = db_init(db2); RCHECK
+
+    rc = db_exec(db2, "SELECT cloudsync_init('*');"); RCHECK
+
+    // init network with connection string + apikey
+    rc = db_exec(db2, network_init); RCHECK
+
+    rc = db_expect_gt0(db2, "SELECT cloudsync_network_sync(250,10);"); RCHECK
+
+    snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM users WHERE name='%s';", value);
+    rc = db_expect_int(db2, sql, 0); RCHECK
+
+    snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM users WHERE name='%s-should-sync';", value);
+    rc = db_expect_int(db2, sql, 1); RCHECK
+
+    sqlite3_close(db2);
 
 ABORT_TEST
 }
