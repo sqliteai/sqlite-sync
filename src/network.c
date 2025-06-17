@@ -27,7 +27,7 @@ static size_t cacert_len = sizeof(cacert_pem) - 1;
 #define CLOUDSYNC_SESSION_TOKEN_MAXSIZE         4096
 
 #define DEFAULT_SYNC_WAIT_MS                    100
-#define DEFAULT_SYNC_MAX_RETRIES                10
+#define DEFAULT_SYNC_MAX_RETRIES                1
  
 #define MAX_QUERY_VALUE_LEN                     256
 
@@ -725,13 +725,13 @@ int cloudsync_network_check_internal(sqlite3_context *context) {
 void cloudsync_network_sync (sqlite3_context *context, int wait_ms, int max_retries) {
     cloudsync_network_send_changes(context, 0, NULL);
     
-    int retries = 0;
+    int ntries = 0;
     int nrows = 0;
-    while (retries < max_retries) {
+    while (ntries < max_retries) {
+        if (ntries > 0) sqlite3_sleep(wait_ms);
         nrows = cloudsync_network_check_internal(context);
         if (nrows > 0) break;
-        else sqlite3_sleep(wait_ms);
-        retries++;
+        ntries++;
     }
     
     sqlite3_result_error_code(context, (nrows == -1) ? SQLITE_ERROR : SQLITE_OK);
