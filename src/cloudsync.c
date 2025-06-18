@@ -2159,7 +2159,7 @@ int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int 
             if (rc != SQLITE_DONE) {
                 // don't "break;", the error can be due to a RLS policy.
                 // in case of error we try to apply the following changes
-                printf("cloudsync_payload_apply error in step: (%d) %s\n", rc, sqlite3_errmsg(db));
+                printf("cloudsync_payload_apply error on db_version %lld/%lld: (%d) %s\n", decoded_context.db_version, decoded_context.seq, rc, sqlite3_errmsg(db));
             }
         }
         
@@ -2170,6 +2170,9 @@ int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int 
         stmt_reset(vm);
     }
 
+    char *lasterr = NULL;
+    if (rc != SQLITE_OK && rc != SQLITE_DONE) lasterr = cloudsync_string_dup(sqlite3_errmsg(db), false);
+    
     if (payload_apply_callback) payload_apply_callback(&payload_apply_xdata, &decoded_context, db, data, CLOUDSYNC_PAYLOAD_APPLY_CLEANUP, rc);
 
     if (rc == SQLITE_DONE) rc = SQLITE_OK;
@@ -2193,8 +2196,9 @@ int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int 
     if (clone) cloudsync_memory_free(clone);
     
     if (rc != SQLITE_OK) {
-        sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+        sqlite3_result_error(context, lasterr, -1);
         sqlite3_result_error_code(context, SQLITE_MISUSE);
+        cloudsync_memory_free(lasterr);
         return -1;
     }
     
