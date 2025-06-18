@@ -211,6 +211,8 @@ sqlite3_int64 dbutils_select (sqlite3 *db, const char *sql, const char **values,
 // compares two SQLite values and returns an integer indicating the comparison result
 int dbutils_value_compare (sqlite3_value *lvalue, sqlite3_value *rvalue) {
     if (lvalue == rvalue) return 0;
+    if (!lvalue) return -1;
+    if (!rvalue) return 1;
     
     int l_type = (lvalue) ? sqlite3_value_type(lvalue) : SQLITE_NULL;
     int r_type = sqlite3_value_type(rvalue);
