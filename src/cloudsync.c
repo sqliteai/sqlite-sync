@@ -2993,7 +2993,7 @@ void cloudsync_init (sqlite3_context *context, const char *table, const char *al
     }
     
     if (rc == SQLITE_OK) dbutils_update_schema_hash(db, &data->schema_hash);
-    else sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    else sqlite3_exec(db, "ROLLBACK TO cloudsync_init; RELEASE cloudsync_init", NULL, NULL, NULL);
 }
 
 void cloudsync_init3 (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -3042,7 +3042,7 @@ void cloudsync_begin_alter (sqlite3_context *context, int argc, sqlite3_value **
     if (cloudsync_context_init(db, data, context) == NULL) {
         sqlite3_result_error(context, "Unable to init the cloudsync context.", -1);
         sqlite3_result_error_code(context, SQLITE_MISUSE);
-        goto cleanup_begin_alter;
+        return;
     }
     
     // create a savepoint to manage the alter operations as a transaction
@@ -3083,7 +3083,7 @@ void cloudsync_begin_alter (sqlite3_context *context, int argc, sqlite3_value **
     return;
     
 rollback_begin_alter:
-    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    sqlite3_exec(db, "ROLLBACK TO cloudsync_alter; RELEASE cloudsync_alter;", NULL, NULL, NULL);
 
 cleanup_begin_alter:
     sqlite3_free_table(result);
@@ -3143,7 +3143,7 @@ void cloudsync_commit_alter (sqlite3_context *context, int argc, sqlite3_value *
     return;
     
 rollback_finalize_alter:
-    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    sqlite3_exec(db, "ROLLBACK TO cloudsync_alter; RELEASE cloudsync_alter;", NULL, NULL, NULL);
     if (table) {
         sqlite3_free_table(table->pk_name);
         table->pk_name = NULL;
