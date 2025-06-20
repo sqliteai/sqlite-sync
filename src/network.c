@@ -622,6 +622,20 @@ void cloudsync_network_set_apikey (sqlite3_context *context, int argc, sqlite3_v
 
 // MARK: -
 
+void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    
+    char *sql = "SELECT max(db_version), hex(site_id) FROM cloudsync_changes() WHERE site_id == (SELECT site_id FROM cloudsync_site_id WHERE rowid=0)";
+    int last_local_change = (int)dbutils_int_select(db, sql);
+    if (last_local_change == 0) {
+        sqlite3_result_int(context, 0);
+        return;
+    }
+    
+    int sent_db_version = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_SEND_DBVERSION);
+    sqlite3_result_int(context, (sent_db_version < last_local_change));
+}
+
 void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_send_changes");
     
@@ -787,6 +801,9 @@ int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
     if (rc != SQLITE_OK) return rc;
     
     rc = dbutils_register_function(db, "cloudsync_network_set_apikey", cloudsync_network_set_apikey, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    
+    rc = dbutils_register_function(db, "cloudsync_network_has_unsent_changes", cloudsync_network_has_unsent_changes, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
     rc = dbutils_register_function(db, "cloudsync_network_send_changes", cloudsync_network_send_changes, 0, pzErrMsg, ctx, NULL);
