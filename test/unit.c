@@ -994,25 +994,6 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     if (print_results) printf("New uuid: %s\n", uuid);
     cloudsync_memory_free(uuid);
     
-    rc = sqlite3_exec(db, "SELECT cloudsync_init('*');", NULL, NULL, NULL);
-    if (rc != SQLITE_OK) goto abort_test_functions;
-    rc = sqlite3_exec(db, "INSERT INTO tbl1 (col1, col2) VALUES ('abc123', 'qwe321');", NULL, NULL, NULL);
-    sqlite3_int64 nrows1 = dbutils_int_select(db, "SELECT count(*) FROM tbl1;");
-    if (nrows1 != 1) goto abort_test_functions;
-    char *siteid1 = dbutils_text_select(db, "SELECT hex(cloudsync_siteid());");
-    sqlite3_int64 nmaster1 = dbutils_int_select(db, "SELECT count(*) FROM sqlite_master;");
-    rc = sqlite3_exec(db, "SELECT cloudsync_logout();", NULL, NULL, NULL);
-    char *siteid2 = dbutils_text_select(db, "SELECT hex(cloudsync_siteid());");
-    sqlite3_int64 nmaster2 = dbutils_int_select(db, "SELECT count(*) FROM sqlite_master;");
-    sqlite3_int64 nrows2 = dbutils_int_select(db, "SELECT count(*) FROM tbl1;");
-    int siteidcmp = strcmp(siteid1, siteid2);
-    cloudsync_memory_free(siteid1);
-    cloudsync_memory_free(siteid2);
-    if (rc != SQLITE_OK) goto abort_test_functions;
-    if (siteidcmp == 0) goto abort_test_functions;
-    if (nmaster1 != nmaster2) goto abort_test_functions;
-    if (nrows2 != 0) goto abort_test_functions;
-    
     return true;
     
 abort_test_functions:

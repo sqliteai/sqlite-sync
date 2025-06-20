@@ -3149,90 +3149,6 @@ rollback_finalize_alter:
         table->pk_name = NULL;
     }
 }
-
-/**
- * Cleanup all local data from cloudsync-enabled tables, so the database can be safely reused
- * by another user without exposing any data from the previous session.
- *
- * Warning: this function deletes all data from the tables. Use with caution.
- */
-void cloudsync_logout (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    bool completed = false;
-    char *errmsg = NULL;
-    sqlite3 *db = sqlite3_context_db_handle(context);
-
-    // if the network layer is enabled, remove the token or apikey
-    #ifndef CLOUDSYNC_OMIT_NETWORK
-    sqlite3_exec(db, "SELECT cloudsync_network_set_token('');", NULL, NULL, NULL);
-    #endif
-    
-    // get the list of cloudsync-enabled tables
-    char *sql = "SELECT tbl_name, key, value FROM cloudsync_table_settings;";
-    char **result = NULL;
-    int nrows, ncols;
-    int rc = sqlite3_get_table(db, sql, &result, &nrows, &ncols, NULL);
-    if (rc != SQLITE_OK) {
-        errmsg = cloudsync_memory_mprintf("Unable to get current cloudsync configuration. %s", sqlite3_errmsg(db));
-        goto finalize;
-    }
-    
-    // run everything in a savepoint
-    rc = sqlite3_exec(db, "SAVEPOINT cloudsync_logout_sp;", NULL, NULL, NULL);
-    if (rc != SQLITE_OK) {
-        errmsg = cloudsync_memory_mprintf("Unable to create cloudsync_logout savepoint. %s", sqlite3_errmsg(db));
-        return;
-    }
-
-    // disable cloudsync for all the previously enabled tables: cloudsync_cleanup('*')
-    rc = sqlite3_exec(db, "SELECT cloudsync_cleanup('*')", NULL, NULL, NULL);
-    if (rc != SQLITE_OK) {
-        errmsg = cloudsync_memory_mprintf("Unable to cleanup current cloudsync configuration. %s", sqlite3_errmsg(db));
-        goto finalize;
-    }
-    
-    // delete all the local data for each previously enabled table
-    // re-enable cloudsync on previously enabled tables
-    for (int i = 1; i <= nrows; i++) {
-        char *tbl_name  = result[i * ncols + 0];
-        char *key       = result[i * ncols + 1];
-        char *value     = result[i * ncols + 2];
-        
-        if (strcmp(key, "algo") != 0) continue;
-        
-        sql = cloudsync_memory_mprintf("DELETE FROM \"%w\";", tbl_name);
-        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-        cloudsync_memory_free(sql);
-        if (rc != SQLITE_OK) {
-            errmsg = cloudsync_memory_mprintf("Unable to delete data from table %s. %s", tbl_name, sqlite3_errmsg(db));
-            goto finalize;
-        }
-        
-        sql = cloudsync_memory_mprintf("SELECT cloudsync_init(\"%w\", \"%w\", 1);", tbl_name, value);
-        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-        cloudsync_memory_free(sql);
-        if (rc != SQLITE_OK) {
-            errmsg = cloudsync_memory_mprintf("Unable to enable cloudsync on table %s. %s", tbl_name, sqlite3_errmsg(db));
-            goto finalize;
-        }
-    }
-    
-    completed = true;
-        
-finalize:
-    if (completed) {
-        sqlite3_exec(db, "RELEASE cloudsync_logout_sp;", NULL, NULL, NULL);
-    } else {
-        // cleanup:
-        // ROLLBACK TO command reverts the state of the database back to what it was just after the corresponding SAVEPOINT
-        // then RELEASE to remove the SAVEPOINT from the transaction stack
-        sqlite3_exec(db, "ROLLBACK TO cloudsync_logout_sp;", NULL, NULL, NULL);
-        sqlite3_exec(db, "RELEASE cloudsync_logout_sp;", NULL, NULL, NULL);
-        sqlite3_result_error(context, errmsg, -1);
-        sqlite3_result_error_code(context, rc);
-    }
-    sqlite3_free_table(result);
-    cloudsync_memory_free(errmsg);
-}
     
 // MARK: - Main Entrypoint -
 
@@ -3350,9 +3266,6 @@ APIEXPORT int sqlite3_cloudsync_init (sqlite3 *db, char **pzErrMsg, const sqlite
     if (rc != SQLITE_OK) return rc;
     
     rc = dbutils_register_function(db, "cloudsync_seq", cloudsync_seq, 0, pzErrMsg, ctx, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
-    rc = dbutils_register_function(db, "cloudsync_logout", cloudsync_logout, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
 
     // NETWORK LAYER
