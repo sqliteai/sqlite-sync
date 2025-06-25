@@ -189,6 +189,9 @@ jobs:
             | del(.devDependencies.shx)
             ' "$PKG" > "$TMP" && mv "$TMP" "$PKG"
 
+          sed 's/@sqlite\.org\/sqlite-wasm/@cloudsync\/sqlite-wasm/g' sqlite-wasm/README.md > sqlite-wasm/README.tmp
+          echo -e "# sqlite-sync WASM $(make version)\nThis README and the TypeScript types are from the [official SQLite wasm repository](https://github.com/sqlite/sqlite-wasm)\n\n$(cat sqlite-wasm/README.tmp)" > sqlite-wasm/README.md
+          rm sqlite-wasm/README.tmp
           cd sqlite-wasm && npm i && npm run publint && npm run check-types && npm pack
 
       - uses: actions/upload-artifact@v4.6.2
