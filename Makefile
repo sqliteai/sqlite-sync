@@ -9,7 +9,7 @@ SQLITE3 ?= sqlite3
 CURL_VERSION ?= 8.12.1
 
 # set sqlite version for WASM static build
-SQLITE_VERSION ?= 3.50.0
+SQLITE_VERSION ?= 3.49.2
 
 # Set default platform if not specified
 ifeq ($(OS),Windows_NT)
