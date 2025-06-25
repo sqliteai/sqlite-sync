@@ -144,7 +144,7 @@ jobs:
         with:
           path: coverage
 
-      - name: wasm npm build
+      - name: wasm npm pack
         if: matrix.name == 'wasm'
         run: |
           git clone https://github.com/sqlite/sqlite-wasm.git sqlite-wasm
@@ -159,7 +159,7 @@ jobs:
           DESC="SQLite Wasm compiled with the automatically initialized cloudsync extension. Conveniently packaged as an ES Module for effortless integration."
           
           jq \
-            --arg name "cloudsync/sqlite-wasm" \
+            --arg name "@cloudsync/sqlite-wasm" \
             --arg version "$(make sqlite_version)+cloudsync-$(make version)" \
             --arg desc "$DESC" \
             --argjson keywords '["offsync","cloudsync","sqliteai"]' \
