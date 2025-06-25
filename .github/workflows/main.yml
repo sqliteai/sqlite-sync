@@ -155,7 +155,7 @@ jobs:
           rm -rf sqlite-wasm/sqlite-wasm/*
           unzip dist/sqlite-wasm.zip -d sqlite-wasm/tmp
           mv sqlite-wasm/tmp/sqlite-wasm-*/jswasm sqlite-wasm/sqlite-wasm
-          rm sqlite-wasm/tmp sqlite-wasm/bin sqlite-wasm/demo
+          rm -rf sqlite-wasm/tmp sqlite-wasm/bin sqlite-wasm/demo
 
           cd sqlite-wasm && npm i && npm run fix && npm run publint && npm run check-types && cd ..
 
@@ -252,7 +252,8 @@ jobs:
           exit 1
 
       - name: publish sqlite-wasm to npm
-        run: ls -lah artifacts #npm publish ./artifacts/your-package-1.0.0.tgz
+        #if: steps.tag.outputs.version != ''
+        run: cd artifacts/cloudsync-wasm && ls -lah #npm publish ./artifacts/your-package-1.0.0.tgz
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           
