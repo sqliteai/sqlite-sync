@@ -155,7 +155,6 @@ jobs:
           rm -rf sqlite-wasm/sqlite-wasm/*
           unzip dist/sqlite-wasm.zip -d sqlite-wasm/tmp
           mv sqlite-wasm/tmp/sqlite-wasm-*/jswasm sqlite-wasm/sqlite-wasm
-          rm -rf sqlite-wasm/tmp sqlite-wasm/bin sqlite-wasm/demo
 
           cd sqlite-wasm && npm i && npm run fix && npm run publint && npm run check-types && cd ..
 
@@ -165,7 +164,7 @@ jobs:
           DESC="SQLite Wasm compiled with the automatically initialized cloudsync extension. Conveniently packaged as an ES Module for effortless integration."
           
           jq \
-            --arg name "@cloudsync/sqlite-wasm" \
+            --arg name "@sqliteai/cloudsync-wasm" \
             --arg version "$(make sqlite_version)+cloudsync-$(make version)" \
             --arg desc "$DESC" \
             --argjson keywords '["offsync","cloudsync","sqliteai"]' \
@@ -195,9 +194,9 @@ jobs:
             | del(.devDependencies.shx)
             ' "$PKG" > "$TMP" && mv "$TMP" "$PKG"
 
-          sed 's/@sqlite\.org\/sqlite-wasm/@cloudsync\/sqlite-wasm/g' sqlite-wasm/README.md > sqlite-wasm/README.tmp
+          sed 's/@sqlite\.org\/sqlite-wasm/@sqliteai\/cloudsync-wasm/g' sqlite-wasm/README.md > sqlite-wasm/README.tmp
           echo -e "# sqlite-sync WASM $(make version)\nThis README and the TypeScript types are from the [official SQLite wasm repository](https://github.com/sqlite/sqlite-wasm)\n\n$(cat sqlite-wasm/README.tmp)" > sqlite-wasm/README.md
-          rm sqlite-wasm/README.tmp sqlite-wasm/package-lock.json
+          rm -rf sqlite-wasm/tmp sqlite-wasm/bin sqlite-wasm/demo sqlite-wasm/README.tmp sqlite-wasm/package-lock.json
           cd sqlite-wasm && npm pack
 
       - uses: actions/upload-artifact@v4.6.2
