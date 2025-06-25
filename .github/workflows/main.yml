@@ -147,7 +147,11 @@ jobs:
       - name: wasm npm pack
         if: matrix.name == 'wasm'
         run: |
-          git clone https://github.com/sqlite/sqlite-wasm.git sqlite-wasm
+          TAG=$(git ls-remote --tags https://github.com/sqlite/sqlite-wasm.git | \
+            awk -v ver=$(make sqlite_version) -F'/' '$NF ~ ver"-build[0-9]+$" {print $NF}' | \
+            sort -V | \
+            tail -n1)
+          git clone --branch "$TAG" --depth 1 https://github.com/sqlite/sqlite-wasm.git sqlite-wasm
           rm -rf sqlite-wasm/sqlite-wasm/*
           unzip dist/sqlite-wasm.zip -d sqlite-wasm/tmp
           mv sqlite-wasm/tmp/sqlite-wasm-*/jswasm sqlite-wasm/sqlite-wasm
@@ -207,7 +211,7 @@ jobs:
     runs-on: ubuntu-latest
     name: release
     needs: build
-    if: github.ref == 'refs/heads/main'
+    #if: github.ref == 'refs/heads/main'
 
     env:
       GH_TOKEN: ${{ github.token }}
@@ -221,12 +225,15 @@ jobs:
           path: artifacts
 
       - name: setup GitHub Pages
+        if: false
         uses: actions/configure-pages@v5
 
       - name: deploy coverage to GitHub Pages
+        if: false
         uses: actions/deploy-pages@v4.0.5
 
       - name: release tag version from cloudsync.h
+        if: false
         id: tag
         run: |
           VERSION=$(make version)
@@ -241,6 +248,11 @@ jobs:
           fi
           echo "❌ CLOUDSYNC_VERSION not found in cloudsync.h"
           exit 1
+
+      - name: publish sqlite-wasm to npm
+        run: ls -lah artifacts #npm publish ./artifacts/your-package-1.0.0.tgz
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           
       - name: zip artifacts
         run: |
