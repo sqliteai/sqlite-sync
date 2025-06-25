@@ -158,12 +158,12 @@ else
 EMSDK := $(BUILD_WASM)/emsdk
 $(EMSDK):
 	git clone https://github.com/emscripten-core/emsdk.git $(EMSDK)
-	cd $(EMSDK) && ./emsdk install latest && ./emsdk activate latest && source ./emsdk_env.sh
+	cd $(EMSDK) && ./emsdk install latest && ./emsdk activate latest && . ./emsdk_env.sh
 
 SQLITE_SRC := $(BUILD_WASM)/sqlite
 $(SQLITE_SRC): $(EMSDK)
 	git clone --branch version-$(SQLITE_VERSION) --depth 1 https://github.com/sqlite/sqlite.git $(SQLITE_SRC)
-	source ./$(EMSDK)/emsdk_env.sh && cd $(SQLITE_SRC) && ./configure --enable-all
+	. ./$(EMSDK)/emsdk_env.sh && cd $(SQLITE_SRC) && ./configure --enable-all
 
 $(TARGET): $(SQLITE_SRC) $(SRC_FILES)
 	cd $(SQLITE_SRC)/ext/wasm && $(MAKE) dist sqlite3_wasm_extra_init.c=../../../../../src/wasm.c
