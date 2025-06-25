@@ -156,15 +156,11 @@ jobs:
           PKG=sqlite-wasm/package.json
           TMP=sqlite-wasm/package.tmp.json
           
-          # Get versions from make commands
-          SQLITE_VERSION=$(make sqlite_version)
-          CLOUDSYNC_VERSION=$(make version)
-          
           DESC="SQLite Wasm compiled with the automatically initialized cloudsync extension. Conveniently packaged as an ES Module for effortless integration."
           
           jq \
             --arg name "cloudsync/sqlite-wasm" \
-            --arg version "${SQLITE_VERSION}+cloudsync-${CLOUDSYNC_VERSION}" \
+            --arg version "$(make sqlite_version)+cloudsync-$(make version)" \
             --arg desc "$DESC" \
             --argjson keywords '["offsync","cloudsync","sqliteai"]' \
             --arg repo_url "git+https://github.com/sqliteai/sqlite-sync.git" \
@@ -193,7 +189,7 @@ jobs:
             | del(.devDependencies.shx)
             ' "$PKG" > "$TMP" && mv "$TMP" "$PKG"
 
-          cd sqlite-wasm && npm i && npm run fix && npm run publint && npm run check-types && npm pack
+          cd sqlite-wasm && npm i && npm run publint && npm run check-types && npm pack
 
       - uses: actions/upload-artifact@v4.6.2
         if: always()
