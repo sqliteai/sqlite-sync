@@ -144,13 +144,64 @@ jobs:
         with:
           path: coverage
 
+      - name: wasm npm build
+        if: matrix.name == 'wasm'
+        run: |
+          git clone https://github.com/sqlite/sqlite-wasm.git sqlite-wasm
+          rm -rf sqlite-wasm/sqlite-wasm/*
+          unzip dist/sqlite-wasm.zip -d sqlite-wasm/tmp
+          mv sqlite-wasm/tmp/sqlite-wasm-*/jswasm sqlite-wasm/sqlite-wasm
+          rm -rf sqlite-wasm/tmp sqlite-wasm/bin sqlite-wasm/demo sqlite-wasm/package-lock.json
+
+          PKG=sqlite-wasm/package.json
+          TMP=sqlite-wasm/package.tmp.json
+          
+          # Get versions from make commands
+          SQLITE_VERSION=$(make sqlite_version)
+          CLOUDSYNC_VERSION=$(make version)
+          
+          DESC="SQLite Wasm compiled with the automatically initialized cloudsync extension. Conveniently packaged as an ES Module for effortless integration."
+          
+          jq \
+            --arg name "cloudsync/sqlite-wasm" \
+            --arg version "${SQLITE_VERSION}+cloudsync-${CLOUDSYNC_VERSION}" \
+            --arg desc "$DESC" \
+            --argjson keywords '["offsync","cloudsync","sqliteai"]' \
+            --arg repo_url "git+https://github.com/sqliteai/sqlite-sync.git" \
+            --arg author "Gioele Cantoni (gioele@sqlitecloud.io)" \
+            --arg bugs_url "https://github.com/sqliteai/sqlite-sync/issues" \
+            --arg homepage "https://github.com/sqliteai/sqlite-sync#readme" \
+            '
+            .name = $name
+            | .version = $version
+            | .description = $desc
+            | .keywords += $keywords
+            | del(.bin)
+            | .scripts |= with_entries(select(
+                  .key != "build"
+                and .key != "start"
+                and .key != "start:node"
+                and .key != "prepublishOnly"
+                and .key != "deploy"
+              ))
+            | .repository.url = $repo_url
+            | .author = $author
+            | .bugs.url = $bugs_url
+            | .homepage = $homepage
+            | del(.devDependencies.decompress)
+            | del(.devDependencies["http-server"])
+            | del(.devDependencies.shx)
+            ' "$PKG" > "$TMP" && mv "$TMP" "$PKG"
+
+          cd sqlite-wasm && npm i && npm run fix && npm run publint && npm run check-types && npm pack
+
       - uses: actions/upload-artifact@v4.6.2
         if: always()
         with:
           name: cloudsync-${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
           path: |
             dist/cloudsync.*
-            dist/sqlite-wasm.zip
+            sqlite-wasm/*.tgz
           if-no-files-found: error
 
   release:
@@ -179,8 +230,7 @@ jobs:
       - name: release tag version from cloudsync.h
         id: tag
         run: |
-          FILE="src/cloudsync.h"
-          VERSION=$(grep -oP '#define CLOUDSYNC_VERSION\s+"\K[^"]+' "$FILE")
+          VERSION=$(make version)
           if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             LATEST=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/latest | jq -r '.name')
             if [[ "$VERSION" != "$LATEST" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then

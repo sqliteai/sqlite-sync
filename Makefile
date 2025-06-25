@@ -289,6 +289,12 @@ endif
 	mv $(CURL_SRC)/lib/.libs/libcurl.a $(CURL_DIR)/$(PLATFORM)
 	rm -rf $(CURL_DIR)/src
 
+# Tools
+sqlite_version: 
+	@echo $(SQLITE_VERSION)
+version:
+	@echo $(shell sed -n 's/^#define CLOUDSYNC_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' src/cloudsync.h)
+
 # Clean up generated files
 clean:
 	rm -rf $(BUILD_DIRS) $(DIST_DIR)/* $(COV_DIR) *.gcda *.gcno *.gcov $(CURL_DIR)/src *.sqlite $(BUILD_WASM)
