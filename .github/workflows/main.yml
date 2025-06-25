@@ -43,6 +43,8 @@ jobs:
           - os: macos-latest
             name: isim
             make: PLATFORM=isim
+          - os: ubuntu-latest
+            name: wasm
 
     defaults:
       run:
@@ -69,6 +71,10 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: make curl/windows/libcurl.a
         shell: msys2 {0}
+
+      - name: wasm install wabt
+        if: matrix.name == 'wasm'
+        run: apt install wabt
 
       - name: build sqlite-sync
         run: make extension ${{ matrix.make && matrix.make || ''}}
@@ -141,7 +147,9 @@ jobs:
         if: always()
         with:
           name: cloudsync-${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
-          path: dist/cloudsync.*
+          path: |
+            dist/cloudsync.*
+            dist/sqlite-wasm.zip
           if-no-files-found: error
 
   release:

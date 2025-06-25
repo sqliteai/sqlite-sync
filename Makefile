@@ -8,6 +8,9 @@ SQLITE3 ?= sqlite3
 # set curl version to download and build
 CURL_VERSION ?= 8.12.1
 
+# set sqlite version for WASM static build
+SQLITE_VERSION ?= 3.50.1
+
 # Set default platform if not specified
 ifeq ($(OS),Windows_NT)
     PLATFORM := windows
@@ -47,6 +50,7 @@ CURL_DIR = curl
 CURL_SRC = $(CURL_DIR)/src/curl-$(CURL_VERSION)
 COV_DIR = coverage
 CUSTOM_CSS = $(TEST_DIR)/sqliteai.css
+BUILD_WASM = build/wasm
 
 SRC_FILES = $(wildcard $(SRC_DIR)/*.c)
 TEST_SRC = $(wildcard $(TEST_DIR)/*.c)
@@ -110,6 +114,8 @@ else ifeq ($(PLATFORM),isim)
     T_LDFLAGS = -framework Security
     CFLAGS += -arch x86_64 -arch arm64 $(SDK)
     CURL_CONFIG = --host=arm64-apple-darwin --with-secure-transport CFLAGS="-arch x86_64 -arch arm64 -isysroot $$(xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0"
+else ifeq ($(PLATFORM),wasm)
+    TARGET := $(DIST_DIR)/sqlite-wasm.zip
 else # linux
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lssl -lcrypto
@@ -127,7 +133,7 @@ endif
 # Windows .def file generation
 $(DEF_FILE):
 ifeq ($(PLATFORM),windows)
-	@echo "LIBRARY js.dll" > $@
+	@echo "LIBRARY cloudsync.dll" > $@
 	@echo "EXPORTS" >> $@
 	@echo "    sqlite3_cloudsync_init" >> $@
 endif
@@ -139,12 +145,29 @@ $(shell mkdir -p $(BUILD_DIRS) $(DIST_DIR))
 extension: $(TARGET)
 all: $(TARGET) 
 
+ifneq ($(PLATFORM),wasm)
 # Loadable library
 $(TARGET): $(RELEASE_OBJ) $(DEF_FILE) $(CURL_LIB)
 	$(CC) $(RELEASE_OBJ) $(DEF_FILE) -o $@ $(LDFLAGS)
 ifeq ($(PLATFORM),windows)
     # Generate import library for Windows
-	dlltool -D $@ -d $(DEF_FILE) -l $(DIST_DIR)/js.lib
+	dlltool -D $@ -d $(DEF_FILE) -l $(DIST_DIR)/cloudsync.lib
+endif
+else
+#WASM build
+EMSDK := $(BUILD_WASM)/emsdk
+$(EMSDK):
+	git clone https://github.com/emscripten-core/emsdk.git $(EMSDK)
+	cd $(EMSDK) && ./emsdk install latest && ./emsdk activate latest && source ./emsdk_env.sh
+
+SQLITE_SRC := $(BUILD_WASM)/sqlite
+$(SQLITE_SRC): $(EMSDK)
+	git clone --branch version-$(SQLITE_VERSION) --depth 1 https://github.com/sqlite/sqlite.git $(SQLITE_SRC)
+	source ./$(EMSDK)/emsdk_env.sh && cd $(SQLITE_SRC) && ./configure --enable-all
+
+$(TARGET): $(SQLITE_SRC) $(SRC_FILES)
+	cd $(SQLITE_SRC)/ext/wasm && $(MAKE) dist sqlite3_wasm_extra_init.c=../../../../../src/wasm.c
+	mv $(SQLITE_SRC)/ext/wasm/sqlite-wasm-*.zip $(TARGET)
 endif
 
 # Test executable
@@ -268,7 +291,7 @@ endif
 
 # Clean up generated files
 clean:
-	rm -rf $(BUILD_DIRS) $(DIST_DIR)/* $(COV_DIR) *.gcda *.gcno *.gcov $(CURL_DIR)/src *.sqlite
+	rm -rf $(BUILD_DIRS) $(DIST_DIR)/* $(COV_DIR) *.gcda *.gcno *.gcov $(CURL_DIR)/src *.sqlite $(BUILD_WASM)
 
 # Help message
 help:
@@ -283,6 +306,7 @@ help:
 	@echo "  android (needs ARCH to be set to x86_64 or arm64-v8a and ANDROID_NDK to be set)"
 	@echo "  ios (only on macOS)"
 	@echo "  isim (only on macOS)"
+	@echo "  wasm (needs wabt[brew install wabt/apt install wabt])"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       				- Build the extension (default)"
