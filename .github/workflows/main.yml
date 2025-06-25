@@ -45,6 +45,7 @@ jobs:
             make: PLATFORM=isim
           - os: ubuntu-latest
             name: wasm
+            make: PLATFORM=wasm
 
     defaults:
       run:
