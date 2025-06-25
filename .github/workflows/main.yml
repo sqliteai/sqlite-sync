@@ -147,11 +147,7 @@ jobs:
       - name: wasm npm pack
         if: matrix.name == 'wasm'
         run: |
-          TAG=$(git ls-remote --tags https://github.com/sqlite/sqlite-wasm.git | \
-            awk -v ver=$(make sqlite_version) -F'/' '$NF ~ ver"-build[0-9]+$" {print $NF}' | \
-            sort -V | \
-            tail -n1)
-          git clone --branch "$TAG" --depth 1 https://github.com/sqlite/sqlite-wasm.git sqlite-wasm
+          git clone https://github.com/sqlite/sqlite-wasm.git sqlite-wasm
           rm -rf sqlite-wasm/sqlite-wasm/*
           unzip dist/sqlite-wasm.zip -d sqlite-wasm/tmp
           mv sqlite-wasm/tmp/sqlite-wasm-*/jswasm sqlite-wasm/sqlite-wasm
