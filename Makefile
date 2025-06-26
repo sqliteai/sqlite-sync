@@ -166,7 +166,7 @@ $(SQLITE_SRC): $(EMSDK)
 	cd $(EMSDK) && . ./emsdk_env.sh && cd ../sqlite && ./configure --enable-all
 
 $(TARGET): $(SQLITE_SRC) $(SRC_FILES)
-	cd $(SQLITE_SRC)/ext/wasm && $(MAKE) dist sqlite3_wasm_extra_init.c=../../../../../src/wasm.c
+	cd $(SQLITE_SRC)/ext/wasm && $(MAKE) dist sqlite3_wasm_extra_init.c=../../../../../src/wasm.c emcc.jsflags+="-sFETCH -pthread"
 	mv $(SQLITE_SRC)/ext/wasm/sqlite-wasm-*.zip $(TARGET)
 endif
 

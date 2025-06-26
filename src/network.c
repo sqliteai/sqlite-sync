@@ -14,8 +14,14 @@
 #include "cloudsync_private.h"
 #include "netword_private.h"
 
+#ifndef SQLITE_WASM_EXTRA_INIT
 #ifndef CLOUDSYNC_OMIT_CURL
 #include "curl/curl.h"
+#endif
+#else
+#include <stdlib.h>
+#include <emscripten/fetch.h>
+#include <emscripten/emscripten.h>
 #endif
 
 #ifdef __ANDROID__
@@ -127,6 +133,98 @@ static size_t network_receive_callback (void *ptr, size_t size, size_t nmemb, vo
     return (size * nmemb);
 }
 
+#ifdef SQLITE_WASM_EXTRA_INIT
+NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char *custom_header) {
+
+    emscripten_fetch_attr_t attr;
+    emscripten_fetch_attr_init(&attr);
+
+    // Set method
+    if (json_payload || is_post_request) {
+        strcpy(attr.requestMethod, "POST");
+    } else {
+        strcpy(attr.requestMethod, "GET");
+    }
+    attr.attributes = EMSCRIPTEN_FETCH_LOAD_TO_MEMORY | EMSCRIPTEN_FETCH_SYNCHRONOUS;
+
+    // Prepare header array (alternating key, value, NULL-terminated)
+    const char *headers[11];
+    int h = 0;
+
+    // Custom header (must be "Key: Value", split at ':')
+    char *custom_key = NULL;
+    if (custom_header) {
+        const char *colon = strchr(custom_header, ':');
+        if (colon) {
+            size_t klen = colon - custom_header;
+            custom_key = (char *)malloc(klen + 1);
+            strncpy(custom_key, custom_header, klen);
+            custom_key[klen] = 0;
+            const char *custom_val = colon + 1;
+            while (*custom_val == ' ') custom_val++;
+            headers[h++] = custom_key;
+            headers[h++] = custom_val;
+        }
+    }
+
+    // Authorization
+    char auth_header[256];
+    if (authentication) {
+        snprintf(auth_header, sizeof(auth_header), "Bearer %s", authentication);
+        headers[h++] = "Authorization";
+        headers[h++] = auth_header;
+    }
+
+    // Content-Type for JSON
+    if (json_payload) {
+        headers[h++] = "Content-Type";
+        headers[h++] = "application/json";
+    }
+
+    // Accept (always)
+    headers[h++] = "Accept";
+    headers[h++] = "application/octet-stream";
+    headers[h] = 0;
+    attr.requestHeaders = headers;
+
+    // Body
+    if (json_payload) {
+        attr.requestData = json_payload;
+        attr.requestDataSize = strlen(json_payload);
+    } else if (is_post_request) {
+        attr.requestData = "";
+        attr.requestDataSize = 0;
+    }
+
+    emscripten_fetch_t *fetch = emscripten_fetch(&attr, endpoint); // Blocks here until the operation is complete.
+    NETWORK_RESULT result = {0, NULL, 0, NULL, NULL};
+    if (fetch->status == 200) {
+        result.code = (fetch->numBytes > 0) ? CLOUDSYNC_NETWORK_BUFFER : CLOUDSYNC_NETWORK_OK;
+        result.buffer = (char *)malloc(fetch->numBytes + 1);
+        if (result.buffer && fetch->numBytes > 0) {
+            memcpy(result.buffer, fetch->data, fetch->numBytes);
+            result.buffer[fetch->numBytes] = 0;
+            result.blen = fetch->numBytes;
+        } else if (result.buffer) {
+            result.buffer[0] = 0;
+            result.blen = 0;
+        }
+    } else {
+        result.code = CLOUDSYNC_NETWORK_ERROR;
+        if (fetch->statusText && fetch->statusText[0])
+            result.buffer = strdup(fetch->statusText);
+        else
+            result.buffer = strdup("Network error");
+        result.blen = 0;
+    }
+
+    // cleanup
+    emscripten_fetch_close(fetch);
+    if (custom_key) free(custom_key);
+
+    return result;
+}
+#else
 NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char *custom_header) {
     char *buffer = NULL;
     size_t blen = 0;
@@ -205,6 +303,7 @@ cleanup:
     
     return result;
 }
+#endif
 
 static size_t network_read_callback(char *buffer, size_t size, size_t nitems, void *userdata) {
     network_read_data *rd = (network_read_data *)userdata;
@@ -220,7 +319,45 @@ static size_t network_read_callback(char *buffer, size_t size, size_t nitems, vo
     return to_copy;
 }
 
-bool network_send_buffer (network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size) {
+#ifdef SQLITE_WASM_EXTRA_INIT
+bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size) {
+
+    bool result = false;
+    emscripten_fetch_attr_t attr;
+    emscripten_fetch_attr_init(&attr);
+    strcpy(attr.requestMethod, "PUT");
+    attr.attributes = EMSCRIPTEN_FETCH_LOAD_TO_MEMORY | EMSCRIPTEN_FETCH_SYNCHRONOUS;
+
+    // Prepare headers (alternating key, value, NULL-terminated)
+    // Max 3 headers: Accept, (optional Auth), Content-Type
+    const char *headers[7];
+    int h = 0;
+    headers[h++] = "Accept";
+    headers[h++] = "text/plain";
+    char auth_header[256];
+    if (authentication) {
+        snprintf(auth_header, sizeof(auth_header), "Bearer %s", authentication);
+        headers[h++] = "Authorization";
+        headers[h++] = auth_header;
+    }
+    headers[h++] = "Content-Type";
+    headers[h++] = "application/octet-stream";
+    headers[h] = 0;
+    attr.requestHeaders = headers;
+
+    // Set request body
+    attr.requestData = (const char *)blob;
+    attr.requestDataSize = blob_size;
+
+    emscripten_fetch_t *fetch = emscripten_fetch(&attr, endpoint); // Blocks here until the operation is complete.
+    if (fetch->status == 200) result = true;
+
+    emscripten_fetch_close(fetch);
+
+    return result;
+}
+#else
+bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size) {
     struct curl_slist *headers = NULL;
     curl_mime *mime = NULL;
     bool result = false;
@@ -292,6 +429,7 @@ cleanup:
     return result;
 }
 #endif
+#endif
 
 int network_set_sqlite_result (sqlite3_context *context, NETWORK_RESULT *result) {
     int rc = 0;
@@ -360,6 +498,9 @@ int network_extract_query_param(const char *query, const char *key, char *output
 
     size_t key_len = strlen(key);
     const char *p = query;
+    #ifdef SQLITE_WASM_EXTRA_INIT
+    if (*p == '?') p++;
+    #endif
 
     while (p && *p) {
         // Find the start of a key=value pair
@@ -394,6 +535,19 @@ int network_extract_query_param(const char *query, const char *key, char *output
 }
 
 #ifndef CLOUDSYNC_OMIT_CURL
+
+#ifdef SQLITE_WASM_EXTRA_INIT
+static char *substr(const char *start, const char *end) {
+    size_t len = end - start;
+    char *out = (char *)malloc(len + 1);
+    if (out) {
+        memcpy(out, start, len);
+        out[len] = 0;
+    }
+    return out;
+}
+#endif
+
 bool network_compute_endpoints (sqlite3_context *context, network_data *data, const char *conn_string) {
     // compute endpoints
     bool result = false;
@@ -410,12 +564,15 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     
     char *conn_string_https = NULL;
     
+    #ifndef SQLITE_WASM_EXTRA_INIT
     CURLUcode rc = CURLUE_OUT_OF_MEMORY;
     CURLU *url = curl_url();
     if (!url) goto finalize;
+    #endif
     
     conn_string_https = cloudsync_string_replace_prefix(conn_string, "sqlitecloud://", "https://");
     
+    #ifndef SQLITE_WASM_EXTRA_INIT
     // set URL: https://UUID.g5.sqlite.cloud:443/chinook.sqlite?apikey=hWDanFolRT9WDK0p54lufNrIyfgLZgtMw6tb6fbPmpo
     rc = curl_url_set(url, CURLUPART_URL, conn_string_https, 0);
     if (rc != CURLE_OK) goto finalize;
@@ -440,6 +597,38 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     // apikey=hWDanFolRT9WDK0p54lufNrIyfgLZgtMw6tb6fbPmpo (OPTIONAL)
     rc = curl_url_get(url, CURLUPART_QUERY, &query, 0);
     if (rc != CURLE_OK && rc != CURLUE_NO_QUERY) goto finalize;
+    #else
+    // Parse: scheme://host[:port]/path?query
+    const char *p = strstr(conn_string_https, "://");
+    if (!p) goto finalize;
+    scheme = substr(conn_string_https, p);
+    p += 3;
+    const char *host_start = p;
+    const char *host_end = strpbrk(host_start, ":/?");
+    if (!host_end) goto finalize;
+    host = substr(host_start, host_end);
+    p = host_end;
+    if (*p == ':') {
+        ++p;
+        const char *port_end = strpbrk(p, "/?");
+        if (!port_end) goto finalize;
+        port = substr(p, port_end);
+        p = port_end;
+    }
+    if (*p == '/') {
+        const char *path_start = p;
+        const char *path_end = strchr(path_start, '?');
+        if (!path_end) path_end = path_start + strlen(path_start);
+        database = substr(path_start, path_end);
+        p = path_end;
+    }
+    if (*p == '?') {
+        query = strdup(p);
+    }
+    if (!scheme || !host || !database) goto finalize;
+    if (!port) port = strdup(CLOUDSYNC_DEFAULT_ENDPOINT_PORT);
+    #define port_or_default port
+    #endif
     if (query != NULL) {
         char value[MAX_QUERY_VALUE_LEN];
         if (!authentication && network_extract_query_param(query, "apikey", value, sizeof(value)) == 0) {
@@ -463,8 +652,13 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
 finalize:
     if (result == false) {
         // store proper result code/message
+        #ifndef SQLITE_WASM_EXTRA_INIT
         if (rc != CURLE_OK) sqlite3_result_error(context, curl_url_strerror(rc), -1);
         sqlite3_result_error_code(context, (rc != CURLE_OK) ? SQLITE_ERROR : SQLITE_NOMEM);
+        #else
+        sqlite3_result_error(context, "URL parse error", -1);
+        sqlite3_result_error_code(context, SQLITE_ERROR);
+        #endif
         
         // cleanup memory managed by the extension
         if (authentication) cloudsync_memory_free(authentication);
@@ -485,13 +679,17 @@ finalize:
         data->upload_endpoint = upload_endpoint;
     }
     
-    // cleanup memory managed by libcurl
+    // cleanup memory
+    #ifndef SQLITE_WASM_EXTRA_INIT
+    if (url) curl_url_cleanup(url);
+    #else
+    #define curl_free(x) free(x)
+    #endif
     if (scheme) curl_free(scheme);
     if (host) curl_free(host);
     if (port) curl_free(port);
     if (database) curl_free(database);
     if (query) curl_free(query);
-    if (url) curl_url_cleanup(url);
     if (conn_string_https && conn_string_https != conn_string) cloudsync_memory_free(conn_string_https);
     
     return result;
@@ -518,7 +716,7 @@ network_data *cloudsync_network_data(sqlite3_context *context) {
 void cloudsync_network_init (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_init");
     
-    #ifndef CLOUDSYNC_OMIT_CURL
+    #if !defined(CLOUDSYNC_OMIT_CURL) && !defined(SQLITE_WASM_EXTRA_INIT)
     curl_global_init(CURL_GLOBAL_ALL);
     #endif
     
@@ -583,7 +781,7 @@ void cloudsync_network_cleanup (sqlite3_context *context, int argc, sqlite3_valu
     
     sqlite3_result_int(context, SQLITE_OK);
     
-    #ifndef CLOUDSYNC_OMIT_CURL
+    #if !defined(CLOUDSYNC_OMIT_CURL) && !defined(SQLITE_WASM_EXTRA_INIT)
     curl_global_cleanup();
     #endif
 }

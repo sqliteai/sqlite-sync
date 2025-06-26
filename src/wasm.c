@@ -3,7 +3,6 @@
 #include "sqlite3.h"
 #include <stdio.h>
 
-#define CLOUDSYNC_OMIT_NETWORK
 #include "utils.c"
 #include "network.c"
 #include "dbutils.c"
