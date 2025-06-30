@@ -10,7 +10,7 @@
 #include "vtab.c"
 #include "pk.c"
 #include "lz4.c"
-//ciao
+
 int sqlite3_wasm_extra_init(const char *z) {
     fprintf(stderr, "%s: %s()\n", __FILE__, __func__);
     return sqlite3_auto_extension((void *) sqlite3_cloudsync_init);

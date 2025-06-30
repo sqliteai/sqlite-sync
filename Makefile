@@ -165,8 +165,13 @@ $(SQLITE_SRC): $(EMSDK)
 	git clone --branch version-$(SQLITE_VERSION) --depth 1 https://github.com/sqlite/sqlite.git $(SQLITE_SRC)
 	cd $(EMSDK) && . ./emsdk_env.sh && cd ../sqlite && ./configure --enable-all
 
+WASM_FLAGS = emcc.jsflags += -sFETCH -pthread
+WASM_MAKEFILE = $(SQLITE_SRC)/ext/wasm/GNUMakefile
 $(TARGET): $(SQLITE_SRC) $(SRC_FILES)
-	cd $(SQLITE_SRC)/ext/wasm && $(MAKE) dist sqlite3_wasm_extra_init.c=../../../../../src/wasm.c emcc.jsflags+="-sFETCH -pthread"
+	if ! grep -Fxq '$(WASM_FLAGS)' '$(WASM_MAKEFILE)'; then \
+    	echo '$(WASM_FLAGS)' >> '$(WASM_MAKEFILE)'; \
+	fi
+	cd $(SQLITE_SRC)/ext/wasm && $(MAKE) dist sqlite3_wasm_extra_init.c=../../../../../src/wasm.c
 	mv $(SQLITE_SRC)/ext/wasm/sqlite-wasm-*.zip $(TARGET)
 endif
 
