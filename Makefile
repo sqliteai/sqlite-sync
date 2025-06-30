@@ -168,9 +168,7 @@ $(SQLITE_SRC): $(EMSDK)
 WASM_FLAGS = emcc.jsflags += -sFETCH -pthread
 WASM_MAKEFILE = $(SQLITE_SRC)/ext/wasm/GNUMakefile
 $(TARGET): $(SQLITE_SRC) $(SRC_FILES)
-	if ! grep -Fxq '$(WASM_FLAGS)' '$(WASM_MAKEFILE)'; then \
-    	echo '$(WASM_FLAGS)' >> '$(WASM_MAKEFILE)'; \
-	fi
+	@grep '$(WASM_FLAGS)' '$(WASM_MAKEFILE)' >/dev/null 2>&1 || echo '$(WASM_FLAGS)' >> '$(WASM_MAKEFILE)'
 	cd $(SQLITE_SRC)/ext/wasm && $(MAKE) dist sqlite3_wasm_extra_init.c=../../../../../src/wasm.c
 	mv $(SQLITE_SRC)/ext/wasm/sqlite-wasm-*.zip $(TARGET)
 endif
