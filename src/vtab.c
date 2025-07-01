@@ -137,6 +137,20 @@ char *build_changes_sql (sqlite3 *db, const char *idxs) {
     "changes_query AS ( "
     "    SELECT "
     "        'SELECT "
+    #ifdef SQLITE_WASM_EXTRA_INIT
+    "        ''' || table_name || ''' AS tbl, "
+    "        t1.pk AS pk, "
+    "        t1.col_name AS col_name, "
+    "        cloudsync_col_value(''' || table_name || ''', t1.col_name, t1.pk) AS col_value, "
+    "        t1.col_version AS col_version, "
+    "        t1.db_version AS db_version, "
+    "        site_tbl.site_id AS site_id, "
+    "        t1.seq AS seq, "
+    "        COALESCE(t2.col_version, 1) AS cl "
+    "     FROM ''' || table_meta || ''' AS t1 "
+    "     LEFT JOIN cloudsync_site_id AS site_tbl ON t1.site_id = site_tbl.rowid "
+    "     LEFT JOIN ''' || table_meta || ''' AS t2 ON t1.pk = t2.pk AND t2.col_name = ''" CLOUDSYNC_TOMBSTONE_VALUE "'' "
+    #else
     "        \"' || \"table_name\" || '\" AS tbl, "
     "        t1.pk AS pk, "
     "        t1.col_name AS col_name, "
@@ -149,6 +163,7 @@ char *build_changes_sql (sqlite3 *db, const char *idxs) {
     "     FROM \"' || \"table_meta\" || '\" AS t1 "
     "     LEFT JOIN cloudsync_site_id AS site_tbl ON t1.site_id = site_tbl.rowid "
     "     LEFT JOIN \"' || \"table_meta\" || '\" AS t2 ON t1.pk = t2.pk AND t2.col_name = ''" CLOUDSYNC_TOMBSTONE_VALUE "'' "
+    #endif
     "     WHERE col_value IS NOT ''" CLOUDSYNC_RLS_RESTRICTED_VALUE "''' "
     "    AS query_string FROM table_names "
     "), "

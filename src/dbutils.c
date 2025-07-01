@@ -419,7 +419,11 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
             // the affinity of a column is determined by the declared type of the column,
             // according to the following rules in the order shown:
             // 1. If the declared type contains the string "INT" then it is assigned INTEGER affinity.
+            #ifdef SQLITE_WASM_EXTRA_INIT
+            sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%w') WHERE pk=1 AND \"type\" LIKE '%%INT%%';", name);
+            #else
             sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%w') WHERE pk=1 AND \"type\" LIKE \"%%INT%%\";", name);
+            #endif
             sqlite3_int64 count2 = dbutils_int_select(db, sql);
             if (count == count2) {
                 dbutils_context_result_error(context, "Table %s uses an single-column INTEGER primary key. For CRDT replication, primary keys must be globally unique. Consider using a TEXT primary key with UUIDs or ULID to avoid conflicts across nodes. If you understand the risk and still want to use this INTEGER primary key, set the third argument of the cloudsync_init function to 1 to skip this check.", name);
