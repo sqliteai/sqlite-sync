@@ -3280,7 +3280,6 @@ APIEXPORT int sqlite3_cloudsync_init (sqlite3 *db, char **pzErrMsg, const sqlite
     
     // register eponymous only changes virtual table
     rc = cloudsync_vtab_register_changes (db, data);
-    fprintf(stderr, "clousync.c init - rc: %d\n", rc);
     if (rc != SQLITE_OK) return rc;
     
     // load config, if exists
