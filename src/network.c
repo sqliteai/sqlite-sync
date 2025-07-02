@@ -626,8 +626,7 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
         query = strdup(p);
     }
     if (!scheme || !host || !database) goto finalize;
-    if (!port) port = strdup(CLOUDSYNC_DEFAULT_ENDPOINT_PORT);
-    #define port_or_default port
+    char *port_or_default = port && strcmp(port, "8860") != 0 ? port : CLOUDSYNC_DEFAULT_ENDPOINT_PORT;
     #endif
     if (query != NULL) {
         char value[MAX_QUERY_VALUE_LEN];
