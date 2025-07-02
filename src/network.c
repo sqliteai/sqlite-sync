@@ -145,8 +145,11 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     } else {
         strcpy(attr.requestMethod, "GET");
     }
-    attr.attributes = EMSCRIPTEN_FETCH_LOAD_TO_MEMORY | EMSCRIPTEN_FETCH_SYNCHRONOUS;
-
+    attr.onerror = NULL; // No progress callback
+    attr.onsuccess = NULL; // No success callback
+    attr.onprogress = NULL; // No progress callback
+    attr.attributes = EMSCRIPTEN_FETCH_LOAD_TO_MEMORY | EMSCRIPTEN_FETCH_SYNCHRONOUS | EMSCRIPTEN_FETCH_REPLACE;
+    
     // Prepare header array (alternating key, value, NULL-terminated)
     const char *headers[11];
     int h = 0;
@@ -195,10 +198,27 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
         attr.requestData = "";
         attr.requestDataSize = 0;
     }
-
+    //endpoint = "https://echo.free.beeceptor.com";
     emscripten_fetch_t *fetch = emscripten_fetch(&attr, endpoint); // Blocks here until the operation is complete.
     NETWORK_RESULT result = {0, NULL, 0, NULL, NULL};
+    fprintf(stderr, "network_receive_buffer: %s %s\n", attr.requestMethod, endpoint);
+    fprintf(stderr, "emscripten_fetch returned, fetch pointer: %p\n", fetch);
+    fprintf(stderr, "network_receive_buffer: status %u, numBytes %zu\n", fetch->status, fetch->numBytes);
+    fprintf(stderr, "network_receive_buffer: statusText %s\n", fetch->statusText ? fetch->statusText : "NULL");
+    fprintf(stderr, "network_receive_buffer: readyState %u\n", fetch->readyState);
+    fprintf(stderr, "network_receive_buffer: data pointer %p\n", fetch->data);
+    
+    if (fetch->readyState != 4) {
+        fprintf(stderr, "ERROR: fetch not completed, readyState=%u\n", fetch->readyState);
+        result.code = CLOUDSYNC_NETWORK_ERROR;
+        result.buffer = strdup("Network request did not complete");
+        emscripten_fetch_close(fetch);
+        if (custom_key) free(custom_key);
+        return result;
+    }
+    
     if (fetch->status == 200) {
+        fprintf(stderr, "status is 200 OK\n");
         result.code = (fetch->numBytes > 0) ? CLOUDSYNC_NETWORK_BUFFER : CLOUDSYNC_NETWORK_OK;
         result.buffer = (char *)malloc(fetch->numBytes + 1);
         if (result.buffer && fetch->numBytes > 0) {
@@ -822,7 +842,7 @@ void cloudsync_network_set_apikey (sqlite3_context *context, int argc, sqlite3_v
 void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, sqlite3_value **argv) {
     sqlite3 *db = sqlite3_context_db_handle(context);
     
-    char *sql = "SELECT max(db_version), hex(site_id) FROM cloudsync_changes() WHERE site_id == (SELECT site_id FROM cloudsync_site_id WHERE rowid=0)";
+    char *sql = "SELECT max(db_version), hex(site_id) FROM cloudsync_changes WHERE site_id == (SELECT site_id FROM cloudsync_site_id WHERE rowid=0)";
     int last_local_change = (int)dbutils_int_select(db, sql);
     if (last_local_change == 0) {
         sqlite3_result_int(context, 0);

@@ -360,11 +360,7 @@ char *db_version_build_query (sqlite3 *db) {
     
     // the good news is that the query can be computed in SQLite without the need to do any extra computation from the host language
     const char *sql = "WITH table_names AS ("
-                    #ifdef SQLITE_WASM_EXTRA_INIT
                       "SELECT format('%w', name) as tbl_name "
-                    #else
-                      "SELECT format(\"%w\", name) as tbl_name "
-                    #endif
                       "FROM sqlite_master "
                       "WHERE type='table' "
                       "AND name LIKE '%_cloudsync'"
@@ -3284,6 +3280,7 @@ APIEXPORT int sqlite3_cloudsync_init (sqlite3 *db, char **pzErrMsg, const sqlite
     
     // register eponymous only changes virtual table
     rc = cloudsync_vtab_register_changes (db, data);
+    fprintf(stderr, "clousync.c init - rc: %d\n", rc);
     if (rc != SQLITE_OK) return rc;
     
     // load config, if exists
