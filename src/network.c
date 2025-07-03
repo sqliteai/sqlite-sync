@@ -102,39 +102,10 @@ bool network_data_set_endpoints (network_data *data, char *auth, char *check, ch
 // MARK: - Utils -
 
 #ifndef CLOUDSYNC_OMIT_CURL
-
-static bool network_buffer_check (network_buffer *data, size_t needed) {
-    // alloc/resize buffer
-    if (data->bused + needed > data->balloc) {
-        if (needed < CLOUDSYNC_NETWORK_MINBUF_SIZE) needed = CLOUDSYNC_NETWORK_MINBUF_SIZE;
-        size_t balloc = (data->balloc * 2) + needed;
-        
-        char *buffer = cloudsync_memory_realloc(data->buffer, balloc);
-        if (!buffer) return false;
-        
-        data->buffer = buffer;
-        data->balloc = balloc;
-    }
-    
-    return true;
-}
-
-static size_t network_receive_callback (void *ptr, size_t size, size_t nmemb, void *xdata) {
-    network_buffer *data = (network_buffer *)xdata;
-    
-    size_t ptr_size = (size*nmemb);
-    if (data->zero_term) ptr_size += 1;
-    
-    if (network_buffer_check(data, ptr_size) == false) return -1;
-    memcpy(data->buffer+data->bused, ptr, size*nmemb);
-    data->bused += size*nmemb;
-    if (data->zero_term) data->buffer[data->bused] = 0;
-    
-    return (size * nmemb);
-}
-
 #ifdef SQLITE_WASM_EXTRA_INIT
 NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char *custom_header) {
+    char *buffer = NULL;
+    size_t blen = 0;
 
     emscripten_fetch_attr_t attr;
     emscripten_fetch_attr_init(&attr);
@@ -145,11 +116,8 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     } else {
         strcpy(attr.requestMethod, "GET");
     }
-    attr.onerror = NULL; // No progress callback
-    attr.onsuccess = NULL; // No success callback
-    attr.onprogress = NULL; // No progress callback
     attr.attributes = EMSCRIPTEN_FETCH_LOAD_TO_MEMORY | EMSCRIPTEN_FETCH_SYNCHRONOUS | EMSCRIPTEN_FETCH_REPLACE;
-    
+
     // Prepare header array (alternating key, value, NULL-terminated)
     const char *headers[11];
     int h = 0;
@@ -183,10 +151,7 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
         headers[h++] = "Content-Type";
         headers[h++] = "application/json";
     }
-
-    // Accept (always)
-    headers[h++] = "Accept";
-    headers[h++] = "application/octet-stream";
+    
     headers[h] = 0;
     attr.requestHeaders = headers;
 
@@ -194,48 +159,36 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     if (json_payload) {
         attr.requestData = json_payload;
         attr.requestDataSize = strlen(json_payload);
-    } else if (is_post_request) {
-        attr.requestData = "";
-        attr.requestDataSize = 0;
     }
-    //endpoint = "https://echo.free.beeceptor.com";
+
     emscripten_fetch_t *fetch = emscripten_fetch(&attr, endpoint); // Blocks here until the operation is complete.
     NETWORK_RESULT result = {0, NULL, 0, NULL, NULL};
-    fprintf(stderr, "network_receive_buffer: %s %s\n", attr.requestMethod, endpoint);
-    fprintf(stderr, "emscripten_fetch returned, fetch pointer: %p\n", fetch);
-    fprintf(stderr, "network_receive_buffer: status %u, numBytes %zu\n", fetch->status, fetch->numBytes);
-    fprintf(stderr, "network_receive_buffer: statusText %s\n", fetch->statusText ? fetch->statusText : "NULL");
-    fprintf(stderr, "network_receive_buffer: readyState %u\n", fetch->readyState);
-    fprintf(stderr, "network_receive_buffer: data pointer %p\n", fetch->data);
-    
-    if (fetch->readyState != 4) {
-        fprintf(stderr, "ERROR: fetch not completed, readyState=%u\n", fetch->readyState);
-        result.code = CLOUDSYNC_NETWORK_ERROR;
-        result.buffer = strdup("Network request did not complete");
-        emscripten_fetch_close(fetch);
-        if (custom_key) free(custom_key);
-        return result;
+
+    if(fetch->readyState == 4){
+        buffer = fetch->data;
+        blen = fetch->totalBytes;
     }
     
-    if (fetch->status == 200) {
-        fprintf(stderr, "status is 200 OK\n");
-        result.code = (fetch->numBytes > 0) ? CLOUDSYNC_NETWORK_BUFFER : CLOUDSYNC_NETWORK_OK;
-        result.buffer = (char *)malloc(fetch->numBytes + 1);
-        if (result.buffer && fetch->numBytes > 0) {
-            memcpy(result.buffer, fetch->data, fetch->numBytes);
-            result.buffer[fetch->numBytes] = 0;
-            result.blen = fetch->numBytes;
-        } else if (result.buffer) {
-            result.buffer[0] = 0;
-            result.blen = 0;
-        }
+    if (fetch->status >= 200 && fetch->status < 300) {
+        
+        if (blen > 0 && buffer) {
+            char *buf = (char*)malloc(blen + 1);
+            if (buf) {
+                memcpy(buf, buffer, blen);
+                buf[blen] = 0;
+                result.code = CLOUDSYNC_NETWORK_BUFFER;
+                result.buffer = buf;
+                result.blen = blen;
+                result.xfree = free;
+            } else result.code = CLOUDSYNC_NETWORK_ERROR;
+        } else result.code = CLOUDSYNC_NETWORK_OK;
     } else {
         result.code = CLOUDSYNC_NETWORK_ERROR;
-        if (fetch->statusText && fetch->statusText[0])
+        if (fetch->statusText && fetch->statusText[0]) {
             result.buffer = strdup(fetch->statusText);
-        else
-            result.buffer = strdup("Network error");
-        result.blen = 0;
+        }
+        result.blen = sizeof(fetch->statusText);
+        result.xfree = free;
     }
 
     // cleanup
@@ -245,6 +198,37 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     return result;
 }
 #else
+
+static bool network_buffer_check (network_buffer *data, size_t needed) {
+    // alloc/resize buffer
+    if (data->bused + needed > data->balloc) {
+        if (needed < CLOUDSYNC_NETWORK_MINBUF_SIZE) needed = CLOUDSYNC_NETWORK_MINBUF_SIZE;
+        size_t balloc = data->balloc + needed;
+        
+        char *buffer = cloudsync_memory_realloc(data->buffer, balloc);
+        if (!buffer) return false;
+        
+        data->buffer = buffer;
+        data->balloc = balloc;
+    }
+    
+    return true;
+}
+
+static size_t network_receive_callback (void *ptr, size_t size, size_t nmemb, void *xdata) {
+    network_buffer *data = (network_buffer *)xdata;
+    
+    size_t ptr_size = (size*nmemb);
+    if (data->zero_term) ptr_size += 1;
+    
+    if (network_buffer_check(data, ptr_size) == false) return -1;
+    memcpy(data->buffer+data->bused, ptr, size*nmemb);
+    data->bused += size*nmemb;
+    if (data->zero_term) data->buffer[data->bused] = 0;
+    
+    return (size * nmemb);
+}
+
 NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char *custom_header) {
     char *buffer = NULL;
     size_t blen = 0;
@@ -286,7 +270,7 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     network_buffer netdata = {NULL, 0, 0, (zero_terminated) ? 1 : 0};
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &netdata);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, network_receive_callback);
-    
+
     // add optional JSON payload (implies setting CURLOPT_POST to 1)
     // or set the CURLOPT_POST option
     if (json_payload) {
@@ -346,7 +330,7 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
     emscripten_fetch_attr_t attr;
     emscripten_fetch_attr_init(&attr);
     strcpy(attr.requestMethod, "PUT");
-    attr.attributes = EMSCRIPTEN_FETCH_LOAD_TO_MEMORY | EMSCRIPTEN_FETCH_SYNCHRONOUS;
+    attr.attributes = EMSCRIPTEN_FETCH_LOAD_TO_MEMORY | EMSCRIPTEN_FETCH_SYNCHRONOUS | EMSCRIPTEN_FETCH_REPLACE;
 
     // Prepare headers (alternating key, value, NULL-terminated)
     // Max 3 headers: Accept, (optional Auth), Content-Type
@@ -370,7 +354,7 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
     attr.requestDataSize = blob_size;
 
     emscripten_fetch_t *fetch = emscripten_fetch(&attr, endpoint); // Blocks here until the operation is complete.
-    if (fetch->status == 200) result = true;
+    if (fetch->status >= 200 && fetch->status < 300) result = true;
 
     emscripten_fetch_close(fetch);
 
