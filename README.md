@@ -12,6 +12,15 @@ Under the hood, SQLite Sync uses advanced **CRDT (Conflict-free Replicated Data 
 
 In simple terms, CRDTs make it possible for multiple users to **edit shared data at the same time**, from anywhere, and everything just works.
 
+## Table of Contents
+- [Key Features](#key-features)
+- [Built-in Network Layer](#built-in-network-layer)
+- [Row-Level Security](#row-level-security)
+- [What Can You Build with SQLite Sync?](#what-can-you-build-with-sqlite-sync)
+- [Documentation](#documentation)
+- [Installation](#installation)
+- [Usage](#usage)
+- [License](#license)
 
 ## Key Features
 
@@ -85,7 +94,11 @@ SQLite Sync is ideal for building collaborative and distributed apps across web,
 - **Collaborative Design Tools**: Merge visual edits and annotations offline.
 - **Educational Apps**: Shared learning content with per-student access controls.
 
-## Installation
+## 📋 Documentation
+
+For detailed information on all available functions, their parameters, and examples, refer to the [comprehensive API Reference](./API.md).
+
+## 📦 Installation
 
 ### Pre-built Binaries
 
