@@ -8,12 +8,16 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <utils.h>
+#include "utils.h"
 #include "sqlite3.h"
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <pthread.h>
+#endif
+
+#ifdef CLOUDSYNC_LOAD_FROM_SOURCES
+#include "cloudsync.h"
 #endif
 
 #define PEERS           5
@@ -123,13 +127,17 @@ int open_load_ext(const char *db_path, sqlite3 **out_db) {
     int rc = sqlite3_open(db_path, &db);
     RCHECK
     
+#ifdef CLOUDSYNC_LOAD_FROM_SOURCES
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+#else
     // enable load extension
     rc = sqlite3_enable_load_extension(db, 1);
     RCHECK
 
     rc = db_exec(db, "SELECT load_extension('"EXT_PATH"');");
     RCHECK
-
+#endif
+    
     *out_db = db;
     return rc;
 
@@ -253,6 +261,9 @@ int test_enable_disable(const char *db_path) {
     rc = db_exec(db, "SELECT cloudsync_network_send_changes();"); RCHECK
     rc = db_exec(db, "SELECT cloudsync_cleanup('*');");
 
+    // give the server the time to apply the latest sent changes, it is an async job
+    sqlite3_sleep(5000);
+    
     sqlite3 *db2 = NULL;
     rc = open_load_ext(":memory:", &db2); RCHECK
     rc = db_init(db2); RCHECK
@@ -275,7 +286,7 @@ int test_enable_disable(const char *db_path) {
 ABORT_TEST
 }
 
-int version(){
+int version(void){
     sqlite3 *db = NULL;
     int rc = open_load_ext(":memory:", &db);
 
