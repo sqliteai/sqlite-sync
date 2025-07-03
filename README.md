@@ -12,6 +12,15 @@ Under the hood, SQLite Sync uses advanced **CRDT (Conflict-free Replicated Data 
 
 In simple terms, CRDTs make it possible for multiple users to **edit shared data at the same time**, from anywhere, and everything just works.
 
+## Table of Contents
+- [Key Features](#key-features)
+- [Built-in Network Layer](#built-in-network-layer)
+- [Row-Level Security](#row-level-security)
+- [What Can You Build with SQLite Sync?](#what-can-you-build-with-sqlite-sync)
+- [Documentation](#documentation)
+- [Installation](#installation)
+- [Usage](#usage)
+- [License](#license)
 
 ## Key Features
 
@@ -85,6 +94,10 @@ SQLite Sync is ideal for building collaborative and distributed apps across web,
 - **Collaborative Design Tools**: Merge visual edits and annotations offline.
 - **Educational Apps**: Shared learning content with per-student access controls.
 
+## Documentation
+
+For detailed information on all available functions, their parameters, and examples, refer to the [comprehensive API Reference](./API.md).
+
 ## Installation
 
 ### Pre-built Binaries
@@ -109,8 +122,42 @@ SELECT load_extension('./cloudsync');
 
 ### Usage
 
+Here's a quick example to get started with `sqlite-sync`:
+
+```sql
+-- Load the extension
+.load ./cloudsync
+
+-- Create a table you want to synchronize
+CREATE TABLE IF NOT EXISTS my_data (
+    id TEXT PRIMARY KEY,
+    value TEXT
+);
+
+-- Initialize synchronization for the table
+-- This sets up internal metadata tables and triggers for CRDT functionality.
+SELECT cloudsync_init('my_data');
+
+-- Insert some data. These changes will be tracked for synchronization.
+INSERT INTO my_data (id, value) VALUES (cloudsync_uuid(), 'Hello from device A!');
+
+-- Configure network settings to connect to your SQLite Cloud database.
+-- Replace <your_connection_string> with your actual connection details.
+-- Example: 'sqlitecloud://<projectid>.sqlite.cloud/<db>.sqlite'
+SELECT cloudsync_network_init('<your_connection_string>');
+
+-- Set your API key or authentication token.
+-- Use cloudsync_network_set_token() if you have an access token.
+SELECT cloudsync_network_set_apikey('YOUR_API_KEY');
+
+-- Manually trigger a synchronization cycle.
+-- This sends local changes to the cloud and pulls down remote changes.
+SELECT cloudsync_network_sync();
+
+-- On another device (after loading extension and initializing the same table):
+-- Running SELECT cloudsync_network_sync(); would pull changes from device A.
 ```
 
-// sample code and API explain here
+## License
 
-```
+This project is licensed under the [Elastic License 2.0](./LICENSE.md). You can use, copy, modify, and distribute it under the terms of the license for non-production use. For production or managed service use, please [contact SQLite Cloud, Inc](mailto:info@sqlitecloud.io) for a commercial license.

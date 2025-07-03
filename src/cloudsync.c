@@ -1907,12 +1907,11 @@ bool cloudsync_buffer_check (cloudsync_network_payload *payload, size_t needed) 
     // alloc/resize buffer
     if (payload->bused + needed > payload->balloc) {
         if (needed < CLOUDSYNC_PAYLOAD_MINBUF_SIZE) needed = CLOUDSYNC_PAYLOAD_MINBUF_SIZE;
-        size_t balloc = (payload->balloc * 2) + needed;
+        size_t balloc = payload->balloc + needed;
         
-        char *buffer = cloudsync_memory_alloc(balloc);
+        char *buffer = cloudsync_memory_realloc(payload->buffer, balloc);
         if (!buffer) return cloudsync_buffer_free(payload);
         
-        if (payload->buffer) cloudsync_memory_free(payload->buffer);
         payload->buffer = buffer;
         payload->balloc = balloc;
         if (payload->nrows == 0) payload->bused = sizeof(cloudsync_network_header);
