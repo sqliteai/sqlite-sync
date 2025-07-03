@@ -251,7 +251,6 @@ jobs:
 
       - name: publish sqlite-wasm to npm
         #if: steps.tag.outputs.version != ''
-        if: false
         run: npm publish ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*+cloudsync-*.tgz
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
