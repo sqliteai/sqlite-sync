@@ -226,11 +226,9 @@ jobs:
           path: artifacts
 
       - name: setup GitHub Pages
-        if: false
         uses: actions/configure-pages@v5
 
       - name: deploy coverage to GitHub Pages
-        if: false
         uses: actions/deploy-pages@v4.0.5
 
       - name: release tag version from cloudsync.h
@@ -249,9 +247,15 @@ jobs:
           echo "❌ CLOUDSYNC_VERSION not found in cloudsync.h"
           exit 1
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@sqliteai'
+
       - name: publish sqlite-wasm to npm
         #if: steps.tag.outputs.version != ''
-        run: npm publish ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*+cloudsync-*.tgz
+        run: npm ci && npm publish ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*+cloudsync-*.tgz
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           
