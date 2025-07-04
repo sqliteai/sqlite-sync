@@ -212,6 +212,7 @@ jobs:
     runs-on: ubuntu-latest
     name: release
     needs: build
+    if: github.ref == 'refs/heads/main'
 
     env:
       GH_TOKEN: ${{ github.token }}
