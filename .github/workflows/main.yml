@@ -252,9 +252,9 @@ jobs:
           node-version: '20.x'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: publish sqlite-wasm to npm
+      - name: wasm publish to npmjs
         #if: steps.tag.outputs.version != ''
-        run: npm publish ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*+cloudsync-*.tgz
+        run: npm publish --provenance --access public ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*+cloudsync-*.tgz
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           
