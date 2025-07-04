@@ -165,7 +165,7 @@ jobs:
           
           jq \
             --arg name "@sqliteai/cloudsync-wasm" \
-            --arg version "$(make sqlite_version)+cloudsync-$(make version)" \
+            --arg version "$(make sqlite_version)-cloudsync-$(make version)" \
             --arg desc "$DESC" \
             --argjson keywords '["offsync","cloudsync","sqliteai"]' \
             --arg repo_url "git+https://github.com/sqliteai/sqlite-sync.git" \
@@ -255,8 +255,8 @@ jobs:
 
       - name: wasm publish to npmjs
         #if: steps.tag.outputs.version != ''
-        #use this version when the repo will become public run: npm publish --provenance --access public ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*+cloudsync-*.tgz
-        run: npm publish --access public ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*+cloudsync-*.tgz
+        #use this version when the repo will become public run: npm publish --provenance --access public ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*-cloudsync-*.tgz
+        run: npm publish --access public ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*-cloudsync-*.tgz
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           
