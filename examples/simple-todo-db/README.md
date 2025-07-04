@@ -29,7 +29,7 @@ Before using the local CLI, you need to set up your cloud database:
 2. Enable RLS for tables you want to secure
 3. Create policies to control user access (e.g., users can only see their own tasks)
 
-**Note**: RLS rules only apply to token-authenticated users. RLS rules are not enforced for API key-authenticated accesses.
+**Note**: RLS rules only apply to token authenticated users. RLS rules are not enforced for apikey authenticated accesses. For more information about tokens, refer to the [Access Tokens documentation](https://docs.sqlitecloud.io/docs/access-tokens). 
 
 ## Step 2: Local Database Setup (Device A)
 
@@ -107,8 +107,11 @@ SELECT cloudsync_is_enabled('tasks');
 -- Replace with your actual connection string from Step 1.3
 SELECT cloudsync_network_init('sqlitecloud://your-project-id.sqlite.cloud/todo_app.sqlite');
 
+-- Configure authentication:
 -- Set your API key from Step 1.3
 SELECT cloudsync_network_set_apikey('your-api-key-here');
+-- Or use token authentication (required for Row-Level Security)
+-- SELECT cloudsync_network_set_token('your_auth_token');
 
 -- Optional: Test connection
 SELECT cloudsync_network_sync();
