@@ -418,28 +418,28 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     
     // set URL: https://UUID.g5.sqlite.cloud:443/chinook.sqlite?apikey=hWDanFolRT9WDK0p54lufNrIyfgLZgtMw6tb6fbPmpo
     rc = curl_url_set(url, CURLUPART_URL, conn_string_https, 0);
-    if (rc != CURLE_OK) goto finalize;
+    if (rc != CURLUE_OK) goto finalize;
     
     // https (MANDATORY)
     rc = curl_url_get(url, CURLUPART_SCHEME, &scheme, 0);
-    if (rc != CURLE_OK) goto finalize;
+    if (rc != CURLUE_OK) goto finalize;
     
     // UUID.g5.sqlite.cloud (MANDATORY)
     rc = curl_url_get(url, CURLUPART_HOST, &host, 0);
-    if (rc != CURLE_OK) goto finalize;
+    if (rc != CURLUE_OK) goto finalize;
     
     // 443 (OPTIONAL)
     rc = curl_url_get(url, CURLUPART_PORT, &port, 0);
-    if (rc != CURLE_OK && rc != CURLUE_NO_PORT) goto finalize;
+    if (rc != CURLUE_OK && rc != CURLUE_NO_PORT) goto finalize;
     char *port_or_default = port && strcmp(port, "8860") != 0 ? port : CLOUDSYNC_DEFAULT_ENDPOINT_PORT;
 
     // /chinook.sqlite (MANDATORY)
     rc = curl_url_get(url, CURLUPART_PATH, &database, 0);
-    if (rc != CURLE_OK) goto finalize;
+    if (rc != CURLUE_OK) goto finalize;
     
     // apikey=hWDanFolRT9WDK0p54lufNrIyfgLZgtMw6tb6fbPmpo (OPTIONAL)
     rc = curl_url_get(url, CURLUPART_QUERY, &query, 0);
-    if (rc != CURLE_OK && rc != CURLUE_NO_QUERY) goto finalize;
+    if (rc != CURLUE_OK && rc != CURLUE_NO_QUERY) goto finalize;
     if (query != NULL) {
         char value[MAX_QUERY_VALUE_LEN];
         if (!authentication && network_extract_query_param(query, "apikey", value, sizeof(value)) == 0) {
@@ -463,8 +463,8 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
 finalize:
     if (result == false) {
         // store proper result code/message
-        if (rc != CURLE_OK) sqlite3_result_error(context, curl_url_strerror(rc), -1);
-        sqlite3_result_error_code(context, (rc != CURLE_OK) ? SQLITE_ERROR : SQLITE_NOMEM);
+        if (rc != CURLUE_OK) sqlite3_result_error(context, curl_url_strerror(rc), -1);
+        sqlite3_result_error_code(context, (rc != CURLUE_OK) ? SQLITE_ERROR : SQLITE_NOMEM);
         
         // cleanup memory managed by the extension
         if (authentication) cloudsync_memory_free(authentication);
