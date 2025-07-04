@@ -212,7 +212,6 @@ jobs:
     runs-on: ubuntu-latest
     name: release
     needs: build
-    #if: github.ref == 'refs/heads/main'
 
     env:
       GH_TOKEN: ${{ github.token }}
@@ -234,8 +233,7 @@ jobs:
       - name: release tag version from cloudsync.h
         id: tag
         run: |
-          FILE="src/cloudsync.h"
-          VERSION=$(grep -oP '#define CLOUDSYNC_VERSION\s+"\K[^"]+' "$FILE")
+          VERSION=$(make version)
           if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             LATEST=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/latest | jq -r '.name')
             if [[ "$VERSION" != "$LATEST" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
@@ -254,7 +252,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: wasm publish to npmjs
-        #if: steps.tag.outputs.version != ''
+        if: steps.tag.outputs.version != ''
         #use this version when the repo will become public run: npm publish --provenance --access public ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*-cloudsync-*.tgz
         run: npm publish --access public ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*-cloudsync-*.tgz
         env:
@@ -274,8 +272,7 @@ jobs:
           done
 
       - uses: softprops/action-gh-release@v2.2.1
-        if: false
-        #if: steps.tag.outputs.version != ''
+        if: steps.tag.outputs.version != ''
         with:
           generate_release_notes: true
           tag_name: ${{ steps.tag.outputs.version }}
