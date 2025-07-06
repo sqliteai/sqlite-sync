@@ -360,7 +360,7 @@ char *db_version_build_query (sqlite3 *db) {
     
     // the good news is that the query can be computed in SQLite without the need to do any extra computation from the host language
     const char *sql = "WITH table_names AS ("
-                      "SELECT format(\"%w\", name) as tbl_name "
+                      "SELECT format('%w', name) as tbl_name "
                       "FROM sqlite_master "
                       "WHERE type='table' "
                       "AND name LIKE '%_cloudsync'"
