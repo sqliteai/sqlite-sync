@@ -19,9 +19,8 @@
 #include "curl/curl.h"
 #endif
 #else
-#include <stdlib.h>
-#include <emscripten/fetch.h>
-#include <emscripten/emscripten.h>
+#define curl_free(x) free(x)
+char *substr(const char *start, const char *end);
 #endif
 
 #ifdef __ANDROID__
@@ -102,103 +101,6 @@ bool network_data_set_endpoints (network_data *data, char *auth, char *check, ch
 // MARK: - Utils -
 
 #ifndef CLOUDSYNC_OMIT_CURL
-#ifdef SQLITE_WASM_EXTRA_INIT
-NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char *custom_header) {
-    char *buffer = NULL;
-    size_t blen = 0;
-
-    emscripten_fetch_attr_t attr;
-    emscripten_fetch_attr_init(&attr);
-
-    // Set method
-    if (json_payload || is_post_request) {
-        strcpy(attr.requestMethod, "POST");
-    } else {
-        strcpy(attr.requestMethod, "GET");
-    }
-    attr.attributes = EMSCRIPTEN_FETCH_LOAD_TO_MEMORY | EMSCRIPTEN_FETCH_SYNCHRONOUS | EMSCRIPTEN_FETCH_REPLACE;
-
-    // Prepare header array (alternating key, value, NULL-terminated)
-    const char *headers[11];
-    int h = 0;
-
-    // Custom header (must be "Key: Value", split at ':')
-    char *custom_key = NULL;
-    if (custom_header) {
-        const char *colon = strchr(custom_header, ':');
-        if (colon) {
-            size_t klen = colon - custom_header;
-            custom_key = (char *)malloc(klen + 1);
-            strncpy(custom_key, custom_header, klen);
-            custom_key[klen] = 0;
-            const char *custom_val = colon + 1;
-            while (*custom_val == ' ') custom_val++;
-            headers[h++] = custom_key;
-            headers[h++] = custom_val;
-        }
-    }
-
-    // Authorization
-    char auth_header[256];
-    if (authentication) {
-        snprintf(auth_header, sizeof(auth_header), "Bearer %s", authentication);
-        headers[h++] = "Authorization";
-        headers[h++] = auth_header;
-    }
-
-    // Content-Type for JSON
-    if (json_payload) {
-        headers[h++] = "Content-Type";
-        headers[h++] = "application/json";
-    }
-    
-    headers[h] = 0;
-    attr.requestHeaders = headers;
-
-    // Body
-    if (json_payload) {
-        attr.requestData = json_payload;
-        attr.requestDataSize = strlen(json_payload);
-    }
-
-    emscripten_fetch_t *fetch = emscripten_fetch(&attr, endpoint); // Blocks here until the operation is complete.
-    NETWORK_RESULT result = {0, NULL, 0, NULL, NULL};
-
-    if(fetch->readyState == 4){
-        buffer = fetch->data;
-        blen = fetch->totalBytes;
-    }
-    
-    if (fetch->status >= 200 && fetch->status < 300) {
-        
-        if (blen > 0 && buffer) {
-            char *buf = (char*)malloc(blen + 1);
-            if (buf) {
-                memcpy(buf, buffer, blen);
-                buf[blen] = 0;
-                result.code = CLOUDSYNC_NETWORK_BUFFER;
-                result.buffer = buf;
-                result.blen = blen;
-                result.xfree = free;
-            } else result.code = CLOUDSYNC_NETWORK_ERROR;
-        } else result.code = CLOUDSYNC_NETWORK_OK;
-    } else {
-        result.code = CLOUDSYNC_NETWORK_ERROR;
-        if (fetch->statusText && fetch->statusText[0]) {
-            result.buffer = strdup(fetch->statusText);
-        }
-        result.blen = sizeof(fetch->statusText);
-        result.xfree = free;
-    }
-
-    // cleanup
-    emscripten_fetch_close(fetch);
-    if (custom_key) free(custom_key);
-
-    return result;
-}
-#else
-
 static bool network_buffer_check (network_buffer *data, size_t needed) {
     // alloc/resize buffer
     if (data->bused + needed > data->balloc) {
@@ -307,7 +209,6 @@ cleanup:
     
     return result;
 }
-#endif
 
 static size_t network_read_callback(char *buffer, size_t size, size_t nitems, void *userdata) {
     network_read_data *rd = (network_read_data *)userdata;
@@ -323,44 +224,6 @@ static size_t network_read_callback(char *buffer, size_t size, size_t nitems, vo
     return to_copy;
 }
 
-#ifdef SQLITE_WASM_EXTRA_INIT
-bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size) {
-
-    bool result = false;
-    emscripten_fetch_attr_t attr;
-    emscripten_fetch_attr_init(&attr);
-    strcpy(attr.requestMethod, "PUT");
-    attr.attributes = EMSCRIPTEN_FETCH_LOAD_TO_MEMORY | EMSCRIPTEN_FETCH_SYNCHRONOUS | EMSCRIPTEN_FETCH_REPLACE;
-
-    // Prepare headers (alternating key, value, NULL-terminated)
-    // Max 3 headers: Accept, (optional Auth), Content-Type
-    const char *headers[7];
-    int h = 0;
-    headers[h++] = "Accept";
-    headers[h++] = "text/plain";
-    char auth_header[256];
-    if (authentication) {
-        snprintf(auth_header, sizeof(auth_header), "Bearer %s", authentication);
-        headers[h++] = "Authorization";
-        headers[h++] = auth_header;
-    }
-    headers[h++] = "Content-Type";
-    headers[h++] = "application/octet-stream";
-    headers[h] = 0;
-    attr.requestHeaders = headers;
-
-    // Set request body
-    attr.requestData = (const char *)blob;
-    attr.requestDataSize = blob_size;
-
-    emscripten_fetch_t *fetch = emscripten_fetch(&attr, endpoint); // Blocks here until the operation is complete.
-    if (fetch->status >= 200 && fetch->status < 300) result = true;
-
-    emscripten_fetch_close(fetch);
-
-    return result;
-}
-#else
 bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size) {
     struct curl_slist *headers = NULL;
     curl_mime *mime = NULL;
@@ -432,7 +295,6 @@ cleanup:
     if (headers) curl_slist_free_all(headers);
     return result;
 }
-#endif
 #endif
 
 int network_set_sqlite_result (sqlite3_context *context, NETWORK_RESULT *result) {
@@ -539,19 +401,6 @@ int network_extract_query_param(const char *query, const char *key, char *output
 }
 
 #ifndef CLOUDSYNC_OMIT_CURL
-
-#ifdef SQLITE_WASM_EXTRA_INIT
-static char *substr(const char *start, const char *end) {
-    size_t len = end - start;
-    char *out = (char *)malloc(len + 1);
-    if (out) {
-        memcpy(out, start, len);
-        out[len] = 0;
-    }
-    return out;
-}
-#endif
-
 bool network_compute_endpoints (sqlite3_context *context, network_data *data, const char *conn_string) {
     // compute endpoints
     bool result = false;
@@ -632,6 +481,7 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     if (!scheme || !host || !database) goto finalize;
     char *port_or_default = port && strcmp(port, "8860") != 0 ? port : CLOUDSYNC_DEFAULT_ENDPOINT_PORT;
     #endif
+    
     if (query != NULL) {
         char value[MAX_QUERY_VALUE_LEN];
         if (!authentication && network_extract_query_param(query, "apikey", value, sizeof(value)) == 0) {
@@ -685,8 +535,6 @@ finalize:
     // cleanup memory
     #ifndef SQLITE_WASM_EXTRA_INIT
     if (url) curl_url_cleanup(url);
-    #else
-    #define curl_free(x) free(x)
     #endif
     if (scheme) curl_free(scheme);
     if (host) curl_free(host);
