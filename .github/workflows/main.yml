@@ -144,66 +144,11 @@ jobs:
         with:
           path: coverage
 
-      - name: wasm npm pack
-        if: matrix.name == 'wasm'
-        run: |
-          TAG=$(git ls-remote --tags https://github.com/sqlite/sqlite-wasm.git | \
-            awk -v ver=$(make sqlite_version) -F'/' '$NF ~ ver"-build[0-9]+$" {print $NF}' | \
-            sort -V | \
-            tail -n1)
-          git clone --branch "$TAG" --depth 1 https://github.com/sqlite/sqlite-wasm.git sqlite-wasm
-          rm -rf sqlite-wasm/sqlite-wasm/*
-          unzip dist/sqlite-wasm.zip -d sqlite-wasm/tmp
-          mv sqlite-wasm/tmp/sqlite-wasm-*/jswasm sqlite-wasm/sqlite-wasm
-
-          cd sqlite-wasm && npm i && npm run fix && npm run publint && npm run check-types && cd ..
-
-          PKG=sqlite-wasm/package.json
-          TMP=sqlite-wasm/package.tmp.json
-          
-          DESC="SQLite Wasm compiled with the automatically initialized cloudsync extension. Conveniently packaged as an ES Module for effortless integration."
-          
-          jq \
-            --arg name "@sqliteai/cloudsync-wasm" \
-            --arg version "$(make sqlite_version)-cloudsync-$(make version)" \
-            --arg desc "$DESC" \
-            --argjson keywords '["offsync","cloudsync","sqliteai"]' \
-            --arg repo_url "git+https://github.com/sqliteai/sqlite-sync.git" \
-            --arg author "Gioele Cantoni (gioele@sqlitecloud.io)" \
-            --arg bugs_url "https://github.com/sqliteai/sqlite-sync/issues" \
-            --arg homepage "https://github.com/sqliteai/sqlite-sync#readme" \
-            '
-            .name = $name
-            | .version = $version
-            | .description = $desc
-            | .keywords += $keywords
-            | del(.bin)
-            | .scripts |= with_entries(select(
-                  .key != "build"
-                and .key != "start"
-                and .key != "start:node"
-                and .key != "prepublishOnly"
-                and .key != "deploy"
-              ))
-            | .repository.url = $repo_url
-            | .author = $author
-            | .bugs.url = $bugs_url
-            | .homepage = $homepage
-            | del(.devDependencies.decompress)
-            | del(.devDependencies["http-server"])
-            | del(.devDependencies.shx)
-            ' "$PKG" > "$TMP" && mv "$TMP" "$PKG"
-
-          sed 's/@sqlite\.org\/sqlite-wasm/@sqliteai\/cloudsync-wasm/g' sqlite-wasm/README.md > sqlite-wasm/README.tmp
-          echo -e "# sqlite-sync WASM $(make version)\nThis README and the TypeScript types are from the [official SQLite wasm repository](https://github.com/sqlite/sqlite-wasm)\n\n$(cat sqlite-wasm/README.tmp)" > sqlite-wasm/README.md
-          rm -rf sqlite-wasm/tmp sqlite-wasm/bin sqlite-wasm/demo sqlite-wasm/README.tmp sqlite-wasm/package-lock.json
-          cd sqlite-wasm && npm pack
-
       - uses: actions/upload-artifact@v4.6.2
         if: always()
         with:
           name: cloudsync-${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
-          path: ${{ matrix.name == 'wasm' && 'sqlite-wasm/*.tgz' || 'dist/cloudsync.*'}}
+          path: dist/${{ matrix.name == 'wasm' && 'sqlite-wasm.zip' || 'cloudsync.*'}}
           if-no-files-found: error
 
   release:
@@ -255,18 +200,70 @@ jobs:
           for folder in "artifacts"/*; do
             if [ -d "$folder" ]; then
               name=$(basename "$folder")
-              if [[ "$name" != "github-pages" ]]; then
+              if [[ "$name" != "github-pages" && "$name" != "cloudsync-wasm" ]]; then
                 zip -jq "${name}-${{ steps.tag.outputs.version }}.zip" "$folder"/*
                 tar -cJf "${name}-${{ steps.tag.outputs.version }}.tar.xz" -C "$folder" .
                 tar -czf "${name}-${{ steps.tag.outputs.version }}.tar.gz" -C "$folder" .
               fi
             fi
           done
+          cp artifacts/cloudsync-wasm/sqlite-wasm.zip "sqlite-$(make sqlite_version)-sync-${{ steps.tag.outputs.version }}-wasm.zip"
 
       - name: wasm publish to npmjs
         if: steps.tag.outputs.version != ''
-        #use this version when the repo will become public run: npm publish --provenance --access public ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*-cloudsync-*.tgz
-        run: npm publish --access public ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*-cloudsync-*.tgz
+        run: |
+          TAG=$(git ls-remote --tags https://github.com/sqlite/sqlite-wasm.git | \
+            awk -v ver=$(make sqlite_version) -F'/' '$NF ~ ver"-build[0-9]+$" {print $NF}' | \
+            sort -V | \
+            tail -n1)
+          git clone --branch "$TAG" --depth 1 https://github.com/sqlite/sqlite-wasm.git sqlite-wasm
+          rm -rf sqlite-wasm/sqlite-wasm/*
+          unzip artifacts/cloudsync-wasm/sqlite-wasm.zip -d sqlite-wasm/tmp
+          mv sqlite-wasm/tmp/sqlite-wasm-*/jswasm sqlite-wasm/sqlite-wasm
+
+          cd sqlite-wasm && npm i && npm run fix && npm run publint && npm run check-types && cd ..
+
+          PKG=sqlite-wasm/package.json
+          TMP=sqlite-wasm/package.tmp.json
+          
+          DESC="SQLite Wasm compiled with the automatically initialized sqlite-sync extension. Conveniently packaged as an ES Module for effortless integration."
+          
+          jq \
+            --arg name "@sqliteai/sqlite-sync-wasm" \
+            --arg version "$(make sqlite_version)-sync-$(make version)" \
+            --arg desc "$DESC" \
+            --argjson keywords '["sync","offsync","cloudsync","sqliteai"]' \
+            --arg repo_url "git+https://github.com/sqliteai/sqlite-sync.git" \
+            --arg author "Gioele Cantoni (gioele@sqlitecloud.io)" \
+            --arg bugs_url "https://github.com/sqliteai/sqlite-sync/issues" \
+            --arg homepage "https://github.com/sqliteai/sqlite-sync#readme" \
+            '
+            .name = $name
+            | .version = $version
+            | .description = $desc
+            | .keywords += $keywords
+            | del(.bin)
+            | .scripts |= with_entries(select(
+                  .key != "build"
+                and .key != "start"
+                and .key != "start:node"
+                and .key != "prepublishOnly"
+                and .key != "deploy"
+              ))
+            | .repository.url = $repo_url
+            | .author = $author
+            | .bugs.url = $bugs_url
+            | .homepage = $homepage
+            | del(.devDependencies.decompress)
+            | del(.devDependencies["http-server"])
+            | del(.devDependencies.shx)
+            ' "$PKG" > "$TMP" && mv "$TMP" "$PKG"
+
+          sed 's/@sqlite\.org\/sqlite-wasm/@sqliteai\/sqlite-sync-wasm/g' sqlite-wasm/README.md > sqlite-wasm/README.tmp
+          echo -e "# sqlite-sync WASM $(make version)\nThis README and the TypeScript types are from the [official SQLite wasm repository](https://github.com/sqlite/sqlite-wasm)\n\n$(cat sqlite-wasm/README.tmp)" > sqlite-wasm/README.md
+          rm -rf sqlite-wasm/tmp sqlite-wasm/bin sqlite-wasm/demo sqlite-wasm/README.tmp sqlite-wasm/package-lock.json
+          cd sqlite-wasm && npm publish --access public
+          #add --provenance to npm publish when the repo will be public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -279,4 +276,5 @@ jobs:
             cloudsync-*-${{ steps.tag.outputs.version }}.zip
             cloudsync-*-${{ steps.tag.outputs.version }}.tar.xz
             cloudsync-*-${{ steps.tag.outputs.version }}.tar.gz
+            sqlite-*-sync-${{ steps.tag.outputs.version }}-wasm.zip
           make_latest: true
