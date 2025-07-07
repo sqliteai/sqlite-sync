@@ -203,9 +203,7 @@ jobs:
         if: always()
         with:
           name: cloudsync-${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
-          path: |
-            dist/cloudsync.*
-            sqlite-wasm/*.tgz
+          path: ${{ matrix.name == 'wasm' && 'sqlite-wasm/*.tgz' || 'dist/cloudsync.*'}}
           if-no-files-found: error
 
   release:
@@ -251,13 +249,6 @@ jobs:
         with:
           node-version: '20.x'
           registry-url: 'https://registry.npmjs.org'
-
-      - name: wasm publish to npmjs
-        if: steps.tag.outputs.version != ''
-        #use this version when the repo will become public run: npm publish --provenance --access public ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*-cloudsync-*.tgz
-        run: npm publish --access public ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*-cloudsync-*.tgz
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           
       - name: zip artifacts
         run: |
@@ -271,6 +262,13 @@ jobs:
               fi
             fi
           done
+
+      - name: wasm publish to npmjs
+        if: steps.tag.outputs.version != ''
+        #use this version when the repo will become public run: npm publish --provenance --access public ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*-cloudsync-*.tgz
+        run: npm publish --access public ./artifacts/cloudsync-wasm/sqlite-wasm/sqliteai-cloudsync-wasm-*-cloudsync-*.tgz
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - uses: softprops/action-gh-release@v2.2.1
         if: steps.tag.outputs.version != ''
