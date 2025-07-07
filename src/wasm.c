@@ -1,4 +1,5 @@
 #ifdef SQLITE_WASM_EXTRA_INIT
+#define CLOUDSYNC_OMIT_CURL
 
 #include <stdio.h>
 #include <stdlib.h>

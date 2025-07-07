@@ -400,7 +400,7 @@ int network_extract_query_param(const char *query, const char *key, char *output
     return -3; // Key not found
 }
 
-#ifndef CLOUDSYNC_OMIT_CURL
+#if !defined(CLOUDSYNC_OMIT_CURL) || defined(SQLITE_WASM_EXTRA_INIT)
 bool network_compute_endpoints (sqlite3_context *context, network_data *data, const char *conn_string) {
     // compute endpoints
     bool result = false;
@@ -567,7 +567,7 @@ network_data *cloudsync_network_data(sqlite3_context *context) {
 void cloudsync_network_init (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_init");
     
-    #if !defined(CLOUDSYNC_OMIT_CURL) && !defined(SQLITE_WASM_EXTRA_INIT)
+    #ifndef CLOUDSYNC_OMIT_CURL
     curl_global_init(CURL_GLOBAL_ALL);
     #endif
     
@@ -632,7 +632,7 @@ void cloudsync_network_cleanup (sqlite3_context *context, int argc, sqlite3_valu
     
     sqlite3_result_int(context, SQLITE_OK);
     
-    #if !defined(CLOUDSYNC_OMIT_CURL) && !defined(SQLITE_WASM_EXTRA_INIT)
+    #ifndef CLOUDSYNC_OMIT_CURL
     curl_global_cleanup();
     #endif
 }
