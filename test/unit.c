@@ -1956,8 +1956,13 @@ bool do_test_internal_functions (void) {
     int rc = sqlite3_open(":memory:", &db);
     if (rc != SQLITE_OK) goto abort_test;
     
-    rc = sqlite3_exec(db, "SELECT \"double-quoted string literal misfeature\"", NULL, NULL, NULL);
-    if (rc != SQLITE_ERROR) goto abort_test;
+    sql = "SELECT \"double-quoted string literal misfeature\"";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_ERROR) {
+        printf("invalid result code for the following query, expected 1 (ERROR), got %d: '%s'\n", rc, sql);
+        printf("the unittest must be built with -DSQLITE_DQS=0\n");
+        goto abort_test;
+    }
     
     sql = "CREATE TABLE foo (name TEXT PRIMARY KEY NOT NULL, age INTEGER UNIQUE);";
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
