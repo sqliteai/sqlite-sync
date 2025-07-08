@@ -507,7 +507,7 @@ finalize:
         // store proper result code/message
         #ifndef SQLITE_WASM_EXTRA_INIT
         if (rc != CURLUE_OK) sqlite3_result_error(context, curl_url_strerror(rc), -1);
-        sqlite3_result_error_code(context, (rc != CURLE_OK) ? SQLITE_ERROR : SQLITE_NOMEM);
+        sqlite3_result_error_code(context, (rc != CURLUE_OK) ? SQLITE_ERROR : SQLITE_NOMEM);
         #else
         sqlite3_result_error(context, "URL parse error", -1);
         sqlite3_result_error_code(context, SQLITE_ERROR);
