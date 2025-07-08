@@ -1,5 +1,5 @@
 # Makefile for SQLite Sync Extension
-# Supports compilation for Linux, macOS, Windows, Android and iOS
+# Supports compilation for Linux, macOS, Windows, Android, iOS and WASM
 
 # customize sqlite3 executable with 
 # make test SQLITE3=/opt/homebrew/Cellar/sqlite/3.49.1/bin/sqlite3
