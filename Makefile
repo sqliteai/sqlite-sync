@@ -71,12 +71,14 @@ ifeq ($(PLATFORM),windows)
     CFLAGS += -DCURL_STATICLIB
     CURL_CONFIG = --with-schannel CFLAGS="-DCURL_STATICLIB"
     EXE = .exe
+    STRIP = strip --strip-unneeded $@
 else ifeq ($(PLATFORM),macos)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     LDFLAGS += -arch x86_64 -arch arm64 -framework Security -dynamiclib -undefined dynamic_lookup
     T_LDFLAGS = -framework Security
     CFLAGS += -arch x86_64 -arch arm64
     CURL_CONFIG = --with-secure-transport CFLAGS="-arch x86_64 -arch arm64"
+    STRIP = strip -x -S $@
 else ifeq ($(PLATFORM),android)
     # Set ARCH to find Android NDK's Clang compiler, the user should set the ARCH
     ifeq ($(filter %,$(ARCH)),)
@@ -100,6 +102,7 @@ else ifeq ($(PLATFORM),android)
     CURL_CONFIG = --host $(ARCH)-$(HOST)-android26 --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(CC) CXX=$(BIN)/$(ARCH)-linux-android26-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lcrypto -lssl
+    STRIP = $(BIN)/llvm-strip --strip-unneeded $@
 else ifeq ($(PLATFORM),ios)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     SDK := -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=11.0
@@ -107,6 +110,7 @@ else ifeq ($(PLATFORM),ios)
     T_LDFLAGS = -framework Security
     CFLAGS += -arch arm64 $(SDK)
     CURL_CONFIG = --host=arm64-apple-darwin --with-secure-transport CFLAGS="-arch arm64 -isysroot $$(xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=11.0"
+    STRIP = strip -x -S $@
 else ifeq ($(PLATFORM),isim)
     TARGET := $(DIST_DIR)/cloudsync.dylib
     SDK := -isysroot $(shell xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0
@@ -120,6 +124,7 @@ else # linux
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lssl -lcrypto
     CURL_CONFIG = --with-openssl
+    STRIP = strip --strip-unneeded $@
 endif
 
 ifneq ($(COVERAGE),false)
@@ -153,6 +158,8 @@ ifeq ($(PLATFORM),windows)
     # Generate import library for Windows
 	dlltool -D $@ -d $(DEF_FILE) -l $(DIST_DIR)/cloudsync.lib
 endif
+    # Strip debug symbols
+	$(STRIP)
 else
 #WASM build
 EMSDK := $(BUILD_WASM)/emsdk
