@@ -890,7 +890,7 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
             goto finalize;
         }
         
-        sql = cloudsync_memory_mprintf("SELECT cloudsync_init(\"%w\", \"%w\", 1);", tbl_name, value);
+        sql = cloudsync_memory_mprintf("SELECT cloudsync_init('%q', '%q', 1);", tbl_name, value);
         rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
         cloudsync_memory_free(sql);
         if (rc != SQLITE_OK) {
