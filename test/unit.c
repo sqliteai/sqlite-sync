@@ -62,6 +62,9 @@ static int test_counter = 1;
 
 #define MAX_SIMULATED_CLIENTS   128
 
+#define CUSTOMERS_TABLE             "customers 1 test table"
+#define CUSTOMERS_NOCOLS_TABLE      "customers nocols"
+
 typedef struct {
     int type;
     union {
@@ -487,11 +490,11 @@ void do_query (sqlite3 *db, const char *sql, const char *type) {
 
 void do_insert (sqlite3 *db, int table_mask, int ninsert, bool print_result) {
     if (table_mask & TEST_PRIKEYS) {
-        const char *table_name = "customers";
+        const char *table_name = CUSTOMERS_TABLE;
         if (print_result) printf("TESTING INSERT on %s\n", table_name);
         
         for (int i=0; i<ninsert; ++i) {
-            char *sql = sqlite3_mprintf("INSERT INTO %w (first_name, last_name, age, note, stamp) VALUES ('name%d', 'surname%d', %d, 'note%d', 'stamp%d');", table_name, i+1, i+1, i+1, i+1, i+1);
+            char *sql = sqlite3_mprintf("INSERT INTO \"%w\" (first_name, last_name, age, note, stamp) VALUES ('name%d', 'surname%d', %d, 'note%d', 'stamp%d');", table_name, i+1, i+1, i+1, i+1, i+1);
             if (!sql) exit (-3);
             
             int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
@@ -505,11 +508,11 @@ void do_insert (sqlite3 *db, int table_mask, int ninsert, bool print_result) {
     }
     
     if (table_mask & TEST_NOCOLS) {
-        const char *table_name = "customers_nocols";
+        const char *table_name = CUSTOMERS_NOCOLS_TABLE;
         if (print_result) printf("TESTING INSERT on %s\n", table_name);
         
         for (int i=0; i<ninsert; ++i) {
-            char *sql = sqlite3_mprintf("INSERT INTO %w (first_name, last_name) VALUES ('name%d', 'surname%d');", table_name, (i+1)+100000, (i+1)+100000);
+            char *sql = sqlite3_mprintf("INSERT INTO \"%w\" (first_name, last_name) VALUES ('name%d', 'surname%d');", table_name, (i+1)+100000, (i+1)+100000);
             if (!sql) exit (-3);
             
             int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
@@ -527,7 +530,7 @@ void do_insert (sqlite3 *db, int table_mask, int ninsert, bool print_result) {
         if (print_result) printf("TESTING INSERT on %s\n", table_name);
         
         for (int i=0; i<ninsert; ++i) {
-            char *sql = sqlite3_mprintf("INSERT INTO %w (first_name, last_name) VALUES ('name%d', 'surname%d');", table_name, (i+1)+200000, (i+1)+200000);
+            char *sql = sqlite3_mprintf("INSERT INTO \"%w\" (first_name, last_name) VALUES ('name%d', 'surname%d');", table_name, (i+1)+200000, (i+1)+200000);
             if (!sql) exit (-3);
             
             int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
@@ -543,10 +546,10 @@ void do_insert (sqlite3 *db, int table_mask, int ninsert, bool print_result) {
 
 void do_insert_val (sqlite3 *db, int table_mask, int val, bool print_result) {
     if (table_mask & TEST_PRIKEYS) {
-        const char *table_name = "customers";
+        const char *table_name = CUSTOMERS_TABLE;
         if (print_result) printf("TESTING INSERT on %s\n", table_name);
         
-        char *sql = sqlite3_mprintf("INSERT INTO %w (first_name, last_name, age, note, stamp) VALUES ('name%d', 'surname%d', %d, 'note%d', 'stamp%d');", table_name, val, val, val, val, val);
+        char *sql = sqlite3_mprintf("INSERT INTO \"%w\" (first_name, last_name, age, note, stamp) VALUES ('name%d', 'surname%d', %d, 'note%d', 'stamp%d');", table_name, val, val, val, val, val);
         if (!sql) exit (-3);
         
         int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
@@ -559,10 +562,10 @@ void do_insert_val (sqlite3 *db, int table_mask, int val, bool print_result) {
     }
     
     if (table_mask & TEST_NOCOLS) {
-        const char *table_name = "customers_nocols";
+        const char *table_name = CUSTOMERS_NOCOLS_TABLE;
         if (print_result) printf("TESTING INSERT on %s\n", table_name);
         
-        char *sql = sqlite3_mprintf("INSERT INTO %w (first_name, last_name) VALUES ('name%d', 'surname%d');", table_name, (val)+100000, (val)+100000);
+        char *sql = sqlite3_mprintf("INSERT INTO \"%w\" (first_name, last_name) VALUES ('name%d', 'surname%d');", table_name, (val)+100000, (val)+100000);
         if (!sql) exit (-3);
         
         int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
@@ -595,43 +598,55 @@ void do_update (sqlite3 *db, int table_mask, bool print_result) {
     int rc = SQLITE_OK;
     
     if (table_mask & TEST_PRIKEYS) {
-        const char *table_name = "customers";
+        const char *table_name = CUSTOMERS_TABLE;
         if (print_result) printf("TESTING UPDATE on %s\n", table_name);
         
-        rc = sqlite3_exec(db, "UPDATE customers SET age = 40 WHERE first_name='name1';", NULL, NULL, NULL);
+        char *sql = sqlite3_mprintf("UPDATE \"%w\" SET age = 40 WHERE first_name='name1';", table_name);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
         if (rc != SQLITE_OK) goto finalize;
         
-        rc = sqlite3_exec(db, "UPDATE customers SET age = 2000, note='hello2000' WHERE first_name='name2';", NULL, NULL, NULL);
+        sql = sqlite3_mprintf("UPDATE \"%w\" SET age = 2000, note='hello2000' WHERE first_name='name2';", table_name);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
         if (rc != SQLITE_OK) goto finalize;
         
-        rc = sqlite3_exec(db, "UPDATE customers SET age = 6000, note='hello6000' WHERE first_name='name6';", NULL, NULL, NULL);
+        sql = sqlite3_mprintf("UPDATE \"%w\" SET age = 6000, note='hello6000' WHERE first_name='name6';", table_name);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
         if (rc != SQLITE_OK) goto finalize;
         
         // update primary key here
-        rc = sqlite3_exec(db, "UPDATE customers SET first_name = 'name1updated' WHERE first_name='name1';", NULL, NULL, NULL);
+        sql = sqlite3_mprintf("UPDATE \"%w\" SET first_name = 'name1updated' WHERE first_name='name1';", table_name);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
         if (rc != SQLITE_OK) goto finalize;
         
-        rc = sqlite3_exec(db, "UPDATE customers SET first_name = 'name8updated' WHERE first_name='name8';", NULL, NULL, NULL);
+        sql = sqlite3_mprintf("UPDATE \"%w\" SET first_name = 'name8updated' WHERE first_name='name8';", table_name);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
         if (rc != SQLITE_OK) goto finalize;
         
         // update two primary keys here
-        rc = sqlite3_exec(db, "UPDATE customers SET first_name = 'name9updated', last_name = 'surname9updated' WHERE first_name='name9';", NULL, NULL, NULL);
+        sql = sqlite3_mprintf("UPDATE \"%w\" SET first_name = 'name9updated', last_name = 'surname9updated' WHERE first_name='name9';", table_name);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
         if (rc != SQLITE_OK) goto finalize;
     }
     
     if (table_mask & TEST_NOCOLS) {
-        const char *table_name = "customers_nocols";
+        const char *table_name = CUSTOMERS_NOCOLS_TABLE;
         if (print_result) printf("TESTING UPDATE on %s\n", table_name);
         
         // update primary key here
-        rc = sqlite3_exec(db, "UPDATE customers_nocols SET first_name = 'name100001updated' WHERE first_name='name100001';", NULL, NULL, NULL);
+        rc = sqlite3_exec(db, "UPDATE \"" CUSTOMERS_NOCOLS_TABLE "\" SET first_name = 'name100001updated' WHERE first_name='name100001';", NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto finalize;
         
-        rc = sqlite3_exec(db, "UPDATE customers_nocols SET first_name = 'name100008updated' WHERE first_name='name100008';", NULL, NULL, NULL);
+        rc = sqlite3_exec(db, "UPDATE \"" CUSTOMERS_NOCOLS_TABLE "\" SET first_name = 'name100008updated' WHERE first_name='name100008';", NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto finalize;
         
         // update two primary keys here
-        rc = sqlite3_exec(db, "UPDATE customers_nocols SET first_name = 'name100009updated', last_name = 'surname100009updated' WHERE first_name='name100009';", NULL, NULL, NULL);
+        rc = sqlite3_exec(db, "UPDATE \"" CUSTOMERS_NOCOLS_TABLE "\" SET first_name = 'name100009updated', last_name = 'surname100009updated' WHERE first_name='name100009';", NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto finalize;
     }
     
@@ -662,43 +677,55 @@ void do_update_random (sqlite3 *db, int table_mask, bool print_result) {
     int rc = SQLITE_OK;
     
     if (table_mask & TEST_PRIKEYS) {
-        const char *table_name = "customers";
+        const char *table_name = CUSTOMERS_TABLE;
         if (print_result) printf("TESTING RANDOM UPDATE on %s\n", table_name);
         
-        rc = sqlite3_exec(db, "UPDATE customers SET age = ABS(RANDOM()) WHERE rowid=(ABS(RANDOM() % 10)+1);", NULL, NULL, NULL);
+        char *sql = sqlite3_mprintf( "UPDATE \"%w\" SET age = ABS(RANDOM()) WHERE rowid=(ABS(RANDOM() %% 10)+1);", table_name);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
         if (rc != SQLITE_OK) goto finalize;
         
-        rc = sqlite3_exec(db, "UPDATE customers SET age = ABS(RANDOM()), note='hello' || HEX(RANDOMBLOB(2)), stamp='stamp' || ABS(RANDOM() % 99) WHERE rowid=(ABS(RANDOM() % 10)+1);", NULL, NULL, NULL);
+        sql = sqlite3_mprintf("UPDATE \"%w\" SET age = ABS(RANDOM()), note='hello' || HEX(RANDOMBLOB(2)), stamp='stamp' || ABS(RANDOM() %% 99) WHERE rowid=(ABS(RANDOM() %% 10)+1);", table_name);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
         if (rc != SQLITE_OK) goto finalize;
         
-        rc = sqlite3_exec(db, "UPDATE customers SET age = ABS(RANDOM()), note='hello' || HEX(RANDOMBLOB(2)), stamp='stamp' || ABS(RANDOM() % 99) WHERE rowid=(ABS(RANDOM() % 10)+1);", NULL, NULL, NULL);
+        sql = sqlite3_mprintf("UPDATE \"%w\" SET age = ABS(RANDOM()), note='hello' || HEX(RANDOMBLOB(2)), stamp='stamp' || ABS(RANDOM() %% 99) WHERE rowid=(ABS(RANDOM() %% 10)+1);", table_name);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
         if (rc != SQLITE_OK) goto finalize;
         
         // update primary key here
-        rc = sqlite3_exec(db, "UPDATE customers SET first_name = 'name' || HEX(RANDOMBLOB(4)) WHERE rowid=(ABS(RANDOM() % 10)+1);", NULL, NULL, NULL);
+        sql = sqlite3_mprintf("UPDATE \"%w\" SET first_name = 'name' || HEX(RANDOMBLOB(4)) WHERE rowid=(ABS(RANDOM() %% 10)+1);", table_name);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
         if (rc != SQLITE_OK) goto finalize;
         
-        rc = sqlite3_exec(db, "UPDATE customers SET first_name = 'name' || HEX(RANDOMBLOB(4)) WHERE rowid=(ABS(RANDOM() % 10)+1);", NULL, NULL, NULL);
+        sql = sqlite3_mprintf("UPDATE \"%w\" SET first_name = 'name' || HEX(RANDOMBLOB(4)) WHERE rowid=(ABS(RANDOM() %% 10)+1);", table_name);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
         if (rc != SQLITE_OK) goto finalize;
         
         // update two primary keys here
-        rc = sqlite3_exec(db, "UPDATE customers SET first_name = 'name' || HEX(RANDOMBLOB(4)), last_name = 'surname' || HEX(RANDOMBLOB(4)) WHERE rowid=(ABS(RANDOM() % 10)+1);", NULL, NULL, NULL);
+        sql = sqlite3_mprintf("UPDATE \"%w\" SET first_name = 'name' || HEX(RANDOMBLOB(4)), last_name = 'surname' || HEX(RANDOMBLOB(4)) WHERE rowid=(ABS(RANDOM() %% 10)+1);", table_name);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
         if (rc != SQLITE_OK) goto finalize;
     }
     
     if (table_mask & TEST_NOCOLS) {
-        const char *table_name = "customers_nocols";
+        const char *table_name = CUSTOMERS_NOCOLS_TABLE;
         if (print_result) printf("TESTING RANDMOM UPDATE on %s\n", table_name);
         
         // update primary key here
-        rc = sqlite3_exec(db, "UPDATE customers_nocols SET first_name = HEX(RANDOMBLOB(8)) WHERE first_name='name100001';", NULL, NULL, NULL);
+        rc = sqlite3_exec(db, "UPDATE \"" CUSTOMERS_NOCOLS_TABLE "\" SET first_name = HEX(RANDOMBLOB(8)) WHERE first_name='name100001';", NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto finalize;
         
-        rc = sqlite3_exec(db, "UPDATE customers_nocols SET first_name = HEX(RANDOMBLOB(8)) WHERE first_name='name100008';", NULL, NULL, NULL);
+        rc = sqlite3_exec(db, "UPDATE \"" CUSTOMERS_NOCOLS_TABLE "\" SET first_name = HEX(RANDOMBLOB(8)) WHERE first_name='name100008';", NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto finalize;
         
         // update two primary keys here
-        rc = sqlite3_exec(db, "UPDATE customers_nocols SET first_name = HEX(RANDOMBLOB(8)), last_name = HEX(RANDOMBLOB(8)) WHERE first_name='name100009';", NULL, NULL, NULL);
+        rc = sqlite3_exec(db, "UPDATE \"" CUSTOMERS_NOCOLS_TABLE "\" SET first_name = HEX(RANDOMBLOB(8)), last_name = HEX(RANDOMBLOB(8)) WHERE first_name='name100009';", NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto finalize;
     }
     
@@ -720,7 +747,7 @@ void do_update_random (sqlite3 *db, int table_mask, bool print_result) {
     
 finalize:
     if (rc != SQLITE_OK) {
-        printf("error in do_update: %s\n", sqlite3_errmsg(db));
+        printf("error in do_update_random: %s\n", sqlite3_errmsg(db));
         exit(-4);
     }
 }
@@ -729,24 +756,28 @@ void do_delete (sqlite3 *db, int table_mask, bool print_result) {
     int rc = SQLITE_OK;
     
     if (table_mask & TEST_PRIKEYS) {
-        const char *table_name = "customers";
+        const char *table_name = CUSTOMERS_TABLE;
         if (print_result) printf("TESTING DELETE on %s\n", table_name);
         
-        int rc = sqlite3_exec(db, "DELETE FROM customers WHERE first_name='name5';", NULL, NULL, NULL);
+        char *sql = sqlite3_mprintf("DELETE FROM \"%w\" WHERE first_name='name5';", table_name);
+        int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
         if (rc != SQLITE_OK) goto finalize;
         
-        rc = sqlite3_exec(db, "DELETE FROM customers WHERE first_name='name7';", NULL, NULL, NULL);
+        sql = sqlite3_mprintf("DELETE FROM \"%w\" WHERE first_name='name7';", table_name);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
         if (rc != SQLITE_OK) goto finalize;
     }
     
     if (table_mask & TEST_NOCOLS) {
-        const char *table_name = "customers_nocols";
+        const char *table_name = CUSTOMERS_NOCOLS_TABLE;
         if (print_result) printf("TESTING DELETE on %s\n", table_name);
         
-        int rc = sqlite3_exec(db, "DELETE FROM customers_nocols WHERE first_name='name100005';", NULL, NULL, NULL);
+        int rc = sqlite3_exec(db, "DELETE FROM \"" CUSTOMERS_NOCOLS_TABLE "\" WHERE first_name='name100005';", NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto finalize;
         
-        rc = sqlite3_exec(db, "DELETE FROM customers_nocols WHERE first_name='name100007';", NULL, NULL, NULL);
+        rc = sqlite3_exec(db, "DELETE FROM \"" CUSTOMERS_NOCOLS_TABLE "\" WHERE first_name='name100007';", NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto finalize;
     }
     
@@ -1005,14 +1036,18 @@ bool do_create_tables (int table_mask, sqlite3 *db) {
     // declare tables
     if (table_mask & TEST_PRIKEYS) {
         // TEST a table with a composite primary key
-        const char *sql = "CREATE TABLE IF NOT EXISTS customers (first_name TEXT NOT NULL, last_name TEXT NOT NULL, age INTEGER, note TEXT, stamp TEXT DEFAULT CURRENT_TIME, PRIMARY KEY(first_name, last_name));";
-        if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) goto abort_create_tables;
+        char *sql = sqlite3_mprintf("CREATE TABLE IF NOT EXISTS \"%w\" (first_name TEXT NOT NULL, last_name TEXT NOT NULL, age INTEGER, note TEXT, stamp TEXT DEFAULT CURRENT_TIME, PRIMARY KEY(first_name, last_name));", CUSTOMERS_TABLE);
+        int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
+        if (rc != SQLITE_OK) goto abort_create_tables;
     }
     
     if (table_mask & TEST_NOCOLS) {
         // TEST a table with no columns other than primary keys
-        const char *sql = "CREATE TABLE IF NOT EXISTS customers_nocols (first_name TEXT NOT NULL, last_name TEXT NOT NULL, PRIMARY KEY(first_name, last_name));";
-        if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) goto abort_create_tables;
+        char *sql = sqlite3_mprintf("CREATE TABLE IF NOT EXISTS \"%w\" (first_name TEXT NOT NULL, last_name TEXT NOT NULL, PRIMARY KEY(first_name, last_name));", CUSTOMERS_NOCOLS_TABLE);
+        int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
+        if (rc != SQLITE_OK) goto abort_create_tables;
     }
     
     if (table_mask & TEST_NOPRIKEYS) {
@@ -1035,33 +1070,33 @@ bool do_alter_tables (int table_mask, sqlite3 *db, int alter_version) {
         const char *sql;
         switch (alter_version) {
             case 1:
-                sql = "SELECT cloudsync_begin_alter('customers'); "
-                      "ALTER TABLE customers ADD new_column_1 TEXT; "
-                      "ALTER TABLE customers ADD new_column_2 TEXT DEFAULT \"default value\"; "
-                      "ALTER TABLE customers DROP note; "
-                      "SELECT cloudsync_commit_alter('customers') ";
+                sql = "SELECT cloudsync_begin_alter('" CUSTOMERS_TABLE "'); "
+                      "ALTER TABLE \"" CUSTOMERS_TABLE "\" ADD new_column_1 TEXT; "
+                      "ALTER TABLE \"" CUSTOMERS_TABLE "\" ADD new_column_2 TEXT DEFAULT 'default value'; "
+                      "ALTER TABLE \"" CUSTOMERS_TABLE "\" DROP note; "
+                      "SELECT cloudsync_commit_alter('" CUSTOMERS_TABLE "') ";
                 break;
             case 2:
-                sql = "SELECT cloudsync_begin_alter('customers'); "
-                      "ALTER TABLE \"customers\" RENAME TO do_alter_tables_temp_customers; "
-                      "CREATE TABLE \"customers\" (first_name TEXT NOT NULL, last_name TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT \"note\",  note4 DATETIME DEFAULT(datetime('subsec')), stamp TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(first_name, last_name)); "
-                      "INSERT INTO \"customers\" (\"first_name\",\"last_name\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\",\"last_name\",\"note\",\"note2\",\"stamp\" FROM do_alter_tables_temp_customers; "
+                sql = "SELECT cloudsync_begin_alter('" CUSTOMERS_TABLE "'); "
+                      "ALTER TABLE \"" CUSTOMERS_TABLE "\" RENAME TO do_alter_tables_temp_customers; "
+                      "CREATE TABLE \"" CUSTOMERS_TABLE "\" (first_name TEXT NOT NULL, last_name TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT 'note',  note4 DATETIME DEFAULT(datetime('subsec')), stamp TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(first_name, last_name)); "
+                      "INSERT INTO \"" CUSTOMERS_TABLE "\" (\"first_name\",\"last_name\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\",\"last_name\",\"note\",'a new note',\"stamp\" FROM do_alter_tables_temp_customers; "
                       "DROP TABLE do_alter_tables_temp_customers; "
-                      "SELECT cloudsync_commit_alter('customers') ";
+                      "SELECT cloudsync_commit_alter('" CUSTOMERS_TABLE "') ";
                 break;
             case 3:
-                sql = "SELECT cloudsync_begin_alter('customers'); "
-                      "ALTER TABLE \"customers\" RENAME TO do_alter_tables_temp_customers; "
-                      "CREATE TABLE \"customers\" (name TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT \"note\",  note4 DATETIME DEFAULT(datetime('subsec')), stamp TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(name)); "
-                      "INSERT INTO \"customers\" (\"name\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\" ||  \"last_name\" ,\"note\",\"note2\",\"stamp\" FROM do_alter_tables_temp_customers; "
+                sql = "SELECT cloudsync_begin_alter('" CUSTOMERS_TABLE "'); "
+                      "ALTER TABLE \"" CUSTOMERS_TABLE "\" RENAME TO do_alter_tables_temp_customers; "
+                      "CREATE TABLE \"" CUSTOMERS_TABLE "\" (name TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT 'note',  note4 DATETIME DEFAULT(datetime('subsec')), stamp TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(name)); "
+                      "INSERT INTO \"" CUSTOMERS_TABLE "\" (\"name\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\" ||  \"last_name\" ,\"note\",'a new note',\"stamp\" FROM do_alter_tables_temp_customers; "
                       "DROP TABLE do_alter_tables_temp_customers; "
-                      "SELECT cloudsync_commit_alter('customers') ";
+                      "SELECT cloudsync_commit_alter('" CUSTOMERS_TABLE "') ";
                 break;
             case 4: // only add columns, not drop
-                sql = "SELECT cloudsync_begin_alter('customers'); "
-                      "ALTER TABLE customers ADD new_column_1 TEXT; "
-                      "ALTER TABLE customers ADD new_column_2 TEXT DEFAULT \"default value\"; "
-                      "SELECT cloudsync_commit_alter('customers') ";
+                sql = "SELECT cloudsync_begin_alter('" CUSTOMERS_TABLE "'); "
+                      "ALTER TABLE \"" CUSTOMERS_TABLE "\" ADD new_column_1 TEXT; "
+                      "ALTER TABLE \"" CUSTOMERS_TABLE "\" ADD new_column_2 TEXT DEFAULT 'default value'; "
+                      "SELECT cloudsync_commit_alter('" CUSTOMERS_TABLE "') ";
                 break;
             default:
                 break;
@@ -1073,32 +1108,32 @@ bool do_alter_tables (int table_mask, sqlite3 *db, int alter_version) {
         const char *sql;
         switch (alter_version) {
             case 1:
-                sql = "SELECT cloudsync_begin_alter('customers_nocols'); "
-                      "ALTER TABLE customers_nocols ADD new_column_1 TEXT; "
-                      "ALTER TABLE customers_nocols ADD new_column_2 TEXT DEFAULT \"default value\"; "
-                      "SELECT cloudsync_commit_alter('customers_nocols'); ";
+                sql = "SELECT cloudsync_begin_alter('" CUSTOMERS_NOCOLS_TABLE "'); "
+                      "ALTER TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" ADD new_column_1 TEXT; "
+                      "ALTER TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" ADD new_column_2 TEXT DEFAULT 'default value'; "
+                      "SELECT cloudsync_commit_alter('" CUSTOMERS_NOCOLS_TABLE "'); ";
                 break;
             case 2:
-                sql = "SELECT cloudsync_begin_alter('customers_nocols'); "
-                      "ALTER TABLE \"customers_nocols\" RENAME TO do_alter_tables_temp_customers_nocols; "
-                      "CREATE TABLE customers_nocols (first_name TEXT NOT NULL, last_name_2 TEXT NOT NULL, PRIMARY KEY(first_name, last_name_2)); "
-                      "INSERT INTO \"customers_nocols\" (\"first_name\",\"last_name_2\") SELECT \"first_name\",\"last_name\" FROM do_alter_tables_temp_customers_nocols; "
+                sql = "SELECT cloudsync_begin_alter('" CUSTOMERS_NOCOLS_TABLE "'); "
+                      "ALTER TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" RENAME TO do_alter_tables_temp_customers_nocols; "
+                      "CREATE TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" (first_name TEXT NOT NULL, last_name_2 TEXT NOT NULL, PRIMARY KEY(first_name, last_name_2)); "
+                      "INSERT INTO \"" CUSTOMERS_NOCOLS_TABLE "\" (\"first_name\",\"last_name_2\") SELECT \"first_name\",\"last_name\" FROM do_alter_tables_temp_customers_nocols; "
                       "DROP TABLE do_alter_tables_temp_customers_nocols; "
-                      "SELECT cloudsync_commit_alter('customers_nocols'); "
-                      "SELECT cloudsync_begin_alter('customers_nocols'); "
-                      "ALTER TABLE \"customers_nocols\" RENAME TO do_alter_tables_temp_customers_nocols; "
-                      "CREATE TABLE customers_nocols (first_name TEXT NOT NULL, last_name TEXT NOT NULL, PRIMARY KEY(first_name, last_name)); "
-                      "INSERT INTO \"customers_nocols\" (\"first_name\",\"last_name\") SELECT \"first_name\",\"last_name_2\" FROM do_alter_tables_temp_customers_nocols; "
+                      "SELECT cloudsync_commit_alter('" CUSTOMERS_NOCOLS_TABLE "'); "
+                      "SELECT cloudsync_begin_alter('" CUSTOMERS_NOCOLS_TABLE "'); "
+                      "ALTER TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" RENAME TO do_alter_tables_temp_customers_nocols; "
+                      "CREATE TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" (first_name TEXT NOT NULL, last_name TEXT NOT NULL, PRIMARY KEY(first_name, last_name)); "
+                      "INSERT INTO \"" CUSTOMERS_NOCOLS_TABLE "\" (\"first_name\",\"last_name\") SELECT \"first_name\",\"last_name_2\" FROM do_alter_tables_temp_customers_nocols; "
                       "DROP TABLE do_alter_tables_temp_customers_nocols; "
-                      "SELECT cloudsync_commit_alter('customers_nocols');" ;
+                      "SELECT cloudsync_commit_alter('" CUSTOMERS_NOCOLS_TABLE "');" ;
                 break;
             case 3:
-                sql = "SELECT cloudsync_begin_alter('customers_nocols'); "
-                      "ALTER TABLE \"customers_nocols\" RENAME TO do_alter_tables_temp_customers_nocols; "
-                      "CREATE TABLE customers_nocols (name TEXT NOT NULL PRIMARY KEY); "
-                      "INSERT INTO \"customers_nocols\" (\"name\") SELECT \"first_name\" || \"last_name\" FROM do_alter_tables_temp_customers_nocols; "
+                sql = "SELECT cloudsync_begin_alter('" CUSTOMERS_NOCOLS_TABLE "'); "
+                      "ALTER TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" RENAME TO do_alter_tables_temp_customers_nocols; "
+                      "CREATE TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" (name TEXT NOT NULL PRIMARY KEY); "
+                      "INSERT INTO \"" CUSTOMERS_NOCOLS_TABLE "\" (\"name\") SELECT \"first_name\" || \"last_name\" FROM do_alter_tables_temp_customers_nocols; "
                       "DROP TABLE do_alter_tables_temp_customers_nocols; "
-                      "SELECT cloudsync_commit_alter('customers_nocols'); ";
+                      "SELECT cloudsync_commit_alter('" CUSTOMERS_NOCOLS_TABLE "'); ";
                 break;
             default:
                 break;
@@ -1118,11 +1153,11 @@ bool do_alter_tables (int table_mask, sqlite3 *db, int alter_version) {
             case 2:
                 sql = "SELECT cloudsync_begin_alter('customers_noprikey'); "
                       "ALTER TABLE \"customers_noprikey\" RENAME TO do_alter_tables_temp_customers_noprikey; "
-                      "CREATE TABLE \"customers_noprikey\" (first_name TEXT NOT NULL, last_name TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT \"note\", stamp TEXT DEFAULT CURRENT_TIMESTAMP); "
-                      "INSERT INTO \"customers_noprikey\" (\"first_name\",\"last_name\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\",\"last_name\",\"note\",\"note2\",\"stamp\" FROM do_alter_tables_temp_customers_noprikey; "
+                      "CREATE TABLE \"customers_noprikey\" (first_name TEXT NOT NULL, last_name TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT 'note', stamp TEXT DEFAULT CURRENT_TIMESTAMP); "
+                      "INSERT INTO \"customers_noprikey\" (\"first_name\",\"last_name\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\",\"last_name\",\"note\",'a new note',\"stamp\" FROM do_alter_tables_temp_customers_noprikey; "
                       "DROP TABLE do_alter_tables_temp_customers_noprikey; "
                       "SELECT cloudsync_commit_alter('customers_noprikey') "
-                        "SELECT cloudsync_begin_alter('customers_nocols'); "
+                        "SELECT cloudsync_begin_alter('customers_noprikey'); "
                         "ALTER TABLE \"customers_noprikey\" RENAME TO do_alter_tables_temp_customers_noprikey; "
                         "CREATE TABLE customers_noprikey (first_name TEXT NOT NULL, last_name TEXT NOT NULL, PRIMARY KEY(first_name, last_name)); "
                         "INSERT INTO \"customers_noprikey\" (\"first_name\",\"last_name\") SELECT \"first_name\",\"last_name_2\" FROM do_alter_tables_temp_customers_noprikey; "
@@ -1132,8 +1167,8 @@ bool do_alter_tables (int table_mask, sqlite3 *db, int alter_version) {
             case 3:
                 sql = "SELECT cloudsync_begin_alter('customers_noprikey'); "
                       "ALTER TABLE \"customers_noprikey\" RENAME TO do_alter_tables_temp_customers_noprikey; "
-                      "CREATE TABLE \"customers_noprikey\" (name TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT \"note\", stamp TEXT DEFAULT CURRENT_TIMESTAMP); "
-                      "INSERT INTO \"customers_noprikey\" (\"first_name\" || \"last_name\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\",\"last_name\",\"note\",\"note2\",\"stamp\" FROM do_alter_tables_temp_customers_noprikey; "
+                      "CREATE TABLE \"customers_noprikey\" (name TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT 'note', stamp TEXT DEFAULT CURRENT_TIMESTAMP); "
+                      "INSERT INTO \"customers_noprikey\" (\"first_name\" || \"last_name\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\",\"last_name\",\"note\",'a new note',\"stamp\" FROM do_alter_tables_temp_customers_noprikey; "
                       "DROP TABLE do_alter_tables_temp_customers_noprikey; "
                       "SELECT cloudsync_commit_alter('customers_noprikey') ";
             default:
@@ -1153,12 +1188,12 @@ bool do_augment_tables (int table_mask, sqlite3 *db, table_algo algo) {
     char sql[512];
     
     if (table_mask & TEST_PRIKEYS) {
-        snprintf(sql, sizeof(sql), "SELECT cloudsync_init('customers', '%s');", crdt_algo_name(algo));
+        snprintf(sql, sizeof(sql), "SELECT cloudsync_init('" CUSTOMERS_TABLE "', '%s');", crdt_algo_name(algo));
         if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) goto abort_augment_tables;
     }
     
     if (table_mask & TEST_NOCOLS) {
-        snprintf(sql, sizeof(sql), "SELECT cloudsync_init('customers_nocols', '%s');", crdt_algo_name(algo));
+        snprintf(sql, sizeof(sql), "SELECT cloudsync_init('" CUSTOMERS_NOCOLS_TABLE "', '%s');", crdt_algo_name(algo));
         if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) goto abort_augment_tables;
     }
     
@@ -1199,7 +1234,7 @@ bool do_test_local (int test_mask, int table_mask, sqlite3 *db, bool print_resul
     if ((test_mask & TEST_INSERT) && (test_mask & TEST_DELETE) && (table_mask & TEST_PRIKEYS)) {
         // reinsert a previously deleted row to trigget local_update_sentinel
         // "DELETE FROM customers WHERE first_name='name5';"
-        const char *sql = "INSERT INTO customers (first_name, last_name, age, note) VALUES ('name5', 'surname5', 55, 'Reinsert a previously delete row');";
+        const char *sql = "INSERT INTO \"" CUSTOMERS_TABLE "\" (first_name, last_name, age, note) VALUES ('name5', 'surname5', 55, 'Reinsert a previously delete row');";
         if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) {
             printf("%s\n", sqlite3_errmsg(db));
             return false;
@@ -1692,7 +1727,8 @@ bool do_test_dbutils (void) {
     "CREATE TABLE IF NOT EXISTS nonnull_nodefault_table (name TEXT PRIMARY KEY NOT NULL, stamp TEXT NOT NULL);"
     "CREATE TABLE IF NOT EXISTS nonnull_default_table (name TEXT PRIMARY KEY NOT NULL, stamp TEXT NOT NULL DEFAULT CURRENT_TIME);"
     "CREATE TABLE IF NOT EXISTS integer_pk (id INTEGER PRIMARY KEY NOT NULL, value);"
-    "CREATE TABLE IF NOT EXISTS int_pk (id INT PRIMARY KEY NOT NULL, value);";
+    "CREATE TABLE IF NOT EXISTS int_pk (id INT PRIMARY KEY NOT NULL, value);"
+    "CREATE TABLE IF NOT EXISTS \"quoted table name 🚀\" (\"pk quoted col 1\" TEXT NOT NULL, \"pk quoted col 2\" TEXT NOT NULL, \"non pk quoted col 1\", \"non pk quoted col 2\", PRIMARY KEY (\"pk quoted col 1\", \"pk quoted col 2\"));";
 ;
     
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
@@ -1710,6 +1746,9 @@ bool do_test_dbutils (void) {
     rc = sqlite3_exec(db, "SELECT cloudsync_init('bar', 'gos');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
     
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('quoted table name 🚀');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
     // test dbutils_write
     sql = "INSERT INTO foo (name, age, note) VALUES (?, ?, ?);";
     const char *values[] = {"Test1", "3.1415", NULL};
@@ -1725,6 +1764,14 @@ bool do_test_dbutils (void) {
     // test dbutils_text_select
     sql = "INSERT INTO foo (name) VALUES ('Test2')";
     rc = dbutils_write_simple(db, sql);
+    if (rc != SQLITE_OK) goto finalize;
+    
+    sql = "INSERT INTO \"quoted table name 🚀\" (\"pk quoted col 1\", \"pk quoted col 2\", \"non pk quoted col 1\", \"non pk quoted col 2\") VALUES ('pk1', 'pk2', 'nonpk1', 'nonpk2');";
+    rc = dbutils_write(db, NULL, sql, NULL, NULL, NULL, -1);
+    if (rc != SQLITE_OK) goto finalize;
+    
+    sql = "SELECT * FROM cloudsync_changes();";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
     
     sqlite3_int64 i64_value = dbutils_int_select(db, "SELECT NULL;");
@@ -1761,6 +1808,8 @@ bool do_test_dbutils (void) {
     b = dbutils_table_sanity_check(db, NULL, "int_pk", false);
     if (b == true) goto finalize;
     b = dbutils_table_sanity_check(db, NULL, "int_pk", true);
+    if (b == false) goto finalize;
+    b = dbutils_table_sanity_check(db, NULL, "quoted table name 🚀", true);
     if (b == false) goto finalize;
     
     // create huge dummy_table table
@@ -1906,6 +1955,14 @@ bool do_test_internal_functions (void) {
     // INIT
     int rc = sqlite3_open(":memory:", &db);
     if (rc != SQLITE_OK) goto abort_test;
+    
+    sql = "SELECT \"double-quoted string literal misfeature\"";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_ERROR) {
+        printf("invalid result code for the following query, expected 1 (ERROR), got %d: '%s'\n", rc, sql);
+        printf("the unittest must be built with -DSQLITE_DQS=0\n");
+        goto abort_test;
+    }
     
     sql = "CREATE TABLE foo (name TEXT PRIMARY KEY NOT NULL, age INTEGER UNIQUE);";
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
@@ -2261,13 +2318,13 @@ bool do_test_merge (int nclients, bool print_result, bool cleanup_databases) {
     
     // compare results
     for (int i=1; i<nclients; ++i) {
-        const char *sql = "SELECT * FROM customers ORDER BY first_name, last_name;";
+        const char *sql = "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;";
         if (do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result) == false) goto finalize;
     }
     
     if (print_result) {
         printf("\n-> customers\n");
-        do_query(db[0], "SELECT * FROM customers ORDER BY first_name, last_name;", query_table);
+        do_query(db[0], "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;", query_table);
     }
     
     result = true;
@@ -2342,7 +2399,7 @@ bool do_test_merge_2 (int nclients, int table_mask, bool print_result, bool clea
             if (nrows == NINSERT) {
                 do_update_random(db[i], table_mask, print_result);
             } else {
-                rc = sqlite3_exec(db[i], "UPDATE customers SET age = ABS(RANDOM()), note='hello' || HEX(RANDOMBLOB(2)), stamp='stamp' || ABS(RANDOM() % 99) WHERE rowid=1;", NULL, NULL, NULL);
+                rc = sqlite3_exec(db[i], "UPDATE \"" CUSTOMERS_TABLE "\" SET age = ABS(RANDOM()), note='hello' || HEX(RANDOMBLOB(2)), stamp='stamp' || ABS(RANDOM() % 99) WHERE rowid=1;", NULL, NULL, NULL);
                 if (rc != SQLITE_OK) goto finalize;
             }
         }
@@ -2362,7 +2419,7 @@ bool do_test_merge_2 (int nclients, int table_mask, bool print_result, bool clea
         if (nrows == NINSERT) {
             do_update_random(db[i], table_mask, print_result);
         } else {
-            rc = sqlite3_exec(db[i], "UPDATE customers SET age = ABS(RANDOM()), note='hello' || HEX(RANDOMBLOB(2)), stamp='stamp' || ABS(RANDOM() % 99) WHERE rowid=1;", NULL, NULL, NULL);
+            rc = sqlite3_exec(db[i], "UPDATE \"" CUSTOMERS_TABLE "\" SET age = ABS(RANDOM()), note='hello' || HEX(RANDOMBLOB(2)), stamp='stamp' || ABS(RANDOM() % 99) WHERE rowid=1;", NULL, NULL, NULL);
             if (rc != SQLITE_OK) goto finalize;
         }
     }
@@ -2378,23 +2435,23 @@ bool do_test_merge_2 (int nclients, int table_mask, bool print_result, bool clea
     // compare results
     for (int i=1; i<nclients; ++i) {
         if (table_mask & TEST_PRIKEYS) {
-            const char *sql = "SELECT * FROM customers ORDER BY first_name, last_name;";
+            const char *sql = "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;";
             if (do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result) == false) goto finalize;
         }
         if (table_mask & TEST_NOCOLS) {
-            const char *sql = "SELECT * FROM customers_nocols ORDER BY first_name, last_name;";
+            const char *sql = "SELECT * FROM \"" CUSTOMERS_NOCOLS_TABLE "\" ORDER BY first_name, last_name;";
             if (do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result) == false) goto finalize;
         }
     }
     
     if (print_result) {
         if (table_mask & TEST_PRIKEYS) {
-            printf("\n-> customers\n");
-            do_query(db[0], "SELECT * FROM customers ORDER BY first_name, last_name;", query_table);
+            printf("\n-> " CUSTOMERS_TABLE "\n");
+            do_query(db[0], "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;", query_table);
         }
         if (table_mask & TEST_NOCOLS) {
-            printf("\n-> customers_nocols\n");
-            do_query(db[0], "SELECT * FROM customers_nocols ORDER BY first_name, last_name;", query_table);
+            printf("\n-> \"" CUSTOMERS_NOCOLS_TABLE "s\"\n");
+            do_query(db[0], "SELECT * FROM \"" CUSTOMERS_NOCOLS_TABLE "\" ORDER BY first_name, last_name;", query_table);
         }
     }
     
@@ -2463,7 +2520,7 @@ bool do_test_merge_4 (int nclients, bool print_result, bool cleanup_databases) {
     // insert, update and delete some data in all clients
     for (int i=0; i<nclients; ++i) {
         do_insert(db[i], table_mask, 1, print_result);
-        snprintf(buf, sizeof(buf), "UPDATE customers SET age=%d, note='note%d', stamp='stamp%d';", i+nclients, i+nclients, 9-i);
+        snprintf(buf, sizeof(buf), "UPDATE \"" CUSTOMERS_TABLE "\" SET age=%d, note='note%d', stamp='stamp%d';", i+nclients, i+nclients, 9-i);
         rc = sqlite3_exec(db[i], buf, NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto finalize;
     }
@@ -2475,15 +2532,15 @@ bool do_test_merge_4 (int nclients, bool print_result, bool cleanup_databases) {
     
     // compare results
     for (int i=1; i<nclients; ++i) {
-        const char *sql = "SELECT * FROM customers ORDER BY first_name, last_name;";
+        const char *sql = "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;";
         if (do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result) == false) goto finalize;
         const char *sql2 = "SELECT 'name1', 'surname1', 3, 'note3', 'stamp9'";
         if (do_compare_queries(db[0], sql, db[i], sql2, -1, -1, print_result) == false) goto finalize;
     }
     
     if (print_result) {
-        printf("\n-> customers\n");
-        do_query(db[0], "SELECT * FROM customers ORDER BY first_name, last_name;", query_table);
+        printf("\n-> " CUSTOMERS_TABLE "\n");
+        do_query(db[0], "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;", query_table);
     }
     
     result = true;
@@ -2554,7 +2611,7 @@ bool do_test_merge_5 (int nclients, bool print_result, bool cleanup_databases, b
     }
     
     int n = 99;
-    snprintf(buf, sizeof(buf), "UPDATE customers SET age=%d;", n);
+    snprintf(buf, sizeof(buf), "UPDATE \"" CUSTOMERS_TABLE "\" SET age=%d;", n);
     rc = sqlite3_exec(db[0], buf, NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
         
@@ -2562,7 +2619,7 @@ bool do_test_merge_5 (int nclients, bool print_result, bool cleanup_databases, b
         return false;
     }
     
-    snprintf(buf, sizeof(buf), "UPDATE customers SET first_name='name%d';", n);
+    snprintf(buf, sizeof(buf), "UPDATE \"" CUSTOMERS_TABLE "\" SET first_name='name%d';", n);
     rc = sqlite3_exec(db[1], buf, NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
 
@@ -2573,13 +2630,13 @@ bool do_test_merge_5 (int nclients, bool print_result, bool cleanup_databases, b
     
     // compare results
     for (int i=1; i<nclients; ++i) {
-        const char *sql = "SELECT * FROM customers ORDER BY first_name, last_name;";
+        const char *sql = "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;";
         if (do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result) == false) goto finalize;
     }
     
     if (print_result) {
         printf("\n-> customers\n");
-        do_query(db[0], "SELECT * FROM customers ORDER BY first_name, last_name;", query_table);
+        do_query(db[0], "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;", query_table);
     }
     
     result = true;
@@ -2661,13 +2718,13 @@ bool do_test_merge_alter_schema_1 (int nclients, bool print_result, bool cleanup
     
     // compare results
     for (int i=1; i<nclients; ++i) {
-        const char *sql = "SELECT * FROM customers ORDER BY first_name, last_name;";
+        const char *sql = "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;";
         if (do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result) == false) goto finalize;
     }
     
     if (print_result) {
         printf("\n-> customers\n");
-        do_query(db[0], "SELECT * FROM customers ORDER BY first_name, last_name;", query_table);
+        do_query(db[0], "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;", query_table);
     }
     
     result = true;
@@ -2750,13 +2807,13 @@ bool do_test_merge_alter_schema_2 (int nclients, bool print_result, bool cleanup
         
     // compare results
     for (int i=1; i<nclients; ++i) {
-        const char *sql = "SELECT * FROM customers ORDER BY first_name, last_name;";
+        const char *sql = "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;";
         if (do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result) == false) goto finalize;
     }
     
     if (print_result) {
         printf("\n-> customers\n");
-        do_query(db[0], "SELECT * FROM customers ORDER BY first_name, last_name;", query_table);
+        do_query(db[0], "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;", query_table);
     }
     
     result = true;
@@ -3059,13 +3116,13 @@ bool do_test_network_encode_decode (int nclients, bool print_result, bool cleanu
     
     // compare results
     for (int i=1; i<nclients; ++i) {
-        const char *sql = "SELECT * FROM customers ORDER BY first_name, last_name;";
+        const char *sql = "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;";
         if (do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result) == false) goto finalize;
     }
     
     if (print_result) {
         printf("\n-> customers\n");
-        do_query(db[0], "SELECT * FROM customers ORDER BY first_name, last_name;", query_table);
+        do_query(db[0], "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;", query_table);
     }
     
     result = true;
@@ -3127,11 +3184,11 @@ bool do_test_fill_initial_data(int nclients, bool print_result, bool cleanup_dat
     // compare results
     for (int i=1; i<nclients; ++i) {
         if (table_mask & TEST_PRIKEYS) {
-            const char *sql = "SELECT * FROM customers ORDER BY first_name, last_name;";
+            const char *sql = "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;";
             if (do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result) == false) goto finalize;
         }
         if (table_mask & TEST_NOCOLS) {
-            const char *sql = "SELECT * FROM customers_nocols ORDER BY first_name, last_name;";
+            const char *sql = "SELECT * FROM \"" CUSTOMERS_NOCOLS_TABLE "\" ORDER BY first_name, last_name;";
             if (do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result) == false) goto finalize;
         }
         if (table_mask & TEST_NOPRIKEYS) {
@@ -3142,12 +3199,12 @@ bool do_test_fill_initial_data(int nclients, bool print_result, bool cleanup_dat
     
     if (print_result) {
         if (table_mask & TEST_PRIKEYS) {
-            printf("\n-> customers\n");
-            do_query(db[0], "SELECT * FROM customers ORDER BY first_name, last_name;", query_table);
+            printf("\n-> " CUSTOMERS_TABLE "\n");
+            do_query(db[0], "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;", query_table);
         }
         if (table_mask & TEST_NOCOLS) {
-            printf("\n-> customers_nocols\n");
-            do_query(db[0], "SELECT * FROM customers_nocols ORDER BY first_name, last_name;", query_table);
+            printf("\n-> \"" CUSTOMERS_NOCOLS_TABLE "\"\n");
+            do_query(db[0], "SELECT * FROM \"" CUSTOMERS_NOCOLS_TABLE "\" ORDER BY first_name, last_name;", query_table);
         }
         if (table_mask & TEST_NOPRIKEYS) {
             printf("\n-> customers_noprikey\n");
@@ -3232,10 +3289,10 @@ bool do_test_alter(int nclients, int alter_version, bool print_result, bool clea
             const char *sql;
             switch (alter_version) {
                 case 3:
-                    sql = "SELECT * FROM customers ORDER BY name;";
+                    sql = "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY name;";
                     break;
                 default:
-                    sql = "SELECT * FROM customers ORDER BY first_name, last_name;";
+                    sql = "SELECT * FROM \"" CUSTOMERS_TABLE "\" ORDER BY first_name, last_name;";
                     break;
             }
             if (do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result) == false) goto finalize;
@@ -3244,10 +3301,10 @@ bool do_test_alter(int nclients, int alter_version, bool print_result, bool clea
             const char *sql;
             switch (alter_version) {
                 case 3:
-                    sql = "SELECT * FROM customers_nocols ORDER BY name;";
+                    sql = "SELECT * FROM \"" CUSTOMERS_NOCOLS_TABLE "\" ORDER BY name;";
                     break;
                 default:
-                    sql = "SELECT * FROM customers_nocols ORDER BY first_name, last_name;";
+                    sql = "SELECT * FROM \"" CUSTOMERS_NOCOLS_TABLE "\" ORDER BY first_name, last_name;";
                     break;
             }
             if (do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result) == false) goto finalize;
@@ -3268,12 +3325,12 @@ bool do_test_alter(int nclients, int alter_version, bool print_result, bool clea
     
     if (print_result) {
         if (table_mask & TEST_PRIKEYS) {
-            printf("\n-> customers\n");
-            do_query(db[0], "SELECT * FROM customers ORDER BY first_name, last_name;", query_table);
+            printf("\n-> " CUSTOMERS_TABLE "\n");
+            do_query(db[0], "SELECT * FROM " CUSTOMERS_TABLE " ORDER BY first_name, last_name;", query_table);
         }
         if (table_mask & TEST_NOCOLS) {
-            printf("\n-> customers_nocols\n");
-            do_query(db[0], "SELECT * FROM customers_nocols ORDER BY first_name, last_name;", query_table);
+            printf("\n-> \"" CUSTOMERS_NOCOLS_TABLE "\"\n");
+            do_query(db[0], "SELECT * FROM \"" CUSTOMERS_NOCOLS_TABLE "\" ORDER BY first_name, last_name;", query_table);
         }
         if (table_mask & TEST_NOPRIKEYS) {
             printf("\n-> customers_noprikey\n");
@@ -3329,23 +3386,23 @@ int main(int argc, const char * argv[]) {
     result += test_report("DBUtils Test:", do_test_dbutils());
     result += test_report("Minor Test:", do_test_others(db));
     result += test_report("Test Error Cases:", do_test_error_cases(db));
-    
+
     int test_mask = TEST_INSERT | TEST_UPDATE | TEST_DELETE;
     int table_mask = TEST_PRIKEYS | TEST_NOCOLS;
     #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
     table_mask |= TEST_NOPRIKEYS;
     #endif
-    
+
     // test local changes
     result += test_report("Local Test:", do_test_local(test_mask, table_mask, db, print_result));
     result += test_report("VTab Test: ", do_test_vtab(db));
     result += test_report("Functions Test:", do_test_functions(db, print_result));
     result += test_report("Functions Test (Int):", do_test_internal_functions());
     result += test_report("String Func Test:", do_test_string_replace_prefix());
-
+ 
     // close local database
     db = close_db(db);
-    
+ 
     // simulate remote merge
     result += test_report("Merge Test:", do_test_merge(3, print_result, cleanup_databases));
     result += test_report("Merge Test 2:", do_test_merge_2(3, TEST_PRIKEYS, print_result, cleanup_databases));

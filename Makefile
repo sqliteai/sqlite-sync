@@ -188,7 +188,7 @@ $(TEST_TARGET): $(TEST_OBJ)
 $(BUILD_RELEASE)/%.o: %.c
 	$(CC) $(CFLAGS) -O3 -fPIC -c $< -o $@
 $(BUILD_TEST)/sqlite3.o: $(SQLITE_DIR)/sqlite3.c
-	$(CC) $(CFLAGS) -DSQLITE_CORE -c $< -o $@
+	$(CC) $(CFLAGS) -DSQLITE_DQS=0 -DSQLITE_CORE -c $< -o $@
 $(BUILD_TEST)/%.o: %.c
 	$(CC) $(T_CFLAGS) -c $< -o $@
 

@@ -470,23 +470,23 @@ int dbutils_delete_triggers (sqlite3 *db, const char *table) {
     size_t blen = sizeof(buffer);
     int rc = SQLITE_ERROR;
     
-    char *sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS cloudsync_before_update_%w;", table);
+    char *sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_before_update_%w\";", table);
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
     
-    sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS cloudsync_before_delete_%w;", table);
+    sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_before_delete_%w\";", table);
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
     
-    sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS cloudsync_after_insert_%w;", table);
+    sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_after_insert_%w\";", table);
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
     
-    sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS cloudsync_after_update_%w;", table);
+    sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_after_update_%w\";", table);
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
     
-    sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS cloudsync_after_delete_%w;", table);
+    sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_after_delete_%w\";", table);
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
     
@@ -512,14 +512,14 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
     
     if (!dbutils_trigger_exists(db, trigger_name)) {
         rc = SQLITE_NOMEM;
-        char *sql = cloudsync_memory_mprintf("SELECT group_concat('NEW.' || name, ',') FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk;", table);
+        char *sql = cloudsync_memory_mprintf("SELECT group_concat('NEW.\"' || name || '\"', ',') FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk;", table);
         if (!sql) goto finalize;
         
         char *pkclause = dbutils_text_select(db, sql);
         char *pkvalues = (pkclause) ? pkclause : "NEW.rowid";
         cloudsync_memory_free(sql);
         
-        sql = cloudsync_memory_mprintf("CREATE TRIGGER %s AFTER INSERT ON %w %s BEGIN SELECT cloudsync_insert('%w', %s); END", trigger_name, table, trigger_when, table, pkvalues);
+        sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%s\" AFTER INSERT ON \"%w\" %s BEGIN SELECT cloudsync_insert('%w', %s); END", trigger_name, table, trigger_when, table, pkvalues);
         if (pkclause) cloudsync_memory_free(pkclause);
         if (!sql) goto finalize;
         
@@ -541,22 +541,22 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
         if (!trigger_name) goto finalize;
         
         if (!dbutils_trigger_exists(db, trigger_name)) {
-            char *sql = cloudsync_memory_mprintf("SELECT group_concat('NEW.' || name, ',') || ',' || group_concat('OLD.' || name, ',') FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk;", table);
+            char *sql = cloudsync_memory_mprintf("SELECT group_concat('NEW.\"' || name || '\"', ',') || ',' || group_concat('OLD.\"' || name || '\"', ',') FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk;", table);
             if (!sql) goto finalize;
             
             char *pkclause = dbutils_text_select(db, sql);
             char *pkvalues = (pkclause) ? pkclause : "NEW.rowid,OLD.rowid";
             cloudsync_memory_free(sql);
             
-            sql = cloudsync_memory_mprintf("SELECT group_concat('NEW.' || name || ', OLD.' || name, ',') FROM pragma_table_info('%w') WHERE pk=0 ORDER BY cid;", table);
+            sql = cloudsync_memory_mprintf("SELECT group_concat('NEW.\"' || name || '\"' || ', OLD.\"' || name || '\"', ',') FROM pragma_table_info('%w') WHERE pk=0 ORDER BY cid;", table);
             if (!sql) goto finalize;
             char *colvalues = dbutils_text_select(db, sql);
             cloudsync_memory_free(sql);
             
             if (colvalues == NULL) {
-                sql = cloudsync_memory_mprintf("CREATE TRIGGER %s AFTER UPDATE ON %w %s BEGIN SELECT cloudsync_update('%w',%s); END", trigger_name, table, trigger_when, table, pkvalues);
+                sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%s\" AFTER UPDATE ON \"%w\" %s BEGIN SELECT cloudsync_update('%w',%s); END", trigger_name, table, trigger_when, table, pkvalues);
             } else {
-                sql = cloudsync_memory_mprintf("CREATE TRIGGER %s AFTER UPDATE ON %w %s BEGIN SELECT cloudsync_update('%w',%s,%s); END", trigger_name, table, trigger_when, table, pkvalues, colvalues);
+                sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%s\" AFTER UPDATE ON \"%w\" %s BEGIN SELECT cloudsync_update('%w',%s,%s); END", trigger_name, table, trigger_when, table, pkvalues, colvalues);
                 cloudsync_memory_free(colvalues);
             }
             if (pkclause) cloudsync_memory_free(pkclause);
@@ -579,7 +579,7 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
         if (!trigger_name) goto finalize;
         
         if (!dbutils_trigger_exists(db, trigger_name)) {
-            char *sql = cloudsync_memory_mprintf("CREATE TRIGGER %s BEFORE UPDATE ON %w FOR EACH ROW WHEN cloudsync_is_enabled('%w') = 1 BEGIN SELECT RAISE(ABORT, 'Error: UPDATE operation is not allowed on table %w.'); END", trigger_name, table, table, table);
+            char *sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%s\" BEFORE UPDATE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%w') = 1 BEGIN SELECT RAISE(ABORT, 'Error: UPDATE operation is not allowed on table %w.'); END", trigger_name, table, table, table);
             if (!sql) goto finalize;
             
             rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
@@ -598,14 +598,14 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
         if (!trigger_name) goto finalize;
         
         if (!dbutils_trigger_exists(db, trigger_name)) {
-            char *sql = cloudsync_memory_mprintf("SELECT group_concat('OLD.' || name, ',') FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk;", table);
+            char *sql = cloudsync_memory_mprintf("SELECT group_concat('OLD.\"' || name || '\"', ',') FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk;", table);
             if (!sql) goto finalize;
             
             char *pkclause = dbutils_text_select(db, sql);
             char *pkvalues = (pkclause) ? pkclause : "OLD.rowid";
             cloudsync_memory_free(sql);
             
-            sql = cloudsync_memory_mprintf("CREATE TRIGGER %s AFTER DELETE ON %w %s BEGIN SELECT cloudsync_delete('%w',%s); END", trigger_name, table, trigger_when, table, pkvalues);
+            sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%s\" AFTER DELETE ON \"%w\" %s BEGIN SELECT cloudsync_delete('%w',%s); END", trigger_name, table, trigger_when, table, pkvalues);
             if (pkclause) cloudsync_memory_free(pkclause);
             if (!sql) goto finalize;
             
@@ -624,7 +624,7 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
         if (!trigger_name) goto finalize;
         
         if (!dbutils_trigger_exists(db, trigger_name)) {
-            char *sql = cloudsync_memory_mprintf("CREATE TRIGGER %s BEFORE DELETE ON %w FOR EACH ROW WHEN cloudsync_is_enabled('%w') = 1 BEGIN SELECT RAISE(ABORT, 'Error: DELETE operation is not allowed on table %w.'); END", trigger_name, table, table, table);
+            char *sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%s\" BEFORE DELETE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%w') = 1 BEGIN SELECT RAISE(ABORT, 'Error: DELETE operation is not allowed on table %w.'); END", trigger_name, table, table, table);
             if (!sql) goto finalize;
             
             rc = sqlite3_exec(db, sql, NULL, NULL, NULL);

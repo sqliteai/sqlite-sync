@@ -360,7 +360,7 @@ char *db_version_build_query (sqlite3 *db) {
     
     // the good news is that the query can be computed in SQLite without the need to do any extra computation from the host language
     const char *sql = "WITH table_names AS ("
-                      "SELECT format('%w', name) as tbl_name "
+                      "SELECT format('%q', name) as tbl_name "
                       "FROM sqlite_master "
                       "WHERE type='table' "
                       "AND name LIKE '%_cloudsync'"
@@ -507,12 +507,12 @@ char *table_build_values_sql (sqlite3 *db, cloudsync_table_context *table) {
     
     #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
     if (table->rowid_only) {
-        sql = memory_mprintf("WITH col_names AS (SELECT group_concat(name, ',') AS cols FROM pragma_table_info('%w') WHERE pk=0 ORDER BY cid) SELECT 'SELECT ' || (SELECT cols FROM col_names) || ' FROM %w WHERE rowid=?;'", table->name, table->name);
+        sql = memory_mprintf("WITH col_names AS (SELECT group_concat('\"' || name || '\"', ',') AS cols FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid) SELECT 'SELECT ' || (SELECT cols FROM col_names) || ' FROM \"%w\" WHERE rowid=?;'", table->name, table->name);
         goto process_process;
     }
     #endif
     
-    sql = cloudsync_memory_mprintf("WITH col_names AS (SELECT group_concat(name, ',') AS cols FROM pragma_table_info('%w') WHERE pk=0 ORDER BY cid), pk_where AS (SELECT group_concat(name, '=? AND ') || '=?' AS pk_clause FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk) SELECT 'SELECT ' || (SELECT cols FROM col_names) || ' FROM %w WHERE ' || (SELECT pk_clause FROM pk_where) || ';'", table->name, table->name, table->name);
+    sql = cloudsync_memory_mprintf("WITH col_names AS (SELECT group_concat('\"' || name || '\"', ',') AS cols FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid), pk_where AS (SELECT group_concat('\"' || name || '\"', '=? AND ') || '=?' AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'SELECT ' || (SELECT cols FROM col_names) || ' FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'", table->name, table->name, table->name);
  
 #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
 process_process:
@@ -527,12 +527,12 @@ process_process:
 char *table_build_mergedelete_sql (sqlite3 *db, cloudsync_table_context *table) {
     #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
     if (table->rowid_only) {
-        char *sql = memory_mprintf("DELETE FROM %w WHERE rowid=?;", table->name);
+        char *sql = memory_mprintf("DELETE FROM \"%w\" WHERE rowid=?;", table->name);
         return sql;
     }
     #endif
     
-    char *sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat(name, '=? AND ') || '=?' AS pk_clause FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk) SELECT 'DELETE FROM %w WHERE ' || (SELECT pk_clause FROM pk_where) || ';'", table->name, table->name);
+    char *sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || name || '\"', '=? AND ') || '=?' AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'DELETE FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'", table->name, table->name);
     if (!sql) return NULL;
     
     char *query = dbutils_text_select(db, sql);
@@ -548,10 +548,10 @@ char *table_build_mergeinsert_sql (sqlite3 *db, cloudsync_table_context *table, 
     if (table->rowid_only) {
         if (colname == NULL) {
             // INSERT OR IGNORE INTO customers (first_name,last_name) VALUES (?,?);
-            sql = memory_mprintf("INSERT OR IGNORE INTO %w (rowid) VALUES (?);", table->name);
+            sql = memory_mprintf("INSERT OR IGNORE INTO \"%w\" (rowid) VALUES (?);", table->name);
         } else {
             // INSERT INTO customers (first_name,last_name,age) VALUES (?,?,?) ON CONFLICT DO UPDATE SET age=?;
-            sql = memory_mprintf("INSERT INTO %w (rowid, %w) VALUES (?, ?) ON CONFLICT DO UPDATE SET %w=?;", table->name, colname, colname);
+            sql = memory_mprintf("INSERT INTO \"%w\" (rowid, \"%w\") VALUES (?, ?) ON CONFLICT DO UPDATE SET \"%w\"=?;", table->name, colname, colname);
         }
         return sql;
     }
@@ -559,9 +559,9 @@ char *table_build_mergeinsert_sql (sqlite3 *db, cloudsync_table_context *table, 
     
     if (colname == NULL) {
         // is sentinel insert
-        sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat(name) AS pk_clause FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk), pk_bind AS (SELECT group_concat('?') AS pk_binding FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk) SELECT 'INSERT OR IGNORE INTO %w (' || (SELECT pk_clause FROM pk_where) || ') VALUES ('  || (SELECT pk_binding FROM pk_bind) || ');'", table->name, table->name, table->name);
+        sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || name || '\"') AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk), pk_bind AS (SELECT group_concat('?') AS pk_binding FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'INSERT OR IGNORE INTO \"%w\" (' || (SELECT pk_clause FROM pk_where) || ') VALUES ('  || (SELECT pk_binding FROM pk_bind) || ');'", table->name, table->name, table->name);
     } else {
-        sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat(name) AS pk_clause FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk), pk_bind AS (SELECT group_concat('?') AS pk_binding FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk) SELECT 'INSERT INTO %w (' || (SELECT pk_clause FROM pk_where) || ',%w) VALUES ('  || (SELECT pk_binding FROM pk_bind) || ',?) ON CONFLICT DO UPDATE SET %w=?;'", table->name, table->name, table->name, colname, colname);
+        sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || name || '\"') AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk), pk_bind AS (SELECT group_concat('?') AS pk_binding FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'INSERT INTO \"%w\" (' || (SELECT pk_clause FROM pk_where) || ',\"%w\") VALUES ('  || (SELECT pk_binding FROM pk_bind) || ',?) ON CONFLICT DO UPDATE SET \"%w\"=?;'", table->name, table->name, table->name, colname, colname);
     }
     if (!sql) return NULL;
     
@@ -572,15 +572,17 @@ char *table_build_mergeinsert_sql (sqlite3 *db, cloudsync_table_context *table, 
 }
 
 char *table_build_value_sql (sqlite3 *db, cloudsync_table_context *table, const char *colname) {
+    char *colnamequote = dbutils_is_star_table(colname) ? "" : "\"";
+
     #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
     if (table->rowid_only) {
-        char *sql = memory_mprintf("SELECT %w FROM %w WHERE rowid=?;", colname, table->name);
+        char *sql = memory_mprintf("SELECT %s%w%s FROM \"%w\" WHERE rowid=?;", colnamequote, colname, colnamequote, table->name);
         return sql;
     }
     #endif
-    
+        
     // SELECT age FROM customers WHERE first_name=? AND last_name=?;
-    char *sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat(name, '=? AND ') || '=?' AS pk_clause FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk) SELECT 'SELECT %w FROM %w WHERE ' || (SELECT pk_clause FROM pk_where) || ';'", table->name, colname, table->name);
+    char *sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || name || '\"', '=? AND ') || '=?' AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'SELECT %s%w%s FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'", table->name, colnamequote, colname, colnamequote, table->name);
     if (!sql) return NULL;
     
     char *query = dbutils_text_select(db, sql);
@@ -1627,7 +1629,7 @@ int cloudsync_finalize_alter (sqlite3_context *context, cloudsync_context *data,
         // compact meta-table
         // delete entries for removed columns
         char *sql = cloudsync_memory_mprintf("DELETE FROM \"%w_cloudsync\" WHERE \"col_name\" NOT IN ("
-                                             "SELECT name FROM pragma_table_info('%w') UNION SELECT '%s'"
+                                             "SELECT name FROM pragma_table_info('%q') UNION SELECT '%s'"
                                              ")", table->name, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
         rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
         cloudsync_memory_free(sql);
@@ -1636,7 +1638,7 @@ int cloudsync_finalize_alter (sqlite3_context *context, cloudsync_context *data,
             goto finalize;
         }
         
-        sql = cloudsync_memory_mprintf("SELECT group_concat('%w.' || name, ',') FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk;", table->name, table->name);
+        sql = cloudsync_memory_mprintf("SELECT group_concat('\"%w\".\"' || name || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table->name, table->name);
         if (!sql) {
             rc = SQLITE_NOMEM;
             goto finalize;
@@ -1646,7 +1648,7 @@ int cloudsync_finalize_alter (sqlite3_context *context, cloudsync_context *data,
         cloudsync_memory_free(sql);
         
         // delete entries related to rows that no longer exist in the original table, but preserve tombstone
-        sql = cloudsync_memory_mprintf("DELETE FROM \"%w_cloudsync\" WHERE (\"col_name\" != '%s' OR (\"col_name\" = '%s' AND col_version %% 2 != 0)) AND NOT EXISTS (SELECT 1 FROM \"%w\" WHERE \"%w_cloudsync\".pk = cloudsync_pk_encode(%w) LIMIT 1);", table->name, CLOUDSYNC_TOMBSTONE_VALUE, CLOUDSYNC_TOMBSTONE_VALUE, table->name, table->name, pkvalues);
+        sql = cloudsync_memory_mprintf("DELETE FROM \"%w_cloudsync\" WHERE (\"col_name\" != '%s' OR (\"col_name\" = '%s' AND col_version %% 2 != 0)) AND NOT EXISTS (SELECT 1 FROM \"%w\" WHERE \"%w_cloudsync\".pk = cloudsync_pk_encode(%s) LIMIT 1);", table->name, CLOUDSYNC_TOMBSTONE_VALUE, CLOUDSYNC_TOMBSTONE_VALUE, table->name, table->name, pkvalues);
         rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
         if (pkclause) cloudsync_memory_free(pkclause);
         cloudsync_memory_free(sql);
@@ -1674,23 +1676,23 @@ int cloudsync_refill_metatable (sqlite3 *db, cloudsync_context *data, const char
     
     sqlite3_stmt *vm = NULL;
     sqlite3_int64 db_version = db_version_next(db, data, CLOUDSYNC_VALUE_NOTSET);
-
-    char *sql = cloudsync_memory_mprintf("SELECT group_concat(name, ',') FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk;", table_name);
-    char *pkclause = dbutils_text_select(db, sql);
-    char *pkvalues = (pkclause) ? pkclause : "rowid";
+    
+    char *sql = cloudsync_memory_mprintf("SELECT group_concat('\"' || name || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
+    char *pkclause_identifiers = dbutils_text_select(db, sql);
+    char *pkvalues_identifiers = (pkclause_identifiers) ? pkclause_identifiers : "rowid";
     cloudsync_memory_free(sql);
     
-    sql = cloudsync_memory_mprintf("SELECT group_concat('cloudsync_pk_decode(pk, ' || pk || ') AS ' || name, ',') FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk;", table_name);
+    sql = cloudsync_memory_mprintf("SELECT group_concat('cloudsync_pk_decode(pk, ' || pk || ') AS ' || '\"' || name || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
     char *pkdecode = dbutils_text_select(db, sql);
     char *pkdecodeval = (pkdecode) ? pkdecode : "cloudsync_pk_decode(pk, 1) AS rowid";
     cloudsync_memory_free(sql);
     
-    sql = cloudsync_memory_mprintf("SELECT group_concat(name || ' = cloudsync_pk_decode(pk, ' || pk || ')', ' AND ') FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk;", table_name);
+    sql = cloudsync_memory_mprintf("SELECT group_concat('\"' || name || '\"' || ' = cloudsync_pk_decode(pk, ' || pk || ')', ' AND ') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
     char *pkonclause = dbutils_text_select(db, sql);
     char *pkonclauseval = (pkonclause) ? pkonclause : "rowid = cloudsync_pk_decode(pk, 1) AS rowid";
     cloudsync_memory_free(sql);
     
-    sql = cloudsync_memory_mprintf("SELECT cloudsync_insert('%w', %w) FROM (SELECT %w FROM \"%w\" EXCEPT SELECT %s FROM \"%w_cloudsync\");", table_name, pkvalues, pkvalues, table_name, pkdecodeval, table_name);
+    sql = cloudsync_memory_mprintf("SELECT cloudsync_insert('%q', %s) FROM (SELECT %s FROM \"%w\" EXCEPT SELECT %s FROM \"%w_cloudsync\");", table_name, pkvalues_identifiers, pkvalues_identifiers, table_name, pkdecodeval, table_name);
     int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     cloudsync_memory_free(sql);
     if (rc != SQLITE_OK) goto finalize;
@@ -1698,7 +1700,7 @@ int cloudsync_refill_metatable (sqlite3 *db, cloudsync_context *data, const char
     // fill missing colums
     // for each non-pk column:
     
-    sql = cloudsync_memory_mprintf("SELECT cloudsync_pk_encode(%w) FROM \"%w\" LEFT JOIN \"%w_cloudsync\" ON %s AND \"%w_cloudsync\".col_name = ? WHERE \"%w_cloudsync\".db_version IS NULL", pkvalues, table_name, table_name, pkonclauseval, table_name, table_name);
+    sql = cloudsync_memory_mprintf("SELECT cloudsync_pk_encode(%s) FROM \"%w\" LEFT JOIN \"%w_cloudsync\" ON %s AND \"%w_cloudsync\".col_name = ? WHERE \"%w_cloudsync\".db_version IS NULL", pkvalues_identifiers, table_name, table_name, pkonclauseval, table_name, table_name);
     rc = sqlite3_prepare(db, sql, -1, &vm, NULL);
     cloudsync_memory_free(sql);
     if (rc != SQLITE_OK) goto finalize;
@@ -1729,7 +1731,7 @@ int cloudsync_refill_metatable (sqlite3 *db, cloudsync_context *data, const char
     
 finalize:
     if (rc != SQLITE_OK) DEBUG_ALWAYS("cloudsync_refill_metatable error: %s", sqlite3_errmsg(db));
-    if (pkclause) cloudsync_memory_free(pkclause);
+    if (pkclause_identifiers) cloudsync_memory_free(pkclause_identifiers);
     if (pkdecode) cloudsync_memory_free(pkdecode);
     if (pkonclause) cloudsync_memory_free(pkonclause);
     if (vm) sqlite3_finalize(vm);

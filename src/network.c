@@ -507,7 +507,7 @@ finalize:
         // store proper result code/message
         #ifndef SQLITE_WASM_EXTRA_INIT
         if (rc != CURLUE_OK) sqlite3_result_error(context, curl_url_strerror(rc), -1);
-        sqlite3_result_error_code(context, (rc != CURLE_OK) ? SQLITE_ERROR : SQLITE_NOMEM);
+        sqlite3_result_error_code(context, (rc != CURLUE_OK) ? SQLITE_ERROR : SQLITE_NOMEM);
         #else
         sqlite3_result_error(context, "URL parse error", -1);
         sqlite3_result_error_code(context, SQLITE_ERROR);
@@ -890,7 +890,7 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
             goto finalize;
         }
         
-        sql = cloudsync_memory_mprintf("SELECT cloudsync_init(\"%w\", \"%w\", 1);", tbl_name, value);
+        sql = cloudsync_memory_mprintf("SELECT cloudsync_init('%q', '%q', 1);", tbl_name, value);
         rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
         cloudsync_memory_free(sql);
         if (rc != SQLITE_OK) {
