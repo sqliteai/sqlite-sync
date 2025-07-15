@@ -396,7 +396,7 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
     }
     
     // no more than 128 columns can be used as a composite primary key (SQLite hard limit)
-    char *sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%w') WHERE pk>0;", name);
+    char *sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk>0;", name);
     sqlite3_int64 count = dbutils_int_select(db, sql);
     if (count > 128) {
         dbutils_context_result_error(context, "No more than 128 columns can be used to form a composite primary key");
@@ -419,7 +419,7 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
             // the affinity of a column is determined by the declared type of the column,
             // according to the following rules in the order shown:
             // 1. If the declared type contains the string "INT" then it is assigned INTEGER affinity.
-            sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%w') WHERE pk=1 AND \"type\" LIKE '%%INT%%';", name);
+            sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk=1 AND \"type\" LIKE '%%INT%%';", name);
             sqlite3_int64 count2 = dbutils_int_select(db, sql);
             if (count == count2) {
                 dbutils_context_result_error(context, "Table %s uses an single-column INTEGER primary key. For CRDT replication, primary keys must be globally unique. Consider using a TEXT primary key with UUIDs or ULID to avoid conflicts across nodes. If you understand the risk and still want to use this INTEGER primary key, set the third argument of the cloudsync_init function to 1 to skip this check.", name);
@@ -434,7 +434,7 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
         
     // if user declared explicit primary key(s) then make sure they are all declared as NOT NULL
     if (count > 0) {
-        sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%w') WHERE pk>0 AND \"notnull\"=1;", name);
+        sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk>0 AND \"notnull\"=1;", name);
         sqlite3_int64 count2 = dbutils_int_select(db, sql);
         if (count2 == -1) {
             dbutils_context_result_error(context, "%s", sqlite3_errmsg(db));
@@ -448,7 +448,7 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
     
     // check for columns declared as NOT NULL without a DEFAULT value.
     // Otherwise, col_merge_stmt would fail if changes to other columns are inserted first.
-    sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%w') WHERE pk=0 AND \"notnull\"=1 AND \"dflt_value\" IS NULL;", name);
+    sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk=0 AND \"notnull\"=1 AND \"dflt_value\" IS NULL;", name);
     sqlite3_int64 count3 = dbutils_int_select(db, sql);
     if (count3 == -1) {
         dbutils_context_result_error(context, "%s", sqlite3_errmsg(db));
@@ -502,24 +502,24 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
     int rc = SQLITE_NOMEM;
     
     // common part
-    char *trigger_when = cloudsync_memory_mprintf("FOR EACH ROW WHEN cloudsync_is_sync('%w') = 0", table);
+    char *trigger_when = cloudsync_memory_mprintf("FOR EACH ROW WHEN cloudsync_is_sync('%q') = 0", table);
     if (!trigger_when) goto finalize;
     
     // INSERT TRIGGER
     // NEW.prikey1, NEW.prikey2...
-    trigger_name = cloudsync_memory_mprintf("cloudsync_after_insert_%w", table);
+    trigger_name = cloudsync_memory_mprintf("cloudsync_after_insert_%s", table);
     if (!trigger_name) goto finalize;
     
     if (!dbutils_trigger_exists(db, trigger_name)) {
         rc = SQLITE_NOMEM;
-        char *sql = cloudsync_memory_mprintf("SELECT group_concat('NEW.\"' || name || '\"', ',') FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk;", table);
+        char *sql = cloudsync_memory_mprintf("SELECT group_concat('NEW.\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table);
         if (!sql) goto finalize;
         
         char *pkclause = dbutils_text_select(db, sql);
         char *pkvalues = (pkclause) ? pkclause : "NEW.rowid";
         cloudsync_memory_free(sql);
         
-        sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%s\" AFTER INSERT ON \"%w\" %s BEGIN SELECT cloudsync_insert('%w', %s); END", trigger_name, table, trigger_when, table, pkvalues);
+        sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%w\" AFTER INSERT ON \"%w\" %s BEGIN SELECT cloudsync_insert('%q', %s); END", trigger_name, table, trigger_when, table, pkvalues);
         if (pkclause) cloudsync_memory_free(pkclause);
         if (!sql) goto finalize;
         
@@ -537,26 +537,26 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
         
         // UPDATE TRIGGER
         // NEW.prikey1, NEW.prikey2, OLD.prikey1, OLD.prikey2, NEW.col1, OLD.col1, NEW.col2, OLD.col2...
-        trigger_name = cloudsync_memory_mprintf("cloudsync_after_update_%w", table);
+        trigger_name = cloudsync_memory_mprintf("cloudsync_after_update_%s", table);
         if (!trigger_name) goto finalize;
         
         if (!dbutils_trigger_exists(db, trigger_name)) {
-            char *sql = cloudsync_memory_mprintf("SELECT group_concat('NEW.\"' || name || '\"', ',') || ',' || group_concat('OLD.\"' || name || '\"', ',') FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk;", table);
+            char *sql = cloudsync_memory_mprintf("SELECT group_concat('NEW.\"' || format('%%w', name) || '\"', ',') || ',' || group_concat('OLD.\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table);
             if (!sql) goto finalize;
             
             char *pkclause = dbutils_text_select(db, sql);
             char *pkvalues = (pkclause) ? pkclause : "NEW.rowid,OLD.rowid";
             cloudsync_memory_free(sql);
             
-            sql = cloudsync_memory_mprintf("SELECT group_concat('NEW.\"' || name || '\"' || ', OLD.\"' || name || '\"', ',') FROM pragma_table_info('%w') WHERE pk=0 ORDER BY cid;", table);
+            sql = cloudsync_memory_mprintf("SELECT group_concat('NEW.\"' || format('%%w', name) || '\"' || ', OLD.\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid;", table);
             if (!sql) goto finalize;
             char *colvalues = dbutils_text_select(db, sql);
             cloudsync_memory_free(sql);
             
             if (colvalues == NULL) {
-                sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%s\" AFTER UPDATE ON \"%w\" %s BEGIN SELECT cloudsync_update('%w',%s); END", trigger_name, table, trigger_when, table, pkvalues);
+                sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%w\" AFTER UPDATE ON \"%w\" %s BEGIN SELECT cloudsync_update('%q',%s); END", trigger_name, table, trigger_when, table, pkvalues);
             } else {
-                sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%s\" AFTER UPDATE ON \"%w\" %s BEGIN SELECT cloudsync_update('%w',%s,%s); END", trigger_name, table, trigger_when, table, pkvalues, colvalues);
+                sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%w\" AFTER UPDATE ON \"%w\" %s BEGIN SELECT cloudsync_update('%q',%s,%s); END", trigger_name, table, trigger_when, table, pkvalues, colvalues);
                 cloudsync_memory_free(colvalues);
             }
             if (pkclause) cloudsync_memory_free(pkclause);
@@ -575,11 +575,11 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
         // A grow-only set is a type of CRDT (Conflict-free Replicated Data Type) where the only permissible operation is to add elements to the set,
         // without ever removing or modifying them.
         // Once an element is added to the set, it remains there permanently, which guarantees that the set only grows over time.
-        trigger_name = cloudsync_memory_mprintf("cloudsync_before_update_%w", table);
+        trigger_name = cloudsync_memory_mprintf("cloudsync_before_update_%s", table);
         if (!trigger_name) goto finalize;
         
         if (!dbutils_trigger_exists(db, trigger_name)) {
-            char *sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%s\" BEFORE UPDATE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%w') = 1 BEGIN SELECT RAISE(ABORT, 'Error: UPDATE operation is not allowed on table %w.'); END", trigger_name, table, table, table);
+            char *sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%w\" BEFORE UPDATE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%q') = 1 BEGIN SELECT RAISE(ABORT, 'Error: UPDATE operation is not allowed on table %w.'); END", trigger_name, table, table, table);
             if (!sql) goto finalize;
             
             rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
@@ -594,18 +594,18 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
     // DELETE TRIGGER
     // OLD.prikey1, OLD.prikey2...
     if (algo != table_algo_crdt_gos) {
-        trigger_name = cloudsync_memory_mprintf("cloudsync_after_delete_%w", table);
+        trigger_name = cloudsync_memory_mprintf("cloudsync_after_delete_%s", table);
         if (!trigger_name) goto finalize;
         
         if (!dbutils_trigger_exists(db, trigger_name)) {
-            char *sql = cloudsync_memory_mprintf("SELECT group_concat('OLD.\"' || name || '\"', ',') FROM pragma_table_info('%w') WHERE pk>0 ORDER BY pk;", table);
+            char *sql = cloudsync_memory_mprintf("SELECT group_concat('OLD.\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table);
             if (!sql) goto finalize;
             
             char *pkclause = dbutils_text_select(db, sql);
             char *pkvalues = (pkclause) ? pkclause : "OLD.rowid";
             cloudsync_memory_free(sql);
             
-            sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%s\" AFTER DELETE ON \"%w\" %s BEGIN SELECT cloudsync_delete('%w',%s); END", trigger_name, table, trigger_when, table, pkvalues);
+            sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%w\" AFTER DELETE ON \"%w\" %s BEGIN SELECT cloudsync_delete('%q',%s); END", trigger_name, table, trigger_when, table, pkvalues);
             if (pkclause) cloudsync_memory_free(pkclause);
             if (!sql) goto finalize;
             
@@ -620,11 +620,11 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
     } else {
         // Grow Only Set
         // In a grow-only set, the delete operation is not allowed.
-        trigger_name = cloudsync_memory_mprintf("cloudsync_before_delete_%w", table);
+        trigger_name = cloudsync_memory_mprintf("cloudsync_before_delete_%s", table);
         if (!trigger_name) goto finalize;
         
         if (!dbutils_trigger_exists(db, trigger_name)) {
-            char *sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%s\" BEFORE DELETE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%w') = 1 BEGIN SELECT RAISE(ABORT, 'Error: DELETE operation is not allowed on table %w.'); END", trigger_name, table, table, table);
+            char *sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%w\" BEFORE DELETE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%q') = 1 BEGIN SELECT RAISE(ABORT, 'Error: DELETE operation is not allowed on table %w.'); END", trigger_name, table, table, table);
             if (!sql) goto finalize;
             
             rc = sqlite3_exec(db, sql, NULL, NULL, NULL);

@@ -360,7 +360,7 @@ char *db_version_build_query (sqlite3 *db) {
     
     // the good news is that the query can be computed in SQLite without the need to do any extra computation from the host language
     const char *sql = "WITH table_names AS ("
-                      "SELECT format('%q', name) as tbl_name "
+                      "SELECT format('%w', name) as tbl_name "
                       "FROM sqlite_master "
                       "WHERE type='table' "
                       "AND name LIKE '%_cloudsync'"
@@ -504,19 +504,22 @@ char *table_build_values_sql (sqlite3 *db, cloudsync_table_context *table) {
 
     // Unfortunately in SQLite column names (or table names) cannot be bound parameters in a SELECT statement
     // otherwise we should have used something like SELECT 'SELECT ? FROM %w WHERE rowid=?';
-    
+
+    char *singlequote_escaped_table_name = cloudsync_memory_mprintf("%q", table->name);
+
     #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
     if (table->rowid_only) {
-        sql = memory_mprintf("WITH col_names AS (SELECT group_concat('\"' || name || '\"', ',') AS cols FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid) SELECT 'SELECT ' || (SELECT cols FROM col_names) || ' FROM \"%w\" WHERE rowid=?;'", table->name, table->name);
+        sql = memory_mprintf("WITH col_names AS (SELECT group_concat('\"' || format('%%w', name) || '\"', ',') AS cols FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid) SELECT 'SELECT ' || (SELECT cols FROM col_names) || ' FROM \"%w\" WHERE rowid=?;'", table->name, table->name);
         goto process_process;
     }
     #endif
     
-    sql = cloudsync_memory_mprintf("WITH col_names AS (SELECT group_concat('\"' || name || '\"', ',') AS cols FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid), pk_where AS (SELECT group_concat('\"' || name || '\"', '=? AND ') || '=?' AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'SELECT ' || (SELECT cols FROM col_names) || ' FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'", table->name, table->name, table->name);
- 
+    sql = cloudsync_memory_mprintf("WITH col_names AS (SELECT group_concat('\"' || format('%%w', name) || '\"', ',') AS cols FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid), pk_where AS (SELECT group_concat('\"' || format('%%w', name) || '\"', '=? AND ') || '=?' AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'SELECT ' || (SELECT cols FROM col_names) || ' FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'", table->name, table->name, singlequote_escaped_table_name);
+    
 #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
 process_process:
 #endif
+    cloudsync_memory_free(singlequote_escaped_table_name);
     if (!sql) return NULL;
     char *query = dbutils_text_select(db, sql);
     cloudsync_memory_free(sql);
@@ -532,7 +535,9 @@ char *table_build_mergedelete_sql (sqlite3 *db, cloudsync_table_context *table) 
     }
     #endif
     
-    char *sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || name || '\"', '=? AND ') || '=?' AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'DELETE FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'", table->name, table->name);
+    char *singlequote_escaped_table_name = cloudsync_memory_mprintf("%q", table->name);
+    char *sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || format('%%w', name) || '\"', '=? AND ') || '=?' AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'DELETE FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'", table->name, singlequote_escaped_table_name);
+    cloudsync_memory_free(singlequote_escaped_table_name);
     if (!sql) return NULL;
     
     char *query = dbutils_text_select(db, sql);
@@ -557,12 +562,18 @@ char *table_build_mergeinsert_sql (sqlite3 *db, cloudsync_table_context *table, 
     }
     #endif
     
+    char *singlequote_escaped_table_name = cloudsync_memory_mprintf("%q", table->name);
+    
     if (colname == NULL) {
         // is sentinel insert
-        sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || name || '\"') AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk), pk_bind AS (SELECT group_concat('?') AS pk_binding FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'INSERT OR IGNORE INTO \"%w\" (' || (SELECT pk_clause FROM pk_where) || ') VALUES ('  || (SELECT pk_binding FROM pk_bind) || ');'", table->name, table->name, table->name);
+        sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || format('%%w', name) || '\"') AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk), pk_bind AS (SELECT group_concat('?') AS pk_binding FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'INSERT OR IGNORE INTO \"%w\" (' || (SELECT pk_clause FROM pk_where) || ') VALUES ('  || (SELECT pk_binding FROM pk_bind) || ');'", table->name, table->name, singlequote_escaped_table_name);
     } else {
-        sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || name || '\"') AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk), pk_bind AS (SELECT group_concat('?') AS pk_binding FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'INSERT INTO \"%w\" (' || (SELECT pk_clause FROM pk_where) || ',\"%w\") VALUES ('  || (SELECT pk_binding FROM pk_bind) || ',?) ON CONFLICT DO UPDATE SET \"%w\"=?;'", table->name, table->name, table->name, colname, colname);
+        char *singlequote_escaped_col_name = cloudsync_memory_mprintf("%q", colname);
+        sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || format('%%w', name) || '\"') AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk), pk_bind AS (SELECT group_concat('?') AS pk_binding FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'INSERT INTO \"%w\" (' || (SELECT pk_clause FROM pk_where) || ',\"%w\") VALUES ('  || (SELECT pk_binding FROM pk_bind) || ',?) ON CONFLICT DO UPDATE SET \"%w\"=?;'", table->name, table->name, singlequote_escaped_table_name, singlequote_escaped_col_name, singlequote_escaped_col_name);
+        cloudsync_memory_free(singlequote_escaped_col_name);
+
     }
+    cloudsync_memory_free(singlequote_escaped_table_name);
     if (!sql) return NULL;
     
     char *query = dbutils_text_select(db, sql);
@@ -582,7 +593,11 @@ char *table_build_value_sql (sqlite3 *db, cloudsync_table_context *table, const 
     #endif
         
     // SELECT age FROM customers WHERE first_name=? AND last_name=?;
-    char *sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || name || '\"', '=? AND ') || '=?' AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'SELECT %s%w%s FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'", table->name, colnamequote, colname, colnamequote, table->name);
+    char *singlequote_escaped_table_name = cloudsync_memory_mprintf("%q", table->name);
+    char *singlequote_escaped_col_name = cloudsync_memory_mprintf("%q", colname);
+    char *sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || format('%%w', name) || '\"', '=? AND ') || '=?' AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'SELECT %s%w%s FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'", table->name, colnamequote, singlequote_escaped_col_name, colnamequote, singlequote_escaped_table_name);
+    cloudsync_memory_free(singlequote_escaped_col_name);
+    cloudsync_memory_free(singlequote_escaped_table_name);
     if (!sql) return NULL;
     
     char *query = dbutils_text_select(db, sql);
@@ -1638,7 +1653,9 @@ int cloudsync_finalize_alter (sqlite3_context *context, cloudsync_context *data,
             goto finalize;
         }
         
-        sql = cloudsync_memory_mprintf("SELECT group_concat('\"%w\".\"' || name || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table->name, table->name);
+        char *singlequote_escaped_table_name = cloudsync_memory_mprintf("%q", table->name);
+        sql = cloudsync_memory_mprintf("SELECT group_concat('\"%w\".\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%s') WHERE pk>0 ORDER BY pk;", singlequote_escaped_table_name, singlequote_escaped_table_name);
+        cloudsync_memory_free(singlequote_escaped_table_name);
         if (!sql) {
             rc = SQLITE_NOMEM;
             goto finalize;
@@ -1677,17 +1694,17 @@ int cloudsync_refill_metatable (sqlite3 *db, cloudsync_context *data, const char
     sqlite3_stmt *vm = NULL;
     sqlite3_int64 db_version = db_version_next(db, data, CLOUDSYNC_VALUE_NOTSET);
     
-    char *sql = cloudsync_memory_mprintf("SELECT group_concat('\"' || name || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
+    char *sql = cloudsync_memory_mprintf("SELECT group_concat('\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
     char *pkclause_identifiers = dbutils_text_select(db, sql);
     char *pkvalues_identifiers = (pkclause_identifiers) ? pkclause_identifiers : "rowid";
     cloudsync_memory_free(sql);
     
-    sql = cloudsync_memory_mprintf("SELECT group_concat('cloudsync_pk_decode(pk, ' || pk || ') AS ' || '\"' || name || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
+    sql = cloudsync_memory_mprintf("SELECT group_concat('cloudsync_pk_decode(pk, ' || pk || ') AS ' || '\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
     char *pkdecode = dbutils_text_select(db, sql);
     char *pkdecodeval = (pkdecode) ? pkdecode : "cloudsync_pk_decode(pk, 1) AS rowid";
     cloudsync_memory_free(sql);
     
-    sql = cloudsync_memory_mprintf("SELECT group_concat('\"' || name || '\"' || ' = cloudsync_pk_decode(pk, ' || pk || ')', ' AND ') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
+    sql = cloudsync_memory_mprintf("SELECT group_concat('\"' || format('%%w', name) || '\"' || ' = cloudsync_pk_decode(pk, ' || pk || ')', ' AND ') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
     char *pkonclause = dbutils_text_select(db, sql);
     char *pkonclauseval = (pkonclause) ? pkonclause : "rowid = cloudsync_pk_decode(pk, 1) AS rowid";
     cloudsync_memory_free(sql);
