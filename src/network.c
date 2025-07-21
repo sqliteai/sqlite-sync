@@ -136,13 +136,13 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     size_t blen = 0;
     struct curl_slist* headers = NULL;
     char errbuf[CURL_ERROR_SIZE] = {0};
-    
+    long response_code = 0;
+
     CURL *curl = curl_easy_init();
     if (!curl) return (NETWORK_RESULT){CLOUDSYNC_NETWORK_ERROR, NULL, 0, NULL, NULL};
     
     // a buffer to store errors in
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
-    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
 
     CURLcode rc = curl_easy_setopt(curl, CURLOPT_URL, endpoint);
     if (rc != CURLE_OK) goto cleanup;
@@ -184,6 +184,7 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     
     // curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
     rc = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
     if (rc == CURLE_OK) {
         buffer = netdata.buffer;
         blen = netdata.bused;
@@ -197,14 +198,14 @@ cleanup:
     
     // build result
     NETWORK_RESULT result = {0, NULL, 0, NULL, NULL};
-    if (rc == CURLE_OK) {
+    if (rc == CURLE_OK && response_code < 400) {
         result.code = (buffer && blen) ? CLOUDSYNC_NETWORK_BUFFER : CLOUDSYNC_NETWORK_OK;
         result.buffer = buffer;
         result.blen = blen;
     } else {
         result.code = CLOUDSYNC_NETWORK_ERROR;
-        result.buffer = (errbuf[0]) ? cloudsync_string_dup(errbuf, false) : NULL;
-        result.blen = rc;
+        result.buffer = buffer ? buffer : (errbuf[0]) ? cloudsync_string_dup(errbuf, false) : NULL;
+        result.blen = buffer ? blen : rc;
     }
     
     return result;
@@ -549,7 +550,7 @@ finalize:
 
 void network_result_to_sqlite_error (sqlite3_context *context, NETWORK_RESULT res, const char *default_error_message) {
     sqlite3_result_error(context, ((res.code == CLOUDSYNC_NETWORK_ERROR) && (res.buffer)) ? res.buffer : default_error_message, -1);
-    sqlite3_result_error_code(context, ((res.code == CLOUDSYNC_NETWORK_ERROR) && (res.blen)) ? (int)res.blen : SQLITE_ERROR);
+    sqlite3_result_error_code(context, SQLITE_ERROR);
     network_result_cleanup(&res);
 }
 
@@ -685,19 +686,19 @@ void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, s
     sqlite3_result_int(context, (sent_db_version < last_local_change));
 }
 
-void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3_value **argv) {
+int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_send_changes");
     
     network_data *data = (network_data *)cloudsync_get_auxdata(context);
-    if (!data) {sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1); return;}
+    if (!data) {sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1); return SQLITE_ERROR;}
     
     sqlite3 *db = sqlite3_context_db_handle(context);
 
     int db_version = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_SEND_DBVERSION);
-    if (db_version<0) {sqlite3_result_error(context, "Unable to retrieve db_version.", -1); return;}
+    if (db_version<0) {sqlite3_result_error(context, "Unable to retrieve db_version.", -1); return SQLITE_ERROR;}
 
     int seq = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_SEND_SEQ);
-    if (seq<0) {sqlite3_result_error(context, "Unable to retrieve seq.", -1); return;}
+    if (seq<0) {sqlite3_result_error(context, "Unable to retrieve seq.", -1); return SQLITE_ERROR;}
     
     // retrieve BLOB
     char sql[1024];
@@ -711,16 +712,16 @@ void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3
     if (rc != SQLITE_OK) {
         sqlite3_result_error(context, "cloudsync_network_send_changes unable to get changes", -1);
         sqlite3_result_error_code(context, rc);
-        return;
+        return rc;
     }
     
     // exit if there are no data to send
-    if (blob == NULL || blob_size == 0) return;
+    if (blob == NULL || blob_size == 0) return SQLITE_OK;
     
     NETWORK_RESULT res = network_receive_buffer(data, data->upload_endpoint, data->authentication, true, false, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
     if (res.code != CLOUDSYNC_NETWORK_BUFFER) {
         network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to receive upload URL");
-        return;
+        return SQLITE_ERROR;
     }
     
     const char *s3_url = res.buffer;
@@ -728,7 +729,7 @@ void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3
     cloudsync_memory_free(blob);
     if (sent == false) {
         network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to upload BLOB changes to remote host.");
-        return;
+        return SQLITE_ERROR;
     }
     
     char json_payload[2024];
@@ -741,7 +742,7 @@ void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3
     res = network_receive_buffer(data, data->upload_endpoint, data->authentication, true, true, json_payload, CLOUDSYNC_HEADER_SQLITECLOUD);
     if (res.code != CLOUDSYNC_NETWORK_OK) {
         network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to notify BLOB upload to remote host.");
-        return;
+        return SQLITE_ERROR;
     }
     
     char buf[256];
@@ -755,6 +756,13 @@ void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3
     }
     
     network_result_cleanup(&res);
+    return SQLITE_OK;
+}
+
+void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_network_send_changes");
+    
+    cloudsync_network_send_changes_internal(context, argc, argv);
 }
 
 int cloudsync_network_check_internal(sqlite3_context *context) {
@@ -786,7 +794,8 @@ int cloudsync_network_check_internal(sqlite3_context *context) {
 }
 
 void cloudsync_network_sync (sqlite3_context *context, int wait_ms, int max_retries) {
-    cloudsync_network_send_changes(context, 0, NULL);
+    int rc = cloudsync_network_send_changes_internal(context, 0, NULL);
+    if (rc != SQLITE_OK) return;
     
     int ntries = 0;
     int nrows = 0;
