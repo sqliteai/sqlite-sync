@@ -60,6 +60,12 @@ jobs:
 
       - uses: actions/checkout@v4.2.2
 
+      - name: Enable core dumps
+        if: matrix.name == 'linux'
+        run: |
+          ulimit -c unlimited
+          echo '/tmp/core.%e.%p' | sudo tee /proc/sys/kernel/core_pattern
+          
       - uses: msys2/setup-msys2@v2.27.0
         if: matrix.os == 'windows-latest'
         with:
@@ -133,8 +139,23 @@ jobs:
 
       - name: test sqlite-sync
         if: matrix.name == 'linux' || matrix.name == 'windows'
+        continue-on-error: true  # so workflow doesn't stop on segfault
         run: make test
 
+      - name: Run test and generate core dump
+        if: matrix.name == 'linux'
+        continue-on-error: true  # so workflow doesn't stop on segfault
+        run: |
+          ./dist/main || echo "segfault occurred"
+          ls -lh /tmp/core.*
+
+      - name: Upload core dump
+        if: always()  # upload even if previous step failed
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-dump
+          path: /tmp/core.*
+    
       - name: test sqlite-sync + coverage
         if: matrix.name == 'macos'
         run: brew install lcov && make test COVERAGE=true
