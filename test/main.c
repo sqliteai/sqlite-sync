@@ -10,17 +10,20 @@
 #include <stdlib.h>
 #include "utils.h"
 #include "sqlite3.h"
+
+#ifndef __linux__
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <pthread.h>
+#endif
+#define PEERS           5
 #endif
 
 #ifdef CLOUDSYNC_LOAD_FROM_SOURCES
 #include "cloudsync.h"
 #endif
 
-#define PEERS           5
 #define DB_PATH         "health-track.sqlite"
 #define EXT_PATH        "./dist/cloudsync"
 #define RCHECK          if (rc != SQLITE_OK) goto abort_test;
@@ -315,6 +318,7 @@ int test_report(const char *description, int rc){
     return rc;
 }
 
+#ifndef __linux__
 #ifdef _WIN32
 DWORD WINAPI worker(LPVOID arg) {
 #else
@@ -331,6 +335,7 @@ void* worker(void* arg) {
 
     return NULL;
 }
+#endif
 
 int main (void) {
     int rc = SQLITE_OK;
@@ -352,6 +357,7 @@ int main (void) {
 
     remove(DB_PATH); // remove the database file
 
+    #ifndef __linux__
     #ifdef _WIN32
     HANDLE threads[PEERS];
     #else
@@ -386,6 +392,7 @@ int main (void) {
         pthread_join(threads[i], NULL);
         #endif
     }
+    #endif
 
     printf("\n");
     return rc;
