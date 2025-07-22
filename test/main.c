@@ -15,7 +15,7 @@
 #include "sqlite3.h"
 
 // Define the number of simulated peers, when it's 0 it skips the peer test.
-#ifdef __linux__
+#if defined(__linux__) !defined(__ANDROID__)
 #define PEERS           0
 #else
 #define PEERS           5
