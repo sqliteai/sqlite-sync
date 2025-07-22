@@ -77,6 +77,10 @@ jobs:
         if: matrix.name == 'wasm'
         run: sudo apt install wabt
 
+      - name: linux install latest dependencies
+        if: matrix.name == 'linux'
+        run: sudo apt-get update && sudo apt-get upgrade
+
       - name: build sqlite-sync
         run: make extension ${{ matrix.make && matrix.make || ''}}
 
