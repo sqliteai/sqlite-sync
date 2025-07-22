@@ -193,7 +193,13 @@ int test_init (const char *db_path, int init) {
 
     // init network with connection string + apikey
     char network_init[512];
-    snprintf(network_init, sizeof(network_init), "SELECT cloudsync_network_init('%s?apikey=%s');", getenv("CONNECTION_STRING"), getenv("APIKEY"));
+    const char* conn_str = getenv("CONNECTION_STRING");
+    const char* apikey = getenv("APIKEY");
+    if (!conn_str || !apikey) {
+        fprintf(stderr, "Error: CONNECTION_STRING or APIKEY not set.\n");
+        exit(1);
+    }
+    snprintf(network_init, sizeof(network_init), "SELECT cloudsync_network_init('%s?apikey=%s');", conn_str, apikey);
     rc = db_exec(db, network_init); RCHECK
 
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM activities;", 0); RCHECK
@@ -255,7 +261,13 @@ int test_enable_disable(const char *db_path) {
 
     // init network with connection string + apikey
     char network_init[512];
-    snprintf(network_init, sizeof(network_init), "SELECT cloudsync_network_init('%s?apikey=%s');", getenv("CONNECTION_STRING"), getenv("APIKEY"));
+    const char* conn_str = getenv("CONNECTION_STRING");
+    const char* apikey = getenv("APIKEY");
+    if (!conn_str || !apikey) {
+        fprintf(stderr, "Error: CONNECTION_STRING or APIKEY not set.\n");
+        exit(1);
+    }
+    snprintf(network_init, sizeof(network_init), "SELECT cloudsync_network_init('%s?apikey=%s');", conn_str, apikey);
     rc = db_exec(db, network_init); RCHECK
 
     rc = db_exec(db, "SELECT cloudsync_network_send_changes();"); RCHECK
