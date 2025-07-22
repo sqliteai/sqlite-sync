@@ -59,7 +59,7 @@ jobs:
     steps:
 
       - uses: actions/checkout@v4.2.2
-          
+
       - uses: msys2/setup-msys2@v2.27.0
         if: matrix.os == 'windows-latest'
         with:
@@ -135,13 +135,6 @@ jobs:
         if: matrix.name == 'linux' || matrix.name == 'windows'
         run: make test
 
-      - name: Upload core dump
-        if: always()  # upload even if previous step failed
-        uses: actions/upload-artifact@v4
-        with:
-          name: core-dump
-          path: /var/lib/systemd/coredump/core.*
-    
       - name: test sqlite-sync + coverage
         if: matrix.name == 'macos'
         run: brew install lcov && make test COVERAGE=true
