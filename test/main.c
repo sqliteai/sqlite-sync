@@ -8,17 +8,18 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <stdint.h>
 #include "utils.h"
 #include "sqlite3.h"
 
-#ifndef __linux__
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <pthread.h>
 #endif
 #define PEERS           5
-#endif
 
 #ifdef CLOUDSYNC_LOAD_FROM_SOURCES
 #include "cloudsync.h"
@@ -318,24 +319,29 @@ int test_report(const char *description, int rc){
     return rc;
 }
 
-#ifndef __linux__
 #ifdef _WIN32
 DWORD WINAPI worker(LPVOID arg) {
 #else
 void* worker(void* arg) {
 #endif
     int thread_id = *(int*)arg;
+    int result = 0;
 
     char description[32];
     snprintf(description, sizeof(description), "%d/%d Peer Test", thread_id+1, PEERS);
-    if(test_report(description, test_init(":memory:", 1))){
+    result = test_init(":memory:", 1);
+    if(test_report(description, result)){
         printf("PEER %d FAIL.\n", thread_id+1);
-        exit(thread_id+1);
+        // Return error code instead of exiting entire process
+        return (void*)(intptr_t)(thread_id+1);
     }
 
+#ifdef _WIN32
+    return 0;
+#else
     return NULL;
-}
 #endif
+}
 
 int main (void) {
     int rc = SQLITE_OK;
@@ -357,43 +363,92 @@ int main (void) {
 
     remove(DB_PATH); // remove the database file
 
-    #ifndef __linux__
     #ifdef _WIN32
     HANDLE threads[PEERS];
     #else
     pthread_t threads[PEERS];
     #endif
     int thread_ids[PEERS];
+    int threads_created = 0;
+    int thread_errors = 0;
 
+    // Initialize threads array to invalid values for cleanup
+    #ifdef _WIN32
+    for (int i = 0; i < PEERS; i++) {
+        threads[i] = NULL;
+    }
+    #else
+    memset(threads, 0, sizeof(threads));
+    #endif
+
+    // Create threads with proper error handling
     for (int i = 0; i < PEERS; i++) {
         thread_ids[i] = i;
         #ifdef _WIN32
         threads[i] = CreateThread(NULL, 0, worker, &thread_ids[i], 0, NULL);
         if (threads[i] == NULL) {
-            fprintf(stderr, "CreateThread failed\n");
-            return 1;
+            fprintf(stderr, "CreateThread failed for thread %d: %lu\n", i, GetLastError());
+            thread_errors++;
+            break; // Stop creating more threads on failure
         }
         #else
-        if (pthread_create(&threads[i], NULL, worker, &thread_ids[i]) != 0) {
-            perror("pthread_create");
-            exit(1);
+        int pthread_result = pthread_create(&threads[i], NULL, worker, &thread_ids[i]);
+        if (pthread_result != 0) {
+            fprintf(stderr, "pthread_create failed for thread %d: %s\n", i, strerror(pthread_result));
+            threads[i] = 0; // Mark as invalid
+            thread_errors++;
+            break; // Stop creating more threads on failure
         }
         #endif
+        threads_created++;
     }
 
-    // Wait for all threads to finish
+    // Wait for all successfully created threads to finish and collect results
     #ifdef _WIN32
-    WaitForMultipleObjects(PEERS, threads, TRUE, INFINITE);
-    #endif
-    for (int i = 0; i < PEERS; i++) {
-        #ifdef _WIN32
-        CloseHandle(threads[i]);
-        #else
-        pthread_join(threads[i], NULL);
-        #endif
+    if (threads_created > 0) {
+        DWORD wait_result = WaitForMultipleObjects(threads_created, threads, TRUE, INFINITE);
+        if (wait_result == WAIT_FAILED) {
+            fprintf(stderr, "WaitForMultipleObjects failed: %lu\n", GetLastError());
+            thread_errors++;
+        }
     }
     #endif
 
+    // Join threads and collect exit codes
+    for (int i = 0; i < threads_created; i++) {
+        #ifdef _WIN32
+        if (threads[i] != NULL) {
+            DWORD exit_code;
+            if (GetExitCodeThread(threads[i], &exit_code) && exit_code != 0) {
+                thread_errors++;
+                printf("Thread %d failed with exit code %lu\n", i, exit_code);
+            }
+            CloseHandle(threads[i]);
+            threads[i] = NULL;
+        }
+        #else
+        if (threads[i] != 0) {
+            void* thread_result = NULL;
+            int join_result = pthread_join(threads[i], &thread_result);
+            if (join_result != 0) {
+                fprintf(stderr, "pthread_join failed for thread %d: %s\n", i, strerror(join_result));
+                thread_errors++;
+            } else if (thread_result != NULL) {
+                int exit_code = (int)(intptr_t)thread_result;
+                thread_errors++;
+                printf("Thread %d failed with exit code %d\n", i, exit_code);
+            }
+            threads[i] = 0;
+        }
+        #endif
+    }
+
+    // Update return code if any thread errors occurred
+    if (thread_errors > 0) {
+        printf("Threading test failed: %d thread(s) had errors\n", thread_errors);
+        rc += thread_errors;
+    }
+    
     printf("\n");
     return rc;
 }

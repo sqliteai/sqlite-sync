@@ -123,6 +123,7 @@ else ifeq ($(PLATFORM),wasm)
 else # linux
     TARGET := $(DIST_DIR)/cloudsync.so
     LDFLAGS += -shared -lssl -lcrypto
+    T_LDFLAGS += -lpthread
     CURL_CONFIG = --with-openssl
     STRIP = strip --strip-unneeded $@
 endif
