@@ -14,12 +14,20 @@
 #include "utils.h"
 #include "sqlite3.h"
 
+// Define the number of simulated peers, when it's 0 it skips the peer test.
+#ifdef __linux__
+#define PEERS           0
+#else
+#define PEERS           5
+#endif
+
+#ifdef PEERS
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <pthread.h>
 #endif
-#define PEERS           5
+#endif // PEERS
 
 #ifdef CLOUDSYNC_LOAD_FROM_SOURCES
 #include "cloudsync.h"
@@ -319,6 +327,7 @@ int test_report(const char *description, int rc){
     return rc;
 }
 
+#ifdef PEERS
 #ifdef _WIN32
 DWORD WINAPI worker(LPVOID arg) {
 #else
@@ -342,6 +351,7 @@ void* worker(void* arg) {
     return NULL;
 #endif
 }
+#endif // PEERS
 
 int main (void) {
     int rc = SQLITE_OK;
@@ -363,6 +373,7 @@ int main (void) {
 
     remove(DB_PATH); // remove the database file
 
+    #ifdef PEERS
     #ifdef _WIN32
     HANDLE threads[PEERS];
     #else
@@ -448,6 +459,7 @@ int main (void) {
         printf("Threading test failed: %d thread(s) had errors\n", thread_errors);
         rc += thread_errors;
     }
+    #endif // PEERS
     
     printf("\n");
     return rc;
