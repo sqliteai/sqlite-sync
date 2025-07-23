@@ -389,6 +389,10 @@ int cloudsync_changesvtab_filter (sqlite3_vtab_cursor *cursor, int idxn, const c
     char *sql = build_changes_sql(db, idxs);
     if (sql == NULL) return SQLITE_NOMEM;
     
+    // the xFilter method may be called multiple times on the same sqlite3_vtab_cursor*
+    if (c->vm) sqlite3_finalize(c->vm);
+    c->vm = NULL;
+    
     int rc = sqlite3_prepare_v2(db, sql, -1, &c->vm, NULL);
     cloudsync_memory_free(sql);
     if (rc != SQLITE_OK) goto abort_filter;
