@@ -253,7 +253,8 @@ sqlite3 *close_db (sqlite3 *db) {
     if (db) {
         sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
         dbutils_debug_stmt(db, true);
-        sqlite3_close(db);
+        int rc = sqlite3_close(db);
+        if (rc != SQLITE_OK) printf("Error while closing db (%d)\n", rc);
     }
     return NULL;
 }
@@ -334,6 +335,7 @@ int unittest_payload_apply_reset_transaction(sqlite3 *db, unittest_payload_apply
 }
 
 bool unittest_payload_apply_rls_callback(void **xdata, cloudsync_pk_decode_bind_context *d, sqlite3 *db, cloudsync_context *data, int step, int rc) {
+    bool is_approved = false;
     unittest_payload_apply_rls_status *s;
     if (*xdata) {
         s = (unittest_payload_apply_rls_status *)*xdata;
@@ -405,9 +407,12 @@ bool unittest_payload_apply_rls_callback(void **xdata, cloudsync_pk_decode_bind_
                 s->last_db_version = db_version;
                 s->is_approved = true;
             }
+            
+            is_approved = s->is_approved;
             break;
         }
         case CLOUDSYNC_PAYLOAD_APPLY_DID_APPLY:
+            is_approved = s->is_approved;
             break;
         case CLOUDSYNC_PAYLOAD_APPLY_CLEANUP:
             if (s->is_approved && !s->last_is_delete) s->is_approved = unittest_validate_changed_row(db, data, s->last_tbl, s->last_pk, s->last_pk_len);
@@ -417,13 +422,14 @@ bool unittest_payload_apply_rls_callback(void **xdata, cloudsync_pk_decode_bind_
                 cloudsync_memory_free(s->last_pk);
                 s->last_pk_len = 0;
             }
-            
+            is_approved = s->is_approved;
+
             cloudsync_memory_free(s);
             *xdata = NULL;
             break;
     }
    
-    return s->is_approved;
+    return is_approved;
 }
 #endif
 
@@ -870,6 +876,7 @@ bool do_test_vtab2 (void) {
     
 finalize:
     if (rc != SQLITE_OK) printf("do_test_vtab2 error: %s\n", sqlite3_errmsg(db));
+    db = close_db(db);
     return result;
 }
 
@@ -3441,17 +3448,17 @@ int main(int argc, const char * argv[]) {
     #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
     table_mask |= TEST_NOPRIKEYS;
     #endif
-
+    
     // test local changes
     result += test_report("Local Test:", do_test_local(test_mask, table_mask, db, print_result));
     result += test_report("VTab Test: ", do_test_vtab(db));
     result += test_report("Functions Test:", do_test_functions(db, print_result));
     result += test_report("Functions Test (Int):", do_test_internal_functions());
     result += test_report("String Func Test:", do_test_string_replace_prefix());
- 
+    
     // close local database
     db = close_db(db);
- 
+    
     // simulate remote merge
     result += test_report("Merge Test:", do_test_merge(3, print_result, cleanup_databases));
     result += test_report("Merge Test 2:", do_test_merge_2(3, TEST_PRIKEYS, print_result, cleanup_databases));
@@ -3476,6 +3483,14 @@ finalize:
     printf("\n");
     if (rc != SQLITE_OK) printf("%s (%d)\n", (db) ? sqlite3_errmsg(db) : "N/A", rc);
     db = close_db(db);
+    
+    cloudsync_memory_finalize();
+
+    sqlite3_int64 memory_used = sqlite3_memory_used();
+    if (memory_used > 0) {
+        printf("Memory leaked: %lld B\n", memory_used);
+        result++;
+    }
     
     return result;
 }

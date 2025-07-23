@@ -1062,6 +1062,7 @@ int dbutils_update_schema_hash(sqlite3 *db, uint64_t *hash) {
     if (!schema) return SQLITE_ERROR;
         
     sqlite3_uint64 h = fnv1a_hash(schema, strlen(schema));
+    cloudsync_memory_free(schema);
     if (hash && *hash == h) return SQLITE_CONSTRAINT;
     
     char sql[1024];

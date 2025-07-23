@@ -1529,7 +1529,6 @@ void cloudsync_context_free (void *ptr) {
     cloudsync_context *data = (cloudsync_context*)ptr;
     cloudsync_memory_free(data->tables);
     cloudsync_memory_free(data);
-    cloudsync_memory_finalize();
 }
 
 const char *cloudsync_context_init (sqlite3 *db, cloudsync_context *data, sqlite3_context *context) {

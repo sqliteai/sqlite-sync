@@ -500,6 +500,7 @@ int cloudsync_vtab_set_error (sqlite3_vtab *vtab, const char *format, ...) {
     char *err = cloudsync_memory_vmprintf(format, arg);
     va_end (arg);
     
+    if (vtab->zErrMsg) cloudsync_memory_free(vtab->zErrMsg);
     vtab->zErrMsg = err;
     return SQLITE_ERROR;
 }
