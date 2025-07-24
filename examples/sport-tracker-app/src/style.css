@@ -1,0 +1,885 @@
+:root {
+  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color-scheme: light dark;
+  color: rgba(255, 255, 255, 0.87);
+  background-color: #242424;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+#root {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-main {
+  flex: 1;
+}
+
+.app-header {
+  padding: 2rem 1rem;
+  border-radius: 8px;
+  margin-bottom: 2rem;
+  text-align: center;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 2.5rem;
+  color: #646cff;
+}
+
+.user-management-section {
+  margin-bottom: 2rem;
+  /* padding-bottom: 2rem; */
+  border-bottom: 1px solid #333;
+}
+
+.user-creation,
+.user-info {
+  margin-bottom: 1.5rem;
+}
+
+.user-form {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.user-input {
+  padding: 0.75rem;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #2a2a2a;
+  color: #fff;
+  font-size: 1rem;
+  min-width: 200px;
+  max-width: 300px;
+}
+
+.user-input:focus {
+  outline: none;
+  border-color: #646cff;
+}
+
+.user-input::placeholder {
+  color: #888;
+}
+
+.btn-create-user {
+  background: #4caf50;
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 1rem;
+  transition: background 0.25s;
+  white-space: nowrap;
+}
+
+.btn-create-user:hover:not(:disabled) {
+  background: #45a049;
+}
+
+.btn-create-user:disabled {
+  background: #666;
+  cursor: not-allowed;
+}
+
+.current-user {
+  color: #4caf50;
+  font-weight: 500;
+  font-size: 1.1rem;
+  padding: 0.5rem 1rem;
+  background: rgba(76, 175, 80, 0.1);
+  border: 1px solid rgba(76, 175, 80, 0.3);
+  border-radius: 4px;
+  display: inline-block;
+}
+
+/* User Actions Layout */
+.user-actions {
+  display: flex;
+  gap: 2rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.create-user-section,
+.restore-user-section {
+  flex: 1;
+  min-width: 300px;
+}
+
+.restore-form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.btn-restore-user {
+  background: #2196f3;
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 1rem;
+  transition: background 0.25s;
+  white-space: nowrap;
+}
+
+.btn-restore-user:hover:not(:disabled) {
+  background: #1976d2;
+}
+
+.btn-restore-user:disabled {
+  background: #666;
+  cursor: not-allowed;
+}
+
+.login-section {
+  background: #1a1a1a;
+  padding: 1rem;
+  border-radius: 8px;
+  margin-bottom: 2rem;
+  border: 1px solid #333;
+}
+
+.user-login {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.user-login.logged-in {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
+.user-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sync-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.sync-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.sync-checkbox input {
+  cursor: pointer;
+}
+
+.user-selector {
+  padding: 0.75rem;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #2a2a2a;
+  color: #fff;
+  font-size: 1rem;
+  min-width: 250px;
+  max-width: 400px;
+}
+
+.user-selector:focus {
+  outline: none;
+  border-color: #646cff;
+}
+
+.btn-login {
+  background: #646cff;
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 1rem;
+  transition: background 0.25s;
+  white-space: nowrap;
+}
+
+.btn-login:hover:not(:disabled) {
+  background: #535bf2;
+}
+
+.btn-login:disabled {
+  background: #666;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.btn-logout {
+  background: #ff6b6b;
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 1rem;
+  transition: background 0.25s;
+  white-space: nowrap;
+}
+
+.btn-logout:hover:not(:disabled) {
+  background: #ff5252;
+}
+
+.btn-logout:disabled {
+  background: #666;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.logged-user {
+  color: #4caf50;
+  font-weight: 500;
+  font-size: 1rem;
+  padding: 0.5rem 1rem;
+  background: rgba(76, 175, 80, 0.1);
+  border: 1px solid rgba(76, 175, 80, 0.3);
+  border-radius: 4px;
+}
+
+.database-status {
+  margin-top: 1rem;
+  padding: 0.5rem 1rem;
+  text-align: center;
+  font-size: 0.9rem;
+  color: #888;
+  background: rgba(100, 108, 255, 0.05);
+  border: 1px solid rgba(100, 108, 255, 0.1);
+  border-radius: 4px;
+  font-family: monospace;
+}
+
+.database-status.warning {
+  background: rgba(255, 107, 107, 0.1);
+  border-color: rgba(255, 107, 107, 0.3);
+  color: #ff6b6b;
+}
+
+.warning-text {
+  color: #ff6b6b;
+  font-weight: 500;
+}
+
+.welcome-message {
+  text-align: center;
+  padding: 2rem;
+}
+
+.welcome-message h2 {
+  color: #646cff;
+  margin-bottom: 1rem;
+}
+
+.welcome-message p {
+  color: #888;
+  margin-bottom: 0.75rem;
+  line-height: 1.6;
+}
+
+.welcome-message p:last-child {
+  margin-bottom: 0;
+}
+
+.app-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+.section {
+  padding: 1.5rem;
+  border-radius: 8px;
+  border: 1px solid #333;
+}
+
+.section h2 {
+  margin: 0 0 1rem 0;
+  color: #646cff;
+  font-size: 1.5rem;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.workout-controls {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+}
+
+.coach-badge {
+  background: #4caf50;
+  color: white;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  margin-left: 0.5rem;
+}
+
+.section-header h2 {
+  margin: 0;
+  color: #646cff;
+}
+
+.items-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+}
+
+.btn-primary {
+  background: #646cff;
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background 0.25s;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #535bf2;
+}
+
+.btn-primary:disabled {
+  background: #666;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.btn-secondary {
+  background: transparent;
+  color: #646cff;
+  border: 1px solid #646cff;
+  padding: 0.75rem 1.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.25s;
+}
+
+.btn-secondary:hover {
+  background: #646cff;
+  color: white;
+}
+
+.btn-complete {
+  background: #4caf50;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.25s;
+}
+
+.btn-complete:hover {
+  background: #45a049;
+}
+
+.form-container {
+  padding: 1.5rem;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.form-container.hidden {
+  display: none;
+}
+
+.form-container h3 {
+  margin: 0 0 1rem 0;
+  color: #646cff;
+}
+
+.form-group {
+  margin-bottom: 1rem;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 0.5rem;
+  color: #ccc;
+  font-weight: 500;
+}
+
+.form-group input,
+.form-group select,
+.form-group textarea {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid #333;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 1rem;
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+  outline: none;
+  border-color: #646cff;
+}
+
+.form-actions {
+  display: flex;
+  gap: 1rem;
+  justify-content: flex-end;
+}
+
+
+.activity-card,
+.workout-card {
+  padding: 1rem;
+  border-radius: 8px;
+  border: 1px solid #333;
+  transition: border-color 0.25s;
+}
+
+.activity-card:hover,
+.workout-card:hover {
+  border-color: #646cff;
+}
+
+.activity-header,
+.workout-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.activity-header-right,
+.workout-header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.activity-header h4,
+.workout-header h4 {
+  margin: 0;
+  color: #646cff;
+}
+
+.activity-date,
+.workout-date {
+  color: #888;
+  font-size: 0.9rem;
+}
+
+.activity-details,
+.workout-details {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.activity-details span,
+.workout-details span {
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.9rem;
+}
+
+.activity-notes {
+  margin: 0.5rem 0 0 0;
+  color: #ccc;
+  font-style: italic;
+}
+
+.activity-user,
+.workout-user {
+  color: #888;
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.workout-card.completed {
+  border-color: #4caf50;
+  opacity: 0.8;
+}
+
+.workout-type {
+  background: #646cff;
+  color: white;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+.completed-badge {
+  color: #4caf50;
+  font-weight: 500;
+}
+
+.btn-delete {
+  background: #ff6b6b;
+  color: white;
+  border: none;
+  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.25s;
+  line-height: 1;
+}
+
+.btn-delete:hover {
+  background: #ff5252;
+}
+
+.btn-delete:active {
+  transform: scale(0.95);
+}
+
+.stats-container {
+  padding: 1rem;
+}
+
+.stats-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+.stat-card {
+  padding: 1.5rem;
+  border-radius: 8px;
+  text-align: center;
+  border: 1px solid #333;
+}
+
+.stat-card h3 {
+  margin: 0 0 0.5rem 0;
+  color: #646cff;
+  font-size: 1rem;
+}
+
+.stat-value {
+  margin: 0;
+  font-size: 2rem;
+  font-weight: bold;
+  color: #4caf50;
+}
+
+.empty-state {
+  text-align: center;
+  color: #888;
+  font-style: italic;
+  padding: 2rem;
+}
+
+.loading-container,
+.error-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 50vh;
+  text-align: center;
+}
+
+.loading-container h2,
+.error-container h2 {
+  color: #646cff;
+  margin-bottom: 1rem;
+}
+
+.loading-container p,
+.error-container p {
+  color: #888;
+  max-width: 500px;
+}
+
+.error-container {
+  color: #ff6b6b;
+}
+
+.error-container h2 {
+  color: #ff6b6b;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color: #213547;
+    background-color: #ffffff;
+  }
+  
+  header,
+  .form-container,
+  .activity-card,
+  .workout-card,
+  .stat-card,
+  .login-section {
+    background: #f9f9f9;
+    border-color: #e0e0e0;
+  }
+  
+  .user-management-section {
+    border-bottom-color: #e0e0e0;
+  }
+  
+  .form-group input,
+  .form-group select,
+  .form-group textarea,
+  .user-input,
+  .user-selector {
+    background: #ffffff;
+    border-color: #e0e0e0;
+    color: #213547;
+  }
+  
+  .activity-details span,
+  .workout-details span {
+    background: #e0e0e0;
+    color: #213547;
+  }
+  
+  .database-status {
+    background: rgba(100, 108, 255, 0.1);
+    border-color: rgba(100, 108, 255, 0.2);
+    color: #666;
+  }
+}
+
+@media (max-width: 768px) {
+  .section-header {
+    flex-direction: column;
+    gap: 1rem;
+    align-items: stretch;
+  }
+  
+  .form-actions {
+    flex-direction: column;
+  }
+  
+  .items-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  
+  .app-header h1 {
+    font-size: 2rem;
+  }
+  
+  .user-login {
+    flex-direction: column;
+    gap: 1rem;
+  }
+  
+  .user-login.logged-in {
+    flex-direction: column;
+    align-items: center;
+  }
+  
+  .user-selector {
+    min-width: auto;
+    width: 100%;
+    max-width: none;
+  }
+}
+
+/* Footer Styles */
+.app-footer {
+  margin-top: auto;
+  padding: 2rem 1rem;
+  border-top: 1px solid #333;
+  background: rgba(0, 0, 0, 0.05);
+  backdrop-filter: blur(10px);
+}
+
+.footer-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  max-width: 1200px;
+  margin: 0 auto;
+  gap: 2rem;
+}
+
+.footer-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.footer-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  color: #646cff;
+}
+
+.footer-icon {
+  font-size: 1.2rem;
+}
+
+.footer-title {
+  font-size: 1.1rem;
+}
+
+.footer-tagline {
+  font-size: 0.85rem;
+  color: #888;
+  font-style: italic;
+}
+
+.footer-versions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.version-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: #ccc;
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+  border: 1px solid #333;
+  background: rgba(100, 108, 255, 0.1);
+}
+
+.version-icon {
+  font-size: 0.9rem;
+}
+
+.version-label {
+  color: #888;
+}
+
+.version-value {
+  font-weight: 600;
+  color: #646cff;
+  font-family: 'Courier New', monospace;
+}
+
+.footer-links {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.footer-links a {
+  color: #646cff;
+  text-decoration: none;
+  transition: color 0.25s;
+}
+
+.footer-links a:hover {
+  color: #4338ca;
+  text-decoration: underline;
+}
+
+.footer-separator {
+  color: #666;
+}
+
+/* Light theme footer */
+@media (prefers-color-scheme: light) {
+  .app-footer {
+    background: rgba(255, 255, 255, 0.8);
+    border-top-color: #e0e0e0;
+  }
+  
+  .version-item {
+    border-color: #e0e0e0;
+    background: rgba(100, 108, 255, 0.05);
+  }
+  
+  .footer-tagline {
+    color: #666;
+  }
+}
+
+/* Mobile footer */
+@media (max-width: 768px) {
+  .footer-content {
+    flex-direction: column;
+    text-align: center;
+    gap: 1.5rem;
+  }
+  
+  .footer-section {
+    align-items: center;
+  }
+  
+  .footer-versions {
+    flex-direction: row;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  
+  .app-footer {
+    padding: 1.5rem 1rem;
+  }
+}
