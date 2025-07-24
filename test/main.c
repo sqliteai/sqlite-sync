@@ -37,7 +37,8 @@
 #define EXT_PATH        "./dist/cloudsync"
 #define RCHECK          if (rc != SQLITE_OK) goto abort_test;
 #define ERROR_MSG       if (rc != SQLITE_OK) printf("Error: %s\n", sqlite3_errmsg(db));
-#define ABORT_TEST      abort_test: ERROR_MSG if (db) sqlite3_close(db); return rc;
+#define TERMINATE       if (db) { db_exec(db, "SELECT cloudsync_terminate();"); }
+#define ABORT_TEST      abort_test: ERROR_MSG TERMINATE if (db) sqlite3_close(db); return rc;
 
 typedef enum { PRINT, NOPRINT, INTGR, GT0 } expected_type;
 
@@ -305,6 +306,8 @@ int test_enable_disable(const char *db_path) {
     snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM users WHERE name='%s-should-sync';", value);
     rc = db_expect_int(db2, sql, 1); RCHECK
 
+    rc = db_exec(db2, "SELECT cloudsync_terminate();"); RCHECK
+    
     sqlite3_close(db2);
 
 ABORT_TEST
@@ -355,6 +358,8 @@ void* worker(void* arg) {
 
 int main (void) {
     int rc = SQLITE_OK;
+    
+    cloudsync_memory_init(1);
     
     printf("\n\nIntegration Test ");
     rc += version();
@@ -460,6 +465,8 @@ int main (void) {
         rc += thread_errors;
     }
     #endif // PEERS
+    
+    cloudsync_memory_finalize();
     
     printf("\n");
     return rc;

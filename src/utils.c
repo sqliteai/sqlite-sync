@@ -515,7 +515,7 @@ void *memdebug_realloc (void *ptr, sqlite3_uint64 new_size) {
     }
     
     void *back_ptr = ptr;
-    void *new_ptr = realloc(ptr, new_size);
+    void *new_ptr = sqlite3_realloc64(ptr, new_size);
     if (!new_ptr) {
         BUILD_ERROR("Unable to reallocate a block of %lld bytes.", new_size);
         BUILD_STACK(n, stack);

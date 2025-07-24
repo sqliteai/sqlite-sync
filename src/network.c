@@ -188,8 +188,9 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     if (rc == CURLE_OK) {
         buffer = netdata.buffer;
         blen = netdata.bused;
-    } else {
-        if (netdata.buffer) cloudsync_memory_free(netdata.buffer);
+    } else if (netdata.buffer) {
+        cloudsync_memory_free(netdata.buffer);
+        netdata.buffer = NULL;
     }
 
 cleanup:
