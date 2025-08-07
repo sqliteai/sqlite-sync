@@ -77,23 +77,11 @@ jobs:
         if: matrix.os == 'windows-latest'
         with:
           msystem: mingw64
-          install: >-
-            mingw-w64-x86_64-cc
-            make
+          install: mingw-w64-x86_64-cc make
       
-      - name: Install build dependencies
+      - name: linux-musl install dependencies
         if: matrix.name == 'linux-musl'
-        run: |
-          apk update
-          apk add --no-cache \
-            git \
-            gcc \
-            make \
-            curl \
-            sqlite \
-            openssl-dev \
-            musl-dev \
-            linux-headers \
+        run: apk update && apk add --no-cache git gcc make curl sqlite openssl-dev musl-dev linux-headers
 
       - name: linux-musl arm64 checkout
         if: matrix.name == 'linux-musl' && matrix.arch == 'arm64'
