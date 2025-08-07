@@ -24,6 +24,14 @@ jobs:
           - os: LinuxARM64
             arch: arm64
             name: linux
+          - os: ubuntu-latest
+            arch: x86_64
+            name: linux-musl
+            container: alpine:latest
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            name: linux-musl
+            container: alpine:latest
           - os: macos-latest
             name: macos
           - os: windows-latest
@@ -50,14 +58,6 @@ jobs:
           - os: macos-latest
             name: apple-xcframework
             make: xcframework
-          - os: ubuntu-latest
-            arch: x86_64
-            name: linux-musl
-            container: alpine:latest
-          - os: ubuntu-24.04-arm
-            arch: arm64
-            name: linux-musl
-            container: alpine:latest
 
     defaults:
       run:
