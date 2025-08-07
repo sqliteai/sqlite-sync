@@ -54,7 +54,7 @@ jobs:
             arch: x86_64
             name: musl
             container: alpine:latest
-          - os: LinuxARM64
+          - os: ubuntu-24.04-arm
             arch: arm64
             name: musl
             container: alpine:latest
