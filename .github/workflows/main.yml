@@ -52,16 +52,16 @@ jobs:
             make: xcframework
           - os: ubuntu-latest
             arch: x86_64
-            name: musl
+            name: linux-musl
             container: alpine:latest
           - os: ubuntu-24.04-arm
             arch: arm64
-            name: musl
+            name: linux-musl
             container: alpine:latest
 
     defaults:
       run:
-        shell: ${{ matrix.name == 'musl' && 'sh' || 'bash' }}
+        shell: ${{ matrix.name == 'linux-musl' && 'sh' || 'bash' }}
 
     env:
       CONNECTION_STRING: ${{ secrets.CONNECTION_STRING }}
@@ -69,17 +69,6 @@ jobs:
       WEBLITE: ${{ secrets.WEBLITE }}
 
     steps:
-
-      - name: Alpine system info
-        if: matrix.name == 'musl'
-        run: |
-          echo "=== Alpine Linux Information ==="
-          cat /etc/alpine-release
-          echo "Kernel: $(uname -r)"
-          echo "Architecture: $(uname -m)"
-          echo "Shell: $SHELL"
-          echo "Available shells:"
-          cat /etc/shells
 
       - uses: actions/checkout@v4.2.2
 
@@ -92,9 +81,8 @@ jobs:
             make
       
       - name: Install build dependencies
-        if: matrix.name == 'musl'
+        if: matrix.name == 'linux-musl'
         run: |
-          # Update package index and install essential build tools
           apk update
           apk add --no-cache \
             git \
@@ -175,7 +163,7 @@ jobs:
             adb shell "sh /data/local/tmp/commands.sh"
 
       - name: test sqlite-sync
-        if: matrix.name == 'linux' || matrix.name == 'windows'
+        if: contains(matrix.name, 'linux') || matrix.name == 'windows'
         run: make test
 
       - name: test sqlite-sync + coverage
