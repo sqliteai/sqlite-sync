@@ -102,6 +102,7 @@ jobs:
             g++ \
             make \
             cmake \
+            curl \
             musl-dev \
             linux-headers \
             pkgconfig \
