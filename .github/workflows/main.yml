@@ -103,6 +103,7 @@ jobs:
             make \
             cmake \
             curl \
+            sqlite \
             openssl-dev \
             musl-dev \
             linux-headers \
