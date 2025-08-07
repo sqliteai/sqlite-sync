@@ -92,7 +92,7 @@ jobs:
           wget https://www.openssl.org/source/openssl-3.0.15.tar.gz
           tar -xzf openssl-3.0.15.tar.gz
           cd openssl-3.0.15
-          CC=musl-gcc ./Configure linux-aarch64 --prefix=/usr/local/musl --openssldir=/usr/local/musl/ssl no-shared
+          CC=musl-gcc CPPFLAGS="-I/usr/include" ./Configure linux-aarch64 --prefix=/usr/local/musl --openssldir=/usr/local/musl/ssl no-shared
           make -j$(nproc)
           sudo make install
           cd ..
