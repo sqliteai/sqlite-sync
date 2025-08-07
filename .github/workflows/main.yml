@@ -93,6 +93,7 @@ jobs:
             -e WEBLITE="${{ env.WEBLITE }}" \
             alpine:latest \
             sh -c '
+              set -e
               apk update && apk add --no-cache gcc make curl sqlite openssl-dev musl-dev linux-headers
               make extension
               make test
