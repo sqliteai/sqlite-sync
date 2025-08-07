@@ -88,9 +88,7 @@ jobs:
           apk add --no-cache \
             git \
             gcc \
-            g++ \
             make \
-            cmake \
             curl \
             sqlite \
             openssl-dev \
@@ -101,17 +99,12 @@ jobs:
             automake \
             libtool
 
-      - name: Musl arm64 git clone
+      - name: linux-musl arm64 checkout
         if: matrix.name == 'linux-musl' && matrix.arch == 'arm64'
         run: |
           git config --global --add safe.directory '*'
           git clone https://github.com/${{ github.repository }}.git .
           git checkout ${{ github.sha }}
-        
-          echo "Repository cloned successfully"
-          echo "Current commit: $(git rev-parse HEAD)"
-          echo "Files:"
-          ls -la
 
       - name: windows build curl
         if: matrix.os == 'windows-latest'
