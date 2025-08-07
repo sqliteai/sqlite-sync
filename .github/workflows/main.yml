@@ -70,6 +70,17 @@ jobs:
 
     steps:
 
+      - name: Alpine system info
+        if: matrix.name == 'musl'
+        run: |
+          echo "=== Alpine Linux Information ==="
+          cat /etc/alpine-release
+          echo "Kernel: $(uname -r)"
+          echo "Architecture: $(uname -m)"
+          echo "Shell: $SHELL"
+          echo "Available shells:"
+          cat /etc/shells
+
       - uses: actions/checkout@v4.2.2
 
       - uses: msys2/setup-msys2@v2.27.0
@@ -79,6 +90,24 @@ jobs:
           install: >-
             mingw-w64-x86_64-cc
             make
+      
+      - name: Install build dependencies
+        if: matrix.name == 'musl'
+        run: |
+          # Update package index and install essential build tools
+          apk update
+          apk add --no-cache \
+            git \
+            gcc \
+            g++ \
+            make \
+            cmake \
+            musl-dev \
+            linux-headers \
+            pkgconfig \
+            autoconf \
+            automake \
+            libtool
 
       - name: windows build curl
         if: matrix.os == 'windows-latest'
