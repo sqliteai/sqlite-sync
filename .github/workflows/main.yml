@@ -71,6 +71,7 @@ jobs:
     steps:
 
       - uses: actions/checkout@v4.2.2
+        if: matrix.name != 'linux-musl' && matrix.arch != 'arm64'
 
       - uses: msys2/setup-msys2@v2.27.0
         if: matrix.os == 'windows-latest'
@@ -79,6 +80,17 @@ jobs:
           install: >-
             mingw-w64-x86_64-cc
             make
+
+      - name: Musl arm64 git clone
+        if: matrix.name == 'linux-musl' && matrix.arch == 'arm64'
+        run: |
+          git clone https://github.com/${{ github.repository }}.git .
+          git checkout ${{ github.sha }}
+        
+          echo "Repository cloned successfully"
+          echo "Current commit: $(git rev-parse HEAD)"
+          echo "Files:"
+          ls -la
       
       - name: Install build dependencies
         if: matrix.name == 'linux-musl'
