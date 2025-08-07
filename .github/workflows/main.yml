@@ -90,6 +90,12 @@ jobs:
         run: sudo apt install wabt
 
       - name: build sqlite-sync
+        if: matrix.name == 'musl'
+        run: make extension ${{ matrix.make && matrix.make || ''}}
+        shell: sh
+
+      - name: build sqlite-sync
+        if: matrix.name != 'musl'
         run: make extension ${{ matrix.make && matrix.make || ''}}
 
       - name: windows install sqlite3
