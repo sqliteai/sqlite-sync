@@ -94,10 +94,6 @@ jobs:
             openssl-dev \
             musl-dev \
             linux-headers \
-            pkgconfig \
-            autoconf \
-            automake \
-            libtool
 
       - name: linux-musl arm64 checkout
         if: matrix.name == 'linux-musl' && matrix.arch == 'arm64'
