@@ -86,7 +86,7 @@ jobs:
         if: matrix.name == 'linux-musl' && matrix.arch == 'arm64'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc make curl sqlite3 musl-dev musl-tools linux-headers-generic
+          sudo apt-get install -y gcc make curl sqlite3 musl-dev musl-tools linux-libc-dev wget
           
           # Build OpenSSL for musl
           wget https://www.openssl.org/source/openssl-3.0.15.tar.gz
