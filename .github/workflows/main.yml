@@ -51,6 +51,11 @@ jobs:
             name: apple-xcframework
             make: xcframework
           - os: ubuntu-latest
+            arch: x86_64
+            name: musl
+            container: alpine:latest
+          - os: LinuxARM64
+            arch: arm64
             name: musl
             container: alpine:latest
 
