@@ -104,6 +104,7 @@ jobs:
       - name: Musl arm64 git clone
         if: matrix.name == 'linux-musl' && matrix.arch == 'arm64'
         run: |
+          git config --global --add safe.directory ${{ github.workspace }}
           git clone https://github.com/${{ github.repository }}.git .
           git checkout ${{ github.sha }}
         
