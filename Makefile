@@ -35,7 +35,6 @@ CC = gcc
 CFLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(SQLITE_DIR) -I$(CURL_DIR)/include
 T_CFLAGS = $(CFLAGS) -DSQLITE_CORE -DCLOUDSYNC_UNITTEST -DCLOUDSYNC_OMIT_NETWORK -DCLOUDSYNC_OMIT_PRINT_RESULT
 LDFLAGS = -L./$(CURL_DIR)/$(PLATFORM) -lcurl
-COVERAGE = false
 
 # Directories
 SRC_DIR = src
@@ -128,7 +127,7 @@ else # linux
     STRIP = strip --strip-unneeded $@
 endif
 
-ifneq ($(COVERAGE),false)
+ifdef COVERAGE
 ifneq (,$(filter $(platform),linux windows))
     T_LDFLAGS += -lgcov
 endif
@@ -207,7 +206,7 @@ $(BUILD_TEST)/%.o: %.c
 test: $(TARGET) $(TEST_TARGET)
 	$(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();"
 	set -e; for t in $(TEST_TARGET); do ./$$t; done
-ifneq ($(COVERAGE),false)
+ifdef COVERAGE
 	mkdir -p $(COV_DIR)
 	lcov --capture --directory . --output-file $(COV_DIR)/coverage.info $(subst src, --include src,${COV_FILES})
 	genhtml $(COV_DIR)/coverage.info --output-directory $(COV_DIR)
@@ -386,7 +385,7 @@ help:
 	@echo "Targets:"
 	@echo "  all       				- Build the extension (default)"
 	@echo "  clean     				- Remove built files"
-	@echo "  test [COVERAGE=true]	- Test the extension with optional coverage output"
+	@echo "  test [COVERAGE=ON]		- Test the extension with optional coverage output"
 	@echo "  help      				- Display this help message"
 
 .PHONY: all clean test extension help xcframework

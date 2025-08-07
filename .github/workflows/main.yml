@@ -18,43 +18,44 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             arch: x86_64
             name: linux
           - os: ubuntu-22.04-arm
             arch: arm64
             name: linux
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             arch: x86_64
             name: linux-musl
             container: alpine:latest
           - os: ubuntu-22.04-arm
             arch: arm64
             name: linux-musl
-          - os: macos-latest
+          - os: macos-15
             name: macos
-          - os: windows-latest
+            make: COVERAGE=ON
+          - os: windows-2022
             arch: x86_64
             name: windows
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             arch: arm64-v8a
             name: android
             make: PLATFORM=android ARCH=arm64-v8a
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             arch: x86_64
             name: android
             make: PLATFORM=android ARCH=x86_64
             sqlite-amalgamation-zip: https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
-          - os: macos-latest
+          - os: macos-15
             name: ios
             make: PLATFORM=ios
-          - os: macos-latest
+          - os: macos-15
             name: ios-sim
             make: PLATFORM=ios-sim
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             name: wasm
             make: PLATFORM=wasm
-          - os: macos-latest
+          - os: macos-15
             name: apple-xcframework
             make: xcframework
 
@@ -72,10 +73,18 @@ jobs:
       - uses: actions/checkout@v4.2.2
 
       - uses: msys2/setup-msys2@v2.27.0
-        if: matrix.os == 'windows-latest'
+        if: matrix.name == 'windows'
         with:
           msystem: mingw64
           install: mingw-w64-x86_64-cc make
+
+      - name: windows install dependencies
+        if: matrix.name == 'windows'
+        run: choco install sqlite -y
+
+      - name: macos install dependencies
+        if: matrix.name == 'macos'
+        run: brew link sqlite --force && brew install lcov
       
       - name: linux-musl x86_64 install dependencies
         if: matrix.name == 'linux-musl' && matrix.arch == 'x86_64'
@@ -96,7 +105,7 @@ jobs:
           docker exec alpine sh -c "apk update && apk add --no-cache gcc make curl sqlite openssl-dev musl-dev linux-headers"
 
       - name: windows build curl
-        if: matrix.os == 'windows-latest'
+        if: matrix.name == 'windows'
         run: make curl/windows/libcurl.a
         shell: msys2 {0}
 
@@ -106,14 +115,6 @@ jobs:
 
       - name: build sqlite-sync
         run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make extension ${{ matrix.make && matrix.make || ''}}
-
-      - name: windows install sqlite3
-        if: matrix.os == 'windows-latest'
-        run: choco install sqlite -y
-
-      - name: macos install sqlite3 without SQLITE_OMIT_LOAD_EXTENSION
-        if: matrix.name == 'macos'
-        run: brew link sqlite --force
 
       - name: android setup test environment
         if: matrix.name == 'android' && matrix.arch != 'arm64-v8a'
@@ -159,12 +160,8 @@ jobs:
             adb shell "sh /data/local/tmp/commands.sh"
 
       - name: test sqlite-sync
-        if: contains(matrix.name, 'linux') || matrix.name == 'windows'
-        run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make test
-
-      - name: test sqlite-sync + coverage
-        if: matrix.name == 'macos'
-        run: brew install lcov && make test COVERAGE=true
+        if: contains(matrix.name, 'linux') || matrix.name == 'windows' || matrix.name == 'macos'
+        run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make test ${{ matrix.make && matrix.make || ''}}
 
       - uses: actions/upload-pages-artifact@v3.0.1
         if: matrix.name == 'macos'
@@ -179,7 +176,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     name: release
     needs: build
     if: github.ref == 'refs/heads/main'
