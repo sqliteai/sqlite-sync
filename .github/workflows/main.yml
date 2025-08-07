@@ -101,11 +101,6 @@ jobs:
             automake \
             libtool
 
-          which gcc
-          gcc --version
-          which make
-          make --version
-
       - name: Musl arm64 git clone
         if: matrix.name == 'linux-musl' && matrix.arch == 'arm64'
         run: |
