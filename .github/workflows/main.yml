@@ -81,10 +81,10 @@ jobs:
         if: matrix.name == 'linux-musl' && matrix.arch == 'x86_64'
         run: apk update && apk add --no-cache gcc make curl sqlite openssl-dev musl-dev linux-headers
       
-      - name: linux-musl arm64 build in docker
+      - name: linux-musl arm64 setup container
         if: matrix.name == 'linux-musl' && matrix.arch == 'arm64'
         run: |
-          docker run --rm \
+          docker run -d --name alpine \
             --platform linux/arm64 \
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
@@ -92,12 +92,8 @@ jobs:
             -e APIKEY="${{ env.APIKEY }}" \
             -e WEBLITE="${{ env.WEBLITE }}" \
             alpine:latest \
-            sh -c '
-              set -e
-              apk update && apk add --no-cache gcc make curl sqlite openssl-dev musl-dev linux-headers
-              make extension
-              make test
-            '
+            tail -f /dev/null
+          docker exec alpine sh -c "apk update && apk add --no-cache gcc make curl sqlite openssl-dev musl-dev linux-headers"
 
       - name: windows build curl
         if: matrix.os == 'windows-latest'
@@ -109,8 +105,7 @@ jobs:
         run: sudo apt install wabt
 
       - name: build sqlite-sync
-        if: matrix.name != 'linux-musl' || matrix.arch != 'arm64'
-        run: make extension ${{ matrix.make && matrix.make || ''}}
+        run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make extension ${{ matrix.make && matrix.make || ''}}
 
       - name: windows install sqlite3
         if: matrix.os == 'windows-latest'
@@ -164,8 +159,8 @@ jobs:
             adb shell "sh /data/local/tmp/commands.sh"
 
       - name: test sqlite-sync
-        if: (contains(matrix.name, 'linux') || matrix.name == 'windows') && !(matrix.name == 'linux-musl' && matrix.arch == 'arm64')
-        run: make test
+        if: contains(matrix.name, 'linux') || matrix.name == 'windows'
+        run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make test
 
       - name: test sqlite-sync + coverage
         if: matrix.name == 'macos'
