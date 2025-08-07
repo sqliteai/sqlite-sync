@@ -31,6 +31,7 @@ jobs:
           - os: ubuntu-24.04-arm
             arch: arm64
             name: linux-musl
+            make: CC=musl-gcc
           - os: macos-latest
             name: macos
           - os: windows-latest
