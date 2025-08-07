@@ -103,6 +103,7 @@ jobs:
             make \
             cmake \
             curl \
+            openssl-dev \
             musl-dev \
             linux-headers \
             pkgconfig \
