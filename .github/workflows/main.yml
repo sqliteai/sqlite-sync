@@ -61,7 +61,7 @@ jobs:
 
     defaults:
       run:
-        shell: ${{ matrix.name == 'linux-musl' && matrix.arch == 'x86_64' && 'sh' || 'bash' }}
+        shell: ${{ contains(matrix.container, 'alpine') && 'sh' || 'bash' }}
 
     env:
       CONNECTION_STRING: ${{ secrets.CONNECTION_STRING }}
