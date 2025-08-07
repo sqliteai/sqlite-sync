@@ -31,7 +31,6 @@ jobs:
           - os: ubuntu-24.04-arm
             arch: arm64
             name: linux-musl
-            make: CC=musl-gcc CURL_CONFIG="--with-openssl=/usr/local/musl"
           - os: macos-latest
             name: macos
           - os: windows-latest
@@ -82,20 +81,23 @@ jobs:
         if: matrix.name == 'linux-musl' && matrix.arch == 'x86_64'
         run: apk update && apk add --no-cache gcc make curl sqlite openssl-dev musl-dev linux-headers
       
-      - name: linux-musl arm64 install dependencies
+      - name: linux-musl arm64 build in docker
         if: matrix.name == 'linux-musl' && matrix.arch == 'arm64'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc make curl sqlite3 musl-dev musl-tools linux-libc-dev wget
-          
-          # Build OpenSSL for musl
-          wget https://www.openssl.org/source/openssl-3.0.15.tar.gz
-          tar -xzf openssl-3.0.15.tar.gz
-          cd openssl-3.0.15
-          CC=musl-gcc CPPFLAGS="-I/usr/include" ./Configure linux-aarch64 --prefix=/usr/local/musl --openssldir=/usr/local/musl/ssl no-shared
-          make -j$(nproc)
-          sudo make install
-          cd ..
+          docker run --rm \
+            --platform linux/arm64 \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            -e CONNECTION_STRING="${{ env.CONNECTION_STRING }}" \
+            -e APIKEY="${{ env.APIKEY }}" \
+            -e WEBLITE="${{ env.WEBLITE }}" \
+            alpine:latest \
+            sh -c '
+              apk update && apk add --no-cache git gcc make curl sqlite openssl-dev musl-dev linux-headers
+              git config --global --add safe.directory "*"
+              make extension
+              make test
+            '
 
       - name: windows build curl
         if: matrix.os == 'windows-latest'
@@ -107,6 +109,7 @@ jobs:
         run: sudo apt install wabt
 
       - name: build sqlite-sync
+        if: matrix.name != 'linux-musl' || matrix.arch != 'arm64'
         run: make extension ${{ matrix.make && matrix.make || ''}}
 
       - name: windows install sqlite3
@@ -161,7 +164,7 @@ jobs:
             adb shell "sh /data/local/tmp/commands.sh"
 
       - name: test sqlite-sync
-        if: contains(matrix.name, 'linux') || matrix.name == 'windows'
+        if: (contains(matrix.name, 'linux') || matrix.name == 'windows') && !(matrix.name == 'linux-musl' && matrix.arch == 'arm64')
         run: make test
 
       - name: test sqlite-sync + coverage
