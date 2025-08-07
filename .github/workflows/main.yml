@@ -21,14 +21,14 @@ jobs:
           - os: ubuntu-latest
             arch: x86_64
             name: linux
-          - os: LinuxARM64
+          - os: ubuntu-22.04-arm
             arch: arm64
             name: linux
           - os: ubuntu-latest
             arch: x86_64
             name: linux-musl
             container: alpine:latest
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             arch: arm64
             name: linux-musl
           - os: macos-latest
@@ -93,8 +93,7 @@ jobs:
             -e WEBLITE="${{ env.WEBLITE }}" \
             alpine:latest \
             sh -c '
-              apk update && apk add --no-cache git gcc make curl sqlite openssl-dev musl-dev linux-headers
-              git config --global --add safe.directory "*"
+              apk update && apk add --no-cache gcc make curl sqlite openssl-dev musl-dev linux-headers
               make extension
               make test
             '
