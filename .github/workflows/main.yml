@@ -116,8 +116,8 @@ jobs:
       - name: build sqlite-sync
         run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make extension ${{ matrix.make && matrix.make || ''}}
 
-      - name: sign xcframework
-        if: matrix.name == 'apple-xcframework'
+      - name: create keychain for codesign
+        if: matrix.os == 'macos-15'
         run: |
           echo "${{ secrets.APPLE_CERTIFICATE }}" | base64 --decode > certificate.p12
           security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
@@ -125,8 +125,20 @@ jobs:
           security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
           security import certificate.p12 -k build.keychain -P "${{ secrets.CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
+
+      - name: codesign dylib
+        if: matrix.os == 'macos-15' && matrix.name != 'apple-xcframework'
+        run: codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/cloudsync.dylib
+
+      - name: codesign xcframework
+        if: matrix.name == 'apple-xcframework'
+        run: |
           find dist/CloudSync.xcframework -name "*.framework" -exec echo "Signing: {}" \; -exec codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime {} \; # Sign each individual framework FIRST
           codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/CloudSync.xcframework # Then sign the xcframework wrapper
+
+      - name: cleanup keychain for codesign
+        if: matrix.os == 'macos-15'
+        run: |
           rm certificate.p12
           security delete-keychain build.keychain
 
