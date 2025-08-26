@@ -116,7 +116,7 @@ jobs:
       - name: build sqlite-sync
         run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make extension ${{ matrix.make && matrix.make || ''}}
 
-      - name: sign and notarize xcframework
+      - name: sign xcframework
         if: matrix.name == 'apple-xcframework'
         run: |
           echo "${{ secrets.APPLE_CERTIFICATE }}" | base64 --decode > certificate.p12
@@ -126,10 +126,7 @@ jobs:
           security import certificate.p12 -k build.keychain -P "${{ secrets.CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
           codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/CloudSync.xcframework
-          ditto -c -k --keepParent dist/CloudSync.xcframework dist/CloudSync.xcframework.zip
-          xcrun notarytool submit dist/CloudSync.xcframework.zip --apple-id "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
-          xcrun stapler staple dist/CloudSync.xcframework
-          rm dist/CloudSync.xcframework.zip certificate.p12
+          rm certificate.p12
           security delete-keychain build.keychain
 
       - name: android setup test environment
