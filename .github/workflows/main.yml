@@ -132,7 +132,6 @@ jobs:
           codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/cloudsync.dylib
           cd dist && ditto -c -k --keepParent cloudsync.dylib cloudsync.zip
           xcrun notarytool submit cloudsync.zip --apple-id "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
-          xcrun stapler staple cloudsync.dylib
           rm cloudsync.zip
 
       - name: codesign xcframework
@@ -142,7 +141,6 @@ jobs:
           codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/CloudSync.xcframework # Then sign the xcframework wrapper
           ditto -c -k --keepParent dist/CloudSync.xcframework dist/CloudSync.xcframework.zip
           xcrun notarytool submit dist/CloudSync.xcframework.zip --apple-id "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
-          find dist/CloudSync.xcframework -name "*.framework" -exec echo "Stapling: {}" \; -exec xcrun stapler staple {} \;
           rm dist/CloudSync.xcframework.zip
 
       - name: cleanup keychain for codesign
