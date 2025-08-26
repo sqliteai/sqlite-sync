@@ -128,8 +128,7 @@ jobs:
 
       - name: codesign dylib
         if: matrix.os == 'macos-15' && matrix.name != 'apple-xcframework'
-        run: |
-          codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/cloudsync.dylib
+        run: codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/cloudsync.dylib
 
       - name: codesign and notarize xcframework
         if: matrix.name == 'apple-xcframework'
