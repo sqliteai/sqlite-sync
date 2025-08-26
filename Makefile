@@ -346,6 +346,7 @@ $(DIST_DIR)/%.xcframework: $(LIB_NAMES)
 	@$(foreach i,1 2 3,\
 		lib=$(word $(i),$(LIB_NAMES)); \
 		fmwk=$(word $(i),$(FMWK_NAMES)); \
+		mkdir -p $(DIST_DIR)/$$fmwk/CloudSync.framework; \
 		printf "$(PLIST)" > $(DIST_DIR)/$$fmwk/CloudSync.framework/Info.plist; \
 		mv $(DIST_DIR)/$$lib $(DIST_DIR)/$$fmwk/CloudSync.framework/CloudSync; \
 		install_name_tool -id "@rpath/CloudSync.framework/CloudSync" $(DIST_DIR)/$$fmwk/CloudSync.framework/CloudSync; \
