@@ -340,14 +340,24 @@ define PLIST
 </plist>
 endef
 
+define MODULEMAP
+framework module CloudSync {\
+  umbrella header \"CloudSync.h\"\
+  export *\
+}
+endef
+
 LIB_NAMES = ios.dylib ios-sim.dylib macos.dylib
 FMWK_NAMES = ios-arm64 ios-arm64_x86_64-simulator macos-arm64_x86_64
 $(DIST_DIR)/%.xcframework: $(LIB_NAMES)
 	@$(foreach i,1 2 3,\
 		lib=$(word $(i),$(LIB_NAMES)); \
 		fmwk=$(word $(i),$(FMWK_NAMES)); \
-		mkdir -p $(DIST_DIR)/$$fmwk/CloudSync.framework; \
+		mkdir -p $(DIST_DIR)/$$fmwk/CloudSync.framework/Headers; \
+		mkdir -p $(DIST_DIR)/$$fmwk/CloudSync.framework/Modules; \
+		cp src/cloudsync.h $(DIST_DIR)/$$fmwk/CloudSync.framework/Headers/CloudSync.h; \
 		printf "$(PLIST)" > $(DIST_DIR)/$$fmwk/CloudSync.framework/Info.plist; \
+		printf "$(MODULEMAP)" > $(DIST_DIR)/$$fmwk/CloudSync.framework/Modules/module.modulemap; \
 		mv $(DIST_DIR)/$$lib $(DIST_DIR)/$$fmwk/CloudSync.framework/CloudSync; \
 		install_name_tool -id "@rpath/CloudSync.framework/CloudSync" $(DIST_DIR)/$$fmwk/CloudSync.framework/CloudSync; \
 	)

@@ -128,7 +128,10 @@ jobs:
 
       - name: codesign dylib
         if: matrix.os == 'macos-15' && matrix.name != 'apple-xcframework'
-        run: codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/cloudsync.dylib
+        run: |
+          codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/cloudsync.dylib
+          xcrun notarytool submit dist/cloudsync.dylib --apple-id "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
+          xcrun stapler staple dist/cloudsync.dylib
 
       - name: codesign xcframework
         if: matrix.name == 'apple-xcframework'
@@ -137,6 +140,7 @@ jobs:
           codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/CloudSync.xcframework # Then sign the xcframework wrapper
           ditto -c -k --keepParent dist/CloudSync.xcframework dist/CloudSync.xcframework.zip
           xcrun notarytool submit dist/CloudSync.xcframework.zip --apple-id "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
+          xcrun stapler staple dist/CloudSync.xcframework
           rm dist/CloudSync.xcframework.zip
 
       - name: cleanup keychain for codesign
