@@ -135,6 +135,9 @@ jobs:
         run: |
           find dist/CloudSync.xcframework -name "*.framework" -exec echo "Signing: {}" \; -exec codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime {} \; # Sign each individual framework FIRST
           codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/CloudSync.xcframework # Then sign the xcframework wrapper
+          ditto -c -k --keepParent dist/CloudSync.xcframework dist/CloudSync.xcframework.zip
+          xcrun notarytool submit dist/CloudSync.xcframework.zip --apple-id "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
+          rm dist/CloudSync.xcframework.zip
 
       - name: cleanup keychain for codesign
         if: matrix.os == 'macos-15'
