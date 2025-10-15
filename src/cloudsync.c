@@ -1711,13 +1711,6 @@ int cloudsync_refill_metatable (sqlite3 *db, cloudsync_context *data, const char
     char *pkdecode = dbutils_text_select(db, sql);
     char *pkdecodeval = (pkdecode) ? pkdecode : "cloudsync_pk_decode(pk, 1) AS rowid";
     cloudsync_memory_free(sql);
-    
-    /* not needed in VERSION 2
-    sql = cloudsync_memory_mprintf("SELECT group_concat('\"' || format('%%w', name) || '\"' || ' = cloudsync_pk_decode(pk, ' || pk || ')', ' AND ') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
-    char *pkonclause = dbutils_text_select(db, sql);
-    char *pkonclauseval = (pkonclause) ? pkonclause : "rowid = cloudsync_pk_decode(pk, 1) AS rowid";
-    cloudsync_memory_free(sql);
-    */
      
     sql = cloudsync_memory_mprintf("SELECT cloudsync_insert('%q', %s) FROM (SELECT %s FROM \"%w\" EXCEPT SELECT %s FROM \"%w_cloudsync\");", table_name, pkvalues_identifiers, pkvalues_identifiers, table_name, pkdecodeval, table_name);
     int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
@@ -1726,12 +1719,6 @@ int cloudsync_refill_metatable (sqlite3 *db, cloudsync_context *data, const char
     
     // fill missing colums
     // for each non-pk column:
-    
-    // VERSION 2 (October 15, 2025)
-    // previous query WAS
-    // sql = cloudsync_memory_mprintf("SELECT cloudsync_pk_encode(%s) FROM \"%w\" LEFT JOIN \"%w_cloudsync\" ON %s AND \"%w_cloudsync\".col_name = ? WHERE \"%w_cloudsync\".db_version IS NULL", pkvalues_identifiers, table_name, table_name, pkonclauseval, table_name, table_name);
-    // but it takes hours with large tables (100,000 rows, 25 columns, of which 18 was primary keys)
-    //
     // The new query does 1 encode per source row and one indexed NOT-EXISTS probe.
     // The old plan does many decodes per candidate and can’t use an index to rule out matches quickly—so it burns CPU and I/O.
     
@@ -1768,8 +1755,6 @@ finalize:
     if (rc != SQLITE_OK) DEBUG_ALWAYS("cloudsync_refill_metatable error: %s", sqlite3_errmsg(db));
     if (pkclause_identifiers) cloudsync_memory_free(pkclause_identifiers);
     if (pkdecode) cloudsync_memory_free(pkdecode);
-    // not needed in VERSION 2
-    // if (pkonclause) cloudsync_memory_free(pkonclause);
     if (vm) sqlite3_finalize(vm);
     return rc;
 }
