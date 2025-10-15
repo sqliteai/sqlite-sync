@@ -5930,7 +5930,7 @@ int main(int argc, const char * argv[]) {
     cloudsync_set_payload_apply_callback(db, unittest_payload_apply_rls_callback);
 
     printf("Testing CloudSync version %s\n", CLOUDSYNC_VERSION);
-    printf("===============================\n");
+    printf("=================================\n");
 
     result += test_report("PK Test:", do_test_pk(db, 10000, print_result));
     result += test_report("UUID Test:", do_test_uuid(db, 1000, print_result));
