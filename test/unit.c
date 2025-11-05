@@ -5910,6 +5910,112 @@ finalize:
 
 // MARK: -
 
+bool do_test_payload_buffer (size_t blob_size) {
+    const char *table_name = "payload_buffer_test";
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    unsigned char *blob = NULL;
+    char *errmsg = NULL;
+    bool success = false;
+    int rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(db, "SELECT cloudsync_version();", NULL, NULL, &errmsg);
+    if (rc != SQLITE_OK) goto cleanup;
+    if (errmsg) { sqlite3_free(errmsg); errmsg = NULL; }
+
+    char *sql = sqlite3_mprintf("CREATE TABLE IF NOT EXISTS \"%w\" ("
+                                "id TEXT PRIMARY KEY NOT NULL, "
+                                "value BLOB, "
+                                "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                                ");", table_name);
+    if (!sql) {
+        rc = SQLITE_NOMEM;
+        goto cleanup;
+    }
+    rc = sqlite3_exec(db, sql, NULL, NULL, &errmsg);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) goto cleanup;
+    if (errmsg) { sqlite3_free(errmsg); errmsg = NULL; }
+
+    sql = sqlite3_mprintf("SELECT cloudsync_init('%q');", table_name);
+    if (!sql) {
+        rc = SQLITE_NOMEM;
+        goto cleanup;
+    }
+    rc = sqlite3_exec(db, sql, NULL, NULL, &errmsg);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) goto cleanup;
+    if (errmsg) { sqlite3_free(errmsg); errmsg = NULL; }
+
+    sql = sqlite3_mprintf("INSERT INTO \"%w\" (id, value) VALUES (?, ?);", table_name);
+    if (!sql) {
+        rc = SQLITE_NOMEM;
+        goto cleanup;
+    }
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    char dummy_id[UUID_STR_MAXLEN];
+    cloudsync_uuid_v7_string(dummy_id, true);
+
+    blob = sqlite3_malloc64(blob_size);
+    if (!blob) {
+        rc = SQLITE_NOMEM;
+        goto cleanup;
+    }
+    for (size_t i = 0; i < blob_size; ++i) {
+        blob[i] = (unsigned char)(i % 256);
+    }
+
+    rc = sqlite3_bind_text(stmt, 1, dummy_id, -1, SQLITE_TRANSIENT);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_bind_blob(stmt, 2, blob, (int)blob_size, SQLITE_TRANSIENT);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE) goto cleanup;
+    rc = sqlite3_finalize(stmt);
+    stmt = NULL;
+    if (rc != SQLITE_OK) goto cleanup;
+
+    sqlite3_free(blob);
+    blob = NULL;
+
+    const char *payload_sql = "SELECT length(cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq)) "
+                              "FROM cloudsync_changes;";
+    rc = sqlite3_prepare_v2(db, payload_sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    int row_count = 0;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        (void)sqlite3_column_int64(stmt, 0);
+        row_count++;
+    }
+    if (rc != SQLITE_DONE || row_count == 0) goto cleanup;
+
+    success = true;
+
+cleanup:
+    if (stmt) {
+        sqlite3_finalize(stmt);
+    }
+    if (blob) {
+        sqlite3_free(blob);
+    }
+    if (errmsg) {
+        fprintf(stderr, "do_test_android_initial_payload error: %s\n", errmsg);
+        sqlite3_free(errmsg);
+    }
+    if (db) db = close_db(db);
+
+    return success;
+}
+
 int test_report(const char *description, bool result){
     printf("%-30s %s\n", description, (result) ? "OK" : "FAILED");
     return result ? 0 : 1;
@@ -5954,6 +6060,10 @@ int main(int argc, const char * argv[]) {
     result += test_report("Functions Test (Int):", do_test_internal_functions());
     result += test_report("String Func Test:", do_test_string_replace_prefix());
     result += test_report("Test Many Columns:", do_test_many_columns(600, db));
+    result += test_report("Payload Buffer Test (500KB):", do_test_payload_buffer(500 * 1024));
+    result += test_report("Payload Buffer Test (600KB):", do_test_payload_buffer(600 * 1024));
+    result += test_report("Payload Buffer Test (1MB):", do_test_payload_buffer(1024 * 1024));
+    result += test_report("Payload Buffer Test (10MB):", do_test_payload_buffer(10 * 1024 * 1024));
 
     // close local database
     db = close_db(db);
