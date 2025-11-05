@@ -1927,6 +1927,8 @@ bool cloudsync_buffer_free (cloudsync_data_payload *payload) {
 }
 
 bool cloudsync_buffer_check (cloudsync_data_payload *payload, size_t needed) {
+    if (payload->nrows == 0) needed += sizeof(cloudsync_payload_header);
+    
     // alloc/resize buffer
     if (payload->bused + needed > payload->balloc) {
         if (needed < CLOUDSYNC_PAYLOAD_MINBUF_SIZE) needed = CLOUDSYNC_PAYLOAD_MINBUF_SIZE;
@@ -3558,4 +3560,3 @@ APIEXPORT int sqlite3_cloudsync_init (sqlite3 *db, char **pzErrMsg, const sqlite
     
     return cloudsync_register(db, pzErrMsg);
 }
-
