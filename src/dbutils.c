@@ -52,35 +52,35 @@ DATABASE_RESULT dbutils_exec (sqlite3_context *context, sqlite3 *db, const char 
     int type = 0;
     
     // compile sql
-    int rc = sqlite3_prepare_v2(db, sql, -1, &pstmt, NULL);
+    int rc = database_prepare(db, sql, (void **)&pstmt, 0);
     if (rc != SQLITE_OK) goto dbutils_exec_finalize;
     
     // check bindings
     for (int i=0; i<count; ++i) {
         switch (types[i]) {
             case SQLITE_NULL:
-                rc = sqlite3_bind_null(pstmt, i+1);
+                rc = database_bind_null(pstmt, i+1);
                 break;
             case SQLITE_TEXT:
-                rc = sqlite3_bind_text(pstmt, i+1, values[i], lens[i], SQLITE_STATIC);
+                rc = database_bind_text(pstmt, i+1, values[i], lens[i]);
                 break;
             case SQLITE_BLOB:
-                rc = sqlite3_bind_blob(pstmt, i+1, values[i], lens[i], SQLITE_STATIC);
+                rc = database_bind_blob(pstmt, i+1, values[i], lens[i]);
                 break;
             case SQLITE_INTEGER: {
                 sqlite3_int64 value = strtoll(values[i], NULL, 0);
-                rc = sqlite3_bind_int64(pstmt, i+1, value);
+                rc = database_bind_int(pstmt, i+1, value);
             }   break;
             case SQLITE_FLOAT: {
                 double value = strtod(values[i], NULL);
-                rc = sqlite3_bind_double(pstmt, i+1, value);
+                rc = database_bind_double(pstmt, i+1, value);
             }   break;
         }
         if (rc != SQLITE_OK) goto dbutils_exec_finalize;
     }
         
     // execute statement
-    rc = sqlite3_step(pstmt);
+    rc = database_step(pstmt);
     
     // check return value based on pre-condition
     if (rc != SQLITE_ROW) goto dbutils_exec_finalize;
@@ -88,7 +88,7 @@ DATABASE_RESULT dbutils_exec (sqlite3_context *context, sqlite3 *db, const char 
     
     // process result (if any)
     for (int i=0; i<result_count; ++i) {
-        type = sqlite3_column_type(pstmt, i);
+        type = database_column_type(pstmt, i);
         results[i].type = type;
         
         if (type == SQLITE_NULL) {
@@ -107,11 +107,11 @@ DATABASE_RESULT dbutils_exec (sqlite3_context *context, sqlite3 *db, const char 
         #endif
         
         // type == expected_type
-        if (type == SQLITE_INTEGER) results[i].value.intValue = sqlite3_column_int64(pstmt, i);
-        else if (type == SQLITE_FLOAT) results[i].value.doubleValue = sqlite3_column_double(pstmt, i);
+        if (type == SQLITE_INTEGER) results[i].value.intValue = database_column_int(pstmt, i);
+        else if (type == SQLITE_FLOAT) results[i].value.doubleValue = database_column_double(pstmt, i);
         else {
             // TEXT or BLOB
-            int len = sqlite3_column_bytes(pstmt, i);
+            int len = database_column_bytes(pstmt, i);
             results[i].len = len;
             #if CLOUDSYNC_UNITTEST
             if (is_test) len = SQLITE_MAX_ALLOCATION_SIZE + 1;
@@ -119,14 +119,14 @@ DATABASE_RESULT dbutils_exec (sqlite3_context *context, sqlite3 *db, const char 
             
             char *buffer = NULL;
             if (type == SQLITE_BLOB) {
-                const void *bvalue = sqlite3_column_blob(pstmt, i);
+                const void *bvalue = database_column_blob(pstmt, i);
                 if (bvalue) {
                     buffer = (char *)cloudsync_memory_alloc(len);
                     if (!buffer) {rc = SQLITE_NOMEM; goto dbutils_exec_finalize;}
                     memcpy(buffer, bvalue, len);
                 }
             } else {
-                const unsigned char *value = sqlite3_column_text(pstmt, i);
+                const unsigned char *value = database_column_text(pstmt, i);
                 if (value) buffer = cloudsync_string_dup((const char *)value, false);
             }
             results[i].value.stringValue = buffer;
@@ -140,10 +140,10 @@ dbutils_exec_finalize:
         #ifdef CLOUDSYNC_UNITTEST
         if (is_test) count = -1;
         #endif
-        if (count != -1) DEBUG_ALWAYS("Error executing %s in dbutils_exec (%s).", sql, sqlite3_errmsg(db));
-        if (context) sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+        if (count != -1) DEBUG_ALWAYS("Error executing %s in dbutils_exec (%s).", sql, database_errmsg(db));
+        if (context) sqlite3_result_error(context, database_errmsg(db), -1);
     }
-    if (pstmt) sqlite3_finalize(pstmt);
+    if (pstmt) database_finalize(pstmt);
     
     if (is_write) {
         DATABASE_RESULT result = {0};
@@ -216,8 +216,8 @@ int dbutils_value_compare (sqlite3_value *lvalue, sqlite3_value *rvalue) {
     if (!lvalue) return -1;
     if (!rvalue) return 1;
     
-    int l_type = (lvalue) ? sqlite3_value_type(lvalue) : SQLITE_NULL;
-    int r_type = sqlite3_value_type(rvalue);
+    int l_type = (lvalue) ? database_value_type(lvalue) : SQLITE_NULL;
+    int r_type = database_value_type(rvalue);
     
     // early exit if types differ, null is less than all types
     if (l_type != r_type) return (r_type - l_type);
@@ -225,14 +225,14 @@ int dbutils_value_compare (sqlite3_value *lvalue, sqlite3_value *rvalue) {
     // at this point lvalue and rvalue are of the same type
     switch (l_type) {
         case SQLITE_INTEGER: {
-            sqlite3_int64 l_int = sqlite3_value_int64(lvalue);
-            sqlite3_int64 r_int = sqlite3_value_int64(rvalue);
+            sqlite3_int64 l_int = database_value_int(lvalue);
+            sqlite3_int64 r_int = database_value_int(rvalue);
             return (l_int < r_int) ? -1 : (l_int > r_int);
         } break;
             
         case SQLITE_FLOAT: {
-            double l_double = sqlite3_value_double(lvalue);
-            double r_double = sqlite3_value_double(rvalue);
+            double l_double = database_value_double(lvalue);
+            double r_double = database_value_double(rvalue);
             return (l_double < r_double) ? -1 : (l_double > r_double);
         } break;
             
@@ -240,16 +240,16 @@ int dbutils_value_compare (sqlite3_value *lvalue, sqlite3_value *rvalue) {
             break;
             
         case SQLITE_TEXT: {
-            const unsigned char *l_text = sqlite3_value_text(lvalue);
-            const unsigned char *r_text = sqlite3_value_text(rvalue);
+            const unsigned char *l_text = database_value_text(lvalue);
+            const unsigned char *r_text = database_value_text(rvalue);
             return strcmp((const char *)l_text, (const char *)r_text);
         } break;
             
         case SQLITE_BLOB: {
-            const void *l_blob = sqlite3_value_blob(lvalue);
-            const void *r_blob = sqlite3_value_blob(rvalue);
-            int l_size = sqlite3_value_bytes(lvalue);
-            int r_size = sqlite3_value_bytes(rvalue);
+            const void *l_blob = database_value_blob(lvalue);
+            const void *r_blob = database_value_blob(rvalue);
+            int l_size = database_value_bytes(lvalue);
+            int r_size = database_value_bytes(rvalue);
             int cmp = memcmp(l_blob, r_blob, (l_size < r_size) ? l_size : r_size);
             return (cmp != 0) ? cmp : (l_size - r_size);
         } break;
@@ -272,18 +272,18 @@ void dbutils_context_result_error (sqlite3_context *context, const char *format,
 // MARK: -
 
 void dbutils_debug_value (sqlite3_value *value) {
-    switch (sqlite3_value_type(value)) {
+    switch (database_value_type(value)) {
         case SQLITE_INTEGER:
-            printf("\t\tINTEGER: %lld\n", sqlite3_value_int64(value));
+            printf("\t\tINTEGER: %lld\n", database_value_int(value));
             break;
         case SQLITE_FLOAT:
-            printf("\t\tFLOAT: %f\n", sqlite3_value_double(value));
+            printf("\t\tFLOAT: %f\n", database_value_double(value));
             break;
         case SQLITE_TEXT:
-            printf("\t\tTEXT: %s (%d)\n", sqlite3_value_text(value), sqlite3_value_bytes(value));
+            printf("\t\tTEXT: %s (%d)\n", database_value_text(value), database_value_bytes(value));
             break;
         case SQLITE_BLOB:
-            printf("\t\tBLOB: %p (%d)\n", (char *)sqlite3_value_blob(value), sqlite3_value_bytes(value));
+            printf("\t\tBLOB: %p (%d)\n", (char *)database_value_blob(value), database_value_bytes(value));
             break;
         case SQLITE_NULL:
             printf("\t\tNULL\n");
@@ -309,34 +309,6 @@ int dbutils_debug_stmt (sqlite3 *db, bool print_result) {
 
 // MARK: -
 
-int dbutils_register_function (sqlite3 *db, const char *name, void (*ptr)(sqlite3_context*,int,sqlite3_value**), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
-    DEBUG_DBFUNCTION("dbutils_register_function %s", name);
-    
-    const int DEFAULT_FLAGS = SQLITE_UTF8 | SQLITE_INNOCUOUS | SQLITE_DETERMINISTIC;
-    int rc = sqlite3_create_function_v2(db, name, nargs, DEFAULT_FLAGS, ctx, ptr, NULL, NULL, ctx_free);
-    
-    if (rc != SQLITE_OK) {
-        if (pzErrMsg) *pzErrMsg = cloudsync_memory_mprintf("Error creating function %s: %s", name, sqlite3_errmsg(db));
-        return rc;
-    }
-    
-    return SQLITE_OK;
-}
-
-int dbutils_register_aggregate (sqlite3 *db, const char *name, void (*xstep)(sqlite3_context*,int,sqlite3_value**), void (*xfinal)(sqlite3_context*), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
-    DEBUG_DBFUNCTION("dbutils_register_aggregate %s", name);
-    
-    const int DEFAULT_FLAGS = SQLITE_UTF8 | SQLITE_INNOCUOUS | SQLITE_DETERMINISTIC;
-    int rc = sqlite3_create_function_v2(db, name, nargs, DEFAULT_FLAGS, ctx, NULL, xstep, xfinal, ctx_free);
-    
-    if (rc != SQLITE_OK) {
-        if (pzErrMsg) *pzErrMsg = cloudsync_memory_mprintf("Error creating aggregate function %s: %s", name, sqlite3_errmsg(db));
-        return rc;
-    }
-    
-    return SQLITE_OK;
-}
-
 bool dbutils_system_exists (sqlite3 *db, const char *name, const char *type) {
     DEBUG_DBFUNCTION("dbutils_system_exists %s: %s", type, name);
     
@@ -345,21 +317,21 @@ bool dbutils_system_exists (sqlite3 *db, const char *name, const char *type) {
     
     char sql[1024];
     snprintf(sql, sizeof(sql), "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type='%s' AND name=?1 COLLATE NOCASE);", type);
-    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    int rc = database_prepare(db, sql, (void **)&vm, 0);
     if (rc != SQLITE_OK) goto finalize;
     
-    rc = sqlite3_bind_text(vm, 1, name, -1, SQLITE_STATIC);
+    rc = database_bind_text(vm, 1, name, -1);
     if (rc != SQLITE_OK) goto finalize;
     
-    rc = sqlite3_step(vm);
+    rc = database_step(vm);
     if (rc == SQLITE_ROW) {
-        result = (bool)sqlite3_column_int(vm, 0);
+        result = (bool)database_column_int(vm, 0);
         rc = SQLITE_OK;
     }
     
 finalize:
-    if (rc != SQLITE_OK) DEBUG_ALWAYS("Error executing %s in dbutils_system_exists for type %s name %s (%s).", sql, type, name, sqlite3_errmsg(db));
-    if (vm) sqlite3_finalize(vm);
+    if (rc != SQLITE_OK) DEBUG_ALWAYS("Error executing %s in dbutils_system_exists for type %s name %s (%s).", sql, type, name, database_errmsg(db));
+    if (vm) database_finalize(vm);
     return result;
 }
 
@@ -404,7 +376,7 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
         dbutils_context_result_error(context, "No more than 128 columns can be used to form a composite primary key");
         return false;
     } else if (count == -1) {
-        dbutils_context_result_error(context, "%s", sqlite3_errmsg(db));
+        dbutils_context_result_error(context, "%s", database_errmsg(db));
         return false;
     }
     
@@ -428,7 +400,7 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
                 return false;
             }
             if (count2 == -1) {
-                dbutils_context_result_error(context, "%s", sqlite3_errmsg(db));
+                dbutils_context_result_error(context, "%s", database_errmsg(db));
                 return false;
             }
         }
@@ -439,7 +411,7 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
         sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk>0 AND \"notnull\"=1;", name);
         sqlite3_int64 count2 = dbutils_int_select(db, sql);
         if (count2 == -1) {
-            dbutils_context_result_error(context, "%s", sqlite3_errmsg(db));
+            dbutils_context_result_error(context, "%s", database_errmsg(db));
             return false;
         }
         if (count != count2) {
@@ -453,7 +425,7 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
     sql = sqlite3_snprintf((int)blen, buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk=0 AND \"notnull\"=1 AND \"dflt_value\" IS NULL;", name);
     sqlite3_int64 count3 = dbutils_int_select(db, sql);
     if (count3 == -1) {
-        dbutils_context_result_error(context, "%s", sqlite3_errmsg(db));
+        dbutils_context_result_error(context, "%s", database_errmsg(db));
         return false;
     }
     if (count3 > 0) {
@@ -473,27 +445,27 @@ int dbutils_delete_triggers (sqlite3 *db, const char *table) {
     int rc = SQLITE_ERROR;
     
     char *sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_before_update_%w\";", table);
-    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    rc = database_exec(db, sql);
     if (rc != SQLITE_OK) goto finalize;
     
     sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_before_delete_%w\";", table);
-    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    rc = database_exec(db, sql);
     if (rc != SQLITE_OK) goto finalize;
     
     sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_after_insert_%w\";", table);
-    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    rc = database_exec(db, sql);
     if (rc != SQLITE_OK) goto finalize;
     
     sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_after_update_%w\";", table);
-    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    rc = database_exec(db, sql);
     if (rc != SQLITE_OK) goto finalize;
     
     sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_after_delete_%w\";", table);
-    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    rc = database_exec(db, sql);
     if (rc != SQLITE_OK) goto finalize;
     
 finalize:
-    if (rc != SQLITE_OK) DEBUG_ALWAYS("dbutils_delete_triggers error %s (%s)", sqlite3_errmsg(db), sql);
+    if (rc != SQLITE_OK) DEBUG_ALWAYS("dbutils_delete_triggers error %s (%s)", database_errmsg(db), sql);
     return rc;
 }
 
@@ -529,7 +501,7 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
         if (pkclause) cloudsync_memory_free(pkclause);
         if (!sql) goto finalize;
         
-        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        rc = database_exec(db, sql);
         DEBUG_SQL("\n%s", sql);
         cloudsync_memory_free(sql);
         if (rc != SQLITE_OK) goto finalize;
@@ -598,7 +570,7 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
             cloudsync_memory_free(values_query);
             if (!sql) goto finalize;
             
-            rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+            rc = database_exec(db, sql);
             DEBUG_SQL("\n%s", sql);
             cloudsync_memory_free(sql);
             if (rc != SQLITE_OK) goto finalize;
@@ -618,7 +590,7 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
             char *sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%w\" BEFORE UPDATE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%q') = 1 BEGIN SELECT RAISE(ABORT, 'Error: UPDATE operation is not allowed on table %w.'); END", trigger_name, table, table, table);
             if (!sql) goto finalize;
             
-            rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+            rc = database_exec(db, sql);
             DEBUG_SQL("\n%s", sql);
             cloudsync_memory_free(sql);
             if (rc != SQLITE_OK) goto finalize;
@@ -645,7 +617,7 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
             if (pkclause) cloudsync_memory_free(pkclause);
             if (!sql) goto finalize;
             
-            rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+            rc = database_exec(db, sql);
             DEBUG_SQL("\n%s", sql);
             cloudsync_memory_free(sql);
             if (rc != SQLITE_OK) goto finalize;
@@ -663,7 +635,7 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
             char *sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%w\" BEFORE DELETE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%q') = 1 BEGIN SELECT RAISE(ABORT, 'Error: DELETE operation is not allowed on table %w.'); END", trigger_name, table, table, table);
             if (!sql) goto finalize;
             
-            rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+            rc = database_exec(db, sql);
             DEBUG_SQL("\n%s", sql);
             cloudsync_memory_free(sql);
             if (rc != SQLITE_OK) goto finalize;
@@ -677,7 +649,7 @@ int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo) {
 finalize:
     if (trigger_name) cloudsync_memory_free(trigger_name);
     if (trigger_when) cloudsync_memory_free(trigger_when);
-    if (rc != SQLITE_OK) DEBUG_ALWAYS("dbutils_create_triggers error %s (%d)", sqlite3_errmsg(db), rc);
+    if (rc != SQLITE_OK) DEBUG_ALWAYS("dbutils_create_triggers error %s (%d)", database_errmsg(db), rc);
     return rc;
 }
 
@@ -688,7 +660,7 @@ int dbutils_check_metatable (sqlite3 *db, const char *table, table_algo algo) {
     char *sql = cloudsync_memory_mprintf("CREATE TABLE IF NOT EXISTS \"%w_cloudsync\" (pk BLOB NOT NULL, col_name TEXT NOT NULL, col_version INTEGER, db_version INTEGER, site_id INTEGER DEFAULT 0, seq INTEGER, PRIMARY KEY (pk, col_name)) WITHOUT ROWID; CREATE INDEX IF NOT EXISTS \"%w_cloudsync_db_idx\" ON \"%w_cloudsync\" (db_version);", table, table, table);
     if (!sql) return SQLITE_NOMEM;
     
-    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    int rc = database_exec(db, sql);
     DEBUG_SQL("\n%s", sql);
     cloudsync_memory_free(sql);
     
@@ -700,10 +672,6 @@ sqlite3_int64 dbutils_schema_version (sqlite3 *db) {
     DEBUG_DBFUNCTION("dbutils_schema_version");
     
     return dbutils_int_select(db, "PRAGMA schema_version;");
-}
-
-bool dbutils_is_star_table (const char *table_name) {
-    return (table_name && (strlen(table_name) == 1) && table_name[0] == '*');
 }
 
 // MARK: - Settings -
@@ -723,27 +691,27 @@ char *dbutils_settings_get_value (sqlite3 *db, const char *key, char *buffer, si
     
     sqlite3_stmt *vm = NULL;
     char *sql = "SELECT value FROM cloudsync_settings WHERE key=?1;";
-    int rc = sqlite3_prepare(db, sql, -1, &vm, NULL);
+    int rc = database_prepare(db, sql, (void **)&vm, 0);
     if (rc != SQLITE_OK) goto finalize_get_value;
     
-    rc = sqlite3_bind_text(vm, 1, key, -1, SQLITE_STATIC);
+    rc = database_bind_text(vm, 1, key, -1);
     if (rc != SQLITE_OK) goto finalize_get_value;
     
-    rc = sqlite3_step(vm);
+    rc = database_step(vm);
     if (rc == SQLITE_DONE) rc = SQLITE_OK;
     else if (rc != SQLITE_ROW) goto finalize_get_value;
     
     // SQLITE_ROW case
-    if (sqlite3_column_type(vm, 0) == SQLITE_NULL) {
+    if (database_column_type(vm, 0) == SQLITE_NULL) {
         rc = SQLITE_OK;
         goto finalize_get_value;
     }
     
-    const unsigned char *value = sqlite3_column_text(vm, 0);
+    const unsigned char *value = database_column_text(vm, 0);
     #if CLOUDSYNC_UNITTEST
-    size = (buffer == OUT_OF_MEMORY_BUFFER) ? (SQLITE_MAX_ALLOCATION_SIZE + 1) :(size_t)sqlite3_column_bytes(vm, 0);
+    size = (buffer == OUT_OF_MEMORY_BUFFER) ? (SQLITE_MAX_ALLOCATION_SIZE + 1) :(size_t)database_column_bytes(vm, 0);
     #else
-    size = (size_t)sqlite3_column_bytes(vm, 0);
+    size = (size_t)database_column_bytes(vm, 0);
     #endif
     if (size + 1 > blen) {
         buffer = cloudsync_memory_alloc((sqlite3_uint64)(size + 1));
@@ -760,8 +728,8 @@ finalize_get_value:
     #if CLOUDSYNC_UNITTEST
     if ((rc == SQLITE_NOMEM) && (size == SQLITE_MAX_ALLOCATION_SIZE + 1)) rc = SQLITE_OK;
     #endif
-    if (rc != SQLITE_OK) DEBUG_ALWAYS("dbutils_settings_get_value error %s", sqlite3_errmsg(db));
-    if (vm) sqlite3_finalize(vm);
+    if (rc != SQLITE_OK) DEBUG_ALWAYS("dbutils_settings_get_value error %s", database_errmsg(db));
+    if (vm) database_finalize(vm);
     
     return buffer;
 }
@@ -833,33 +801,33 @@ char *dbutils_table_settings_get_value (sqlite3 *db, const char *table, const ch
     
     sqlite3_stmt *vm = NULL;
     char *sql = "SELECT value FROM cloudsync_table_settings WHERE (tbl_name=?1 AND col_name=?2 AND key=?3);";
-    int rc = sqlite3_prepare(db, sql, -1, &vm, NULL);
+    int rc = database_prepare(db, sql, (void **)&vm, 0);
     if (rc != SQLITE_OK) goto finalize_get_value;
     
-    rc = sqlite3_bind_text(vm, 1, table, -1, SQLITE_STATIC);
+    rc = database_bind_text(vm, 1, table, -1);
     if (rc != SQLITE_OK) goto finalize_get_value;
     
-    rc = sqlite3_bind_text(vm, 2, (column) ? column : "*", -1, SQLITE_STATIC);
+    rc = database_bind_text(vm, 2, (column) ? column : "*", -1);
     if (rc != SQLITE_OK) goto finalize_get_value;
     
-    rc = sqlite3_bind_text(vm, 3, key, -1, SQLITE_STATIC);
+    rc = database_bind_text(vm, 3, key, -1);
     if (rc != SQLITE_OK) goto finalize_get_value;
     
-    rc = sqlite3_step(vm);
+    rc = database_step(vm);
     if (rc == SQLITE_DONE) rc = SQLITE_OK;
     else if (rc != SQLITE_ROW) goto finalize_get_value;
     
     // SQLITE_ROW case
-    if (sqlite3_column_type(vm, 0) == SQLITE_NULL) {
+    if (database_column_type(vm, 0) == SQLITE_NULL) {
         rc = SQLITE_OK;
         goto finalize_get_value;
     }
     
-    const unsigned char *value = sqlite3_column_text(vm, 0);
+    const unsigned char *value = database_column_text(vm, 0);
     #if CLOUDSYNC_UNITTEST
-    size = (buffer == OUT_OF_MEMORY_BUFFER) ? (SQLITE_MAX_ALLOCATION_SIZE + 1) :(size_t)sqlite3_column_bytes(vm, 0);
+    size = (buffer == OUT_OF_MEMORY_BUFFER) ? (SQLITE_MAX_ALLOCATION_SIZE + 1) :(size_t)database_column_bytes(vm, 0);
     #else
-    size = (size_t)sqlite3_column_bytes(vm, 0);
+    size = (size_t)database_column_bytes(vm, 0);
     #endif
     if (size + 1 > blen) {
         buffer = cloudsync_memory_alloc((sqlite3_uint64)(size + 1));
@@ -877,9 +845,9 @@ finalize_get_value:
     if ((rc == SQLITE_NOMEM) && (size == SQLITE_MAX_ALLOCATION_SIZE + 1)) rc = SQLITE_OK;
     #endif
     if (rc != SQLITE_OK) {
-        DEBUG_ALWAYS("cloudsync_table_settings error %s", sqlite3_errmsg(db));
+        DEBUG_ALWAYS("cloudsync_table_settings error %s", database_errmsg(db));
     }
-    if (vm) sqlite3_finalize(vm);
+    if (vm) database_finalize(vm);
     
     return buffer;
 }
@@ -931,7 +899,7 @@ int dbutils_table_settings_set_key_value (sqlite3 *db, sqlite3_context *context,
     return rc;
 }
 
-sqlite3_int64 dbutils_table_settings_count_tables (sqlite3 *db) {
+db_int64 dbutils_table_settings_count_tables (sqlite3 *db) {
     DEBUG_SETTINGS("dbutils_table_settings_count_tables");
     return dbutils_int_select(db, "SELECT count(*) FROM cloudsync_table_settings WHERE key='algo';");
 }
@@ -991,14 +959,14 @@ int dbutils_settings_load (sqlite3 *db, cloudsync_context *data) {
     
     // load global settings
     const char *sql = "SELECT key, value FROM cloudsync_settings;";
-    int rc = sqlite3_exec(db, sql, dbutils_settings_load_callback, data, NULL);
-    if (rc != SQLITE_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", sqlite3_errmsg(db));
+    int rc = database_exec_callback(db, sql, dbutils_settings_load_callback, data);
+    if (rc != SQLITE_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", database_errmsg(db));
     
     // load table-specific settings
     dbutils_settings_table_context xdata = {.db = db, .data = data};
     sql = "SELECT lower(tbl_name), lower(col_name), key, value FROM cloudsync_table_settings ORDER BY tbl_name;";
-    rc = sqlite3_exec(db, sql, dbutils_settings_table_load_callback, &xdata, NULL);
-    if (rc != SQLITE_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", sqlite3_errmsg(db));
+    rc = database_exec_callback(db, sql, dbutils_settings_table_load_callback, &xdata);
+    if (rc != SQLITE_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", database_errmsg(db));
     
     return SQLITE_OK;
 }
@@ -1019,19 +987,19 @@ int dbutils_settings_init (sqlite3 *db, void *cloudsync_data, sqlite3_context *c
         
         // create table and fill-in initial data
         snprintf(sql, sizeof(sql), "CREATE TABLE IF NOT EXISTS cloudsync_settings (key TEXT PRIMARY KEY NOT NULL COLLATE NOCASE, value TEXT);");
-        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-        if (rc != SQLITE_OK) {if (context) sqlite3_result_error(context, sqlite3_errmsg(db), -1); return rc;}
+        rc = database_exec(db, sql);
+        if (rc != SQLITE_OK) {if (context) sqlite3_result_error(context, database_errmsg(db), -1); return rc;}
         
         // library version
         snprintf(sql, sizeof(sql), "INSERT INTO cloudsync_settings (key, value) VALUES ('%s', '%s');", CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
-        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-        if (rc != SQLITE_OK) {if (context) sqlite3_result_error(context, sqlite3_errmsg(db), -1); return rc;}
+        rc = database_exec(db, sql);
+        if (rc != SQLITE_OK) {if (context) sqlite3_result_error(context, database_errmsg(db), -1); return rc;}
         
         // schema version
         snprintf(sql, sizeof(sql), "INSERT INTO cloudsync_settings (key, value) VALUES ('%s', %lld);", CLOUDSYNC_KEY_SCHEMAVERSION, (long long)dbutils_schema_version(db));
-        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-        if (rc != SQLITE_OK) {if (context) sqlite3_result_error(context, sqlite3_errmsg(db), -1); return rc;}
-    } 
+        rc = database_exec(db, sql);
+        if (rc != SQLITE_OK) {if (context) sqlite3_result_error(context, database_errmsg(db), -1); return rc;}
+    }
     
     if (dbutils_table_exists(db, CLOUDSYNC_SITEID_NAME) == false) {
         DEBUG_SETTINGS("cloudsync_site_id does not exist (creating a new one)");
@@ -1040,8 +1008,8 @@ int dbutils_settings_init (sqlite3 *db, void *cloudsync_data, sqlite3_context *c
         // site_id is implicitly indexed
         // the rowid column is the primary key
         char *sql = "CREATE TABLE IF NOT EXISTS cloudsync_site_id (site_id BLOB UNIQUE NOT NULL);";
-        int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-        if (rc != SQLITE_OK) {if (context) sqlite3_result_error(context, sqlite3_errmsg(db), -1); return rc;}
+        int rc = database_exec(db, sql);
+        if (rc != SQLITE_OK) {if (context) sqlite3_result_error(context, database_errmsg(db), -1); return rc;}
         
         // siteid (to uniquely identify this local copy of the database)
         uint8_t site_id[UUID_LEN];
@@ -1061,8 +1029,8 @@ int dbutils_settings_init (sqlite3 *db, void *cloudsync_data, sqlite3_context *c
         DEBUG_SETTINGS("cloudsync_table_settings does not exist (creating a new one)");
         
         char *sql = "CREATE TABLE IF NOT EXISTS cloudsync_table_settings (tbl_name TEXT NOT NULL COLLATE NOCASE, col_name TEXT NOT NULL COLLATE NOCASE, key TEXT, value TEXT, PRIMARY KEY(tbl_name,key));";
-        int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-        if (rc != SQLITE_OK) {if (context) sqlite3_result_error(context, sqlite3_errmsg(db), -1); return rc;}
+        int rc = database_exec(db, sql);
+        if (rc != SQLITE_OK) {if (context) sqlite3_result_error(context, database_errmsg(db), -1); return rc;}
     }
     
     // check if cloudsync_settings table exists
@@ -1074,8 +1042,8 @@ int dbutils_settings_init (sqlite3 *db, void *cloudsync_data, sqlite3_context *c
         
         // create table
         char *sql = "CREATE TABLE IF NOT EXISTS cloudsync_schema_versions (hash INTEGER PRIMARY KEY, seq INTEGER NOT NULL)";
-        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-        if (rc != SQLITE_OK) {if (context) sqlite3_result_error(context, sqlite3_errmsg(db), -1); return rc;}
+        rc = database_exec(db, sql);
+        if (rc != SQLITE_OK) {if (context) sqlite3_result_error(context, database_errmsg(db), -1); return rc;}
     }
     
     // cloudsync_settings table exists so load it
@@ -1108,7 +1076,7 @@ int dbutils_update_schema_hash(sqlite3 *db, uint64_t *hash) {
                                "VALUES (%lld, COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
                                "ON CONFLICT(hash) DO UPDATE SET "
                                "  seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);", (sqlite3_int64)h);
-    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    int rc = database_exec(db, sql);
     if (rc == SQLITE_OK && hash) *hash = h;
     return rc;
 }
@@ -1137,5 +1105,5 @@ bool dbutils_check_schema_hash (sqlite3 *db, sqlite3_uint64 hash) {
 
 int dbutils_settings_cleanup (sqlite3 *db) {
     const char *sql = "DROP TABLE IF EXISTS cloudsync_settings; DROP TABLE IF EXISTS cloudsync_site_id; DROP TABLE IF EXISTS cloudsync_table_settings; DROP TABLE IF EXISTS cloudsync_schema_versions; ";
-    return sqlite3_exec(db, sql, NULL, NULL, NULL);
+    return database_exec(db, sql);
 }

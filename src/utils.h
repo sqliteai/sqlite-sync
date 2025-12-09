@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <strings.h>
 #include <string.h>
+#include "database.h"
 
 // CLOUDSYNC_DESKTOP_OS = 1 if compiling for macOS, Linux (desktop), or Windows
 // Not set for iOS, Android, WebAssembly, or other platforms
@@ -94,6 +95,7 @@
 #define cloudsync_memory_init(_once)                  memdebug_init(_once)
 #define cloudsync_memory_finalize                     memdebug_finalize
 #define cloudsync_memory_alloc                        memdebug_alloc
+#define cloudsync_memory_zeroalloc                    memdebug_zeroalloc
 #define cloudsync_memory_free                         memdebug_free
 #define cloudsync_memory_realloc                      memdebug_realloc
 #define cloudsync_memory_size                         memdebug_msize
@@ -102,21 +104,22 @@
 
 void memdebug_init (int once);
 void memdebug_finalize (void);
-void *memdebug_alloc (sqlite3_uint64 size);
-void *memdebug_realloc (void *ptr, sqlite3_uint64 new_size);
+void *memdebug_alloc (db_uint64 size);
+void *memdebug_realloc (void *ptr, db_uint64 new_size);
 char *memdebug_vmprintf (const char *format, va_list list);
 char *memdebug_mprintf(const char *format, ...);
 void memdebug_free (void *ptr);
-sqlite3_uint64 memdebug_msize (void *ptr);
+db_uint64 memdebug_msize (void *ptr);
 #else
 #define cloudsync_memory_init(_once)
 #define cloudsync_memory_finalize()
-#define cloudsync_memory_alloc                        sqlite3_malloc64
-#define cloudsync_memory_free                         sqlite3_free
-#define cloudsync_memory_realloc                      sqlite3_realloc64
-#define cloudsync_memory_size                         sqlite3_msize
-#define cloudsync_memory_vmprintf                     sqlite3_vmprintf
-#define cloudsync_memory_mprintf                      sqlite3_mprintf
+#define cloudsync_memory_alloc                        dbmem_alloc
+#define cloudsync_memory_zeroalloc                    dbmem_zeroalloc
+#define cloudsync_memory_free                         dbmem_free
+#define cloudsync_memory_realloc                      dbmem_realloc
+#define cloudsync_memory_size                         dbmem_size
+#define cloudsync_memory_vmprintf                     dbmem_vmprintf
+#define cloudsync_memory_mprintf                      dbmem_mprintf
 #endif
 
 #define UUID_STR_MAXLEN                     37
@@ -141,7 +144,6 @@ char *cloudsync_uuid_v7_stringify (uint8_t uuid[UUID_LEN], char value[UUID_STR_M
 char *cloudsync_string_replace_prefix(const char *input, char *prefix, char *replacement);
 uint64_t fnv1a_hash(const char *data, size_t len);
 
-void *cloudsync_memory_zeroalloc (uint64_t size);
 char *cloudsync_string_ndup (const char *str, size_t len, bool lowercase);
 char *cloudsync_string_dup (const char *str, bool lowercase);
 int cloudsync_blob_compare(const char *blob1, size_t size1, const char *blob2, size_t size2);

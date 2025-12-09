@@ -34,9 +34,6 @@ char *dbutils_text_select (sqlite3 *db, const char *sql);
 char *dbutils_blob_select (sqlite3 *db, const char *sql, int *size, sqlite3_context *context, int *rc);
 int dbutils_blob_int_int_select (sqlite3 *db, const char *sql, char **blob, int *size, sqlite3_int64 *int1, sqlite3_int64 *int2);
 
-int dbutils_register_function (sqlite3 *db, const char *name, void (*ptr)(sqlite3_context*,int,sqlite3_value**), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *));
-int dbutils_register_aggregate (sqlite3 *db, const char *name, void (*xstep)(sqlite3_context*,int,sqlite3_value**), void (*xfinal)(sqlite3_context*), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *));
-
 int dbutils_debug_stmt (sqlite3 *db, bool print_result);
 void dbutils_debug_values (int argc, sqlite3_value **argv);
 void dbutils_debug_value (sqlite3_value *value);
@@ -48,7 +45,6 @@ bool dbutils_system_exists (sqlite3 *db, const char *name, const char *type);
 bool dbutils_table_exists (sqlite3 *db, const char *name);
 bool dbutils_trigger_exists (sqlite3 *db, const char *name);
 bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const char *name, bool skip_int_pk_check);
-bool dbutils_is_star_table (const char *table_name);
 
 int dbutils_delete_triggers (sqlite3 *db, const char *table);
 int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo);

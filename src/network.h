@@ -10,6 +10,12 @@
 
 #include "cloudsync.h"
 
+#ifndef SQLITE_CORE
+#include "sqlite3ext.h"
+#else
+#include "sqlite3.h"
+#endif
+
 int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx);
 
 #endif

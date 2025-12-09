@@ -7,11 +7,7 @@
 
 #include "pk.h"
 #include "utils.h"
-
-#ifndef SQLITE_CORE
-SQLITE_EXTENSION_INIT3
-#endif
-
+ 
 /*
  
  The pk_encode and pk_decode functions are designed to serialize and deserialize an array of values (sqlite_value structures)
@@ -71,41 +67,40 @@ SQLITE_EXTENSION_INIT3
 
 // Three bits are reserved for the type field, so only values in the 0..7 range can be used (8 values)
 // SQLITE already reserved values from 1 to 5
-// #define SQLITE_INTEGER               1
-// #define SQLITE_FLOAT                 2
-// #define SQLITE_TEXT                  3
-// #define SQLITE_BLOB                  4
-// #define SQLITE_NULL                  5
-#define SQLITE_NEGATIVE_INTEGER         0
-#define SQLITE_MAX_NEGATIVE_INTEGER     6
-#define SQLITE_NEGATIVE_FLOAT           7
+// #define SQLITE_INTEGER                   1   // now DBTYPE_INTEGER
+// #define SQLITE_FLOAT                     2   // now DBTYPE_FLOAT
+// #define SQLITE_TEXT                      3   // now DBTYPE_TEXT
+// #define SQLITE_BLOB                      4   // now DBTYPE_BLOB
+// #define SQLITE_NULL                      5   // now DBTYPE_NULL
+#define DATABASE_TYPE_NEGATIVE_INTEGER      0   // was SQLITE_NEGATIVE_INTEGER
+#define DATABASE_TYPE_MAX_NEGATIVE_INTEGER  6   // was SQLITE_MAX_NEGATIVE_INTEGER
+#define DATABASE_TYPE_NEGATIVE_FLOAT        7   // was SQLITE_NEGATIVE_FLOAT
 
 // MARK: - Decoding -
 
 int pk_decode_bind_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
     // default decode callback used to bind values to a sqlite3_stmt vm
     
-    sqlite3_stmt *vm = (sqlite3_stmt *)xdata;
-    int rc = SQLITE_OK;
+    int rc = DBRES_OK;
     switch (type) {
-        case SQLITE_INTEGER:
-            rc = sqlite3_bind_int64(vm, index+1, ival);
+        case DBTYPE_INTEGER:
+            rc = database_bind_int(xdata, index+1, ival);
             break;
         
-        case SQLITE_FLOAT:
-            rc = sqlite3_bind_double(vm, index+1, dval);
+        case DBTYPE_FLOAT:
+            rc = database_bind_double(xdata, index+1, dval);
             break;
             
-        case SQLITE_NULL:
-            rc = sqlite3_bind_null(vm, index+1);
+        case DBTYPE_NULL:
+            rc = database_bind_null(xdata, index+1);
             break;
             
-        case SQLITE_TEXT:
-            rc = sqlite3_bind_text(vm, index+1, pval, (int)ival, SQLITE_STATIC);
+        case DBTYPE_TEXT:
+            rc = database_bind_text(xdata, index+1, pval, (int)ival);
             break;
             
-        case SQLITE_BLOB:
-            rc = sqlite3_bind_blob64(vm, index+1, (const void *)pval, (sqlite3_uint64)ival, SQLITE_STATIC);
+        case DBTYPE_BLOB:
+            rc = database_bind_blob(xdata, index+1, (const void *)pval, ival);
             break;
     }
     
@@ -114,28 +109,28 @@ int pk_decode_bind_callback (void *xdata, int index, int type, int64_t ival, dou
 
 int pk_decode_print_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
     switch (type) {
-        case SQLITE_INTEGER:
+        case DBTYPE_INTEGER:
             printf("%d\tINTEGER:\t%lld\n", index, (long long)ival);
             break;
         
-        case SQLITE_FLOAT:
+        case DBTYPE_FLOAT:
             printf("%d\tFLOAT:\t%.5f\n", index, dval);
             break;
             
-        case SQLITE_NULL:
+        case DBTYPE_NULL:
             printf("%d\tNULL\n", index);
             break;
             
-        case SQLITE_TEXT:
+        case DBTYPE_TEXT:
             printf("%d\tTEXT:\t%s\n", index, pval);
             break;
             
-        case SQLITE_BLOB:
+        case DBTYPE_BLOB:
             printf("%d\tBLOB:\t%lld bytes\n", index, (long long)ival);
             break;
     }
     
-    return SQLITE_OK;
+    return DBRES_OK;
 }
 
 uint8_t pk_decode_u8 (char *buffer, size_t *bseek) {
@@ -181,39 +176,39 @@ int pk_decode(char *buffer, size_t blen, int count, size_t *seek, int (*cb) (voi
         size_t nbytes = (type_byte >> 3) & 0x1F;
         
         switch (type) {
-            case SQLITE_MAX_NEGATIVE_INTEGER: {
+            case DATABASE_TYPE_MAX_NEGATIVE_INTEGER: {
                 int64_t value = INT64_MIN;
-                type = SQLITE_INTEGER;
-                if (cb) if (cb(xdata, (int)i, type, value, 0.0, NULL) != SQLITE_OK) return -1;
+                type = DBTYPE_INTEGER;
+                if (cb) if (cb(xdata, (int)i, type, value, 0.0, NULL) != DBRES_OK) return -1;
             }
                 break;
                 
-            case SQLITE_NEGATIVE_INTEGER:
-            case SQLITE_INTEGER: {
+            case DATABASE_TYPE_NEGATIVE_INTEGER:
+            case DBTYPE_INTEGER: {
                 int64_t value = pk_decode_int64(buffer, &bseek, nbytes);
-                if (type == SQLITE_NEGATIVE_INTEGER) {value = -value; type = SQLITE_INTEGER;}
-                if (cb) if (cb(xdata, (int)i, type, value, 0.0, NULL) != SQLITE_OK) return -1;
+                if (type == DATABASE_TYPE_NEGATIVE_INTEGER) {value = -value; type = DBTYPE_INTEGER;}
+                if (cb) if (cb(xdata, (int)i, type, value, 0.0, NULL) != DBRES_OK) return -1;
             }
                 break;
                 
-            case SQLITE_NEGATIVE_FLOAT:
-            case SQLITE_FLOAT: {
+            case DATABASE_TYPE_NEGATIVE_FLOAT:
+            case DBTYPE_FLOAT: {
                 double value = pk_decode_double(buffer, &bseek);
-                if (type == SQLITE_NEGATIVE_FLOAT) {value = -value; type = SQLITE_FLOAT;}
-                if (cb) if (cb(xdata, (int)i, type, 0, value, NULL) != SQLITE_OK) return -1;
+                if (type == DATABASE_TYPE_NEGATIVE_FLOAT) {value = -value; type = DBTYPE_FLOAT;}
+                if (cb) if (cb(xdata, (int)i, type, 0, value, NULL) != DBRES_OK) return -1;
             }
                 break;
                 
-            case SQLITE_TEXT:
-            case SQLITE_BLOB: {
+            case DBTYPE_TEXT:
+            case DBTYPE_BLOB: {
                 int64_t length = pk_decode_int64(buffer, &bseek, nbytes);
                 char *value = pk_decode_data(buffer, &bseek, (int32_t)length);
-                if (cb) if (cb(xdata, (int)i, type, length, 0.0, value) != SQLITE_OK) return -1;
+                if (cb) if (cb(xdata, (int)i, type, length, 0.0, value) != DBRES_OK) return -1;
             }
                 break;
                 
-            case SQLITE_NULL: {
-                if (cb) if (cb(xdata, (int)i, type, 0, 0.0, NULL) != SQLITE_OK) return -1;
+            case DBTYPE_NULL: {
+                if (cb) if (cb(xdata, (int)i, type, 0, 0.0, NULL) != DBRES_OK) return -1;
             }
                 break;
         }
@@ -242,16 +237,16 @@ size_t pk_encode_nbytes_needed (int64_t value) {
     return 8; // Larger than 7-byte range, needs 8 bytes
 }
 
-size_t pk_encode_size (sqlite3_value **argv, int argc, int reserved) {
+size_t pk_encode_size (dbvalue_t **argv, int argc, int reserved) {
     // estimate the required buffer size
     size_t required = reserved;
     size_t nbytes;
     int64_t val, len;
     
     for (int i = 0; i < argc; i++) {
-        switch (sqlite3_value_type(argv[i])) {
-            case SQLITE_INTEGER:
-                val = sqlite3_value_int64(argv[i]);
+        switch (database_value_type(argv[i])) {
+            case DBTYPE_INTEGER:
+                val = database_value_int(argv[i]);
                 if (val == INT64_MIN) {
                     required += 1;
                     break;
@@ -260,16 +255,16 @@ size_t pk_encode_size (sqlite3_value **argv, int argc, int reserved) {
                 nbytes = pk_encode_nbytes_needed(val);
                 required += 1 + nbytes;
                 break;
-            case SQLITE_FLOAT:
+            case DBTYPE_FLOAT:
                 required += 1 + sizeof(int64_t);
                 break;
-            case SQLITE_TEXT:
-            case SQLITE_BLOB:
-                len = (int32_t)sqlite3_value_bytes(argv[i]);
+            case DBTYPE_TEXT:
+            case DBTYPE_BLOB:
+                len = (int32_t)database_value_bytes(argv[i]);
                 nbytes = pk_encode_nbytes_needed(len);
                 required += 1 + len + nbytes;
                 break;
-            case SQLITE_NULL:
+            case DBTYPE_NULL:
                 required += 1;
                 break;
         }
@@ -295,7 +290,7 @@ size_t pk_encode_data (char *buffer, size_t bseek, char *data, size_t datalen) {
     return bseek + datalen;
 }
     
-char *pk_encode (sqlite3_value **argv, int argc, char *b, bool is_prikey, size_t *bsize) {
+char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bsize) {
     size_t bseek = 0;
     size_t blen = 0;
     char *buffer = b;
@@ -313,42 +308,42 @@ char *pk_encode (sqlite3_value **argv, int argc, char *b, bool is_prikey, size_t
     }
         
     for (int i = 0; i < argc; i++) {
-        int type = sqlite3_value_type(argv[i]);
+        int type = database_value_type(argv[i]);
         switch (type) {
-            case SQLITE_INTEGER: {
-                int64_t value = sqlite3_value_int64(argv[i]);
+            case DBTYPE_INTEGER: {
+                int64_t value = database_value_int(argv[i]);
                 if (value == INT64_MIN) {
-                    bseek = pk_encode_u8(buffer, bseek, SQLITE_MAX_NEGATIVE_INTEGER);
+                    bseek = pk_encode_u8(buffer, bseek, DATABASE_TYPE_MAX_NEGATIVE_INTEGER);
                     break;
                 }
-                if (value < 0) {value = -value; type = SQLITE_NEGATIVE_INTEGER;}
+                if (value < 0) {value = -value; type = DATABASE_TYPE_NEGATIVE_INTEGER;}
                 size_t nbytes = pk_encode_nbytes_needed(value);
                 uint8_t type_byte = (nbytes << 3) | type;
                 bseek = pk_encode_u8(buffer, bseek, type_byte);
                 bseek = pk_encode_int64(buffer, bseek, value, nbytes);
             }
                 break;
-            case SQLITE_FLOAT: {
-                double value = sqlite3_value_double(argv[i]);
-                if (value < 0) {value = -value; type = SQLITE_NEGATIVE_FLOAT;}
+            case DBTYPE_FLOAT: {
+                double value = database_value_double(argv[i]);
+                if (value < 0) {value = -value; type = DATABASE_TYPE_NEGATIVE_FLOAT;}
                 int64_t net_double;
                 memcpy(&net_double, &value, sizeof(int64_t));
                 bseek = pk_encode_u8(buffer, bseek, type);
                 bseek = pk_encode_int64(buffer, bseek, net_double, sizeof(int64_t));
             }
                 break;
-            case SQLITE_TEXT:
-            case SQLITE_BLOB: {
-                int32_t len = (int32_t)sqlite3_value_bytes(argv[i]);
+            case DBTYPE_TEXT:
+            case DBTYPE_BLOB: {
+                int32_t len = (int32_t)database_value_bytes(argv[i]);
                 size_t nbytes = pk_encode_nbytes_needed(len);
-                uint8_t type_byte = (nbytes << 3) | sqlite3_value_type(argv[i]);
+                uint8_t type_byte = (nbytes << 3) | database_value_type(argv[i]);
                 bseek = pk_encode_u8(buffer, bseek, type_byte);
                 bseek = pk_encode_int64(buffer, bseek, len, nbytes);
-                bseek = pk_encode_data(buffer, bseek, (char *)sqlite3_value_blob(argv[i]), len);
+                bseek = pk_encode_data(buffer, bseek, (char *)database_value_blob(argv[i]), len);
             }
                 break;
-            case SQLITE_NULL: {
-                bseek = pk_encode_u8(buffer, bseek, SQLITE_NULL);
+            case DBTYPE_NULL: {
+                bseek = pk_encode_u8(buffer, bseek, DBTYPE_NULL);
             }
                 break;
         }
@@ -358,6 +353,6 @@ char *pk_encode (sqlite3_value **argv, int argc, char *b, bool is_prikey, size_t
     return buffer;
 }
 
-char *pk_encode_prikey (sqlite3_value **argv, int argc, char *b, size_t *bsize) {
+char *pk_encode_prikey (dbvalue_t **argv, int argc, char *b, size_t *bsize) {
     return pk_encode(argv, argc, b, true, bsize);
 }

@@ -579,7 +579,7 @@ void cloudsync_network_init (sqlite3_context *context, int argc, sqlite3_value *
     if (!data) goto abort_memory;
     
     // init context
-    uint8_t *site_id = (uint8_t *)cloudsync_context_init(sqlite3_context_db_handle(context), NULL, context);
+    uint8_t *site_id = (uint8_t *)cloudsync_context_init((cloudsync_context *)sqlite3_user_data(context), sqlite3_context_db_handle(context), context);
     if (!site_id) goto abort_siteid;
     
     // save site_id string representation: 01957493c6c07e14803727e969f1d2cc
@@ -919,40 +919,46 @@ finalize:
 // MARK: -
 
 int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
+    const int DEFAULT_FLAGS = SQLITE_UTF8 | SQLITE_INNOCUOUS | SQLITE_DETERMINISTIC;
     int rc = SQLITE_OK;
     
-    rc = dbutils_register_function(db, "cloudsync_network_init", cloudsync_network_init, 1, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_init", 1, DEFAULT_FLAGS, ctx, cloudsync_network_init, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_create_function(db, "cloudsync_network_cleanup", 0, DEFAULT_FLAGS, ctx, cloudsync_network_cleanup, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_cleanup", cloudsync_network_cleanup, 0, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_set_token", 1, DEFAULT_FLAGS, ctx, cloudsync_network_set_token, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_set_token", cloudsync_network_set_token, 1, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_set_apikey", 1, DEFAULT_FLAGS, ctx, cloudsync_network_set_apikey, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_set_apikey", cloudsync_network_set_apikey, 1, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_has_unsent_changes", 0, DEFAULT_FLAGS, ctx, cloudsync_network_has_unsent_changes, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_has_unsent_changes", cloudsync_network_has_unsent_changes, 0, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_send_changes", 0, DEFAULT_FLAGS, ctx, cloudsync_network_send_changes, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_send_changes", cloudsync_network_send_changes, 0, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_check_changes", 0, DEFAULT_FLAGS, ctx, cloudsync_network_check_changes, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_check_changes", cloudsync_network_check_changes, 0, pzErrMsg, ctx, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
-    rc = dbutils_register_function(db, "cloudsync_network_sync", cloudsync_network_sync0, 0, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_sync", 0, DEFAULT_FLAGS, ctx, cloudsync_network_sync0, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = dbutils_register_function(db, "cloudsync_network_sync", cloudsync_network_sync2, 2, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_sync", 2, DEFAULT_FLAGS, ctx, cloudsync_network_sync2, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = dbutils_register_function(db, "cloudsync_network_reset_sync_version", cloudsync_network_reset_sync_version, 0, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_reset_sync_version", 0, DEFAULT_FLAGS, ctx, cloudsync_network_reset_sync_version, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_logout", cloudsync_network_logout, 0, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_logout", 0, DEFAULT_FLAGS, ctx, cloudsync_network_logout, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
+    
+cleanup:
+    if ((rc != SQLITE_OK) && (pzErrMsg)) {
+        *pzErrMsg = cloudsync_memory_mprintf("Error creating function in cloudsync_network_register: %s", database_errmsg(db));
+    }
     
     return rc;
 }

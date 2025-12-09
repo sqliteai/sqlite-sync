@@ -21,7 +21,9 @@
 
 #include "pk.h"
 #include "dbutils.h"
+#include "database.h"
 #include "cloudsync.h"
+#include "cloudsync_sqlite.h"
 #include "cloudsync_private.h"
 
 // declared only if macro CLOUDSYNC_UNITTEST is defined 
@@ -30,9 +32,9 @@ extern bool force_vtab_filter_abort;
 extern bool force_uncompressed_blob;
 
 // private prototypes
-sqlite3_stmt *stmt_reset (sqlite3_stmt *stmt);
-int stmt_count (sqlite3_stmt *stmt, const char *value, size_t len, int type);
-int stmt_execute (sqlite3_stmt *stmt, void *data);
+dbvm_t *dbvm_reset (dbvm_t *stmt);
+int dbvm_count (dbvm_t *stmt, const char *value, size_t len, int type);
+int dbvm_execute (dbvm_t *stmt, void *data);
 
 sqlite3_int64 dbutils_select (sqlite3 *db, const char *sql, const char **values, int types[], int lens[], int count, int expected_type);
 int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values, char **names);
@@ -980,7 +982,11 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     rc = sqlite3_exec(db, "DROP TABLE IF EXISTS rowid_table; DROP TABLE IF EXISTS nonnull_prikey_table;", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
-    rc = sqlite3_exec(db, "SELECT cloudsync_init('*');", NULL, NULL, NULL);
+    // * disabled in 0.9.0
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('tbl1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto abort_test_functions;
+    
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('tbl2');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
     rc = sqlite3_exec(db, "SELECT cloudsync_disable('tbl1');", NULL, NULL, NULL);
@@ -989,7 +995,8 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     int v1 = (int)dbutils_int_select(db, "SELECT cloudsync_is_enabled('tbl1');");
     if (v1 == 1) goto abort_test_functions;
     
-    rc = sqlite3_exec(db, "SELECT cloudsync_disable('*');", NULL, NULL, NULL);
+    // * disabled in 0.9.0
+    rc = sqlite3_exec(db, "SELECT cloudsync_disable('tbl2');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
     int v2 = (int)dbutils_int_select(db, "SELECT cloudsync_is_enabled('tbl2');");
@@ -1001,7 +1008,8 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     int v3 = (int)dbutils_int_select(db, "SELECT cloudsync_is_enabled('tbl1');");
     if (v3 != 1) goto abort_test_functions;
     
-    rc = sqlite3_exec(db, "SELECT cloudsync_enable('*');", NULL, NULL, NULL);
+    // * disabled in 0.9.0
+    rc = sqlite3_exec(db, "SELECT cloudsync_enable('tbl2');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
     int v4 = (int)dbutils_int_select(db, "SELECT cloudsync_is_enabled('tbl2');");
@@ -1016,7 +1024,10 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     rc = sqlite3_exec(db, "SELECT cloudsync_set_column('tbl1', 'col1', 'key1', 'value1');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
-    rc = sqlite3_exec(db, "SELECT cloudsync_cleanup('*');", NULL, NULL, NULL);
+    // * disabled in 0.9.0
+    rc = sqlite3_exec(db, "SELECT cloudsync_cleanup('tbl1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto abort_test_functions;
+    rc = sqlite3_exec(db, "SELECT cloudsync_cleanup('tbl2');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
     char *uuid = dbutils_text_select(db, "SELECT cloudsync_uuid();");
@@ -1787,11 +1798,11 @@ bool do_test_dbutils (void) {
     sqlite3_int64 i64_value = dbutils_int_select(db, "SELECT NULL;");
     if (i64_value != 0) goto finalize;
     
-    rc = dbutils_register_function(db, NULL, NULL, 0, NULL, NULL, NULL);
-    if (rc == SQLITE_OK) goto finalize;
+    //rc = dbutils_register_function(db, NULL, NULL, 0, NULL, NULL, NULL);
+    //if (rc == SQLITE_OK) goto finalize;
     
-    rc = dbutils_register_aggregate(db, NULL, NULL, NULL, 0, NULL, NULL, NULL);
-    if (rc == SQLITE_OK) goto finalize;
+    //rc = dbutils_register_aggregate(db, NULL, NULL, NULL, 0, NULL, NULL, NULL);
+    //if (rc == SQLITE_OK) goto finalize;
     
     bool b = dbutils_system_exists(db, "non_existing_table", "non_existing_type");
     if (b == true) goto finalize;
@@ -1936,7 +1947,7 @@ bool do_test_error_cases (sqlite3 *db) {
     
     // test cloudsync_init missing table
     sqlite3_prepare_v2(db, "SELECT cloudsync_init('missing_table');", -1, &stmt, NULL);
-    int res = stmt_execute(stmt, NULL);
+    int res = dbvm_execute(stmt, NULL);
     sqlite3_finalize(stmt);
     if (res != -1) return false;
     
@@ -1986,12 +1997,12 @@ bool do_test_internal_functions (void) {
     rc = sqlite3_prepare(db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto abort_test;
     
-    int res = stmt_count(vm, NULL, 0, 0);
+    int res = dbvm_count(vm, NULL, 0, 0);
     if (res != 0) goto abort_test;
     if (vm) sqlite3_finalize(vm);
     vm = NULL;
     
-    // TEST 2 (stmt_execute returns an error)
+    // TEST 2 (dbvm_execute returns an error)
     sql = "INSERT INTO foo (name, age) VALUES ('Name1', 22)";
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test;
@@ -2000,7 +2011,7 @@ bool do_test_internal_functions (void) {
     if (rc != SQLITE_OK) goto abort_test;
     
     // this statement must fail
-    res = stmt_execute(vm, NULL);
+    res = dbvm_execute(vm, NULL);
     if (res != -1) goto abort_test;
     if (vm) sqlite3_finalize(vm);
     vm = NULL;
@@ -2181,7 +2192,7 @@ bool do_merge_values (sqlite3 *srcdb, sqlite3 *destdb, bool only_local) {
             goto finalize;
         }
         
-        stmt_reset(insert_stmt);
+        dbvm_reset(insert_stmt);
     }
     
     rc = SQLITE_OK;
@@ -2241,7 +2252,7 @@ bool do_merge_using_payload (sqlite3 *srcdb, sqlite3 *destdb, bool only_local, b
             goto finalize;
         }
         
-        stmt_reset(insert_stmt);
+        dbvm_reset(insert_stmt);
     }
     
     rc = SQLITE_OK;

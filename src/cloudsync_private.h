@@ -9,16 +9,19 @@
 #define __CLOUDSYNC_PRIVATE__
 
 #include <stdbool.h>
+#include "cloudsync.h"
+
 #ifndef SQLITE_CORE
 #include "sqlite3ext.h"
 #else
 #include "sqlite3.h"
 #endif
 
-
+#define CLOUDSYNC_VALUE_NOTSET                  -1
 #define CLOUDSYNC_TOMBSTONE_VALUE               "__[RIP]__"
 #define CLOUDSYNC_RLS_RESTRICTED_VALUE          "__[RLS]__"
 #define CLOUDSYNC_DISABLE_ROWIDONLY_TABLES      1
+#define CLOUDSYNC_DEFAULT_ALGO                  "cls"
 
 typedef enum {
     CLOUDSYNC_PAYLOAD_APPLY_WILL_APPLY   = 1,
@@ -26,14 +29,10 @@ typedef enum {
     CLOUDSYNC_PAYLOAD_APPLY_CLEANUP      = 3
 } CLOUDSYNC_PAYLOAD_APPLY_STEPS;
 
-typedef struct cloudsync_context cloudsync_context;
-typedef struct cloudsync_pk_decode_bind_context cloudsync_pk_decode_bind_context;
-
 int cloudsync_merge_insert (sqlite3_vtab *vtab, int argc, sqlite3_value **argv, sqlite3_int64 *rowid);
 void cloudsync_sync_key (cloudsync_context *data, const char *key, const char *value);
 
 // used by network layer
-const char *cloudsync_context_init (sqlite3 *db, cloudsync_context *data, sqlite3_context *context);
 void *cloudsync_get_auxdata (sqlite3_context *context);
 void cloudsync_set_auxdata (sqlite3_context *context, void *xdata);
 int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int blen);

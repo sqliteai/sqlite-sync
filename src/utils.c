@@ -129,14 +129,6 @@ int cloudsync_uuid_v7_compare (uint8_t value1[UUID_LEN], uint8_t value2[UUID_LEN
 
 // MARK: - General -
 
-void *cloudsync_memory_zeroalloc (uint64_t size) {
-    void *ptr = (void *)cloudsync_memory_alloc((sqlite3_uint64)size);
-    if (!ptr) return NULL;
-    
-    memset(ptr, 0, (size_t)size);
-    return ptr;
-}
-
 char *cloudsync_string_ndup (const char *str, size_t len, bool lowercase) {
     if (str == NULL) return NULL;
     
@@ -620,7 +612,7 @@ void memdebug_finalize (void) {
     }
 }
 
-void *memdebug_alloc (sqlite3_uint64 size) {
+void *memdebug_alloc (db_uint64 size) {
     void *ptr = sqlite3_malloc64(size);
     if (!ptr) {
         BUILD_ERROR("Unable to allocated a block of %lld bytes", size);
@@ -630,6 +622,14 @@ void *memdebug_alloc (sqlite3_uint64 size) {
     }
     _ptr_add(ptr, size);
     return ptr;
+}
+
+void *memdebug_zeroalloc (db_uint64 size) {
+    void *ptr = memdebug_alloc(size);
+    if (!ptr) return NULL;
+    
+    memset(ptr, 0, (size_t)size);
+    return NULL;
 }
 
 void *memdebug_realloc (void *ptr, sqlite3_uint64 new_size) {
@@ -680,7 +680,7 @@ char *memdebug_mprintf(const char *format, ...) {
     return z;
 }
 
-sqlite3_uint64 memdebug_msize (void *ptr) {
+db_uint64 memdebug_msize (void *ptr) {
     return sqlite3_msize(ptr);
 }
 
