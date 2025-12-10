@@ -79,7 +79,7 @@
 // MARK: - Decoding -
 
 int pk_decode_bind_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
-    // default decode callback used to bind values to a sqlite3_stmt vm
+    // default decode callback used to bind values to a dbvm_t vm
     
     int rc = DBRES_OK;
     switch (type) {
@@ -300,7 +300,7 @@ char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bs
         // 1 is the number of items in the serialization (always 1 byte so max 255 primary keys, even if there is an hard SQLite limit of 128)
         blen = pk_encode_size(argv, argc, 1);
         size_t blen_curr = *bsize;
-        buffer = (blen > blen_curr || b == NULL) ? cloudsync_memory_alloc((sqlite3_uint64)blen) : b;
+        buffer = (blen > blen_curr || b == NULL) ? cloudsync_memory_alloc((db_uint64)blen) : b;
         if (!buffer) return NULL;
         
         // the first u8 value is the total number of items in the primary key(s)

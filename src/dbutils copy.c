@@ -32,11 +32,6 @@ typedef struct {
     } value;
 } DATABASE_RESULT;
 
-typedef struct {
-    sqlite3             *db;
-    cloudsync_context   *data;
-} dbutils_settings_table_context;
-
 int dbutils_settings_check_version (sqlite3 *db, const char *version);
 
 // MARK: - General -
@@ -157,11 +152,6 @@ dbutils_exec_finalize:
 
 int dbutils_write (sqlite3 *db, sqlite3_context *context, const char *sql, const char **values, int types[], int lens[], int count) {
     DATABASE_RESULT result = dbutils_exec(context, db, sql, values, types, lens, count, NULL, NULL, 0);
-    return result.rc;
-}
-
-int dbutils_write_simple (sqlite3 *db, const char *sql) {
-    DATABASE_RESULT result = dbutils_exec(NULL, db, sql, NULL, NULL, NULL, 0, NULL, NULL, 0);
     return result.rc;
 }
 
@@ -728,7 +718,9 @@ finalize_get_value:
     #if CLOUDSYNC_UNITTEST
     if ((rc == SQLITE_NOMEM) && (size == SQLITE_MAX_ALLOCATION_SIZE + 1)) rc = SQLITE_OK;
     #endif
-    if (rc != SQLITE_OK) DEBUG_ALWAYS("dbutils_settings_get_value error %s", database_errmsg(db));
+    if (rc != SQLITE_OK) {
+        DEBUG_ALWAYS("dbutils_settings_get_value error %s", database_errmsg(db));
+    }
     if (vm) database_finalize(vm);
     
     return buffer;
@@ -763,6 +755,7 @@ int dbutils_settings_set_key_value (sqlite3 *db, sqlite3_context *context, const
 
 int dbutils_settings_get_int_value (sqlite3 *db, const char *key) {
     DEBUG_SETTINGS("dbutils_settings_get_int_value key: %s", key);
+    
     char buffer[256] = {0};
     if (dbutils_settings_get_value(db, key, buffer, sizeof(buffer)) == NULL) return -1;
     
@@ -928,9 +921,8 @@ int dbutils_settings_load_callback (void *xdata, int ncols, char **values, char 
 bool table_add_to_context (sqlite3 *db, cloudsync_context *data, table_algo algo, const char *table_name);
 
 int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values, char **names) {
-    dbutils_settings_table_context *context = (dbutils_settings_table_context *)xdata;
-    cloudsync_context *data = context->data;
-    sqlite3 *db = context->db;
+    cloudsync_context *data = (cloudsync_context *)xdata;
+    sqlite3 *db = cloudsync_db(data);
 
     for (int i=0; i<ncols; i+=4) {
         const char *table_name = values[i];
@@ -963,9 +955,8 @@ int dbutils_settings_load (sqlite3 *db, cloudsync_context *data) {
     if (rc != SQLITE_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", database_errmsg(db));
     
     // load table-specific settings
-    dbutils_settings_table_context xdata = {.db = db, .data = data};
     sql = "SELECT lower(tbl_name), lower(col_name), key, value FROM cloudsync_table_settings ORDER BY tbl_name;";
-    rc = database_exec_callback(db, sql, dbutils_settings_table_load_callback, &xdata);
+    rc = database_exec_callback(db, sql, dbutils_settings_table_load_callback, &data);
     if (rc != SQLITE_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", database_errmsg(db));
     
     return SQLITE_OK;

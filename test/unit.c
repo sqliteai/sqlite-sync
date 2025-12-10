@@ -1784,7 +1784,7 @@ bool do_test_dbutils (void) {
     
     // test dbutils_text_select
     sql = "INSERT INTO foo (name) VALUES ('Test2')";
-    rc = dbutils_write_simple(db, sql);
+    rc = database_exec(db, sql);
     if (rc != SQLITE_OK) goto finalize;
     
     sql = "INSERT INTO \"quoted table name 🚀\" (\"pk quoted col 1\", \"pk quoted col 2\", \"non pk quoted col 1\", \"non pk quoted col 2\") VALUES ('pk1', 'pk2', 'nonpk1', 'nonpk2');";
@@ -1937,7 +1937,7 @@ bool do_test_others (sqlite3 *db) {
     int count = dbutils_debug_stmt(db, false);
     sqlite3_finalize(stmt);
     // to increase code coverage
-    dbutils_context_result_error(NULL, "Test is: %s", "Hello World");
+    dbutils_set_error(NULL, "Test is: %s", "Hello World");
     return (count == 1);
 }
 

@@ -52,7 +52,14 @@ db_int64 cloudsync_dbversion_next (db_t *db, cloudsync_context *data, db_int64 m
 int cloudsync_commit_hook (void *ctx);
 void cloudsync_rollback_hook (void *ctx);
 
-//
+// PAYLOAD
+int cloudsync_payload_header_size (void);
+
+//#ifdef CLOUDSYNC_DESKTOP_OS
+int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, int *blob_size);
+//#endif
+
+// END OK
 
 // CLOUDSYNCTABLE CONTEXT
 typedef struct cloudsync_table_context cloudsync_table_context;

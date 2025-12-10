@@ -41,6 +41,7 @@ int database_exec (db_t *db, const char *sql);  // SQLITE_OK
 int database_exec_callback (db_t *db, const char *sql, int (*callback)(void *xdata, int argc, char **values, char **names), void *xdata); // SQLITE_OK and SQLITE_ABORT
 const char *database_errmsg (db_t *db);
 int database_errcode (db_t *db);
+bool database_in_transaction (db_t *db);
 
 // VM and BINDING
 int  database_prepare (db_t *db, const char *sql, dbvm_t **vm, int flags);          // SQLITE_OK

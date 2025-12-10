@@ -132,7 +132,7 @@ int cloudsync_uuid_v7_compare (uint8_t value1[UUID_LEN], uint8_t value2[UUID_LEN
 char *cloudsync_string_ndup (const char *str, size_t len, bool lowercase) {
     if (str == NULL) return NULL;
     
-    char *s = (char *)cloudsync_memory_alloc((sqlite3_uint64)(len + 1));
+    char *s = (char *)cloudsync_memory_alloc((db_uint64)(len + 1));
     if (!s) return NULL;
     
     if (lowercase) {
@@ -164,21 +164,21 @@ int cloudsync_blob_compare(const char *blob1, size_t size1, const char *blob2, s
     return memcmp(blob1, blob2, size1); // Use memcmp for byte-by-byte comparison
 }
 
-void cloudsync_rowid_decode (sqlite3_int64 rowid, sqlite3_int64 *db_version, sqlite3_int64 *seq) {
+void cloudsync_rowid_decode (db_int64 rowid, db_int64 *db_version, db_int64 *seq) {
     // use unsigned 64-bit integer for intermediate calculations
     // when db_version is large enough, it can cause overflow, leading to negative values
     // to handle this correctly, we need to ensure the calculations are done in an unsigned 64-bit integer context
-    // before converting back to sqlite3_int64 as needed
+    // before converting back to db_int64 as needed
     uint64_t urowid = (uint64_t)rowid;
     
     // define the bit mask for seq (30 bits)
     const uint64_t SEQ_MASK = 0x3FFFFFFF; // (2^30 - 1)
 
     // extract seq by masking the lower 30 bits
-    *seq = (sqlite3_int64)(urowid & SEQ_MASK);
+    *seq = (db_int64)(urowid & SEQ_MASK);
 
     // extract db_version by shifting 30 bits to the right
-    *db_version = (sqlite3_int64)(urowid >> 30);
+    *db_version = (db_int64)(urowid >> 30);
 }
 
 char *cloudsync_string_replace_prefix(const char *input, char *prefix, char *replacement) {
@@ -314,7 +314,7 @@ static bool cloudsync_file_read_all (int fd, char *buf, size_t n) {
     return true;
 }
 
-char *cloudsync_file_read (const char *path, sqlite3_int64 *len) {
+char *cloudsync_file_read (const char *path, db_int64 *len) {
     int fd = -1;
     char *buffer = NULL;
 
@@ -613,7 +613,7 @@ void memdebug_finalize (void) {
 }
 
 void *memdebug_alloc (db_uint64 size) {
-    void *ptr = sqlite3_malloc64(size);
+    void *ptr = dbmem_alloc(size);
     if (!ptr) {
         BUILD_ERROR("Unable to allocated a block of %lld bytes", size);
         BUILD_STACK(n, stack);
@@ -632,7 +632,7 @@ void *memdebug_zeroalloc (db_uint64 size) {
     return NULL;
 }
 
-void *memdebug_realloc (void *ptr, sqlite3_uint64 new_size) {
+void *memdebug_realloc (void *ptr, db_uint64 new_size) {
     if (!ptr) return memdebug_alloc(new_size);
     
     mem_slot *slot = _ptr_lookup(ptr);
@@ -644,7 +644,7 @@ void *memdebug_realloc (void *ptr, sqlite3_uint64 new_size) {
     }
     
     void *back_ptr = ptr;
-    void *new_ptr = sqlite3_realloc64(ptr, new_size);
+    void *new_ptr = dbmem_realloc(ptr, new_size);
     if (!new_ptr) {
         BUILD_ERROR("Unable to reallocate a block of %lld bytes.", new_size);
         BUILD_STACK(n, stack);
@@ -657,15 +657,15 @@ void *memdebug_realloc (void *ptr, sqlite3_uint64 new_size) {
 }
 
 char *memdebug_vmprintf (const char *format, va_list list) {
-    char *ptr = sqlite3_vmprintf(format, list);
+    char *ptr = dbmem_vmprintf(format, list);
     if (!ptr) {
-        BUILD_ERROR("Unable to allocated for sqlite3_vmprintf with format %s", format);
+        BUILD_ERROR("Unable to allocated for dbmem_vmprintf with format %s", format);
         BUILD_STACK(n, stack);
         memdebug_report(current_error, stack, n, NULL);
         return NULL;
     }
     
-    _ptr_add(ptr, sqlite3_msize(ptr));
+    _ptr_add(ptr, dbmem_size(ptr));
     return ptr;
 }
 
@@ -681,7 +681,7 @@ char *memdebug_mprintf(const char *format, ...) {
 }
 
 db_uint64 memdebug_msize (void *ptr) {
-    return sqlite3_msize(ptr);
+    return dbmem_size(ptr);
 }
 
 void memdebug_free (void *ptr) {
@@ -709,7 +709,7 @@ void memdebug_free (void *ptr) {
     }
     
     _ptr_remove(ptr);
-    sqlite3_free(ptr);
+    dbmem_free(ptr);
 }
 
 #endif

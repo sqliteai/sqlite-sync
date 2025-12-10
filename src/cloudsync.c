@@ -341,7 +341,7 @@ int cloudsync_dbversion_rebuild (db_t *db, cloudsync_context *data) {
     db_int64 count = dbutils_table_settings_count_tables(db);
     if (count == 0) return SQLITE_OK;
     else if (count == -1) {
-        dbutils_context_result_error(cloudsync_dbcontext(data), "%s", database_errmsg(db));
+        dbutils_set_error(cloudsync_dbcontext(data), "%s", database_errmsg(db));
         return SQLITE_ERROR;
     }
     
@@ -972,7 +972,7 @@ bool table_add_to_context (sqlite3 *db, cloudsync_context *data, table_algo algo
     table->npks = (int)dbutils_int_select(db, sql);
     cloudsync_memory_free(sql);
     if (table->npks == -1) {
-        dbutils_context_result_error(cloudsync_dbcontext(data), "%s", database_errmsg(db));
+        dbutils_set_error(cloudsync_dbcontext(data), "%s", database_errmsg(db));
         goto abort_add_table;
     }
     
@@ -990,7 +990,7 @@ bool table_add_to_context (sqlite3 *db, cloudsync_context *data, table_algo algo
     int64_t ncols = (int64_t)dbutils_int_select(db, sql);
     cloudsync_memory_free(sql);
     if (ncols == -1) {
-        dbutils_context_result_error(cloudsync_dbcontext(data), "%s", database_errmsg(db));
+        dbutils_set_error(cloudsync_dbcontext(data), "%s", database_errmsg(db));
         goto abort_add_table;
     }
     
@@ -1570,6 +1570,7 @@ bool cloudsync_config_exists (sqlite3 *db) {
 
 cloudsync_context *cloudsync_context_create (void) {
     cloudsync_context *data = (cloudsync_context *)cloudsync_memory_zeroalloc((uint64_t)(sizeof(cloudsync_context)));
+    if (!data) return NULL;
     DEBUG_SETTINGS("cloudsync_context_create %p", data);
     
     data->libversion = CLOUDSYNC_VERSION;
@@ -1578,12 +1579,11 @@ cloudsync_context *cloudsync_context_create (void) {
     data->debug = 1;
     #endif
     
-    // allocate space for 128 tables (it can grow if needed)
-    data->tables = (cloudsync_table_context **)cloudsync_memory_zeroalloc((uint64_t)(CLOUDSYNC_INIT_NTABLES * sizeof(cloudsync_table_context *)));
-    if (!data->tables) {
-        cloudsync_memory_free(data);
-        return NULL;
-    }
+    // allocate space for 64 tables (it can grow if needed)
+    uint64_t mem_needed = (uint64_t)(CLOUDSYNC_INIT_NTABLES * sizeof(cloudsync_table_context *));
+    data->tables = (cloudsync_table_context **)cloudsync_memory_zeroalloc(mem_needed);
+    if (!data->tables) {cloudsync_memory_free(data); return NULL;}
+    
     data->tables_alloc = CLOUDSYNC_INIT_NTABLES;
     data->tables_count = 0;
         
@@ -2177,7 +2177,7 @@ int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int 
     if (!data || header.schema_hash != data->schema_hash) {
         sqlite3 *db = sqlite3_context_db_handle(context);
         if (!dbutils_check_schema_hash(db, header.schema_hash)) {
-            dbutils_context_result_error(context, "Cannot apply the received payload because the schema hash is unknown %llu.", header.schema_hash);
+            dbutils_set_error(context, "Cannot apply the received payload because the schema hash is unknown %llu.", header.schema_hash);
             sqlite3_result_error_code(context, SQLITE_MISMATCH);
             return -1;
         }
@@ -2185,7 +2185,7 @@ int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int 
     
     // sanity check header
     if ((header.signature != CLOUDSYNC_PAYLOAD_SIGNATURE) || (header.ncols == 0)) {
-        dbutils_context_result_error(context, "Error on cloudsync_payload_apply: invalid signature or column size.");
+        dbutils_set_error(context, "Error on cloudsync_payload_apply: invalid signature or column size.");
         sqlite3_result_error_code(context, SQLITE_MISUSE);
         return -1;
     }
@@ -2201,7 +2201,7 @@ int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int 
         
         uint32_t rc = LZ4_decompress_safe(buffer, clone, blen, header.expanded_size);
         if (rc <= 0 || rc != header.expanded_size) {
-            dbutils_context_result_error(context, "Error on cloudsync_payload_apply: unable to decompress BLOB (%d).", rc);
+            dbutils_set_error(context, "Error on cloudsync_payload_apply: unable to decompress BLOB (%d).", rc);
             sqlite3_result_error_code(context, SQLITE_MISUSE);
             return -1;
         }
@@ -2216,7 +2216,7 @@ int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int 
     const char *sql = "INSERT INTO cloudsync_changes(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) VALUES (?,?,?,?,?,?,?,?,?);";
     int rc = database_prepare(db, sql, (void **)&vm, 0);
     if (rc != SQLITE_OK) {
-        dbutils_context_result_error(context, "Error on cloudsync_payload_apply: error while compiling SQL statement (%s).", database_errmsg(db));
+        dbutils_set_error(context, "Error on cloudsync_payload_apply: error while compiling SQL statement (%s).", database_errmsg(db));
         if (clone) cloudsync_memory_free(clone);
         return -1;
     }
@@ -2255,7 +2255,7 @@ int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int 
         if (in_savepoint && db_version_changed) {
             rc = database_exec(db, "RELEASE cloudsync_payload_apply;");
             if (rc != SQLITE_OK) {
-                dbutils_context_result_error(context, "Error on cloudsync_payload_apply: unable to release a savepoint (%s).", database_errmsg(db));
+                dbutils_set_error(context, "Error on cloudsync_payload_apply: unable to release a savepoint (%s).", database_errmsg(db));
                 if (clone) cloudsync_memory_free(clone);
                 return -1;
             }
@@ -2263,11 +2263,11 @@ int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int 
         }
 
         // Start new savepoint if needed
-        bool in_transaction = sqlite3_get_autocommit(db) != true;
+        bool in_transaction = database_in_transaction(db);
         if (!in_transaction && db_version_changed) {
             rc = database_exec(db, "SAVEPOINT cloudsync_payload_apply;");
             if (rc != SQLITE_OK) {
-                dbutils_context_result_error(context, "Error on cloudsync_payload_apply: unable to start a transaction (%s).", database_errmsg(db));
+                dbutils_set_error(context, "Error on cloudsync_payload_apply: unable to start a transaction (%s).", database_errmsg(db));
                 if (clone) cloudsync_memory_free(clone);
                 return -1;
             }
@@ -2335,42 +2335,22 @@ int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int 
     return nrows;
 }
 
-void cloudsync_payload_decode (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    DEBUG_FUNCTION("cloudsync_payload_decode");
-    //debug_values(argc, argv);
-    
-    // sanity check payload type
-    if (database_value_type(argv[0]) != SQLITE_BLOB) {
-        dbutils_context_result_error(context, "Error on cloudsync_payload_decode: value must be a BLOB.");
-        sqlite3_result_error_code(context, SQLITE_MISUSE);
-        return;
-    }
-    
-    // sanity check payload size
-    int blen = database_value_bytes(argv[0]);
-    if (blen < (int)sizeof(cloudsync_payload_header)) {
-        dbutils_context_result_error(context, "Error on cloudsync_payload_decode: invalid input size.");
-        sqlite3_result_error_code(context, SQLITE_MISUSE);
-        return;
-    }
-    
-    // obtain payload
-    const char *payload = (const char *)database_value_blob(argv[0]);
-    
-    // apply changes
-    cloudsync_payload_apply(context, payload, blen);
+int cloudsync_payload_header_size (void) {
+    return (int)sizeof(cloudsync_payload_header);
 }
 
 // MARK: - Payload load/store -
 
-int cloudsync_payload_get (sqlite3_context *context, char **blob, int *blob_size, int *db_version, int *seq, sqlite3_int64 *new_db_version, sqlite3_int64 *new_seq) {
-    sqlite3 *db = sqlite3_context_db_handle(context);
-
+int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int *seq, sqlite3_int64 *new_db_version, sqlite3_int64 *new_seq) {
+    
+    sqlite3 *db = data->db;
+    
+    // retrieve current db_version and seq
     *db_version = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_SEND_DBVERSION);
-    if (*db_version < 0) {sqlite3_result_error(context, "Unable to retrieve db_version.", -1); return SQLITE_ERROR;}
+    if (*db_version < 0) return SQLITE_ERROR;
 
     *seq = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_SEND_SEQ);
-    if (*seq < 0) {sqlite3_result_error(context, "Unable to retrieve seq.", -1); return SQLITE_ERROR;}
+    if (*seq < 0) return SQLITE_ERROR;
     
     // retrieve BLOB
     char sql[1024];
@@ -2378,11 +2358,7 @@ int cloudsync_payload_get (sqlite3_context *context, char **blob, int *blob_size
                                "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq), max_db_version AS max_db_version, MAX(IIF(db_version = max_db_version, seq, NULL)) FROM cloudsync_changes, max_db_version WHERE site_id=cloudsync_siteid() AND (db_version>%d OR (db_version=%d AND seq>%d))", *db_version, *db_version, *seq);
     
     int rc = dbutils_blob_int_int_select(db, sql, blob, blob_size, new_db_version, new_seq);
-    if (rc != SQLITE_OK) {
-        sqlite3_result_error(context, "cloudsync_network_send_changes unable to get changes", -1);
-        sqlite3_result_error_code(context, rc);
-        return rc;
-    }
+    if (rc != SQLITE_OK) return rc;
     
     // exit if there is no data to send
     if (blob == NULL || blob_size == 0) return SQLITE_OK;
@@ -2390,42 +2366,41 @@ int cloudsync_payload_get (sqlite3_context *context, char **blob, int *blob_size
 }
 
 #ifdef CLOUDSYNC_DESKTOP_OS
-
-void cloudsync_payload_save (sqlite3_context *context, int argc, sqlite3_value **argv) {
+int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, int *size) {
     DEBUG_FUNCTION("cloudsync_payload_save");
     
-    // sanity check argument
-    if (database_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "Unable to retrieve file path.", -1);
-        return;
-    }
+    // silently delete any other payload with the same name
+    cloudsync_file_delete(payload_path);
     
-    // retrieve full path to file
-    const char *path = (const char *)database_value_text(argv[0]);
-    cloudsync_file_delete(path);
+    // TODO: fix me
+    void *context = NULL;
     
     // retrieve payload
     char *blob = NULL;
     int blob_size = 0, db_version = 0, seq = 0;
     sqlite3_int64 new_db_version = 0, new_seq = 0;
-    int rc = cloudsync_payload_get(context, &blob, &blob_size, &db_version, &seq, &new_db_version, &new_seq);
-    if (rc != SQLITE_OK) return;
+    int rc = cloudsync_payload_get(data, &blob, &blob_size, &db_version, &seq, &new_db_version, &new_seq);
+    if (rc != SQLITE_OK) {
+        if (db_version < 0) dbutils_set_error(context, "Unable to retrieve db_version");
+        else if (seq < 0) dbutils_set_error(context, "Unable to retrieve seq");
+        else dbutils_set_error(context, "Unable to retrieve changes in cloudsync_payload_save");
+        return rc;
+    }
     
-    // exit if there is no data to send
-    if (blob == NULL || blob_size == 0) return;
+    // exit if there is no data to save
+    if (blob == NULL || blob_size == 0) {
+        if (size) *size = 0;
+        return SQLITE_OK;
+    }
     
     // write payload to file
-    bool res = cloudsync_file_write(path, blob, (size_t)blob_size);
+    bool res = cloudsync_file_write(payload_path, blob, (size_t)blob_size);
     sqlite3_free(blob);
-    
-    if (res == false) {
-        sqlite3_result_error(context, "Unable to write payload to file path.", -1);
-        return;
-    }
+    if (res == false) return SQLITE_IOERR;
     
     // update db_version and seq
     char buf[256];
-    sqlite3 *db = sqlite3_context_db_handle(context);
+    sqlite3 *db = data->db;
     if (new_db_version != db_version) {
         snprintf(buf, sizeof(buf), "%lld", new_db_version);
         dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
@@ -2436,7 +2411,8 @@ void cloudsync_payload_save (sqlite3_context *context, int argc, sqlite3_value *
     }
     
     // returns blob size
-    sqlite3_result_int64(context, (sqlite3_int64)blob_size);
+    if (size) *size = blob_size;
+    return SQLITE_OK;
 }
 
 void cloudsync_payload_load (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -2483,7 +2459,7 @@ int cloudsync_cleanup_internal (db_t *db, cloudsync_context *data, cloudsync_tab
     int rc = database_exec(db, sql);
     cloudsync_memory_free(sql);
     if (rc != SQLITE_OK) {
-        dbutils_context_result_error(context, "Unable to drop cloudsync table %s_cloudsync in cloudsync_cleanup.", table_name);
+        dbutils_set_error(context, "Unable to drop cloudsync table %s_cloudsync in cloudsync_cleanup.", table_name);
         sqlite3_result_error_code(context, rc);
         return rc;
     }
@@ -2491,7 +2467,7 @@ int cloudsync_cleanup_internal (db_t *db, cloudsync_context *data, cloudsync_tab
     // drop original triggers
     dbutils_delete_triggers(db, table_name);
     if (rc != SQLITE_OK) {
-        dbutils_context_result_error(context, "Unable to drop cloudsync table %s_cloudsync in cloudsync_cleanup.", table_name);
+        dbutils_set_error(context, "Unable to drop cloudsync table %s_cloudsync in cloudsync_cleanup.", table_name);
         sqlite3_result_error_code(context, rc);
         return rc;
     }
@@ -2587,7 +2563,7 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     
     algo_new = crdt_algo_from_name(algo_name);
     if (algo_new == table_algo_none) {
-        dbutils_context_result_error(context, "algo name %s does not exist", crdt_algo_name);
+        dbutils_set_error(context, "algo name %s does not exist", crdt_algo_name);
         return SQLITE_MISUSE;
     }
     
@@ -2608,7 +2584,7 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
         dbutils_table_settings_set_key_value(NULL, context, table_name, "*", "algo", algo_name);
     } else {
         // error condition
-        dbutils_context_result_error(context, "%s", "Before changing a table algorithm you must call cloudsync_cleanup(table_name)");
+        dbutils_set_error(context, "%s", "Before changing a table algorithm you must call cloudsync_cleanup(table_name)");
         return SQLITE_MISUSE;
     }
     
@@ -2622,48 +2598,33 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     // check triggers
     int rc = dbutils_check_triggers(db, table_name, algo_new);
     if (rc != SQLITE_OK) {
-        dbutils_context_result_error(context, "An error occurred while creating triggers: %s (%d)", database_errmsg(db), rc);
+        dbutils_set_error(context, "An error occurred while creating triggers: %s (%d)", database_errmsg(db), rc);
         return SQLITE_MISUSE;
     }
     
     // check meta-table
     rc = dbutils_check_metatable(db, table_name, algo_new);
     if (rc != SQLITE_OK) {
-        dbutils_context_result_error(context, "An error occurred while creating metatable: %s (%d)", database_errmsg(db), rc);
+        dbutils_set_error(context, "An error occurred while creating metatable: %s (%d)", database_errmsg(db), rc);
         return SQLITE_MISUSE;
     }
     
     // add prepared statements
     if (cloudsync_add_dbvms(db, data) != SQLITE_OK) {
-        dbutils_context_result_error(context, "%s", "An error occurred while trying to compile prepared SQL statements.");
+        dbutils_set_error(context, "%s", "An error occurred while trying to compile prepared SQL statements.");
         return SQLITE_MISUSE;
     }
     
     // add table to in-memory data context
     if (table_add_to_context(db, data, algo_new, table_name) == false) {
-        dbutils_context_result_error(context, "An error occurred while adding %s table information to global context", table_name);
+        dbutils_set_error(context, "An error occurred while adding %s table information to global context", table_name);
         return SQLITE_MISUSE;
     }
     
     if (cloudsync_refill_metatable(db, data, table_name) != SQLITE_OK) {
-        dbutils_context_result_error(context, "%s", "An error occurred while trying to fill the augmented table.");
+        dbutils_set_error(context, "%s", "An error occurred while trying to fill the augmented table.");
         return SQLITE_MISUSE;
     }
         
     return SQLITE_OK;
 }
-
-
-/*
- int dbsync_init_internal (sqlite3_context *context, const char *table_name, const char *algo_name, bool skip_int_pk_check) {
-     DEBUG_FUNCTION("cloudsync_init_internal");
-     
-     // get database reference
-     sqlite3 *db = sqlite3_context_db_handle(context);
-     
-     // retrieve global context
-     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-     
-     
- }
- */

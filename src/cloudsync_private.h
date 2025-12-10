@@ -36,7 +36,7 @@ void cloudsync_sync_key (cloudsync_context *data, const char *key, const char *v
 void *cloudsync_get_auxdata (sqlite3_context *context);
 void cloudsync_set_auxdata (sqlite3_context *context, void *xdata);
 int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int blen);
-int cloudsync_payload_get (sqlite3_context *context, char **blob, int *blob_size, int *db_version, int *seq, sqlite3_int64 *new_db_version, sqlite3_int64 *new_seq);
+int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int *seq, sqlite3_int64 *new_db_version, sqlite3_int64 *new_seq);
 
 // used by core
 typedef bool (*cloudsync_payload_apply_callback_t)(void **xdata, cloudsync_pk_decode_bind_context *decoded_change, sqlite3 *db, cloudsync_context *data, int step, int rc);

@@ -8,9 +8,8 @@
 #ifndef __CLOUDSYNC_PK__
 #define __CLOUDSYNC_PK__
 
-#include <stdio.h>
 #include <stdint.h>
-#include <string.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include "database.h"
 

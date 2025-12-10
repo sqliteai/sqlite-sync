@@ -603,12 +603,12 @@ void cloudsync_network_init (sqlite3_context *context, int argc, sqlite3_value *
     return;
     
 abort_memory:
-    dbutils_context_result_error(context, "Unable to allocate memory in cloudsync_network_init.");
+    dbutils_set_error(context, "Unable to allocate memory in cloudsync_network_init.");
     sqlite3_result_error_code(context, SQLITE_NOMEM);
     goto abort_cleanup;
     
 abort_siteid:
-    dbutils_context_result_error(context, "Unable to compute/retrieve site_id.");
+    dbutils_set_error(context, "Unable to compute/retrieve site_id.");
     sqlite3_result_error_code(context, SQLITE_MISUSE);
     goto abort_cleanup;
     
@@ -690,20 +690,28 @@ void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, s
 int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_send_changes");
     
-    network_data *data = (network_data *)cloudsync_get_auxdata(context);
-    if (!data) {sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1); return SQLITE_ERROR;}
+    // retrieve global context
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    
+    network_data *netdata = (network_data *)cloudsync_get_auxdata(context);
+    if (!netdata) {sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1); return SQLITE_ERROR;}
     
     // retrieve payload
     char *blob = NULL;
     int blob_size = 0, db_version = 0, seq = 0;
     sqlite3_int64 new_db_version = 0, new_seq = 0;
-    int rc = cloudsync_payload_get(context, &blob, &blob_size, &db_version, &seq, &new_db_version, &new_seq);
-    if (rc != SQLITE_OK) return rc;
-    
+    int rc = cloudsync_payload_get(data, &blob, &blob_size, &db_version, &seq, &new_db_version, &new_seq);
+    if (rc != SQLITE_OK) {
+        if (db_version < 0) sqlite3_result_error(context, "Unable to retrieve db_version.", -1);
+        else if (seq < 0) sqlite3_result_error(context, "Unable to retrieve seq.", -1);
+        else sqlite3_result_error(context, "Unable to retrieve changes in cloudsync_network_send_changes", -1);
+        return rc;
+    }
+        
     // exit if there is no data to send
     if (blob == NULL || blob_size == 0) return SQLITE_OK;
     
-    NETWORK_RESULT res = network_receive_buffer(data, data->upload_endpoint, data->authentication, true, false, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
+    NETWORK_RESULT res = network_receive_buffer(netdata, netdata->upload_endpoint, netdata->authentication, true, false, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
     if (res.code != CLOUDSYNC_NETWORK_BUFFER) {
         cloudsync_memory_free(blob);
         network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to receive upload URL");
@@ -711,7 +719,7 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     }
     
     const char *s3_url = res.buffer;
-    bool sent = network_send_buffer(data, s3_url, NULL, blob, blob_size);
+    bool sent = network_send_buffer(netdata, s3_url, NULL, blob, blob_size);
     cloudsync_memory_free(blob);
     if (sent == false) {
         network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to upload BLOB changes to remote host.");
@@ -726,7 +734,7 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     network_result_cleanup(&res);
     
     // notify remote host that we succesfully uploaded changes
-    res = network_receive_buffer(data, data->upload_endpoint, data->authentication, true, true, json_payload, CLOUDSYNC_HEADER_SQLITECLOUD);
+    res = network_receive_buffer(netdata, netdata->upload_endpoint, netdata->authentication, true, true, json_payload, CLOUDSYNC_HEADER_SQLITECLOUD);
     if (res.code != CLOUDSYNC_NETWORK_OK) {
         network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to notify BLOB upload to remote host.");
         network_result_cleanup(&res);

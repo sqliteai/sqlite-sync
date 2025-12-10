@@ -37,6 +37,11 @@ int database_errcode (db_t *db) {
     return sqlite3_errcode((sqlite3 *)db);
 }
 
+bool database_in_transaction (db_t *db) {
+    bool in_transaction = (sqlite3_get_autocommit(db) != true);
+    return in_transaction;
+}
+
 // MARK: - VM and BINDING -
 
 int database_prepare (db_t *db, const char *sql, dbvm_t **vm, int flags) {
