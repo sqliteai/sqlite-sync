@@ -32,11 +32,6 @@ typedef struct {
     } value;
 } DATABASE_RESULT;
 
-typedef struct {
-    sqlite3             *db;
-    cloudsync_context   *data;
-} dbutils_settings_table_context;
-
 int dbutils_settings_check_version (sqlite3 *db, const char *version);
 
 // MARK: - General -
@@ -928,9 +923,8 @@ int dbutils_settings_load_callback (void *xdata, int ncols, char **values, char 
 bool table_add_to_context (sqlite3 *db, cloudsync_context *data, table_algo algo, const char *table_name);
 
 int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values, char **names) {
-    dbutils_settings_table_context *context = (dbutils_settings_table_context *)xdata;
-    cloudsync_context *data = context->data;
-    sqlite3 *db = context->db;
+    cloudsync_context *data = (cloudsync_context *)xdata;
+    sqlite3 *db = cloudsync_db(data);
 
     for (int i=0; i<ncols; i+=4) {
         const char *table_name = values[i];
@@ -963,9 +957,8 @@ int dbutils_settings_load (sqlite3 *db, cloudsync_context *data) {
     if (rc != SQLITE_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", database_errmsg(db));
     
     // load table-specific settings
-    dbutils_settings_table_context xdata = {.db = db, .data = data};
     sql = "SELECT lower(tbl_name), lower(col_name), key, value FROM cloudsync_table_settings ORDER BY tbl_name;";
-    rc = database_exec_callback(db, sql, dbutils_settings_table_load_callback, &xdata);
+    rc = database_exec_callback(db, sql, dbutils_settings_table_load_callback, data);
     if (rc != SQLITE_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", database_errmsg(db));
     
     return SQLITE_OK;

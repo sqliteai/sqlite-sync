@@ -8,7 +8,8 @@
 #ifndef __CLOUDSYNC_DATABASE__
 #define __CLOUDSYNC_DATABASE__
 
-#include <stdarg.h>     // va_list
+#include <stdarg.h>         // va_list
+#include <stdbool.h>
 
 typedef long long int db_int64;
 typedef unsigned long long int db_uint64;
