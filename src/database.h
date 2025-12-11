@@ -50,6 +50,7 @@ int  database_step (dbvm_t *vm);                                                
 void database_finalize (dbvm_t *vm);                                                // NO RET
 void database_reset (dbvm_t *vm);                                                   // NO RET
 void database_clear_bindings (dbvm_t *vm);                                          // NO RET
+const char *database_sql (dbvm_t *vm);
 
 int database_bind_blob (dbvm_t *vm, int index, const void *value, db_uint64 size);  // SQLITE_OK
 int database_bind_double (dbvm_t *vm, int index, double value);                     // SQLITE_OK
@@ -97,5 +98,9 @@ char *dbmem_vmprintf (const char *format, va_list list);
 char *dbmem_mprintf(const char *format, ...);
 void dbmem_free (void *ptr);
 db_uint64 dbmem_size (void *ptr);
+
+int database_pk_names (dbvm_t *vm, const char *table_name, char ***names, int *count);
+char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta);
+
 
 #endif

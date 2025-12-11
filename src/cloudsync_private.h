@@ -29,21 +29,28 @@ typedef enum {
     CLOUDSYNC_PAYLOAD_APPLY_CLEANUP      = 3
 } CLOUDSYNC_PAYLOAD_APPLY_STEPS;
 
-int cloudsync_merge_insert (sqlite3_vtab *vtab, int argc, sqlite3_value **argv, sqlite3_int64 *rowid);
+
+// used by vtab.c
+int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, const char *col_name, dbvalue_t *col_value, db_int64 col_version, db_int64 db_version, const char *site_id, int site_len, db_int64 seq, db_int64 *rowid);
+
+int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, db_int64 insert_cl, const char *insert_name, dbvalue_t *insert_value, db_int64 insert_col_version, db_int64 insert_db_version, const char *insert_site_id, int insert_site_id_len, db_int64 insert_seq, db_int64 *rowid);
+
+typedef struct cloudsync_pk_decode_bind_context cloudsync_pk_decode_bind_context;
+
 void cloudsync_sync_key (cloudsync_context *data, const char *key, const char *value);
 
 // used by network layer
 void *cloudsync_get_auxdata (sqlite3_context *context);
 void cloudsync_set_auxdata (sqlite3_context *context, void *xdata);
 int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int blen);
-int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int *seq, sqlite3_int64 *new_db_version, sqlite3_int64 *new_seq);
+int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int *seq, db_int64 *new_db_version, db_int64 *new_seq);
 
 // used by core
 typedef bool (*cloudsync_payload_apply_callback_t)(void **xdata, cloudsync_pk_decode_bind_context *decoded_change, sqlite3 *db, cloudsync_context *data, int step, int rc);
-void cloudsync_set_payload_apply_callback(sqlite3 *db, cloudsync_payload_apply_callback_t callback);
+void cloudsync_set_payload_apply_callback(db_t *db, cloudsync_payload_apply_callback_t callback);
 
-bool cloudsync_config_exists (sqlite3 *db);
-sqlite3_stmt *cloudsync_colvalue_stmt (sqlite3 *db, cloudsync_context *data, const char *tbl_name, bool *persistent);
+bool cloudsync_config_exists (db_t *db);
+dbvm_t *cloudsync_colvalue_stmt (db_t *db, cloudsync_context *data, const char *tbl_name, bool *persistent);
 char *cloudsync_pk_context_tbl (cloudsync_pk_decode_bind_context *ctx, int64_t *tbl_len);
 void *cloudsync_pk_context_pk (cloudsync_pk_decode_bind_context *ctx, int64_t *pk_len);
 char *cloudsync_pk_context_colname (cloudsync_pk_decode_bind_context *ctx, int64_t *colname_len);

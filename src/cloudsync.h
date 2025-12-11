@@ -19,8 +19,6 @@ extern "C" {
 
 #define CLOUDSYNC_VERSION                       "0.9.0"
 
-typedef struct cloudsync_pk_decode_bind_context cloudsync_pk_decode_bind_context;
-
 // CLOUDSYNC CONTEXT
 typedef struct cloudsync_context cloudsync_context;
 
@@ -29,7 +27,7 @@ const char *cloudsync_context_init (cloudsync_context *data, void *db, void *db_
 void cloudsync_context_free (void *ctx);
 
 // OK
-int cloudsync_cleanup (db_t *db, cloudsync_context *data, const char *table_name);
+int cloudsync_cleanup (cloudsync_context *data, const char *table_name);
 int cloudsync_init_table (cloudsync_context *data, const char *table_name, const char *algo_name, bool skip_int_pk_check);
 
 int cloudsync_terminate (cloudsync_context *data);
@@ -37,17 +35,16 @@ int cloudsync_insync (cloudsync_context *data);
 int cloudsync_bumpseq (cloudsync_context *data);
 void *cloudsync_siteid (cloudsync_context *data);
 void cloudsync_reset_siteid (cloudsync_context *data);
-
+db_int64 cloudsync_dbversion_next (cloudsync_context *data, db_int64 merging_version);
 db_int64 cloudsync_dbversion (cloudsync_context *data);
-void cloudsync_update_schema_hash (cloudsync_context *data, void *db);
+void cloudsync_update_schema_hash (cloudsync_context *data);
+int cloudsync_dbversion_check_uptodate (cloudsync_context *data);
 
 void *cloudsync_db (cloudsync_context *data);
 void *cloudsync_dbcontext (cloudsync_context *data);
 void cloudsync_set_db (cloudsync_context *data, void *value);
 void cloudsync_set_dbcontext (cloudsync_context *data, void *value);
-
-int cloudsync_dbversion_check_uptodate (db_t *db, cloudsync_context *data);
-db_int64 cloudsync_dbversion_next (db_t *db, cloudsync_context *data, db_int64 merging_version);
+const char *cloudsync_errmsg (cloudsync_context *data);
 
 int cloudsync_commit_hook (void *ctx);
 void cloudsync_rollback_hook (void *ctx);
@@ -75,6 +72,7 @@ const char *table_colname (cloudsync_table_context *table, int index);
 
 char **table_pknames (cloudsync_table_context *table);
 void table_set_pknames (cloudsync_table_context *table, char **pknames);
+bool table_algo_isgos (cloudsync_table_context *table);
 
 int table_remove (cloudsync_context *data, cloudsync_table_context *table);
 void table_free (cloudsync_table_context *table);

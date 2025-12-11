@@ -45,12 +45,15 @@ typedef struct {
 } cloudsync_update_payload;
 
 // TODO: REMOVE
-int local_mark_insert_sentinel_meta (sqlite3 *db, cloudsync_table_context *table, const char *pk, size_t pklen, sqlite3_int64 db_version, int seq);
-int local_update_sentinel (sqlite3 *db, cloudsync_table_context *table, const char *pk, size_t pklen, sqlite3_int64 db_version, int seq);
-int local_mark_insert_or_update_meta (sqlite3 *db, cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, sqlite3_int64 db_version, int seq);
-int local_mark_delete_meta (sqlite3 *db, cloudsync_table_context *table, const char *pk, size_t pklen, sqlite3_int64 db_version, int seq);
-int local_drop_meta (sqlite3 *db, cloudsync_table_context *table, const char *pk, size_t pklen);
-int local_update_move_meta (sqlite3 *db, cloudsync_table_context *table, const char *pk, size_t pklen, const char *pk2, size_t pklen2, sqlite3_int64 db_version);
+int local_mark_insert_sentinel_meta (cloudsync_table_context *table, const char *pk, size_t pklen, db_int64 db_version, int seq);
+int local_update_sentinel (cloudsync_table_context *table, const char *pk, size_t pklen, db_int64 db_version, int seq);
+int local_mark_insert_or_update_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, db_int64 db_version, int seq);
+int local_mark_delete_meta (cloudsync_table_context *table, const char *pk, size_t pklen, db_int64 db_version, int seq);
+int local_drop_meta (cloudsync_table_context *table, const char *pk, size_t pklen);
+int local_update_move_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *pk2, size_t pklen2, db_int64 db_version);
+
+
+
 int cloudsync_finalize_alter (sqlite3_context *context, cloudsync_context *data, cloudsync_table_context *table);
 
 void cloudsync_payload_encode_step (sqlite3_context *context, int argc, sqlite3_value **argv);
@@ -80,11 +83,11 @@ void dbsync_db_version (sqlite3_context *context, int argc, sqlite3_value **argv
     UNUSED_PARAMETER(argv);
     
     // retrieve context
-    sqlite3 *db = sqlite3_context_db_handle(context);
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     
-    int rc = cloudsync_dbversion_check_uptodate(db, data);
+    int rc = cloudsync_dbversion_check_uptodate(data);
     if (rc != SQLITE_OK) {
+        sqlite3 *db = sqlite3_context_db_handle(context);
         dbutils_set_error(context, "Unable to retrieve db_version (%s).", database_errmsg(db));
         return;
     }
@@ -96,12 +99,12 @@ void dbsync_db_version_next (sqlite3_context *context, int argc, sqlite3_value *
     DEBUG_FUNCTION("cloudsync_db_version_next");
     
     // retrieve context
-    sqlite3 *db = sqlite3_context_db_handle(context);
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     
     sqlite3_int64 merging_version = (argc == 1) ? database_value_int(argv[0]) : CLOUDSYNC_VALUE_NOTSET;
-    sqlite3_int64 value = cloudsync_dbversion_next(db, data, merging_version);
+    sqlite3_int64 value = cloudsync_dbversion_next(data, merging_version);
     if (value == -1) {
+        sqlite3 *db = sqlite3_context_db_handle(context);
         dbutils_set_error(context, "Unable to retrieve next_db_version (%s).", database_errmsg(db));
         return;
     }
@@ -321,7 +324,7 @@ void dbsync_insert (sqlite3_context *context, int argc, sqlite3_value **argv) {
     }
     
     // compute the next database version for tracking changes
-    db_int64 db_version = cloudsync_dbversion_next(db, data, CLOUDSYNC_VALUE_NOTSET);
+    db_int64 db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
     
     // check if a row with the same primary key already exists
     // if so, this means the row might have been previously deleted (sentinel)
@@ -330,18 +333,18 @@ void dbsync_insert (sqlite3_context *context, int argc, sqlite3_value **argv) {
     
     if (table_count_cols(table) == 0) {
         // if there are no columns other than primary keys, insert a sentinel record
-        rc = local_mark_insert_sentinel_meta(db, table, pk, pklen, db_version, cloudsync_bumpseq(data));
+        rc = local_mark_insert_sentinel_meta(table, pk, pklen, db_version, cloudsync_bumpseq(data));
         if (rc != SQLITE_OK) goto cleanup;
     } else if (pk_exists){
         // if a row with the same primary key already exists, update the sentinel record
-        rc = local_update_sentinel(db, table, pk, pklen, db_version, cloudsync_bumpseq(data));
+        rc = local_update_sentinel(table, pk, pklen, db_version, cloudsync_bumpseq(data));
         if (rc != SQLITE_OK) goto cleanup;
     }
     
     // process each non-primary key column for insert or update
     for (int i=0; i<table_count_cols(table); ++i) {
         // mark the column as inserted or updated in the metadata
-        rc = local_mark_insert_or_update_meta(db, table, pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
+        rc = local_mark_insert_or_update_meta(table, pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
         if (rc != SQLITE_OK) goto cleanup;
     }
     
@@ -368,7 +371,7 @@ void dbsync_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
     }
     
     // compute the next database version for tracking changes
-    db_int64 db_version = cloudsync_dbversion_next(db, data, CLOUDSYNC_VALUE_NOTSET);
+    db_int64 db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
     int rc = SQLITE_OK;
     
     // encode the primary key values into a buffer
@@ -381,11 +384,11 @@ void dbsync_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
     }
     
     // mark the row as deleted by inserting a delete sentinel into the metadata
-    rc = local_mark_delete_meta(db, table, pk, pklen, db_version, cloudsync_bumpseq(data));
+    rc = local_mark_delete_meta(table, pk, pklen, db_version, cloudsync_bumpseq(data));
     if (rc != SQLITE_OK) goto cleanup;
     
     // remove any metadata related to the old rows associated with this primary key
-    rc = local_drop_meta(db, table, pk, pklen);
+    rc = local_drop_meta(table, pk, pklen);
     if (rc != SQLITE_OK) goto cleanup;
     
 cleanup:
@@ -476,7 +479,7 @@ void dbsync_update_final (sqlite3_context *context) {
     }
 
     // compute the next database version for tracking changes
-    db_int64 db_version = cloudsync_dbversion_next(db, data, CLOUDSYNC_VALUE_NOTSET);
+    db_int64 db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
     int rc = SQLITE_OK;
     
     // Check if the primary key(s) have changed
@@ -515,17 +518,17 @@ void dbsync_update_final (sqlite3_context *context) {
         }
         
         // mark the rows with the old primary key as deleted in the metadata (old row handling)
-        rc = local_mark_delete_meta(db, table, oldpk, oldpklen, db_version, cloudsync_bumpseq(data));
+        rc = local_mark_delete_meta(table, oldpk, oldpklen, db_version, cloudsync_bumpseq(data));
         if (rc != SQLITE_OK) goto cleanup;
         
         // move non-sentinel metadata entries from OLD primary key to NEW primary key
         // handles the case where some metadata is retained across primary key change
         // see https://github.com/sqliteai/sqlite-sync/blob/main/docs/PriKey.md for more details
-        rc = local_update_move_meta(db, table, pk, pklen, oldpk, oldpklen, db_version);
+        rc = local_update_move_meta(table, pk, pklen, oldpk, oldpklen, db_version);
         if (rc != SQLITE_OK) goto cleanup;
         
         // mark a new sentinel row with the new primary key in the metadata
-        rc = local_mark_insert_sentinel_meta(db, table, pk, pklen, db_version, cloudsync_bumpseq(data));
+        rc = local_mark_insert_sentinel_meta(table, pk, pklen, db_version, cloudsync_bumpseq(data));
         if (rc != SQLITE_OK) goto cleanup;
         
         // free memory if the OLD primary key was dynamically allocated
@@ -540,7 +543,7 @@ void dbsync_update_final (sqlite3_context *context) {
         if (dbutils_value_compare(payload->old_values[col_index], payload->new_values[col_index]) != 0) {
             // if a column value has changed, mark it as updated in the metadata
             // columns are in cid order
-            rc = local_mark_insert_or_update_meta(db, table, pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
+            rc = local_mark_insert_or_update_meta(table, pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
             if (rc != SQLITE_OK) goto cleanup;
         }
     }
@@ -560,9 +563,7 @@ void dbsync_cleanup (sqlite3_context *context, int argc, sqlite3_value **argv) {
     
     const char *table = (const char *)database_value_text(argv[0]);
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    sqlite3 *db = sqlite3_context_db_handle(context);
-    
-    cloudsync_cleanup(db, data, table);
+    cloudsync_cleanup(data, table);
 }
 
 void dbsync_enable_disable (sqlite3_context *context, const char *table_name, bool value) {
@@ -639,7 +640,7 @@ void dbsync_init (sqlite3_context *context, const char *table, const char *algo,
         return;
     }
     
-    cloudsync_update_schema_hash(data, db);
+    cloudsync_update_schema_hash(data);
     
     // returns site_id as TEXT
     char buffer[UUID_STR_MAXLEN];
@@ -784,8 +785,7 @@ void dbsync_commit_alter (sqlite3_context *context, int argc, sqlite3_value **ar
         goto rollback_finalize_alter;
     }
     
-    cloudsync_update_schema_hash(data, db);
-    
+    cloudsync_update_schema_hash(data);
     return;
     
 rollback_finalize_alter:

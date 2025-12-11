@@ -7,10 +7,12 @@
 
 #include <stdio.h>
 #include <string.h>
+
 #include "vtab.h"
 #include "utils.h"
 #include "dbutils.h"
 #include "cloudsync.h"
+#include "cloudsync_private.h"
 
 #ifndef SQLITE_CORE
 SQLITE_EXTENSION_INIT3
@@ -472,6 +474,76 @@ int cloudsync_changesvtab_rowid (sqlite3_vtab_cursor *cursor, sqlite3_int64 *row
     return SQLITE_OK;
 }
 
+int cloudsync_changesvtab_insert_gos (sqlite3_vtab *vtab, cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, const char *insert_name, sqlite3_value *insert_value, sqlite3_int64 insert_col_version, sqlite3_int64 insert_db_version, const char *insert_site_id, int insert_site_id_len, sqlite3_int64 insert_seq, sqlite3_int64 *rowid) {
+    DEBUG_VTAB("cloudsync_changesvtab_insert_gos");
+    
+    // Grow-Only Set (GOS) Algorithm: Only insertions are allowed, deletions and updates are prevented from a trigger.
+    int rc = merge_insert_col(data, table, insert_pk, insert_pk_len, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
+    
+    if (rc != SQLITE_OK) {
+        cloudsync_vtab_set_error(vtab, "%s", cloudsync_errmsg(data));
+    }
+    
+    return rc;
+}
+
+int cloudsync_changesvtab_insert (sqlite3_vtab *vtab, int argc, sqlite3_value **argv, sqlite3_int64 *rowid) {
+    DEBUG_VTAB("cloudsync_changesvtab_insert");
+    
+    // this function performs the merging logic for an insert in a cloud-synchronized table. It handles
+    // different scenarios including conflicts, causal lengths, delete operations, and resurrecting rows
+    // based on the incoming data (from remote nodes or clients) and the local database state
+
+    // this function handles different CRDT algorithms (GOS, DWS, AWS, and CLS).
+    // the merging strategy is determined based on the table->algo value.
+    
+    // meta table declaration:
+    // tbl TEXT NOT NULL, pk BLOB NOT NULL, col_name TEXT NOT NULL,"
+    // "col_value ANY, col_version INTEGER NOT NULL, db_version INTEGER NOT NULL,"
+    // "site_id BLOB NOT NULL, cl INTEGER NOT NULL, seq INTEGER NOT NULL
+    
+    // meta information to retrieve from arguments:
+    // argv[0] -> table name (TEXT)
+    // argv[1] -> primary key (BLOB)
+    // argv[2] -> column name (TEXT or NULL if sentinel)
+    // argv[3] -> column value (ANY)
+    // argv[4] -> column version (INTEGER)
+    // argv[5] -> database version (INTEGER)
+    // argv[6] -> site ID (BLOB, identifies the origin of the update)
+    // argv[7] -> causal length (INTEGER, tracks the order of operations)
+    // argv[8] -> sequence number (INTEGER, unique per operation)
+    
+    // extract table name
+    const char *insert_tbl = (const char *)sqlite3_value_text(argv[0]);
+    
+    // lookup table
+    cloudsync_context *data = cloudsync_vtab_get_context(vtab);
+    cloudsync_table_context *table = table_lookup(data, insert_tbl);
+    if (!table) return cloudsync_vtab_set_error(vtab, "Unable to find table %s,", insert_tbl);
+    
+    // extract the remaining fields from the input values
+    const char *insert_pk = (const char *)sqlite3_value_blob(argv[1]);
+    int insert_pk_len = sqlite3_value_bytes(argv[1]);
+    const char *insert_name = (sqlite3_value_type(argv[2]) == SQLITE_NULL) ? CLOUDSYNC_TOMBSTONE_VALUE : (const char *)sqlite3_value_text(argv[2]);
+    sqlite3_value *insert_value = argv[3];
+    sqlite3_int64 insert_col_version = sqlite3_value_int(argv[4]);
+    sqlite3_int64 insert_db_version = sqlite3_value_int(argv[5]);
+    const char *insert_site_id = (const char *)sqlite3_value_blob(argv[6]);
+    int insert_site_id_len = sqlite3_value_bytes(argv[6]);
+    sqlite3_int64 insert_cl = sqlite3_value_int(argv[7]);
+    sqlite3_int64 insert_seq = sqlite3_value_int(argv[8]);
+    
+    // perform different logic for each different table algorithm
+    if (table_algo_isgos(table)) return cloudsync_changesvtab_insert_gos(vtab, data, table, insert_pk, insert_pk_len, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
+    
+    int rc = merge_insert (data, table, insert_pk, insert_pk_len, insert_cl, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
+    if (rc != SQLITE_OK) {
+        return cloudsync_vtab_set_error(vtab, "%s", cloudsync_errmsg(data));
+    }
+    
+    return SQLITE_OK;
+}
+
 int cloudsync_changesvtab_update (sqlite3_vtab *vtab, int argc, sqlite3_value **argv, sqlite3_int64 *rowid) {
     DEBUG_VTAB("cloudsync_changesvtab_update");
     
@@ -485,7 +557,7 @@ int cloudsync_changesvtab_update (sqlite3_vtab *vtab, int argc, sqlite3_value **
     // argv[0] is set only in case of DELETE statement (it contains the rowid of a row in the virtual table to be deleted)
     // argv[1] is the rowid of a new row to be inserted into the virtual table (always NULL in our case)
     // so reduce the number of meaningful arguments by 2
-    return cloudsync_merge_insert(vtab, argc-2, &argv[2], rowid);
+    return cloudsync_changesvtab_insert(vtab, argc-2, &argv[2], rowid);
 }
 
 // MARK: -

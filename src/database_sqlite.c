@@ -7,6 +7,8 @@
 
 #include "cloudsync.h"
 #include "database.h"
+#include "utils.h"
+
 #include <string.h>
 
 #ifndef SQLITE_CORE
@@ -64,6 +66,85 @@ void database_clear_bindings (dbvm_t *vm) {
     sqlite3_clear_bindings((sqlite3_stmt *)vm);
 }
 
+const char *database_sql (dbvm_t *vm) {
+    return sqlite3_expanded_sql((sqlite3_stmt *)vm);
+}
+
+int database_pk_rowid (db_t *db, const char *table_name, char ***names, int *count) {
+    char buffer[2048];
+    char *sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT rowid FROM %Q LIMIT 0;", table_name);
+    if (!sql) return SQLITE_NOMEM;
+    
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    if (rc == SQLITE_OK) {
+        char **r = (char**)dbmem_alloc(sizeof(char*));
+        if (!r) return SQLITE_NOMEM;
+        r[0] = cloudsync_string_dup("rowid", false);
+        *names = r;
+        *count = 1;
+    } else {
+        // WITHOUT ROWID + no declared PKs => return empty set
+        *names = NULL;
+        *count = 0;
+        rc = SQLITE_OK;
+    }
+    
+cleanup:
+    if (vm) sqlite3_finalize(vm);
+    return rc;
+}
+
+int database_pk_names (db_t *db, const char *table_name, char ***names, int *count) {
+    char buffer[2048];
+    char *sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT name FROM pragma_table_info(%Q) WHERE pk > 0 ORDER BY pk;", table_name);
+    if (!sql) return SQLITE_NOMEM;
+    
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    // count PK columns
+    int rows = 0;
+    while ((rc = sqlite3_step(vm)) == SQLITE_ROW) rows++;
+    if (rc != SQLITE_DONE) goto cleanup;
+    
+    if (rows == 0) {
+        sqlite3_finalize(vm);
+        // no declared PKs so check for rowid availability
+        return database_pk_rowid(db, table_name, names, count);
+    }
+    
+    // reset vm to read PKs again
+    rc = sqlite3_reset(vm);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    // allocate array
+    char **r = (char**)dbmem_alloc(sizeof(char*) * rows);
+    if (!r) {rc = SQLITE_NOMEM; goto cleanup;}
+    
+    int i = 0;
+    while ((rc = sqlite3_step(vm)) == SQLITE_ROW) {
+        const char *txt = (const char*)sqlite3_column_text(vm, 0);
+        if (!txt) {rc = SQLITE_ERROR; goto cleanup;}
+        r[i] = cloudsync_string_dup(txt, false);
+        if (!r[i]) { rc = SQLITE_NOMEM; goto cleanup;}
+        i++;
+    }
+    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    
+    *names = r;
+    *count = rows;
+    
+cleanup:
+    if (vm) sqlite3_finalize(vm);
+    return rc;
+}
+
+// MARK: -
+
 int database_bind_blob (dbvm_t *vm, int index, const void *value, db_uint64 size) {
     return sqlite3_bind_blob64((sqlite3_stmt *)vm, index, value, size, SQLITE_STATIC);
 }
@@ -86,6 +167,20 @@ int database_bind_text (dbvm_t *vm, int index, const char *value, int size) {
 
 int database_bind_value (dbvm_t *vm, int index, dbvalue_t *value) {
     return sqlite3_bind_value((sqlite3_stmt *)vm, index, (const sqlite3_value *)value);
+}
+
+// MARK: - SQL -
+
+char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta) {
+    char *sql = NULL;
+    
+    if (is_meta) {
+        sql = sqlite3_snprintf(bsize, buffer, "DROP TABLE IF EXISTS \"%w_cloudsync\";", table_name);
+    } else {
+        sql = sqlite3_snprintf(bsize, buffer, "DROP TABLE IF EXISTS \"%w\";", table_name);
+    }
+    
+    return sql;
 }
 
 // MARK: - VALUE -
