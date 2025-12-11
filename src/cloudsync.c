@@ -172,21 +172,20 @@ struct cloudsync_context {
     int             schema_version;
     uint64_t        schema_hash;
     
-    // set at the start of each transaction on the first invocation and
-    // re-set on transaction commit or rollback
+    // set at transaction start and reset on commit/rollback
     db_int64        db_version;
-    // the version that the db will be set to at the end of the transaction
-    // if that transaction were to commit at the time this value is checked
+    // version the DB would have if the transaction committed now
     db_int64        pending_db_version;
     // used to set an order inside each transaction
     int             seq;
     
-    // augmented tables are stored in-memory so we do not need to retrieve information about col names and cid
-    // from the disk each time a write statement is performed
-    // we do also not need to use an hash map here because for few tables the direct in-memory comparison with table name is faster
-    cloudsync_table_context **tables;
-    int tables_count;
-    int tables_alloc;
+    // augmented tables are stored in-memory so we do not need to retrieve information about
+    // col_names and cid from the disk each time a write statement is performed
+    // we do also not need to use an hash map here because for few tables the direct
+    // in-memory comparison with table name is faster
+    cloudsync_table_context **tables;   // dense vector: [0..tables_count-1] are valid
+    int tables_count;                   // size
+    int tables_cap;                     // capacity
 };
 
 typedef struct {
@@ -864,8 +863,7 @@ cleanup:
 cloudsync_table_context *table_lookup (cloudsync_context *data, const char *table_name) {
     DEBUG_DBFUNCTION("table_lookup %s", table_name);
     
-    for (int i=0; i<data->tables_alloc; ++i) {
-        if (data->tables[i] == NULL) continue;
+    for (int i=0; i<data->tables_count; ++i) {
         if ((strcasecmp(data->tables[i]->name, table_name) == 0)) return data->tables[i];
     }
     
@@ -890,14 +888,19 @@ int table_remove (cloudsync_context *data, cloudsync_table_context *table) {
     const char *table_name = table->name;
     DEBUG_DBFUNCTION("table_remove %s", table_name);
     
-    for (int i=0; i<data->tables_alloc; ++i) {
-        if (data->tables[i] == NULL) continue;
-        if ((strcasecmp(data->tables[i]->name, table_name) == 0)) {
-            data->tables[i] = NULL;
-            --data->tables_count;
+    for (int i = 0; i < data->tables_count; ++i) {
+        cloudsync_table_context *t = data->tables[i];
+        
+        // pointer compare is fastest but fallback to strcasecmp if not same pointer
+        if ((t == table) || ((strcasecmp(t->name, table_name) == 0))) {
+            int last = data->tables_count - 1;
+            data->tables[i] = data->tables[last];   // move last into the hole (keeps array dense)
+            data->tables[last] = NULL;              // NULLify tail (as an extra security measure)
+            data->tables_count--;
             return data->tables_count;
         }
     }
+    
     return -1;
 }
 
@@ -939,6 +942,19 @@ int table_add_to_context_cb (void *xdata, int ncols, char **values, char **names
     return 0;
 }
 
+bool table_ensure_capacity (cloudsync_context *data) {
+    if (data->tables_count < data->tables_cap) return true;
+    
+    int new_cap = data->tables_cap ? data->tables_cap * 2 : CLOUDSYNC_INIT_NTABLES;
+    size_t bytes = (size_t)new_cap * sizeof(*data->tables);
+    void *p = cloudsync_memory_realloc(data->tables, bytes);
+    if (!p) return false;
+    
+    data->tables = (cloudsync_table_context **)p;
+    data->tables_cap = new_cap;
+    return true;
+}
+
 bool table_add_to_context (sqlite3 *db, cloudsync_context *data, table_algo algo, const char *table_name) {
     DEBUG_DBFUNCTION("cloudsync_context_add_table %s", table_name);
     
@@ -946,21 +962,8 @@ bool table_add_to_context (sqlite3 *db, cloudsync_context *data, table_algo algo
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (table) return true;
     
-    // is there any space available?
-    if (data->tables_alloc <= data->tables_count + 1) {
-        // realloc tables
-        cloudsync_table_context **clone = (cloudsync_table_context **)cloudsync_memory_realloc(data->tables, sizeof(cloudsync_table_context) * data->tables_alloc + CLOUDSYNC_INIT_NTABLES);
-        if (!clone) goto abort_add_table;
-        
-        // reset new entries
-        for (int i=data->tables_alloc; i<data->tables_alloc + CLOUDSYNC_INIT_NTABLES; ++i) {
-            clone[i] = NULL;
-        }
-        
-        // replace old ptr
-        data->tables = clone;
-        data->tables_alloc += CLOUDSYNC_INIT_NTABLES;
-    }
+    // check for space availability
+    if (!table_ensure_capacity(data)) return false;
     
     // setup a new table context
     table = table_create(table_name, algo);
@@ -1018,15 +1021,8 @@ bool table_add_to_context (sqlite3 *db, cloudsync_context *data, table_algo algo
         if (rc == SQLITE_ABORT) goto abort_add_table;
     }
     
-    // lookup the first free slot
-    for (int i=0; i<data->tables_alloc; ++i) {
-        if (data->tables[i] == NULL) {
-            data->tables[i] = table;
-            if (i > data->tables_count - 1) ++data->tables_count;
-            break;
-        }
-    }
-    
+    // append newly created table
+    data->tables[data->tables_count++] = table;
     return true;
     
 abort_add_table:
@@ -1584,7 +1580,7 @@ cloudsync_context *cloudsync_context_create (void) {
     data->tables = (cloudsync_table_context **)cloudsync_memory_zeroalloc(mem_needed);
     if (!data->tables) {cloudsync_memory_free(data); return NULL;}
     
-    data->tables_alloc = CLOUDSYNC_INIT_NTABLES;
+    data->tables_cap = CLOUDSYNC_INIT_NTABLES;
     data->tables_count = 0;
         
     return data;
@@ -2520,9 +2516,11 @@ int cloudsync_load_siteid (db_t *db, cloudsync_context *data) {
 }
 
 int cloudsync_terminate (cloudsync_context *data) {
-    for (int i=0; i<data->tables_alloc; ++i) {
-        if (data->tables[i]) table_free(data->tables[i]);
-        data->tables[i] = NULL;
+    // can't use for/loop here because data->tables_count is changed by table_remove
+    while (data->tables_count > 0) {
+        cloudsync_table_context *t = data->tables[data->tables_count - 1];
+        table_remove(data, t);
+        table_free(t);
     }
     
     if (data->schema_version_stmt) database_finalize(data->schema_version_stmt);
