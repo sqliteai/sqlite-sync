@@ -22,8 +22,8 @@ extern "C" {
 // CLOUDSYNC CONTEXT
 typedef struct cloudsync_context cloudsync_context;
 
-cloudsync_context *cloudsync_context_create (void);
-const char *cloudsync_context_init (cloudsync_context *data, void *db, void *db_context);
+cloudsync_context *cloudsync_context_create (void *db);
+const char *cloudsync_context_init (cloudsync_context *data, void *db);
 void cloudsync_context_free (void *ctx);
 
 // OK
@@ -44,9 +44,6 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name);
 int cloudsync_commit_alter (cloudsync_context *data, const char *table_name);
 
 void *cloudsync_db (cloudsync_context *data);
-void *cloudsync_dbcontext (cloudsync_context *data);
-void cloudsync_set_db (cloudsync_context *data, void *value);
-void cloudsync_set_dbcontext (cloudsync_context *data, void *value);
 const char *cloudsync_errmsg (cloudsync_context *data);
 
 int cloudsync_commit_hook (void *ctx);
@@ -58,6 +55,8 @@ int cloudsync_payload_header_size (void);
 //#ifdef CLOUDSYNC_DESKTOP_OS
 int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, int *blob_size);
 //#endif
+
+int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int blen, int *nrows);
 
 // END OK
 
@@ -79,6 +78,13 @@ bool table_algo_isgos (cloudsync_table_context *table);
 
 int table_remove (cloudsync_context *data, cloudsync_table_context *table);
 void table_free (cloudsync_table_context *table);
+
+int local_mark_insert_sentinel_meta (cloudsync_table_context *table, const char *pk, size_t pklen, db_int64 db_version, int seq);
+int local_update_sentinel (cloudsync_table_context *table, const char *pk, size_t pklen, db_int64 db_version, int seq);
+int local_mark_insert_or_update_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, db_int64 db_version, int seq);
+int local_mark_delete_meta (cloudsync_table_context *table, const char *pk, size_t pklen, db_int64 db_version, int seq);
+int local_drop_meta (cloudsync_table_context *table, const char *pk, size_t pklen);
+int local_update_move_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *pk2, size_t pklen2, db_int64 db_version);
 
 #ifdef __cplusplus
 }

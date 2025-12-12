@@ -45,13 +45,6 @@ typedef struct {
 } cloudsync_update_payload;
 
 // TODO: REMOVE
-int local_mark_insert_sentinel_meta (cloudsync_table_context *table, const char *pk, size_t pklen, db_int64 db_version, int seq);
-int local_update_sentinel (cloudsync_table_context *table, const char *pk, size_t pklen, db_int64 db_version, int seq);
-int local_mark_insert_or_update_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, db_int64 db_version, int seq);
-int local_mark_delete_meta (cloudsync_table_context *table, const char *pk, size_t pklen, db_int64 db_version, int seq);
-int local_drop_meta (cloudsync_table_context *table, const char *pk, size_t pklen);
-int local_update_move_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *pk2, size_t pklen2, db_int64 db_version);
-
 void cloudsync_payload_encode_step (sqlite3_context *context, int argc, sqlite3_value **argv);
 void cloudsync_payload_encode_final (sqlite3_context *context);
 
@@ -559,7 +552,12 @@ void dbsync_cleanup (sqlite3_context *context, int argc, sqlite3_value **argv) {
     
     const char *table = (const char *)database_value_text(argv[0]);
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    cloudsync_cleanup(data, table);
+    
+    int rc = cloudsync_cleanup(data, table);
+    if (rc != DBRES_OK) {
+        sqlite3_result_error(context, cloudsync_errmsg(data), -1);
+        sqlite3_result_error_code(context, rc);
+    }
 }
 
 void dbsync_enable_disable (sqlite3_context *context, const char *table_name, bool value) {
@@ -609,10 +607,7 @@ void dbsync_terminate (sqlite3_context *context, int argc, sqlite3_value **argv)
 
 void dbsync_init (sqlite3_context *context, const char *table, const char *algo, bool skip_int_pk_check) {
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    sqlite3 *db = sqlite3_context_db_handle(context);
-    
-    cloudsync_set_dbcontext(data, context);
-    cloudsync_set_db(data, db);
+    sqlite3 *db = cloudsync_db(data);
     
     int rc = database_exec(db, "SAVEPOINT cloudsync_init;");
     if (rc != SQLITE_OK) {
@@ -628,10 +623,10 @@ void dbsync_init (sqlite3_context *context, const char *table, const char *algo,
             dbutils_set_error(context, "Unable to release cloudsync_init savepoint. %s", database_errmsg(db));
             sqlite3_result_error_code(context, rc);
         }
-    }
-    
-    // in case of error, rollback transaction
-    if (rc != SQLITE_OK) {
+    } else {
+        // in case of error, rollback transaction
+        sqlite3_result_error(context, cloudsync_errmsg(data), -1);
+        sqlite3_result_error_code(context, rc);
         database_exec(db, "ROLLBACK TO cloudsync_init; RELEASE cloudsync_init");
         return;
     }
@@ -735,7 +730,18 @@ void dbsync_payload_decode (sqlite3_context *context, int argc, sqlite3_value **
     const char *payload = (const char *)database_value_blob(argv[0]);
     
     // apply changes
-    cloudsync_payload_apply(context, payload, blen);
+    int nrows = 0;
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    int rc = cloudsync_payload_apply(data, payload, blen, &nrows);
+    if (rc != SQLITE_OK) {
+        sqlite3_result_error(context, cloudsync_errmsg(data), -1);
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+    
+    // TODO: check me
+    // returns number of applied rows
+    // sqlite3_result_int(context, nrows);
 }
 
 #ifdef CLOUDSYNC_DESKTOP_OS
@@ -762,11 +768,8 @@ void dbsync_payload_save (sqlite3_context *context, int argc, sqlite3_value **ar
         return;
     }
     
-    if (rc == SQLITE_IOERR) {
-        sqlite3_result_error(context, "Unable to write payload to file path.", -1);
-    } else {
-        sqlite3_result_error(context, "An error occurred while processing changes for payload_save.", -1);
-    }
+    sqlite3_result_error(context, cloudsync_errmsg(data), -1);
+    sqlite3_result_error_code(context, rc);
 }
 
 void dbsync_payload_load (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -784,16 +787,29 @@ void dbsync_payload_load (sqlite3_context *context, int argc, sqlite3_value **ar
     sqlite3_int64 payload_size = 0;
     char *payload = cloudsync_file_read(path, &payload_size);
     if (!payload) {
-        if (payload_size == -1) sqlite3_result_error(context, "Unable to read payload from file path.", -1);
-        if (payload) cloudsync_memory_free(payload);
+        if (payload_size < 0) {
+            sqlite3_result_error(context, "Unable to read payload from file path.", -1);
+            sqlite3_result_error_code(context, SQLITE_IOERR);
+            return;
+        }
+        // no rows affected but no error either
+        sqlite3_result_int(context, 0);
         return;
     }
     
-    int nrows = (payload_size) ? cloudsync_payload_apply (context, payload, (int)payload_size) : 0;
+    int nrows = 0;
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    int rc = cloudsync_payload_apply (data, payload, (int)payload_size, &nrows);
     if (payload) cloudsync_memory_free(payload);
     
+    if (rc != SQLITE_OK) {
+        sqlite3_result_error(context, cloudsync_errmsg(data), -1);
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+    
     // returns number of applied rows
-    if (nrows != -1) sqlite3_result_int(context, nrows);
+    sqlite3_result_int(context, nrows);
 }
 #endif
 
@@ -833,7 +849,7 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     cloudsync_memory_init(1);
     
     // init context
-    void *ctx = cloudsync_context_create();
+    void *ctx = cloudsync_context_create(db);
     if (!ctx) {
         if (pzErrMsg) *pzErrMsg = "Not enought memory to create a database context";
         return SQLITE_NOMEM;
@@ -955,7 +971,7 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     
     // load config, if exists
     if (cloudsync_config_exists(db)) {
-        if (cloudsync_context_init(ctx, db, NULL) == NULL) {
+        if (cloudsync_context_init(ctx, db) == NULL) {
             if (pzErrMsg) *pzErrMsg = "An error occurred while trying to initialize context";
             return SQLITE_ERROR;
         }

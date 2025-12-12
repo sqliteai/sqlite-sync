@@ -40,7 +40,6 @@ typedef struct cloudsync_pk_decode_bind_context cloudsync_pk_decode_bind_context
 void cloudsync_sync_key (cloudsync_context *data, const char *key, const char *value);
 
 // used by network layer
-int cloudsync_payload_apply (sqlite3_context *context, const char *payload, int blen);
 int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int *seq, db_int64 *new_db_version, db_int64 *new_seq);
 
 // used by core

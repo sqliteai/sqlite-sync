@@ -934,7 +934,7 @@ int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values,
         if (strcmp(key, "algo")!=0) continue;
         
         if (dbutils_check_triggers(db, table_name, crdt_algo_from_name(value)) != SQLITE_OK) return SQLITE_MISUSE;
-        if (table_add_to_context(db, data, crdt_algo_from_name(value), table_name)  == false) return SQLITE_MISUSE;
+        if (table_add_to_context(db, data, crdt_algo_from_name(value), table_name) == false) return SQLITE_MISUSE;
         
         DEBUG_SETTINGS("load tbl_name: %s value: %s", key, value);
     }
@@ -966,17 +966,17 @@ int dbutils_settings_load (sqlite3 *db, cloudsync_context *data) {
 
 int dbutils_settings_init (sqlite3 *db, void *cloudsync_data, sqlite3_context *context) {
     DEBUG_SETTINGS("dbutils_settings_init %p", context);
-        
+    
     cloudsync_context *data = (cloudsync_context *)cloudsync_data;
     if (!data) data = (cloudsync_context *)sqlite3_user_data(context);
     
     // check if cloudsync_settings table exists
+    int rc = SQLITE_OK;
     bool settings_exists = dbutils_table_exists(db, CLOUDSYNC_SETTINGS_NAME);
     if (settings_exists == false) {
         DEBUG_SETTINGS("cloudsync_settings does not exist (creating a new one)");
         
         char sql[1024];
-        int rc = SQLITE_OK;
         
         // create table and fill-in initial data
         snprintf(sql, sizeof(sql), "CREATE TABLE IF NOT EXISTS cloudsync_settings (key TEXT PRIMARY KEY NOT NULL COLLATE NOCASE, value TEXT);");
@@ -1001,7 +1001,7 @@ int dbutils_settings_init (sqlite3 *db, void *cloudsync_data, sqlite3_context *c
         // site_id is implicitly indexed
         // the rowid column is the primary key
         char *sql = "CREATE TABLE IF NOT EXISTS cloudsync_site_id (site_id BLOB UNIQUE NOT NULL);";
-        int rc = database_exec(db, sql);
+        rc = database_exec(db, sql);
         if (rc != SQLITE_OK) {if (context) sqlite3_result_error(context, database_errmsg(db), -1); return rc;}
         
         // siteid (to uniquely identify this local copy of the database)
@@ -1022,7 +1022,7 @@ int dbutils_settings_init (sqlite3 *db, void *cloudsync_data, sqlite3_context *c
         DEBUG_SETTINGS("cloudsync_table_settings does not exist (creating a new one)");
         
         char *sql = "CREATE TABLE IF NOT EXISTS cloudsync_table_settings (tbl_name TEXT NOT NULL COLLATE NOCASE, col_name TEXT NOT NULL COLLATE NOCASE, key TEXT, value TEXT, PRIMARY KEY(tbl_name,key));";
-        int rc = database_exec(db, sql);
+        rc = database_exec(db, sql);
         if (rc != SQLITE_OK) {if (context) sqlite3_result_error(context, database_errmsg(db), -1); return rc;}
     }
     
@@ -1030,8 +1030,6 @@ int dbutils_settings_init (sqlite3 *db, void *cloudsync_data, sqlite3_context *c
     bool schema_versions_exists = dbutils_table_exists(db, CLOUDSYNC_SCHEMA_VERSIONS_NAME);
     if (schema_versions_exists == false) {
         DEBUG_SETTINGS("cloudsync_schema_versions does not exist (creating a new one)");
-        
-        int rc = SQLITE_OK;
         
         // create table
         char *sql = "CREATE TABLE IF NOT EXISTS cloudsync_schema_versions (hash INTEGER PRIMARY KEY, seq INTEGER NOT NULL)";
@@ -1051,6 +1049,9 @@ int dbutils_settings_init (sqlite3 *db, void *cloudsync_data, sqlite3_context *c
      */
     
     return SQLITE_OK;
+    
+abort:
+    return rc;
 }
 
 int dbutils_update_schema_hash(sqlite3 *db, uint64_t *hash) {
