@@ -40,6 +40,9 @@ db_int64 cloudsync_dbversion (cloudsync_context *data);
 void cloudsync_update_schema_hash (cloudsync_context *data);
 int cloudsync_dbversion_check_uptodate (cloudsync_context *data);
 
+int cloudsync_begin_alter (cloudsync_context *data, const char *table_name);
+int cloudsync_commit_alter (cloudsync_context *data, const char *table_name);
+
 void *cloudsync_db (cloudsync_context *data);
 void *cloudsync_dbcontext (cloudsync_context *data);
 void cloudsync_set_db (cloudsync_context *data, void *value);

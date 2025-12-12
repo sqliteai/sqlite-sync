@@ -99,7 +99,7 @@ char *dbmem_mprintf(const char *format, ...);
 void dbmem_free (void *ptr);
 db_uint64 dbmem_size (void *ptr);
 
-int database_pk_names (dbvm_t *vm, const char *table_name, char ***names, int *count);
+int database_pk_names (db_t *db, const char *table_name, char ***names, int *count);
 char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta);
 
 

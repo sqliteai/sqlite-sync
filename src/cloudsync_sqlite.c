@@ -52,10 +52,6 @@ int local_mark_delete_meta (cloudsync_table_context *table, const char *pk, size
 int local_drop_meta (cloudsync_table_context *table, const char *pk, size_t pklen);
 int local_update_move_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *pk2, size_t pklen2, db_int64 db_version);
 
-
-
-int cloudsync_finalize_alter (sqlite3_context *context, cloudsync_context *data, cloudsync_table_context *table);
-
 void cloudsync_payload_encode_step (sqlite3_context *context, int argc, sqlite3_value **argv);
 void cloudsync_payload_encode_final (sqlite3_context *context);
 
@@ -675,122 +671,35 @@ void dbsync_init1 (sqlite3_context *context, int argc, sqlite3_value **argv) {
 // MARK: -
 
 void dbsync_begin_alter (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    DEBUG_FUNCTION("cloudsync_begin_alter");
-    char *errmsg = NULL;
-    char **result = NULL;
-    
+    DEBUG_FUNCTION("dbsync_begin_alter");
+     
+    //retrieve table argument
     const char *table_name = (const char *)database_value_text(argv[0]);
     
-    // get database reference
-    sqlite3 *db = sqlite3_context_db_handle(context);
-    
-    // retrieve global context
+    // retrieve context
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     
-    // init cloudsync_settings
-    if (cloudsync_context_init(data, db, context) == NULL) {
-        sqlite3_result_error(context, "Unable to init the cloudsync context.", -1);
-        sqlite3_result_error_code(context, SQLITE_MISUSE);
-        return;
-    }
-    
-    // create a savepoint to manage the alter operations as a transaction
-    int rc = database_exec(db, "SAVEPOINT cloudsync_alter;");
-    if (rc != SQLITE_OK) {
-        sqlite3_result_error(context, "Unable to create cloudsync_alter savepoint.", -1);
+    int rc = cloudsync_begin_alter(data, table_name);
+    if (rc != DBRES_OK) {
+        sqlite3_result_error(context, cloudsync_errmsg(data), -1);
         sqlite3_result_error_code(context, rc);
-        goto rollback_begin_alter;
     }
-    
-    cloudsync_table_context *table = table_lookup(data, table_name);
-    if (!table) {
-        dbutils_set_error(context, "Unable to find table %s", table_name);
-        sqlite3_result_error_code(context, SQLITE_MISUSE);
-        goto rollback_begin_alter;
-    }
-    
-    int nrows, ncols;
-    char *sql = cloudsync_memory_mprintf("SELECT name FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
-    rc = sqlite3_get_table(db, sql, &result, &nrows, &ncols, &errmsg);
-    cloudsync_memory_free(sql);
-    if (errmsg || ncols != 1 || nrows != table_count_pks(table)) {
-        dbutils_set_error(context, "Unable to get primary keys for table %s (%s)", table_name, errmsg);
-        sqlite3_result_error_code(context, SQLITE_MISUSE);
-        goto rollback_begin_alter;
-    }
-    
-    // drop original triggers
-    dbutils_delete_triggers(db, table_name);
-    if (rc != SQLITE_OK) {
-        dbutils_set_error(context, "Unable to delete triggers for table %s in cloudsync_begin_alter.", table_name);
-        sqlite3_result_error_code(context, rc);
-        goto rollback_begin_alter;
-    }
-    
-    table_set_pknames(table, result);
-    return;
-    
-rollback_begin_alter:
-    database_exec(db, "ROLLBACK TO cloudsync_alter; RELEASE cloudsync_alter;");
-
-    sqlite3_free_table(result);
-    sqlite3_free(errmsg);
 }
 
 void dbsync_commit_alter (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_commit_alter");
     
+    //retrieve table argument
     const char *table_name = (const char *)database_value_text(argv[0]);
-    cloudsync_table_context *table = NULL;
     
-    // get database reference
-    sqlite3 *db = sqlite3_context_db_handle(context);
-    
-    // retrieve global context
+    // retrieve context
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     
-    // init cloudsync_settings
-    if (cloudsync_context_init(data, db, context) == NULL) {
-        dbutils_set_error(context, "Unable to init the cloudsync context.");
-        sqlite3_result_error_code(context, SQLITE_MISUSE);
-        goto rollback_finalize_alter;
-    }
-    
-    table = table_lookup(data, table_name);
-    if (!table || !table_pknames(table)) {
-        dbutils_set_error(context, "Unable to find table context.");
-        sqlite3_result_error_code(context, SQLITE_MISUSE);
-        goto rollback_finalize_alter;
-    }
-    
-    int rc = cloudsync_finalize_alter(context, data, table);
-    if (rc != SQLITE_OK) goto rollback_finalize_alter;
-    
-    // the table is outdated, delete it and it will be reloaded in the cloudsync_init_internal
-    table_remove(data, table);
-    table_free(table);
-    table = NULL;
-        
-    // init again cloudsync for the table
-    table_algo algo_current = dbutils_table_settings_get_algo(db, table_name);
-    if (algo_current == table_algo_none) algo_current = dbutils_table_settings_get_algo(db, "*");
-    rc = cloudsync_init_table(data, table_name, crdt_algo_name(algo_current), true);
-    if (rc != SQLITE_OK) goto rollback_finalize_alter;
-
-    // release savepoint
-    rc = database_exec(db, "RELEASE cloudsync_alter;");
-    if (rc != SQLITE_OK) {
-        dbutils_set_error(context, database_errmsg(db));
+    int rc = cloudsync_commit_alter(data, table_name);
+    if (rc != DBRES_OK) {
+        sqlite3_result_error(context, cloudsync_errmsg(data), -1);
         sqlite3_result_error_code(context, rc);
-        goto rollback_finalize_alter;
     }
-    
-    cloudsync_update_schema_hash(data);
-    return;
-    
-rollback_finalize_alter:
-    database_exec(db, "ROLLBACK TO cloudsync_alter; RELEASE cloudsync_alter;");
-    if (table) table_set_pknames(table, NULL);
 }
 
 // MARK: - Payload -

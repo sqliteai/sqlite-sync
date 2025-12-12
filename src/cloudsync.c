@@ -391,18 +391,6 @@ db_int64 cloudsync_dbversion_next (cloudsync_context *data, db_int64 merging_ver
     return result;
 }
 
-// MARK: -
-
-void *cloudsync_get_auxdata (sqlite3_context *context) {
-    cloudsync_context *data = (context) ? (cloudsync_context *)sqlite3_user_data(context) : NULL;
-    return (data) ? data->aux_data : NULL;
-}
-
-void cloudsync_set_auxdata (sqlite3_context *context, void *xdata) {
-    cloudsync_context *data = (context) ? (cloudsync_context *)sqlite3_user_data(context) : NULL;
-    if (data) data->aux_data = xdata;
-}
-
 // MARK: - PK Context -
 
 char *cloudsync_pk_context_tbl (cloudsync_pk_decode_bind_context *ctx, int64_t *tbl_len) {
@@ -532,7 +520,13 @@ int cloudsync_set_error (cloudsync_context *data, const char *err_user, int err_
     if (err_user == NULL) {
         snprintf(data->errmsg, sizeof(data->errmsg), "%s", database_errmsg(db));
     } else {
-        snprintf(data->errmsg, sizeof(data->errmsg), "%s (%s)", err_user, database_errmsg(db));
+        const char *db_error = database_errmsg(db);
+        int rc = database_errcode(db);
+        if (rc == DBRES_OK) {
+            snprintf(data->errmsg, sizeof(data->errmsg), "%s", err_user);
+        } else {
+            snprintf(data->errmsg, sizeof(data->errmsg), "%s (%s)", err_user, db_error);
+        }
     }
     
     return err_code;
@@ -547,6 +541,12 @@ const char *cloudsync_errmsg (cloudsync_context *data) {
 }
 
 // MARK: - Table Utils -
+
+void table_pknames_free (char **names, int nrows) {
+    if (!names) return;
+    for (int i = 0; i < nrows; ++i) {dbmem_free(names[i]);}
+    dbmem_free(names);
+}
 
 char *table_build_values_sql (db_t *db, cloudsync_table_context *table) {
     char *sql = NULL;
@@ -726,8 +726,8 @@ void table_free (cloudsync_table_context *table) {
         }
     }
     
-    if (table->pk_name) sqlite3_free_table(table->pk_name);
     if (table->name) cloudsync_memory_free(table->name);
+    if (table->pk_name) table_pknames_free(table->pk_name, table->npks);
     if (table->meta_pkexists_stmt) database_finalize(table->meta_pkexists_stmt);
     if (table->meta_sentinel_update_stmt) database_finalize(table->meta_sentinel_update_stmt);
     if (table->meta_sentinel_insert_stmt) database_finalize(table->meta_sentinel_insert_stmt);
@@ -1124,8 +1124,7 @@ char **table_pknames (cloudsync_table_context *table) {
 }
 
 void table_set_pknames (cloudsync_table_context *table, char **pknames) {
-    // TODO: fix me
-    if (table->pk_name) sqlite3_free_table(table->pk_name);
+    table_pknames_free(table->pk_name, table->npks);
     table->pk_name = pknames;
 }
 
@@ -1621,7 +1620,66 @@ void cloudsync_rollback_hook (void *ctx) {
     data->seq = 0;
 }
 
-int cloudsync_finalize_alter (sqlite3_context *context, cloudsync_context *data, cloudsync_table_context *table) {
+int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
+    db_t *db = data->db;
+    
+    // init cloudsync_settings
+    if (cloudsync_context_init(data, db, NULL) == NULL) {
+        return cloudsync_set_error(data, "Unable to initialize cloudsync context", SQLITE_MISUSE);
+    }
+    
+    // lookup table
+    cloudsync_table_context *table = table_lookup(data, table_name);
+    if (!table) {
+        char buffer[1024];
+        snprintf(buffer, sizeof(buffer), "Unable to find table %s", table_name);
+        return cloudsync_set_error(data, buffer, SQLITE_MISUSE);
+    }
+    
+    // create a savepoint to manage the alter operations as a transaction
+    int rc = database_exec(db, "SAVEPOINT cloudsync_alter;");
+    if (rc != SQLITE_OK) {
+        return cloudsync_set_error(data, "Unable to create cloudsync_begin_alter savepoint", SQLITE_MISUSE);
+    }
+    
+    // retrieve primary key(s)
+    char **names = NULL;
+    int nrows = 0;
+    rc = database_pk_names(db, table_name, &names, &nrows);
+    if (rc != DBRES_OK) {
+        char buffer[1024];
+        snprintf(buffer, sizeof(buffer), "Unable to get primary keys for table %s", table_name);
+        cloudsync_set_error(data, buffer, SQLITE_MISUSE);
+        goto rollback_begin_alter;
+    }
+    
+    // sanity check the number of primary keys
+    if (nrows != table_count_pks(table)) {
+        char buffer[1024];
+        snprintf(buffer, sizeof(buffer), "Number of primary keys for table %s changed before ALTER", table_name);
+        cloudsync_set_error(data, buffer, SQLITE_MISUSE);
+        goto rollback_begin_alter;
+    }
+    
+    // drop original triggers
+    dbutils_delete_triggers(db, table_name);
+    if (rc != SQLITE_OK) {
+        char buffer[1024];
+        snprintf(buffer, sizeof(buffer), "Unable to delete triggers for table %s in cloudsync_begin_alter.", table_name);
+        cloudsync_set_error(data, buffer, SQLITE_ERROR);
+        goto rollback_begin_alter;
+    }
+    
+    table_set_pknames(table, names);
+    return DBRES_OK;
+    
+rollback_begin_alter:
+    database_exec(db, "ROLLBACK TO cloudsync_alter; RELEASE cloudsync_alter;");
+    if (names) table_pknames_free(names, nrows);
+    return rc;
+}
+
+int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *table) {
     // check if dbversion needed to be updated
     cloudsync_dbversion_check_uptodate(data);
 
@@ -1640,24 +1698,6 @@ int cloudsync_finalize_alter (sqlite3_context *context, cloudsync_context *data,
         goto finalize;
     }
     
-    /*
-    char *errmsg = NULL;
-    char **result = NULL;
-    int nrows, ncols;
-    char *sql = cloudsync_memory_mprintf("SELECT name FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table->name);
-    
-    sqlite3 *db = data->db;
-    int rc = sqlite3_get_table(db, sql, &result, &nrows, &ncols, NULL);
-    cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) {
-        DEBUG_SQLITE_ERROR(rc, "cloudsync_finalize_alter", db);
-        goto finalize;
-    } else if (errmsg || ncols != 1) {
-        rc = SQLITE_MISUSE;
-        goto finalize;
-    }
-    */
-    
     // check if there are differences
     bool pk_diff = (nrows != table->npks);
     if (!pk_diff) {
@@ -1668,20 +1708,6 @@ int cloudsync_finalize_alter (sqlite3_context *context, cloudsync_context *data,
             }
         }
     }
-    
-    /*
-    bool pk_diff = false;
-    if (nrows != table->npks) {
-        pk_diff = true;
-    } else {
-        for (int i=0; i<nrows; ++i) {
-            if (strcmp(table->pk_name[i], result[i]) != 0) {
-                pk_diff = true;
-                break;
-            }
-        }
-    }
-    */
     
     // TODO: FIX SQL
     if (pk_diff) {
@@ -1732,13 +1758,60 @@ int cloudsync_finalize_alter (sqlite3_context *context, cloudsync_context *data,
     // update key to be later used in cloudsync_dbversion_rebuild
     char buf[256];
     snprintf(buf, sizeof(buf), "%lld", data->db_version);
-    dbutils_settings_set_key_value(db, context, "pre_alter_dbversion", buf);
+    dbutils_settings_set_key_value(db, NULL, "pre_alter_dbversion", buf);
     
 finalize:
-    // free result
-    for (int i = 0; i < nrows; ++i) {dbmem_free(result[i]);}
-    dbmem_free(result);
+    table_pknames_free(result, nrows);
+    return rc;
+}
+
+int cloudsync_commit_alter (cloudsync_context *data, const char *table_name) {
+    db_t *db = data->db;
+    int rc = DBRES_MISUSE;
+    cloudsync_table_context *table = NULL;
     
+    // init cloudsync_settings
+    if (cloudsync_context_init(data, db, NULL) == NULL) {
+        cloudsync_set_error(data, "Unable to initialize cloudsync context", DBRES_MISUSE);
+        goto rollback_finalize_alter;
+    }
+    
+    // lookup table
+    table = table_lookup(data, table_name);
+    if (!table) {
+        char buffer[1024];
+        snprintf(buffer, sizeof(buffer), "Unable to find table %s", table_name);
+        cloudsync_set_error(data, buffer, DBRES_MISUSE);
+        goto rollback_finalize_alter;
+    }
+    
+    rc = cloudsync_finalize_alter(data, table);
+    if (rc != SQLITE_OK) goto rollback_finalize_alter;
+    
+    // the table is outdated, delete it and it will be reloaded in the cloudsync_init_internal
+    table_remove(data, table);
+    table_free(table);
+    table = NULL;
+        
+    // init again cloudsync for the table
+    table_algo algo_current = dbutils_table_settings_get_algo(db, table_name);
+    if (algo_current == table_algo_none) algo_current = dbutils_table_settings_get_algo(db, "*");
+    rc = cloudsync_init_table(data, table_name, crdt_algo_name(algo_current), true);
+    if (rc != SQLITE_OK) goto rollback_finalize_alter;
+
+    // release savepoint
+    rc = database_exec(db, "RELEASE cloudsync_alter;");
+    if (rc != SQLITE_OK) {
+        cloudsync_set_dberror(data);
+        goto rollback_finalize_alter;
+    }
+    
+    cloudsync_update_schema_hash(data);
+    return DBRES_OK;
+    
+rollback_finalize_alter:
+    database_exec(db, "ROLLBACK TO cloudsync_alter; RELEASE cloudsync_alter;");
+    if (table) table_set_pknames(table, NULL);
     return rc;
 }
 
