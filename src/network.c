@@ -881,8 +881,8 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
     }
 
     // disable cloudsync for all the previously enabled tables: cloudsync_cleanup('*')
-    // TODO: fix me because we disabled * from cloudsync_cleanup
-    rc = sqlite3_exec(db, "SELECT cloudsync_cleanup('*')", NULL, NULL, NULL);
+    cloudsync_context *xdata = (cloudsync_context *)sqlite3_user_data(context);
+    rc = cloudsync_cleanup_all(xdata);
     if (rc != SQLITE_OK) {
         errmsg = cloudsync_memory_mprintf("Unable to cleanup current cloudsync configuration. %s", sqlite3_errmsg(db));
         goto finalize;

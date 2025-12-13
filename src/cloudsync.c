@@ -218,10 +218,10 @@ int cloudsync_set_dberror (cloudsync_context *data);
 // MARK: - DBVM Utils -
 
 DBVM_VALUE dbvm_execute (dbvm_t *stmt, cloudsync_context *data) {
-    int rc = database_step(stmt);
+    int rc = databasevm_step(stmt);
     if (rc != DBRES_ROW && rc != DBRES_DONE) {
         if (data) DEBUG_DBERROR(rc, "stmt_execute", data->db);
-        database_reset(stmt);
+        databasevm_reset(stmt);
         return DBVM_VALUE_ERROR;
     }
     
@@ -245,7 +245,7 @@ DBVM_VALUE dbvm_execute (dbvm_t *stmt, cloudsync_context *data) {
         data->db_version = (rc == DBRES_DONE) ? CLOUDSYNC_MIN_DB_VERSION : database_column_int(stmt, 0);
     }
     
-    database_reset(stmt);
+    databasevm_reset(stmt);
     return result;
 }
 
@@ -254,11 +254,11 @@ int dbvm_count (dbvm_t *stmt, const char *value, size_t len, int type) {
     int rc = DBRES_OK;
     
     if (value) {
-        rc = (type == DBTYPE_TEXT) ? database_bind_text(stmt, 1, value, (int)len) : database_bind_blob(stmt, 1, value, len);
+        rc = (type == DBTYPE_TEXT) ? databasevm_bind_text(stmt, 1, value, (int)len) : databasevm_bind_blob(stmt, 1, value, len);
         if (rc != DBRES_OK) goto cleanup;
     }
 
-    rc = database_step(stmt);
+    rc = databasevm_step(stmt);
     if (rc == DBRES_DONE) {
         result = 0;
         rc = DBRES_OK;
@@ -269,15 +269,17 @@ int dbvm_count (dbvm_t *stmt, const char *value, size_t len, int type) {
     
 cleanup:
     //DEBUG_DBERROR(rc, "stmt_count", sqlite3_db_handle(stmt));
-    database_reset(stmt);
+    databasevm_reset(stmt);
     return result;
 }
 
 dbvm_t *dbvm_reset (dbvm_t *stmt) {
-    database_clear_bindings(stmt);
-    database_reset(stmt);
+    databasevm_clear_bindings(stmt);
+    databasevm_reset(stmt);
     return NULL;
 }
+
+// MARK: - Settings -
 
 // MARK: - Database Version -
 
@@ -318,7 +320,7 @@ char *cloudsync_dbversion_build_query (db_t *db) {
 
 int cloudsync_dbversion_rebuild (db_t *db, cloudsync_context *data) {
     if (data->db_version_stmt) {
-        database_finalize(data->db_version_stmt);
+        databasevm_finalize(data->db_version_stmt);
         data->db_version_stmt = NULL;
     }
     
@@ -689,13 +691,13 @@ void table_free (cloudsync_table_context *table) {
         }
         if (table->col_merge_stmt) {
             for (int i=0; i<table->ncols; ++i) {
-                database_finalize(table->col_merge_stmt[i]);
+                databasevm_finalize(table->col_merge_stmt[i]);
             }
             cloudsync_memory_free(table->col_merge_stmt);
         }
         if (table->col_value_stmt) {
             for (int i=0; i<table->ncols; ++i) {
-                database_finalize(table->col_value_stmt[i]);
+                databasevm_finalize(table->col_value_stmt[i]);
             }
             cloudsync_memory_free(table->col_value_stmt);
         }
@@ -706,22 +708,22 @@ void table_free (cloudsync_table_context *table) {
     
     if (table->name) cloudsync_memory_free(table->name);
     if (table->pk_name) table_pknames_free(table->pk_name, table->npks);
-    if (table->meta_pkexists_stmt) database_finalize(table->meta_pkexists_stmt);
-    if (table->meta_sentinel_update_stmt) database_finalize(table->meta_sentinel_update_stmt);
-    if (table->meta_sentinel_insert_stmt) database_finalize(table->meta_sentinel_insert_stmt);
-    if (table->meta_row_insert_update_stmt) database_finalize(table->meta_row_insert_update_stmt);
-    if (table->meta_row_drop_stmt) database_finalize(table->meta_row_drop_stmt);
-    if (table->meta_update_move_stmt) database_finalize(table->meta_update_move_stmt);
-    if (table->meta_local_cl_stmt) database_finalize(table->meta_local_cl_stmt);
-    if (table->meta_winner_clock_stmt) database_finalize(table->meta_winner_clock_stmt);
-    if (table->meta_merge_delete_drop) database_finalize(table->meta_merge_delete_drop);
-    if (table->meta_zero_clock_stmt) database_finalize(table->meta_zero_clock_stmt);
-    if (table->meta_col_version_stmt) database_finalize(table->meta_col_version_stmt);
-    if (table->meta_site_id_stmt) database_finalize(table->meta_site_id_stmt);
+    if (table->meta_pkexists_stmt) databasevm_finalize(table->meta_pkexists_stmt);
+    if (table->meta_sentinel_update_stmt) databasevm_finalize(table->meta_sentinel_update_stmt);
+    if (table->meta_sentinel_insert_stmt) databasevm_finalize(table->meta_sentinel_insert_stmt);
+    if (table->meta_row_insert_update_stmt) databasevm_finalize(table->meta_row_insert_update_stmt);
+    if (table->meta_row_drop_stmt) databasevm_finalize(table->meta_row_drop_stmt);
+    if (table->meta_update_move_stmt) databasevm_finalize(table->meta_update_move_stmt);
+    if (table->meta_local_cl_stmt) databasevm_finalize(table->meta_local_cl_stmt);
+    if (table->meta_winner_clock_stmt) databasevm_finalize(table->meta_winner_clock_stmt);
+    if (table->meta_merge_delete_drop) databasevm_finalize(table->meta_merge_delete_drop);
+    if (table->meta_zero_clock_stmt) databasevm_finalize(table->meta_zero_clock_stmt);
+    if (table->meta_col_version_stmt) databasevm_finalize(table->meta_col_version_stmt);
+    if (table->meta_site_id_stmt) databasevm_finalize(table->meta_site_id_stmt);
     
-    if (table->real_col_values_stmt) database_finalize(table->real_col_values_stmt);
-    if (table->real_merge_delete_stmt) database_finalize(table->real_merge_delete_stmt);
-    if (table->real_merge_sentinel_stmt) database_finalize(table->real_merge_sentinel_stmt);
+    if (table->real_col_values_stmt) databasevm_finalize(table->real_col_values_stmt);
+    if (table->real_merge_delete_stmt) databasevm_finalize(table->real_merge_delete_stmt);
+    if (table->real_merge_sentinel_stmt) databasevm_finalize(table->real_merge_sentinel_stmt);
     
     cloudsync_memory_free(table);
 }
@@ -1116,13 +1118,13 @@ db_int64 merge_get_local_cl (cloudsync_table_context *table, const char *pk, int
     dbvm_t *vm = table->meta_local_cl_stmt;
     db_int64 result = -1;
     
-    int rc = database_bind_blob(vm, 1, (const void *)pk, pklen);
+    int rc = databasevm_bind_blob(vm, 1, (const void *)pk, pklen);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_blob(vm, 2, (const void *)pk, pklen);
+    rc = databasevm_bind_blob(vm, 2, (const void *)pk, pklen);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc == DBRES_ROW) result = database_column_int(vm, 0);
     else if (rc == DBRES_DONE) result = 0;
     
@@ -1135,13 +1137,13 @@ cleanup:
 int merge_get_col_version (cloudsync_table_context *table, const char *col_name, const char *pk, int pklen, db_int64 *version) {
     dbvm_t *vm = table->meta_col_version_stmt;
     
-    int rc = database_bind_blob(vm, 1, (const void *)pk, pklen);
+    int rc = databasevm_bind_blob(vm, 1, (const void *)pk, pklen);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_text(vm, 2, col_name, -1);
+    rc = databasevm_bind_text(vm, 2, col_name, -1);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc == DBRES_ROW) {
         *version = database_column_int(vm, 0);
         rc = DBRES_OK;
@@ -1157,35 +1159,35 @@ int merge_set_winner_clock (cloudsync_context *data, cloudsync_table_context *ta
     
     // get/set site_id
     dbvm_t *vm = data->getset_siteid_stmt;
-    int rc = database_bind_blob(vm, 1, (const void *)site_id, site_len);
+    int rc = databasevm_bind_blob(vm, 1, (const void *)site_id, site_len);
     if (rc != DBRES_OK) goto cleanup_merge;
     
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc != DBRES_ROW) goto cleanup_merge;
     
     int64_t ord = database_column_int(vm, 0);
     dbvm_reset(vm);
     
     vm = table->meta_winner_clock_stmt;
-    rc = database_bind_blob(vm, 1, (const void *)pk, pk_len);
+    rc = databasevm_bind_blob(vm, 1, (const void *)pk, pk_len);
     if (rc != DBRES_OK) goto cleanup_merge;
     
-    rc = database_bind_text(vm, 2, (colname) ? colname : CLOUDSYNC_TOMBSTONE_VALUE, -1);
+    rc = databasevm_bind_text(vm, 2, (colname) ? colname : CLOUDSYNC_TOMBSTONE_VALUE, -1);
     if (rc != DBRES_OK) goto cleanup_merge;
     
-    rc = database_bind_int(vm, 3, col_version);
+    rc = databasevm_bind_int(vm, 3, col_version);
     if (rc != DBRES_OK) goto cleanup_merge;
     
-    rc = database_bind_int(vm, 4, db_version);
+    rc = databasevm_bind_int(vm, 4, db_version);
     if (rc != DBRES_OK) goto cleanup_merge;
     
-    rc = database_bind_int(vm, 5, seq);
+    rc = databasevm_bind_int(vm, 5, seq);
     if (rc != DBRES_OK) goto cleanup_merge;
     
-    rc = database_bind_int(vm, 6, ord);
+    rc = databasevm_bind_int(vm, 6, ord);
     if (rc != DBRES_OK) goto cleanup_merge;
     
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc == DBRES_ROW) {
         *rowid = database_column_int(vm, 0);
         rc = DBRES_OK;
@@ -1214,8 +1216,8 @@ int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, c
     
     // bind value
     if (col_value) {
-        rc = database_bind_value(vm, table->npks+1, col_value);
-        if (rc == DBRES_OK) rc = database_bind_value(vm, table->npks+2, col_value);
+        rc = databasevm_bind_value(vm, table->npks+1, col_value);
+        if (rc == DBRES_OK) rc = databasevm_bind_value(vm, table->npks+2, col_value);
         if (rc != DBRES_OK) {
             cloudsync_set_dberror(data);
             dbvm_reset(vm);
@@ -1232,7 +1234,7 @@ int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, c
     // the trick is to disable that trigger before executing the statement
     if (table->algo == table_algo_crdt_gos) table->enabled = 0;
     SYNCBIT_SET(data);
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     DEBUG_MERGE("merge_insert(%02x%02x): %s (%d)", data->site_id[UUID_LEN-2], data->site_id[UUID_LEN-1], database_sql(vm), rc);
     dbvm_reset(vm);
     SYNCBIT_RESET(data);
@@ -1263,7 +1265,7 @@ int merge_delete (cloudsync_context *data, cloudsync_table_context *table, const
     
     // perform real operation and disable triggers
     SYNCBIT_SET(data);
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     DEBUG_MERGE("merge_delete(%02x%02x): %s (%d)", data->site_id[UUID_LEN-2], data->site_id[UUID_LEN-1], database_sql(vm), rc);
     dbvm_reset(vm);
     SYNCBIT_RESET(data);
@@ -1279,8 +1281,8 @@ int merge_delete (cloudsync_context *data, cloudsync_table_context *table, const
     // drop clocks _after_ setting the winner clock so we don't lose track of the max db_version!!
     // this must never come before `set_winner_clock`
     vm = table->meta_merge_delete_drop;
-    rc = database_bind_blob(vm, 1, (const void *)pk, pklen);
-    if (rc == DBRES_OK) rc = database_step(vm);
+    rc = databasevm_bind_blob(vm, 1, (const void *)pk, pklen);
+    if (rc == DBRES_OK) rc = databasevm_step(vm);
     dbvm_reset(vm);
     
     if (rc == DBRES_DONE) rc = DBRES_OK;
@@ -1291,13 +1293,13 @@ int merge_delete (cloudsync_context *data, cloudsync_table_context *table, const
 int merge_zeroclock_on_resurrect(cloudsync_table_context *table, db_int64 db_version, const char *pk, int pklen) {
     dbvm_t *vm = table->meta_zero_clock_stmt;
     
-    int rc = database_bind_int(vm, 1, db_version);
+    int rc = databasevm_bind_int(vm, 1, db_version);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_blob(vm, 2, (const void *)pk, pklen);
+    rc = databasevm_bind_blob(vm, 2, (const void *)pk, pklen);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
@@ -1342,7 +1344,7 @@ int merge_did_cid_win (cloudsync_context *data, cloudsync_table_context *table, 
         
     // execute vm
     dbvalue_t *local_value;
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc == DBRES_DONE) {
         // meta entry exists but the actual value is missing
         // we should allow the value_compare function to make a decision
@@ -1369,13 +1371,13 @@ int merge_did_cid_win (cloudsync_context *data, cloudsync_table_context *table, 
     
     // values are the same and merge_equal_values is true
     vm = table->meta_site_id_stmt;
-    rc = database_bind_blob(vm, 1, (const void *)pk, pklen);
+    rc = databasevm_bind_blob(vm, 1, (const void *)pk, pklen);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_text(vm, 2, col_name, -1);
+    rc = databasevm_bind_text(vm, 2, col_name, -1);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc == DBRES_ROW) {
         const void *local_site_id = database_column_blob(vm, 0);
         ret = memcmp(site_id, local_site_id, site_len);
@@ -1410,7 +1412,7 @@ int merge_sentinel_only_insert (cloudsync_context *data, cloudsync_table_context
     
     // perform real operation and disable triggers
     SYNCBIT_SET(data);
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     dbvm_reset(vm);
     SYNCBIT_RESET(data);
     if (rc == DBRES_DONE) rc = DBRES_OK;
@@ -1829,11 +1831,11 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     for (int i=0; i<table->ncols; ++i) {
         char *col_name = table->col_name[i];
 
-        rc = database_bind_text(vm, 1, col_name, -1);
+        rc = databasevm_bind_text(vm, 1, col_name, -1);
         if (rc != DBRES_OK) goto finalize;
         
         while (1) {
-            rc = database_step(vm);
+            rc = databasevm_step(vm);
             if (rc == DBRES_ROW) {
                 const char *pk = (const char *)database_column_text(vm, 0);
                 size_t pklen = strlen(pk);
@@ -1847,14 +1849,14 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
         }
         if (rc != DBRES_OK) goto finalize;
 
-        database_reset(vm);
+        databasevm_reset(vm);
     }
     
 finalize:
     if (rc != DBRES_OK) DEBUG_ALWAYS("cloudsync_refill_metatable error: %s", database_errmsg(db));
     if (pkclause_identifiers) cloudsync_memory_free(pkclause_identifiers);
     if (pkdecode) cloudsync_memory_free(pkdecode);
-    if (vm) database_finalize(vm);
+    if (vm) databasevm_finalize(vm);
     return rc;
 }
 
@@ -1864,21 +1866,21 @@ int local_update_sentinel (cloudsync_table_context *table, const char *pk, size_
     dbvm_t *vm = table->meta_sentinel_update_stmt;
     if (!vm) return -1;
     
-    int rc = database_bind_int(vm, 1, db_version);
+    int rc = databasevm_bind_int(vm, 1, db_version);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_int(vm, 2, seq);
+    rc = databasevm_bind_int(vm, 2, seq);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_blob(vm, 3, pk, (int)pklen);
+    rc = databasevm_bind_blob(vm, 3, pk, (int)pklen);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
     DEBUG_DBERROR(rc, "local_update_sentinel", table->context->db);
-    database_reset(vm);
+    databasevm_reset(vm);
     return rc;
 }
 
@@ -1886,27 +1888,27 @@ int local_mark_insert_sentinel_meta (cloudsync_table_context *table, const char 
     dbvm_t *vm = table->meta_sentinel_insert_stmt;
     if (!vm) return -1;
     
-    int rc = database_bind_blob(vm, 1, pk, (int)pklen);
+    int rc = databasevm_bind_blob(vm, 1, pk, (int)pklen);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_int(vm, 2, db_version);
+    rc = databasevm_bind_int(vm, 2, db_version);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_int(vm, 3, seq);
+    rc = databasevm_bind_int(vm, 3, seq);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_int(vm, 4, db_version);
+    rc = databasevm_bind_int(vm, 4, db_version);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_int(vm, 5, seq);
+    rc = databasevm_bind_int(vm, 5, seq);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
     DEBUG_DBERROR(rc, "local_insert_sentinel", table->context->db);
-    database_reset(vm);
+    databasevm_reset(vm);
     return rc;
 }
 
@@ -1915,33 +1917,33 @@ int local_mark_insert_or_update_meta_impl (cloudsync_table_context *table, const
     dbvm_t *vm = table->meta_row_insert_update_stmt;
     if (!vm) return -1;
     
-    int rc = database_bind_blob(vm, 1, pk, pklen);
+    int rc = databasevm_bind_blob(vm, 1, pk, pklen);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_text(vm, 2, (col_name) ? col_name : CLOUDSYNC_TOMBSTONE_VALUE, -1);
+    rc = databasevm_bind_text(vm, 2, (col_name) ? col_name : CLOUDSYNC_TOMBSTONE_VALUE, -1);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_int(vm, 3, col_version);
+    rc = databasevm_bind_int(vm, 3, col_version);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_int(vm, 4, db_version);
+    rc = databasevm_bind_int(vm, 4, db_version);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_int(vm, 5, seq);
+    rc = databasevm_bind_int(vm, 5, seq);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_int(vm, 6, db_version);
+    rc = databasevm_bind_int(vm, 6, db_version);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_bind_int(vm, 7, seq);
+    rc = databasevm_bind_int(vm, 7, seq);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
     DEBUG_DBERROR(rc, "local_insert_or_update", table->context->db);
-    database_reset(vm);
+    databasevm_reset(vm);
     return rc;
 }
 
@@ -1957,15 +1959,15 @@ int local_drop_meta (cloudsync_table_context *table, const char *pk, size_t pkle
     dbvm_t *vm = table->meta_row_drop_stmt;
     if (!vm) return -1;
     
-    int rc = database_bind_blob(vm, 1, pk, pklen);
+    int rc = databasevm_bind_blob(vm, 1, pk, pklen);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
     DEBUG_DBERROR(rc, "local_drop_meta", table->context->db);
-    database_reset(vm);
+    databasevm_reset(vm);
     return rc;
 }
 
@@ -1994,23 +1996,23 @@ int local_update_move_meta (cloudsync_table_context *table, const char *pk, size
     if (!vm) return -1;
     
     // new primary key
-    int rc = database_bind_blob(vm, 1, pk, pklen);
+    int rc = databasevm_bind_blob(vm, 1, pk, pklen);
     if (rc != DBRES_OK) goto cleanup;
     
     // new db_version
-    rc = database_bind_int(vm, 2, db_version);
+    rc = databasevm_bind_int(vm, 2, db_version);
     if (rc != DBRES_OK) goto cleanup;
     
     // old primary key
-    rc = database_bind_blob(vm, 3, pk2, pklen2);
+    rc = databasevm_bind_blob(vm, 3, pk2, pklen2);
     if (rc != DBRES_OK) goto cleanup;
     
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
     DEBUG_DBERROR(rc, "local_update_move_meta", table->context->db);
-    database_reset(vm);
+    databasevm_reset(vm);
     return rc;
 }
 
@@ -2260,7 +2262,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     for (uint32_t i=0; i<nrows; ++i) {
         size_t seek = 0;
         pk_decode((char *)buffer, blen, ncols, &seek, cloudsync_pk_decode_bind_callback, &decoded_context);
-        // n is the pk_decode return value, I don't think I should assert here because in any case the next database_step would fail
+        // n is the pk_decode return value, I don't think I should assert here because in any case the next databasevm_step would fail
         // assert(n == ncols);
                 
         bool approved = true;
@@ -2299,7 +2301,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         }
         
         if (approved) {
-            rc = database_step(vm);
+            rc = databasevm_step(vm);
             if (rc != DBRES_DONE) {
                 // don't "break;", the error can be due to a RLS policy.
                 // in case of error we try to apply the following changes
@@ -2346,7 +2348,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     }
 
     // cleanup vm
-    if (vm) database_finalize(vm);
+    if (vm) databasevm_finalize(vm);
     
     // cleanup memory
     if (clone) cloudsync_memory_free(clone);
@@ -2490,6 +2492,21 @@ int cloudsync_cleanup (cloudsync_context *data, const char *table_name) {
     return DBRES_OK;
 }
 
+int cloudsync_cleanup_all (cloudsync_context *data) {
+    // cleanup all tables in the data context
+    while (data->tables_count > 0) {
+        cloudsync_table_context *t = data->tables[data->tables_count - 1];
+        table_remove(data, t);
+        table_free(t);
+    }
+    
+    // cleanup database
+    cloudsync_reset_siteid(data);
+    dbutils_settings_cleanup(data->db);
+    
+    return DBRES_OK;
+}
+
 int cloudsync_terminate (cloudsync_context *data) {
     // can't use for/loop here because data->tables_count is changed by table_remove
     while (data->tables_count > 0) {
@@ -2498,10 +2515,10 @@ int cloudsync_terminate (cloudsync_context *data) {
         table_free(t);
     }
     
-    if (data->schema_version_stmt) database_finalize(data->schema_version_stmt);
-    if (data->data_version_stmt) database_finalize(data->data_version_stmt);
-    if (data->db_version_stmt) database_finalize(data->db_version_stmt);
-    if (data->getset_siteid_stmt) database_finalize(data->getset_siteid_stmt);
+    if (data->schema_version_stmt) databasevm_finalize(data->schema_version_stmt);
+    if (data->data_version_stmt) databasevm_finalize(data->data_version_stmt);
+    if (data->db_version_stmt) databasevm_finalize(data->db_version_stmt);
+    if (data->getset_siteid_stmt) databasevm_finalize(data->getset_siteid_stmt);
     
     data->schema_version_stmt = NULL;
     data->data_version_stmt = NULL;

@@ -84,23 +84,23 @@ int pk_decode_bind_callback (void *xdata, int index, int type, int64_t ival, dou
     int rc = DBRES_OK;
     switch (type) {
         case DBTYPE_INTEGER:
-            rc = database_bind_int(xdata, index+1, ival);
+            rc = databasevm_bind_int(xdata, index+1, ival);
             break;
         
         case DBTYPE_FLOAT:
-            rc = database_bind_double(xdata, index+1, dval);
+            rc = databasevm_bind_double(xdata, index+1, dval);
             break;
             
         case DBTYPE_NULL:
-            rc = database_bind_null(xdata, index+1);
+            rc = databasevm_bind_null(xdata, index+1);
             break;
             
         case DBTYPE_TEXT:
-            rc = database_bind_text(xdata, index+1, pval, (int)ival);
+            rc = databasevm_bind_text(xdata, index+1, pval, (int)ival);
             break;
             
         case DBTYPE_BLOB:
-            rc = database_bind_blob(xdata, index+1, (const void *)pval, ival);
+            rc = databasevm_bind_blob(xdata, index+1, (const void *)pval, ival);
             break;
     }
     

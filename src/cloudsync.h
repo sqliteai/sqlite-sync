@@ -30,6 +30,8 @@ void cloudsync_context_free (void *ctx);
 
 // OK
 int cloudsync_cleanup (cloudsync_context *data, const char *table_name);
+int cloudsync_cleanup_all (cloudsync_context *data);
+
 int cloudsync_init_table (cloudsync_context *data, const char *table_name, const char *algo_name, bool skip_int_pk_check);
 
 int cloudsync_terminate (cloudsync_context *data);

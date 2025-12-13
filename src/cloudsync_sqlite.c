@@ -210,7 +210,7 @@ void dbsync_col_value (sqlite3_context *context, int argc, sqlite3_value **argv)
     if (rc < 0) goto cleanup;
     
     // execute vm
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc == SQLITE_DONE) {
         rc = SQLITE_OK;
         sqlite3_result_text(context, CLOUDSYNC_RLS_RESTRICTED_VALUE, -1, SQLITE_STATIC);
@@ -225,7 +225,7 @@ cleanup:
         sqlite3 *db = sqlite3_context_db_handle(context);
         sqlite3_result_error(context, database_errmsg(db), -1);
     }
-    database_reset(vm);
+    databasevm_reset(vm);
 }
 
 void dbsync_pk_encode (sqlite3_context *context, int argc, sqlite3_value **argv) {

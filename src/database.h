@@ -41,36 +41,38 @@ typedef void dbcontext_t;
 #endif
 
 // GENERAL
-int database_exec (db_t *db, const char *sql);  // SQLITE_OK
-int database_exec_callback (db_t *db, const char *sql, int (*callback)(void *xdata, int argc, char **values, char **names), void *xdata); // SQLITE_OK and SQLITE_ABORT
-const char *database_errmsg (db_t *db);
-int database_errcode (db_t *db);
-bool database_in_transaction (db_t *db);
+typedef int (*database_exec_cb) (void *xdata, int argc, char **values, char **names);
 
-// VM and BINDING
-int  database_prepare (db_t *db, const char *sql, dbvm_t **vm, int flags);          // SQLITE_OK
-int  database_step (dbvm_t *vm);                                                    // SQLITE_OK, SQLITE_DONE, SQLITE_ROW
-void database_finalize (dbvm_t *vm);                                                // NO RET
-void database_reset (dbvm_t *vm);                                                   // NO RET
-void database_clear_bindings (dbvm_t *vm);                                          // NO RET
-const char *database_sql (dbvm_t *vm);
-
-int database_bind_blob (dbvm_t *vm, int index, const void *value, db_uint64 size);  // SQLITE_OK
-int database_bind_double (dbvm_t *vm, int index, double value);                     // SQLITE_OK
-int database_bind_int (dbvm_t *vm, int index, db_int64 value);                      // SQLITE_OK
-int database_bind_null (dbvm_t *vm, int index);                                     // SQLITE_OK
-int database_bind_text (dbvm_t *vm, int index, const char *value, int size);        // SQLITE_OK
-int database_bind_value (dbvm_t *vm, int index, dbvalue_t *value);                  // SQLITE_OK
-
+int database_exec (db_t *db, const char *sql);
+int database_exec_callback (db_t *db, const char *sql, database_exec_cb, void *xdata);
 int database_begin_savepoint (db_t *db, const char *savepoint_name);
 int database_commit_savepoint (db_t *db, const char *savepoint_name);
 int database_rollback_savepoint (db_t *db, const char *savepoint_name);
+int database_errcode (db_t *db);
+bool database_in_transaction (db_t *db);
+const char *database_errmsg (db_t *db);
+
+// VM
+int  database_prepare (db_t *db, const char *sql, dbvm_t **vm, int flags);
+int  databasevm_step (dbvm_t *vm);
+void databasevm_finalize (dbvm_t *vm);
+void databasevm_reset (dbvm_t *vm);
+void databasevm_clear_bindings (dbvm_t *vm);
+const char *databasevm_sql (dbvm_t *vm);
+
+// BINDING
+int databasevm_bind_blob (dbvm_t *vm, int index, const void *value, db_uint64 size);
+int databasevm_bind_double (dbvm_t *vm, int index, double value);
+int databasevm_bind_int (dbvm_t *vm, int index, db_int64 value);
+int databasevm_bind_null (dbvm_t *vm, int index);
+int databasevm_bind_text (dbvm_t *vm, int index, const char *value, int size);
+int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value);
 
 // VALUE
 const void *database_value_blob (dbvalue_t *value);
 double database_value_double (dbvalue_t *value);
 db_int64 database_value_int (dbvalue_t *value);
-const unsigned char *database_value_text (dbvalue_t *value);
+const char *database_value_text (dbvalue_t *value);
 int database_value_bytes (dbvalue_t *value);
 int database_value_type (dbvalue_t *value);
 void database_value_free (dbvalue_t *value);
@@ -80,16 +82,12 @@ void *database_value_dup (dbvalue_t *value);
 const void *database_column_blob (dbvm_t *vm, int index);
 double database_column_double (dbvm_t *vm, int index);
 db_int64 database_column_int (dbvm_t *vm, int index);
-const unsigned char *database_column_text (dbvm_t *vm, int index);
+const char *database_column_text (dbvm_t *vm, int index);
 dbvalue_t *database_column_value (dbvm_t *vm, int index);
 int database_column_bytes (dbvm_t *vm, int index);
 int database_column_type (dbvm_t *vm, int index);
 
-// CONTEXT
-void *database_user_data (dbcontext_t *context);
-void database_result_error (dbcontext_t *context, const char *errmsg);
-void database_result_error_code (dbcontext_t *context, int errcode);
-
+// RESULT
 void database_result_blob (dbcontext_t *context, const void *value, db_uint64 size, void(*)(void*));
 void database_result_double (dbcontext_t *context, double value);
 void database_result_int (dbcontext_t *context, db_int64 value);

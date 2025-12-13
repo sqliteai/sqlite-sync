@@ -23,6 +23,20 @@ SQLITE_EXTENSION_INIT3
 
 #define CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY    "cloudsync_payload_apply_callback"
 
+// MARK: - SQL -
+
+char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta) {
+    char *sql = NULL;
+    
+    if (is_meta) {
+        sql = sqlite3_snprintf(bsize, buffer, "DROP TABLE IF EXISTS \"%w_cloudsync\";", table_name);
+    } else {
+        sql = sqlite3_snprintf(bsize, buffer, "DROP TABLE IF EXISTS \"%w\";", table_name);
+    }
+    
+    return sql;
+}
+
 // MARK: GENERAL -
 
 int database_exec (db_t *db, const char *sql) {
@@ -46,29 +60,29 @@ bool database_in_transaction (db_t *db) {
     return in_transaction;
 }
 
-// MARK: - VM and BINDING -
+// MARK: - VM -
 
 int database_prepare (db_t *db, const char *sql, dbvm_t **vm, int flags) {
     return sqlite3_prepare_v3((sqlite3 *)db, sql, -1, flags, (sqlite3_stmt **)vm, NULL);
 }
 
-int database_step (dbvm_t *vm) {
+int databasevm_step (dbvm_t *vm) {
     return sqlite3_step((sqlite3_stmt *)vm);
 }
 
-void database_finalize (dbvm_t *vm) {
+void databasevm_finalize (dbvm_t *vm) {
     sqlite3_finalize((sqlite3_stmt *)vm);
 }
 
-void database_reset (dbvm_t *vm) {
+void databasevm_reset (dbvm_t *vm) {
     sqlite3_reset((sqlite3_stmt *)vm);
 }
 
-void database_clear_bindings (dbvm_t *vm) {
+void databasevm_clear_bindings (dbvm_t *vm) {
     sqlite3_clear_bindings((sqlite3_stmt *)vm);
 }
 
-const char *database_sql (dbvm_t *vm) {
+const char *databasevm_sql (dbvm_t *vm) {
     return sqlite3_expanded_sql((sqlite3_stmt *)vm);
 }
 
@@ -145,44 +159,30 @@ cleanup:
     return rc;
 }
 
-// MARK: -
+// MARK: - BINDING -
 
-int database_bind_blob (dbvm_t *vm, int index, const void *value, db_uint64 size) {
+int databasevm_bind_blob (dbvm_t *vm, int index, const void *value, db_uint64 size) {
     return sqlite3_bind_blob64((sqlite3_stmt *)vm, index, value, size, SQLITE_STATIC);
 }
 
-int database_bind_double (dbvm_t *vm, int index, double value) {
+int databasevm_bind_double (dbvm_t *vm, int index, double value) {
     return sqlite3_bind_double((sqlite3_stmt *)vm, index, value);
 }
 
-int database_bind_int (dbvm_t *vm, int index, db_int64 value) {
+int databasevm_bind_int (dbvm_t *vm, int index, db_int64 value) {
     return sqlite3_bind_int64((sqlite3_stmt *)vm, index, value);
 }
 
-int database_bind_null (dbvm_t *vm, int index) {
+int databasevm_bind_null (dbvm_t *vm, int index) {
     return sqlite3_bind_null((sqlite3_stmt *)vm, index);
 }
 
-int database_bind_text (dbvm_t *vm, int index, const char *value, int size) {
+int databasevm_bind_text (dbvm_t *vm, int index, const char *value, int size) {
     return sqlite3_bind_text((sqlite3_stmt *)vm, index, value, size, SQLITE_STATIC);
 }
 
-int database_bind_value (dbvm_t *vm, int index, dbvalue_t *value) {
+int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value) {
     return sqlite3_bind_value((sqlite3_stmt *)vm, index, (const sqlite3_value *)value);
-}
-
-// MARK: - SQL -
-
-char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta) {
-    char *sql = NULL;
-    
-    if (is_meta) {
-        sql = sqlite3_snprintf(bsize, buffer, "DROP TABLE IF EXISTS \"%w_cloudsync\";", table_name);
-    } else {
-        sql = sqlite3_snprintf(bsize, buffer, "DROP TABLE IF EXISTS \"%w\";", table_name);
-    }
-    
-    return sql;
 }
 
 // MARK: - VALUE -
@@ -199,8 +199,8 @@ db_int64 database_value_int (dbvalue_t *value) {
     return (db_int64)sqlite3_value_int64((sqlite3_value *)value);
 }
 
-const unsigned char *database_value_text (dbvalue_t *value) {
-    return sqlite3_value_text((sqlite3_value *)value);
+const char *database_value_text (dbvalue_t *value) {
+    return (const char *)sqlite3_value_text((sqlite3_value *)value);
 }
 
 int database_value_bytes (dbvalue_t *value) {
@@ -234,8 +234,8 @@ db_int64 database_column_int (dbvm_t *vm, int index) {
     return (db_int64)sqlite3_column_int64((sqlite3_stmt *)vm, index);
 }
 
-const unsigned char *database_column_text (dbvm_t *vm, int index) {
-    return sqlite3_column_text((sqlite3_stmt *)vm, index);
+const char *database_column_text (dbvm_t *vm, int index) {
+    return (const char *)sqlite3_column_text((sqlite3_stmt *)vm, index);
 }
 
 dbvalue_t *database_column_value (dbvm_t *vm, int index) {

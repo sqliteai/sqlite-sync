@@ -54,28 +54,28 @@ DATABASE_RESULT dbutils_exec (sqlite3_context *context, sqlite3 *db, const char 
     for (int i=0; i<count; ++i) {
         switch (types[i]) {
             case SQLITE_NULL:
-                rc = database_bind_null(pstmt, i+1);
+                rc = databasevm_bind_null(pstmt, i+1);
                 break;
             case SQLITE_TEXT:
-                rc = database_bind_text(pstmt, i+1, values[i], lens[i]);
+                rc = databasevm_bind_text(pstmt, i+1, values[i], lens[i]);
                 break;
             case SQLITE_BLOB:
-                rc = database_bind_blob(pstmt, i+1, values[i], lens[i]);
+                rc = databasevm_bind_blob(pstmt, i+1, values[i], lens[i]);
                 break;
             case SQLITE_INTEGER: {
                 sqlite3_int64 value = strtoll(values[i], NULL, 0);
-                rc = database_bind_int(pstmt, i+1, value);
+                rc = databasevm_bind_int(pstmt, i+1, value);
             }   break;
             case SQLITE_FLOAT: {
                 double value = strtod(values[i], NULL);
-                rc = database_bind_double(pstmt, i+1, value);
+                rc = databasevm_bind_double(pstmt, i+1, value);
             }   break;
         }
         if (rc != SQLITE_OK) goto dbutils_exec_finalize;
     }
         
     // execute statement
-    rc = database_step(pstmt);
+    rc = databasevm_step(pstmt);
     
     // check return value based on pre-condition
     if (rc != SQLITE_ROW) goto dbutils_exec_finalize;
@@ -121,7 +121,7 @@ DATABASE_RESULT dbutils_exec (sqlite3_context *context, sqlite3 *db, const char 
                     memcpy(buffer, bvalue, len);
                 }
             } else {
-                const unsigned char *value = database_column_text(pstmt, i);
+                const char *value = database_column_text(pstmt, i);
                 if (value) buffer = cloudsync_string_dup((const char *)value, false);
             }
             results[i].value.stringValue = buffer;
@@ -138,7 +138,7 @@ dbutils_exec_finalize:
         if (count != -1) DEBUG_ALWAYS("Error executing %s in dbutils_exec (%s).", sql, database_errmsg(db));
         if (context) sqlite3_result_error(context, database_errmsg(db), -1);
     }
-    if (pstmt) database_finalize(pstmt);
+    if (pstmt) databasevm_finalize(pstmt);
     
     if (is_write) {
         DATABASE_RESULT result = {0};
@@ -152,11 +152,6 @@ dbutils_exec_finalize:
 
 int dbutils_write (sqlite3 *db, sqlite3_context *context, const char *sql, const char **values, int types[], int lens[], int count) {
     DATABASE_RESULT result = dbutils_exec(context, db, sql, values, types, lens, count, NULL, NULL, 0);
-    return result.rc;
-}
-
-int dbutils_write_simple (sqlite3 *db, const char *sql) {
-    DATABASE_RESULT result = dbutils_exec(NULL, db, sql, NULL, NULL, NULL, 0, NULL, NULL, 0);
     return result.rc;
 }
 
@@ -235,8 +230,8 @@ int dbutils_value_compare (sqlite3_value *lvalue, sqlite3_value *rvalue) {
             break;
             
         case SQLITE_TEXT: {
-            const unsigned char *l_text = database_value_text(lvalue);
-            const unsigned char *r_text = database_value_text(rvalue);
+            const char *l_text = database_value_text(lvalue);
+            const char *r_text = database_value_text(rvalue);
             return strcmp((const char *)l_text, (const char *)r_text);
         } break;
             
@@ -315,10 +310,10 @@ bool dbutils_system_exists (sqlite3 *db, const char *name, const char *type) {
     int rc = database_prepare(db, sql, (void **)&vm, 0);
     if (rc != SQLITE_OK) goto finalize;
     
-    rc = database_bind_text(vm, 1, name, -1);
+    rc = databasevm_bind_text(vm, 1, name, -1);
     if (rc != SQLITE_OK) goto finalize;
     
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc == SQLITE_ROW) {
         result = (bool)database_column_int(vm, 0);
         rc = SQLITE_OK;
@@ -326,7 +321,7 @@ bool dbutils_system_exists (sqlite3 *db, const char *name, const char *type) {
     
 finalize:
     if (rc != SQLITE_OK) DEBUG_ALWAYS("Error executing %s in dbutils_system_exists for type %s name %s (%s).", sql, type, name, database_errmsg(db));
-    if (vm) database_finalize(vm);
+    if (vm) databasevm_finalize(vm);
     return result;
 }
 
@@ -687,10 +682,10 @@ char *dbutils_settings_get_value (sqlite3 *db, const char *key, char *buffer, si
     int rc = database_prepare(db, sql, (void **)&vm, 0);
     if (rc != SQLITE_OK) goto finalize_get_value;
     
-    rc = database_bind_text(vm, 1, key, -1);
+    rc = databasevm_bind_text(vm, 1, key, -1);
     if (rc != SQLITE_OK) goto finalize_get_value;
     
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc == SQLITE_DONE) rc = SQLITE_OK;
     else if (rc != SQLITE_ROW) goto finalize_get_value;
     
@@ -700,7 +695,7 @@ char *dbutils_settings_get_value (sqlite3 *db, const char *key, char *buffer, si
         goto finalize_get_value;
     }
     
-    const unsigned char *value = database_column_text(vm, 0);
+    const char *value = database_column_text(vm, 0);
     #if CLOUDSYNC_UNITTEST
     size = (buffer == OUT_OF_MEMORY_BUFFER) ? (SQLITE_MAX_ALLOCATION_SIZE + 1) :(size_t)database_column_bytes(vm, 0);
     #else
@@ -722,7 +717,7 @@ finalize_get_value:
     if ((rc == SQLITE_NOMEM) && (size == SQLITE_MAX_ALLOCATION_SIZE + 1)) rc = SQLITE_OK;
     #endif
     if (rc != SQLITE_OK) DEBUG_ALWAYS("dbutils_settings_get_value error %s", database_errmsg(db));
-    if (vm) database_finalize(vm);
+    if (vm) databasevm_finalize(vm);
     
     return buffer;
 }
@@ -797,16 +792,16 @@ char *dbutils_table_settings_get_value (sqlite3 *db, const char *table, const ch
     int rc = database_prepare(db, sql, (void **)&vm, 0);
     if (rc != SQLITE_OK) goto finalize_get_value;
     
-    rc = database_bind_text(vm, 1, table, -1);
+    rc = databasevm_bind_text(vm, 1, table, -1);
     if (rc != SQLITE_OK) goto finalize_get_value;
     
-    rc = database_bind_text(vm, 2, (column) ? column : "*", -1);
+    rc = databasevm_bind_text(vm, 2, (column) ? column : "*", -1);
     if (rc != SQLITE_OK) goto finalize_get_value;
     
-    rc = database_bind_text(vm, 3, key, -1);
+    rc = databasevm_bind_text(vm, 3, key, -1);
     if (rc != SQLITE_OK) goto finalize_get_value;
     
-    rc = database_step(vm);
+    rc = databasevm_step(vm);
     if (rc == SQLITE_DONE) rc = SQLITE_OK;
     else if (rc != SQLITE_ROW) goto finalize_get_value;
     
@@ -816,7 +811,7 @@ char *dbutils_table_settings_get_value (sqlite3 *db, const char *table, const ch
         goto finalize_get_value;
     }
     
-    const unsigned char *value = database_column_text(vm, 0);
+    const char *value = database_column_text(vm, 0);
     #if CLOUDSYNC_UNITTEST
     size = (buffer == OUT_OF_MEMORY_BUFFER) ? (SQLITE_MAX_ALLOCATION_SIZE + 1) :(size_t)database_column_bytes(vm, 0);
     #else
@@ -840,7 +835,7 @@ finalize_get_value:
     if (rc != SQLITE_OK) {
         DEBUG_ALWAYS("cloudsync_table_settings error %s", database_errmsg(db));
     }
-    if (vm) database_finalize(vm);
+    if (vm) databasevm_finalize(vm);
     
     return buffer;
 }
