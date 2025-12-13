@@ -11,12 +11,6 @@
 #include <stdbool.h>
 #include "cloudsync.h"
 
-#ifndef SQLITE_CORE
-#include "sqlite3ext.h"
-#else
-#include "sqlite3.h"
-#endif
-
 #define CLOUDSYNC_VALUE_NOTSET                  -1
 #define CLOUDSYNC_TOMBSTONE_VALUE               "__[RIP]__"
 #define CLOUDSYNC_RLS_RESTRICTED_VALUE          "__[RLS]__"

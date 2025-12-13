@@ -109,15 +109,17 @@ char *cloudsync_uuid_v7_stringify (uint8_t uuid[UUID_LEN], char value[UUID_STR_M
 
 char *cloudsync_uuid_v7_string (char value[UUID_STR_MAXLEN], bool dash_format) {
     uint8_t uuid[UUID_LEN];
-    if (cloudsync_uuid_v7(uuid) != 0) return NULL;
     
+    if (cloudsync_uuid_v7(uuid) != 0) return NULL;
     return cloudsync_uuid_v7_stringify(uuid, value, dash_format);
 }
 
 int cloudsync_uuid_v7_compare (uint8_t value1[UUID_LEN], uint8_t value2[UUID_LEN]) {
     // reconstruct the timestamp by reversing the bit shifts and combining the bytes
-    uint64_t t1 = ((uint64_t)value1[0] << 40) | ((uint64_t)value1[1] << 32) | ((uint64_t)value1[2] << 24) | ((uint64_t)value1[3] << 16) | ((uint64_t)value1[4] << 8)  | ((uint64_t)value1[5]);
-    uint64_t t2 = ((uint64_t)value2[0] << 40) | ((uint64_t)value2[1] << 32) | ((uint64_t)value2[2] << 24) | ((uint64_t)value2[3] << 16) | ((uint64_t)value2[4] << 8)  | ((uint64_t)value2[5]);
+    uint64_t t1 =   ((uint64_t)value1[0] << 40) | ((uint64_t)value1[1] << 32) | ((uint64_t)value1[2] << 24) |
+                    ((uint64_t)value1[3] << 16) | ((uint64_t)value1[4] << 8)  | ((uint64_t)value1[5]);
+    uint64_t t2 =   ((uint64_t)value2[0] << 40) | ((uint64_t)value2[1] << 32) | ((uint64_t)value2[2] << 24) |
+                    ((uint64_t)value2[3] << 16) | ((uint64_t)value2[4] << 8)  | ((uint64_t)value2[5]);
     
     if (t1 == t2) return memcmp(value1, value2, UUID_LEN);
     return (t1 > t2) ? 1 : -1;
@@ -154,10 +156,8 @@ char *cloudsync_string_dup (const char *str, bool lowercase) {
 }
 
 int cloudsync_blob_compare(const char *blob1, size_t size1, const char *blob2, size_t size2) {
-    if (size1 != size2) {
-        return (int)(size1 - size2); // Blobs are different if sizes are different
-    }
-    return memcmp(blob1, blob2, size1); // Use memcmp for byte-by-byte comparison
+    if (size1 != size2) return (int)(size1 - size2); // blobs are different if sizes are different
+    return memcmp(blob1, blob2, size1); // use memcmp for byte-by-byte comparison
 }
 
 void cloudsync_rowid_decode (db_int64 rowid, db_int64 *db_version, db_int64 *seq) {
@@ -184,13 +184,13 @@ char *cloudsync_string_replace_prefix(const char *input, char *prefix, char *rep
     size_t replacement_len = strlen(replacement);
 
     if (strncmp(input, prefix, prefix_len) == 0) {
-        // Allocate memory for new string
+        // allocate memory for new string
         size_t input_len = strlen(input);
         size_t new_len = input_len - prefix_len + replacement_len;
         char *result = cloudsync_memory_alloc(new_len + 1); // +1 for null terminator
         if (!result) return NULL;
 
-        // Copy replacement and the rest of the input string
+        // copy replacement and the rest of the input string
         strcpy(result, replacement);
         strcpy(result + replacement_len, input + prefix_len);
         return result;
@@ -201,7 +201,7 @@ char *cloudsync_string_replace_prefix(const char *input, char *prefix, char *rep
 }
 
 /*
- Compute a normalized hash of a SQLite CREATE TABLE statement.
+ Compute a normalized hash of a CREATE TABLE statement.
  
  * Normalization:
   * - Skips comments (-- and / * )

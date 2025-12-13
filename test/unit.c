@@ -42,7 +42,7 @@ int dbutils_settings_check_version (sqlite3 *db, const char *version);
 bool dbutils_migrate (sqlite3 *db);
 const char *vtab_opname_from_value (int value);
 int vtab_colname_is_legal (const char *name);
-int binary_comparison (int x, int y);
+int dbutils_binary_comparison (int x, int y);
 sqlite3 *do_create_database (void);
 
 static int stdout_backup = -1; // Backup file descriptor for stdout
@@ -1918,11 +1918,11 @@ bool do_test_dbutils (void) {
     
     int n1 = 1;
     int n2 = 2;
-    cmp = binary_comparison(n1, n2);
+    cmp = dbutils_binary_comparison(n1, n2);
     if (cmp != -1) goto finalize;
-    cmp = binary_comparison(n2, n1);
+    cmp = dbutils_binary_comparison(n2, n1);
     if (cmp != 1) goto finalize;
-    cmp = binary_comparison(n1, n1);
+    cmp = dbutils_binary_comparison(n1, n1);
     if (cmp != 0) goto finalize;
     
     rc = SQLITE_OK;

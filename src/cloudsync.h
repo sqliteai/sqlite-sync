@@ -55,6 +55,7 @@ void cloudsync_rollback_hook (void *ctx);
 
 // PAYLOAD
 
+// available only on Desktop OS (no WASM, no mobile)
 //#ifdef CLOUDSYNC_DESKTOP_OS
 int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, int *blob_size);
 //#endif
@@ -66,6 +67,8 @@ int    cloudsync_payload_encode_step  (cloudsync_payload_context *payload, cloud
 int    cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsync_context *data);
 char  *cloudsync_payload_blob (cloudsync_payload_context *payload, db_int64 *blob_size, db_int64 *nrows);
 size_t cloudsync_payload_context_size (size_t *header_size);
+
+
 
 // END OK
 

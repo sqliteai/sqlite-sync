@@ -29,12 +29,6 @@
     #define CLOUDSYNC_DESKTOP_OS 1
 #endif
 
-#ifndef SQLITE_CORE
-#include "sqlite3ext.h"
-#else
-#include "sqlite3.h"
-#endif
-
 #define CLOUDSYNC_DEBUG_FUNCTIONS           0
 #define CLOUDSYNC_DEBUG_DBFUNCTIONS         0
 #define CLOUDSYNC_DEBUG_SETTINGS            0
@@ -150,7 +144,7 @@ int cloudsync_blob_compare(const char *blob1, size_t size1, const char *blob2, s
 
 void cloudsync_rowid_decode (db_int64 rowid, db_int64 *db_version, db_int64 *seq);
 
-// available only on Desktop OS
+// available only on Desktop OS (no WASM, no mobile)
 #ifdef CLOUDSYNC_DESKTOP_OS
 bool cloudsync_file_delete (const char *path);
 char *cloudsync_file_read (const char *path, db_int64 *len);

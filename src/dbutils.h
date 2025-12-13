@@ -12,6 +12,12 @@
 #include "utils.h"
 #include "cloudsync_private.h"
 
+#ifndef SQLITE_CORE
+#include "sqlite3ext.h"
+#else
+#include "sqlite3.h"
+#endif
+
 #define CLOUDSYNC_SETTINGS_NAME             "cloudsync_settings"
 #define CLOUDSYNC_SITEID_NAME               "cloudsync_site_id"
 #define CLOUDSYNC_TABLE_SETTINGS_NAME       "cloudsync_table_settings"

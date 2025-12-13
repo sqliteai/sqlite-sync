@@ -33,6 +33,7 @@ typedef struct {
 } DATABASE_RESULT;
 
 int dbutils_settings_check_version (sqlite3 *db, const char *version);
+bool table_add_to_context (db_t *db, cloudsync_context *data, table_algo algo, const char *table_name);
 
 // MARK: - General -
 
@@ -49,7 +50,6 @@ DATABASE_RESULT dbutils_exec (sqlite3_context *context, sqlite3 *db, const char 
     // compile sql
     int rc = database_prepare(db, sql, (void **)&pstmt, 0);
     if (rc != SQLITE_OK) goto dbutils_exec_finalize;
-    
     // check bindings
     for (int i=0; i<count; ++i) {
         switch (types[i]) {
@@ -671,10 +671,8 @@ sqlite3_int64 dbutils_schema_version (sqlite3 *db) {
 
 // MARK: - Settings -
 
-int binary_comparison (int x, int y) {
-    if (x == y) return 0;
-    if (x > y) return 1;
-    return -1;
+int dbutils_binary_comparison (int x, int y) {
+    return (x == y) ? 0 : (x > y ? 1 : -1);
 }
 
 char *dbutils_settings_get_value (sqlite3 *db, const char *key, char *buffer, size_t blen) {
@@ -777,9 +775,9 @@ int dbutils_settings_check_version (sqlite3 *db, const char *version) {
     if (count1 != 3 || count2 != 3) return -666;
     
     int res = 0;
-    if ((res = binary_comparison(major1, major2)) == 0) {
-        if ((res = binary_comparison(minor1, minor2)) == 0) {
-            return binary_comparison(patch1, patch2);
+    if ((res = dbutils_binary_comparison(major1, major2)) == 0) {
+        if ((res = dbutils_binary_comparison(minor1, minor2)) == 0) {
+            return dbutils_binary_comparison(patch1, patch2);
         }
     }
     
@@ -920,8 +918,6 @@ int dbutils_settings_load_callback (void *xdata, int ncols, char **values, char 
     return 0;
 }
 
-bool table_add_to_context (sqlite3 *db, cloudsync_context *data, table_algo algo, const char *table_name);
-
 int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values, char **names) {
     cloudsync_context *data = (cloudsync_context *)xdata;
     sqlite3 *db = cloudsync_db(data);
@@ -1049,9 +1045,6 @@ int dbutils_settings_init (sqlite3 *db, void *cloudsync_data, sqlite3_context *c
      */
     
     return SQLITE_OK;
-    
-abort:
-    return rc;
 }
 
 int dbutils_update_schema_hash(sqlite3 *db, uint64_t *hash) {
