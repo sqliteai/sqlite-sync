@@ -297,7 +297,8 @@ char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bs
     
     // in primary-key encoding the number of items must be explicitly added to the encoded buffer
     if (is_prikey) {
-        // 1 is the number of items in the serialization (always 1 byte so max 255 primary keys, even if there is an hard SQLite limit of 128)
+        // 1 is the number of items in the serialization
+        // always 1 byte so max 255 primary keys, even if there is an hard SQLite limit of 128
         blen = pk_encode_size(argv, argc, 1);
         size_t blen_curr = *bsize;
         buffer = (blen > blen_curr || b == NULL) ? cloudsync_memory_alloc((db_uint64)blen) : b;

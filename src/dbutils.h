@@ -38,7 +38,6 @@ void dbutils_debug_values (int argc, sqlite3_value **argv);
 void dbutils_debug_value (sqlite3_value *value);
 
 int dbutils_value_compare (sqlite3_value *v1, sqlite3_value *v2);
-void dbutils_set_error (sqlite3_context *context, const char *format, ...);
 
 bool dbutils_system_exists (sqlite3 *db, const char *name, const char *type);
 bool dbutils_table_exists (sqlite3 *db, const char *name);

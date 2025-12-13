@@ -23,20 +23,6 @@
 #include "utils.h"
 #include "dbutils.h"
 
-// TODO: to be removed
-
-#ifndef SQLITE_CORE
-#include "sqlite3ext.h"
-#else
-#include "sqlite3.h"
-#endif
-
-#ifndef SQLITE_CORE
-SQLITE_EXTENSION_INIT3
-#endif
-
-// end TO BE removed
-
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -66,13 +52,12 @@ SQLITE_EXTENSION_INIT3
 #define CLOUDSYNC_PAYLOAD_MINBUF_SIZE           512*1024
 #define CLOUDSYNC_PAYLOAD_VERSION               1
 #define CLOUDSYNC_PAYLOAD_SIGNATURE             'CLSY'
-#define CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY    "cloudsync_payload_apply_callback"
 
 #ifndef MAX
 #define MAX(a, b)                               (((a)>(b))?(a):(b))
 #endif
 
-#define DEBUG_SQLITE_ERROR(_rc, _fn, _db)   do {if (_rc != SQLITE_OK) printf("Error in %s: %s\n", _fn, database_errmsg(_db));} while (0)
+#define DEBUG_DBERROR(_rc, _fn, _db)   do {if (_rc != DBRES_OK) printf("Error in %s: %s\n", _fn, database_errmsg(_db));} while (0)
 
 typedef enum {
     CLOUDSYNC_PK_INDEX_TBL          = 0,
@@ -94,7 +79,6 @@ typedef enum {
 
 #define SYNCBIT_SET(_data)                  _data->insync = 1
 #define SYNCBIT_RESET(_data)                _data->insync = 0
-#define BUMP_SEQ(_data)                     ((_data)->seq += 1, (_data)->seq - 1)
 
 // MARK: -
 
@@ -189,13 +173,14 @@ struct cloudsync_table_context {
     cloudsync_context *context;
 };
 
-typedef struct {
+struct cloudsync_payload_context {
     char        *buffer;
+    size_t      bsize;
     size_t      balloc;
     size_t      bused;
     uint64_t    nrows;
     uint16_t    ncols;
-} cloudsync_data_payload;
+};
 
 #ifdef _MSC_VER
     #pragma pack(push, 1) // For MSVC: pack struct with 1-byte alignment
@@ -234,8 +219,8 @@ int cloudsync_set_dberror (cloudsync_context *data);
 
 DBVM_VALUE dbvm_execute (dbvm_t *stmt, cloudsync_context *data) {
     int rc = database_step(stmt);
-    if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
-        if (data) DEBUG_SQLITE_ERROR(rc, "stmt_execute", data->db);
+    if (rc != DBRES_ROW && rc != DBRES_DONE) {
+        if (data) DEBUG_DBERROR(rc, "stmt_execute", data->db);
         database_reset(stmt);
         return DBVM_VALUE_ERROR;
     }
@@ -257,7 +242,7 @@ DBVM_VALUE dbvm_execute (dbvm_t *stmt, cloudsync_context *data) {
         }
         
     } else if (stmt == data->db_version_stmt) {
-        data->db_version = (rc == SQLITE_DONE) ? CLOUDSYNC_MIN_DB_VERSION : database_column_int(stmt, 0);
+        data->db_version = (rc == DBRES_DONE) ? CLOUDSYNC_MIN_DB_VERSION : database_column_int(stmt, 0);
     }
     
     database_reset(stmt);
@@ -266,24 +251,24 @@ DBVM_VALUE dbvm_execute (dbvm_t *stmt, cloudsync_context *data) {
 
 int dbvm_count (dbvm_t *stmt, const char *value, size_t len, int type) {
     int result = -1;
-    int rc = SQLITE_OK;
+    int rc = DBRES_OK;
     
     if (value) {
-        rc = (type == SQLITE_TEXT) ? database_bind_text(stmt, 1, value, (int)len) : database_bind_blob(stmt, 1, value, len);
-        if (rc != SQLITE_OK) goto cleanup;
+        rc = (type == DBTYPE_TEXT) ? database_bind_text(stmt, 1, value, (int)len) : database_bind_blob(stmt, 1, value, len);
+        if (rc != DBRES_OK) goto cleanup;
     }
 
     rc = database_step(stmt);
-    if (rc == SQLITE_DONE) {
+    if (rc == DBRES_DONE) {
         result = 0;
-        rc = SQLITE_OK;
-    } else if (rc == SQLITE_ROW) {
+        rc = DBRES_OK;
+    } else if (rc == DBRES_ROW) {
         result = (int)database_column_int(stmt, 0);
-        rc = SQLITE_OK;
+        rc = DBRES_OK;
     }
     
 cleanup:
-    //DEBUG_SQLITE_ERROR(rc, "stmt_count", sqlite3_db_handle(stmt));
+    //DEBUG_DBERROR(rc, "stmt_count", sqlite3_db_handle(stmt));
     database_reset(stmt);
     return result;
 }
@@ -338,14 +323,14 @@ int cloudsync_dbversion_rebuild (db_t *db, cloudsync_context *data) {
     }
     
     db_int64 count = dbutils_table_settings_count_tables(db);
-    if (count == 0) return SQLITE_OK;
+    if (count == 0) return DBRES_OK;
     else if (count == -1) return cloudsync_set_dberror(data);
     
     char *sql = cloudsync_dbversion_build_query(db);
-    if (!sql) return SQLITE_NOMEM;
+    if (!sql) return DBRES_NOMEM;
     DEBUG_SQL("db_version_stmt: %s", sql);
     
-    int rc = database_prepare(db, sql, (void **)&data->db_version_stmt, SQLITE_PREPARE_PERSISTENT);
+    int rc = database_prepare(db, sql, (void **)&data->db_version_stmt, DBFLAG_PERSISTENT);
     DEBUG_STMT("db_version_stmt %p", data->db_version_stmt);
     cloudsync_memory_free(sql);
     return rc;
@@ -357,7 +342,7 @@ int cloudsync_dbversion_rerun (db_t *db, cloudsync_context *data) {
     
     if (schema_changed == DBVM_VALUE_CHANGED) {
         int rc = cloudsync_dbversion_rebuild(db, data);
-        if (rc != SQLITE_OK) return -1;
+        if (rc != DBRES_OK) return -1;
     }
     
     DBVM_VALUE rc = dbvm_execute(data->db_version_stmt, data);
@@ -378,7 +363,7 @@ int cloudsync_dbversion_check_uptodate (cloudsync_context *data) {
 
 db_int64 cloudsync_dbversion_next (cloudsync_context *data, db_int64 merging_version) {
     int rc = cloudsync_dbversion_check_uptodate(data);
-    if (rc != SQLITE_OK) return -1;
+    if (rc != DBRES_OK) return -1;
     
     db_int64 result = data->db_version + 1;
     if (result < data->pending_db_version) result = data->pending_db_version;
@@ -429,18 +414,18 @@ void cloudsync_reset_siteid (cloudsync_context *data) {
 
 int cloudsync_load_siteid (db_t *db, cloudsync_context *data) {
     // check if site_id was already loaded
-    if (data->site_id[0] != 0) return SQLITE_OK;
+    if (data->site_id[0] != 0) return DBRES_OK;
     
     // load site_id
     int size, rc;
     char *buffer = dbutils_blob_select(db, "SELECT site_id FROM cloudsync_site_id WHERE rowid=0;", &size, NULL, &rc);
     if (!buffer) return rc;
-    if (size != UUID_LEN) return SQLITE_MISUSE;
+    if (size != UUID_LEN) return DBRES_MISUSE;
     
     memcpy(data->site_id, buffer, UUID_LEN);
     cloudsync_memory_free(buffer);
     
-    return SQLITE_OK;
+    return DBRES_OK;
 }
 
 db_int64 cloudsync_dbversion (cloudsync_context *data) {
@@ -466,17 +451,17 @@ int cloudsync_add_dbvms (db_t *db, cloudsync_context *data) {
     
     if (data->data_version_stmt == NULL) {
         const char *sql = "PRAGMA data_version;";
-        int rc = database_prepare(db, sql, (void **)&data->data_version_stmt, SQLITE_PREPARE_PERSISTENT);
+        int rc = database_prepare(db, sql, (void **)&data->data_version_stmt, DBFLAG_PERSISTENT);
         DEBUG_STMT("data_version_stmt %p", data->data_version_stmt);
-        if (rc != SQLITE_OK) return rc;
+        if (rc != DBRES_OK) return rc;
         DEBUG_SQL("data_version_stmt: %s", sql);
     }
     
     if (data->schema_version_stmt == NULL) {
         const char *sql = "PRAGMA schema_version;";
-        int rc = database_prepare(db, sql, (void **)&data->schema_version_stmt, SQLITE_PREPARE_PERSISTENT);
+        int rc = database_prepare(db, sql, (void **)&data->schema_version_stmt, DBFLAG_PERSISTENT);
         DEBUG_STMT("schema_version_stmt %p", data->schema_version_stmt);
-        if (rc != SQLITE_OK) return rc;
+        if (rc != DBRES_OK) return rc;
         DEBUG_SQL("schema_version_stmt: %s", sql);
     }
     
@@ -485,9 +470,9 @@ int cloudsync_add_dbvms (db_t *db, cloudsync_context *data) {
         // in SQLite, we can’t directly combine an INSERT and a SELECT to both insert a row and return an identifier (rowid) in a single statement,
         // however, we can use a workaround by leveraging the INSERT statement with ON CONFLICT DO UPDATE and then combining it with RETURNING rowid
         const char *sql = "INSERT INTO cloudsync_site_id (site_id) VALUES (?) ON CONFLICT(site_id) DO UPDATE SET site_id = site_id RETURNING rowid;";
-        int rc = database_prepare(db, sql, (void **)&data->getset_siteid_stmt, SQLITE_PREPARE_PERSISTENT);
+        int rc = database_prepare(db, sql, (void **)&data->getset_siteid_stmt, DBFLAG_PERSISTENT);
         DEBUG_STMT("getset_siteid_stmt %p", data->getset_siteid_stmt);
-        if (rc != SQLITE_OK) return rc;
+        if (rc != DBRES_OK) return rc;
         DEBUG_SQL("getset_siteid_stmt: %s", sql);
     }
     
@@ -525,12 +510,20 @@ const char *cloudsync_errmsg (cloudsync_context *data) {
     return data->errmsg;
 }
 
+void *cloudsync_auxdata (cloudsync_context *data) {
+    return data->aux_data;
+}
+
+void cloudsync_set_auxdata (cloudsync_context *data, void *xdata) {
+    data->aux_data = xdata;
+}
+
 // MARK: - Table Utils -
 
 void table_pknames_free (char **names, int nrows) {
     if (!names) return;
-    for (int i = 0; i < nrows; ++i) {dbmem_free(names[i]);}
-    dbmem_free(names);
+    for (int i = 0; i < nrows; ++i) {cloudsync_memory_free(names[i]);}
+    cloudsync_memory_free(names);
 }
 
 char *table_build_values_sql (db_t *db, cloudsync_table_context *table) {
@@ -734,7 +727,7 @@ void table_free (cloudsync_table_context *table) {
 }
 
 int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
-    int rc = SQLITE_OK;
+    int rc = DBRES_OK;
     char *sql = NULL;
     
     // META TABLE statements
@@ -745,144 +738,144 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     // we do not need an index on the pk column because it is already covered by the fact that it is part of the prikeys
     // EXPLAIN QUERY PLAN reports: SEARCH table_name USING PRIMARY KEY (pk=?)
     sql = cloudsync_memory_mprintf("SELECT EXISTS(SELECT 1 FROM \"%w_cloudsync\" WHERE pk = ? LIMIT 1);", table->name);
-    if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
+    if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_pkexists_stmt: %s", sql);
     
-    rc = database_prepare(db, sql, (void **)&table->meta_pkexists_stmt, SQLITE_PREPARE_PERSISTENT);
+    rc = database_prepare(db, sql, (void **)&table->meta_pkexists_stmt, DBFLAG_PERSISTENT);
     
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     // precompile the update local sentinel statement
     sql = cloudsync_memory_mprintf("UPDATE \"%w_cloudsync\" SET col_version = CASE col_version %% 2 WHEN 0 THEN col_version + 1 ELSE col_version + 2 END, db_version = ?, seq = ?, site_id = 0 WHERE pk = ? AND col_name = '%s';", table->name, CLOUDSYNC_TOMBSTONE_VALUE);
-    if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
+    if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_sentinel_update_stmt: %s", sql);
     
-    rc = database_prepare(db, sql, (void **)&table->meta_sentinel_update_stmt, SQLITE_PREPARE_PERSISTENT);
+    rc = database_prepare(db, sql, (void **)&table->meta_sentinel_update_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     // precompile the insert local sentinel statement
     sql = cloudsync_memory_mprintf("INSERT INTO \"%w_cloudsync\" (pk, col_name, col_version, db_version, seq, site_id) SELECT ?, '%s', 1, ?, ?, 0 WHERE 1 ON CONFLICT DO UPDATE SET col_version = CASE col_version %% 2 WHEN 0 THEN col_version + 1 ELSE col_version + 2 END, db_version = ?, seq = ?, site_id = 0;", table->name, CLOUDSYNC_TOMBSTONE_VALUE);
-    if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
+    if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_sentinel_insert_stmt: %s", sql);
     
-    rc = database_prepare(db, sql, (void **)&table->meta_sentinel_insert_stmt, SQLITE_PREPARE_PERSISTENT);
+    rc = database_prepare(db, sql, (void **)&table->meta_sentinel_insert_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
 
     // precompile the insert/update local row statement
     sql = cloudsync_memory_mprintf("INSERT INTO \"%w_cloudsync\" (pk, col_name, col_version, db_version, seq, site_id ) SELECT ?, ?, ?, ?, ?, 0 WHERE 1 ON CONFLICT DO UPDATE SET col_version = col_version + 1, db_version = ?, seq = ?, site_id = 0;", table->name);
-    if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
+    if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_row_insert_update_stmt: %s", sql);
     
-    rc = database_prepare(db, sql, (void **)&table->meta_row_insert_update_stmt, SQLITE_PREPARE_PERSISTENT);
+    rc = database_prepare(db, sql, (void **)&table->meta_row_insert_update_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     // precompile the delete rows from meta
     sql = cloudsync_memory_mprintf("DELETE FROM \"%w_cloudsync\" WHERE pk=? AND col_name!='%s';", table->name, CLOUDSYNC_TOMBSTONE_VALUE);
-    if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
+    if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_row_drop_stmt: %s", sql);
     
-    rc = database_prepare(db, sql, (void **)&table->meta_row_drop_stmt, SQLITE_PREPARE_PERSISTENT);
+    rc = database_prepare(db, sql, (void **)&table->meta_row_drop_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     // precompile the update rows from meta when pk changes
     // see https://github.com/sqliteai/sqlite-sync/blob/main/docs/PriKey.md for more details
     sql = cloudsync_memory_mprintf("UPDATE OR REPLACE \"%w_cloudsync\" SET pk=?, db_version=?, col_version=1, seq=cloudsync_seq(), site_id=0 WHERE (pk=? AND col_name!='%s');", table->name, CLOUDSYNC_TOMBSTONE_VALUE);
-    if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
+    if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_update_move_stmt: %s", sql);
     
-    rc = database_prepare(db, sql, (void **)&table->meta_update_move_stmt, SQLITE_PREPARE_PERSISTENT);
+    rc = database_prepare(db, sql, (void **)&table->meta_update_move_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     // local cl
     sql = cloudsync_memory_mprintf("SELECT COALESCE((SELECT col_version FROM \"%w_cloudsync\" WHERE pk=? AND col_name='%s'), (SELECT 1 FROM \"%w_cloudsync\" WHERE pk=?));", table->name, CLOUDSYNC_TOMBSTONE_VALUE, table->name);
-    if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
+    if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_local_cl_stmt: %s", sql);
     
-    rc = database_prepare(db, sql, (void **)&table->meta_local_cl_stmt, SQLITE_PREPARE_PERSISTENT);
+    rc = database_prepare(db, sql, (void **)&table->meta_local_cl_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     // rowid of the last inserted/updated row in the meta table
     sql = cloudsync_memory_mprintf("INSERT OR REPLACE INTO \"%w_cloudsync\" (pk, col_name, col_version, db_version, seq, site_id) VALUES (?, ?, ?, cloudsync_db_version_next(?), ?, ?) RETURNING ((db_version << 30) | seq);", table->name);
-    if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
+    if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_winner_clock_stmt: %s", sql);
     
-    rc = database_prepare(db, sql, (void **)&table->meta_winner_clock_stmt, SQLITE_PREPARE_PERSISTENT);
+    rc = database_prepare(db, sql, (void **)&table->meta_winner_clock_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     sql = cloudsync_memory_mprintf("DELETE FROM \"%w_cloudsync\" WHERE pk=? AND col_name!='%s';", table->name, CLOUDSYNC_TOMBSTONE_VALUE);
-    if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
+    if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_merge_delete_drop: %s", sql);
     
-    rc = database_prepare(db, sql, (void **)&table->meta_merge_delete_drop, SQLITE_PREPARE_PERSISTENT);
+    rc = database_prepare(db, sql, (void **)&table->meta_merge_delete_drop, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     // zero clock
     sql = cloudsync_memory_mprintf("UPDATE \"%w_cloudsync\" SET col_version = 0, db_version = cloudsync_db_version_next(?) WHERE pk=? AND col_name!='%s';", table->name, CLOUDSYNC_TOMBSTONE_VALUE);
-    if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
+    if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_zero_clock_stmt: %s", sql);
     
-    rc = database_prepare(db, sql, (void **)&table->meta_zero_clock_stmt, SQLITE_PREPARE_PERSISTENT);
+    rc = database_prepare(db, sql, (void **)&table->meta_zero_clock_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     // col_version
     sql = cloudsync_memory_mprintf("SELECT col_version FROM \"%w_cloudsync\" WHERE pk=? AND col_name=?;", table->name);
-    if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
+    if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_col_version_stmt: %s", sql);
     
-    rc = database_prepare(db, sql, (void **)&table->meta_col_version_stmt, SQLITE_PREPARE_PERSISTENT);
+    rc = database_prepare(db, sql, (void **)&table->meta_col_version_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     // site_id
     sql = cloudsync_memory_mprintf("SELECT site_id FROM \"%w_cloudsync\" WHERE pk=? AND col_name=?;", table->name);
-    if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
+    if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_site_id_stmt: %s", sql);
     
-    rc = database_prepare(db, sql, (void **)&table->meta_site_id_stmt, SQLITE_PREPARE_PERSISTENT);
+    rc = database_prepare(db, sql, (void **)&table->meta_site_id_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     // REAL TABLE statements
     
     // precompile the get column value statement
     if (ncols > 0) {
         sql = table_build_values_sql(db, table);
-        if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
+        if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
         DEBUG_SQL("real_col_values_stmt: %s", sql);
         
-        rc = database_prepare(db, sql, (void **)&table->real_col_values_stmt, SQLITE_PREPARE_PERSISTENT);
+        rc = database_prepare(db, sql, (void **)&table->real_col_values_stmt, DBFLAG_PERSISTENT);
         cloudsync_memory_free(sql);
-        if (rc != SQLITE_OK) goto cleanup;
+        if (rc != DBRES_OK) goto cleanup;
     }
     
     sql = table_build_mergedelete_sql(db, table);
-    if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
+    if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("real_merge_delete: %s", sql);
     
-    rc = database_prepare(db, sql, (void **)&table->real_merge_delete_stmt, SQLITE_PREPARE_PERSISTENT);
+    rc = database_prepare(db, sql, (void **)&table->real_merge_delete_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     sql = table_build_mergeinsert_sql(db, table, NULL);
-    if (!sql) {rc = SQLITE_NOMEM; goto cleanup;}
+    if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("real_merge_sentinel: %s", sql);
     
-    rc = database_prepare(db, sql, (void **)&table->real_merge_sentinel_stmt, SQLITE_PREPARE_PERSISTENT);
+    rc = database_prepare(db, sql, (void **)&table->real_merge_sentinel_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
 cleanup:
-    if (rc != SQLITE_OK) printf("table_add_stmts error: %s\n", database_errmsg(db));
+    if (rc != DBRES_OK) printf("table_add_stmts error: %s\n", database_errmsg(db));
     return rc;
 }
 
@@ -934,7 +927,7 @@ int table_add_to_context_cb (void *xdata, int ncols, char **values, char **names
     cloudsync_table_context *table = (cloudsync_table_context *)xdata;
     
     db_t *db = table->context->db;
-    if (!db) return SQLITE_ERROR;
+    if (!db) return DBRES_ERROR;
     
     int index = table->ncols;
     for (int i=0; i<ncols; i+=2) {
@@ -946,22 +939,22 @@ int table_add_to_context_cb (void *xdata, int ncols, char **values, char **names
         if (!table->col_name[index]) return 1;
         
         char *sql = table_build_mergeinsert_sql(db, table, name);
-        if (!sql) return SQLITE_NOMEM;
+        if (!sql) return DBRES_NOMEM;
         DEBUG_SQL("col_merge_stmt[%d]: %s", index, sql);
         
-        int rc = database_prepare(db, sql, (void **)&table->col_merge_stmt[index], SQLITE_PREPARE_PERSISTENT);
+        int rc = database_prepare(db, sql, (void **)&table->col_merge_stmt[index], DBFLAG_PERSISTENT);
         cloudsync_memory_free(sql);
-        if (rc != SQLITE_OK) return rc;
-        if (!table->col_merge_stmt[index]) return SQLITE_MISUSE;
+        if (rc != DBRES_OK) return rc;
+        if (!table->col_merge_stmt[index]) return DBRES_MISUSE;
         
         sql = table_build_value_sql(db, table, name);
-        if (!sql) return SQLITE_NOMEM;
+        if (!sql) return DBRES_NOMEM;
         DEBUG_SQL("col_value_stmt[%d]: %s", index, sql);
         
-        rc = database_prepare(db, sql, (void **)&table->col_value_stmt[index], SQLITE_PREPARE_PERSISTENT);
+        rc = database_prepare(db, sql, (void **)&table->col_value_stmt[index], DBFLAG_PERSISTENT);
         cloudsync_memory_free(sql);
-        if (rc != SQLITE_OK) return rc;
-        if (!table->col_value_stmt[index]) return SQLITE_MISUSE;
+        if (rc != DBRES_OK) return rc;
+        if (!table->col_value_stmt[index]) return DBRES_MISUSE;
     }
     table->ncols += 1;
     
@@ -1024,7 +1017,7 @@ bool table_add_to_context (db_t *db, cloudsync_context *data, table_algo algo, c
     }
     
     int rc = table_add_stmts(db, table, (int)ncols);
-    if (rc != SQLITE_OK) goto abort_add_table;
+    if (rc != DBRES_OK) goto abort_add_table;
     
     // a table with only pk(s) is totally legal
     if (ncols > 0) {
@@ -1044,7 +1037,7 @@ bool table_add_to_context (db_t *db, cloudsync_context *data, table_algo algo, c
         if (!sql) goto abort_add_table;
         int rc = database_exec_callback(db, sql, table_add_to_context_cb, (void *)table);
         cloudsync_memory_free(sql);
-        if (rc == SQLITE_ABORT) goto abort_add_table;
+        if (rc == DBRES_ABORT) goto abort_add_table;
     }
     
     // append newly created table
@@ -1101,7 +1094,7 @@ const char *table_colname (cloudsync_table_context *table, int index) {
 bool table_pk_exists (cloudsync_table_context *table, const char *value, size_t len) {
     // check if a row with the same primary key already exists
     // if so, this means the row might have been previously deleted (sentinel)
-    return (bool)dbvm_count(table->meta_pkexists_stmt, value, len, SQLITE_BLOB);
+    return (bool)dbvm_count(table->meta_pkexists_stmt, value, len, DBTYPE_BLOB);
 }
 
 char **table_pknames (cloudsync_table_context *table) {
@@ -1124,14 +1117,14 @@ db_int64 merge_get_local_cl (cloudsync_table_context *table, const char *pk, int
     db_int64 result = -1;
     
     int rc = database_bind_blob(vm, 1, (const void *)pk, pklen);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_blob(vm, 2, (const void *)pk, pklen);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_step(vm);
-    if (rc == SQLITE_ROW) result = database_column_int(vm, 0);
-    else if (rc == SQLITE_DONE) result = 0;
+    if (rc == DBRES_ROW) result = database_column_int(vm, 0);
+    else if (rc == DBRES_DONE) result = 0;
     
 cleanup:
     if (result == -1) cloudsync_set_dberror(table->context);
@@ -1143,19 +1136,19 @@ int merge_get_col_version (cloudsync_table_context *table, const char *col_name,
     dbvm_t *vm = table->meta_col_version_stmt;
     
     int rc = database_bind_blob(vm, 1, (const void *)pk, pklen);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_text(vm, 2, col_name, -1);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_step(vm);
-    if (rc == SQLITE_ROW) {
+    if (rc == DBRES_ROW) {
         *version = database_column_int(vm, 0);
-        rc = SQLITE_OK;
+        rc = DBRES_OK;
     }
     
 cleanup:
-    if ((rc != SQLITE_OK) && (rc != SQLITE_DONE)) cloudsync_set_dberror(table->context);
+    if ((rc != DBRES_OK) && (rc != DBRES_DONE)) cloudsync_set_dberror(table->context);
     dbvm_reset(vm);
     return rc;
 }
@@ -1165,41 +1158,41 @@ int merge_set_winner_clock (cloudsync_context *data, cloudsync_table_context *ta
     // get/set site_id
     dbvm_t *vm = data->getset_siteid_stmt;
     int rc = database_bind_blob(vm, 1, (const void *)site_id, site_len);
-    if (rc != SQLITE_OK) goto cleanup_merge;
+    if (rc != DBRES_OK) goto cleanup_merge;
     
     rc = database_step(vm);
-    if (rc != SQLITE_ROW) goto cleanup_merge;
+    if (rc != DBRES_ROW) goto cleanup_merge;
     
     int64_t ord = database_column_int(vm, 0);
     dbvm_reset(vm);
     
     vm = table->meta_winner_clock_stmt;
     rc = database_bind_blob(vm, 1, (const void *)pk, pk_len);
-    if (rc != SQLITE_OK) goto cleanup_merge;
+    if (rc != DBRES_OK) goto cleanup_merge;
     
     rc = database_bind_text(vm, 2, (colname) ? colname : CLOUDSYNC_TOMBSTONE_VALUE, -1);
-    if (rc != SQLITE_OK) goto cleanup_merge;
+    if (rc != DBRES_OK) goto cleanup_merge;
     
     rc = database_bind_int(vm, 3, col_version);
-    if (rc != SQLITE_OK) goto cleanup_merge;
+    if (rc != DBRES_OK) goto cleanup_merge;
     
     rc = database_bind_int(vm, 4, db_version);
-    if (rc != SQLITE_OK) goto cleanup_merge;
+    if (rc != DBRES_OK) goto cleanup_merge;
     
     rc = database_bind_int(vm, 5, seq);
-    if (rc != SQLITE_OK) goto cleanup_merge;
+    if (rc != DBRES_OK) goto cleanup_merge;
     
     rc = database_bind_int(vm, 6, ord);
-    if (rc != SQLITE_OK) goto cleanup_merge;
+    if (rc != DBRES_OK) goto cleanup_merge;
     
     rc = database_step(vm);
-    if (rc == SQLITE_ROW) {
+    if (rc == DBRES_ROW) {
         *rowid = database_column_int(vm, 0);
-        rc = SQLITE_OK;
+        rc = DBRES_OK;
     }
     
 cleanup_merge:
-    if (rc != SQLITE_OK) cloudsync_set_dberror(data);
+    if (rc != DBRES_OK) cloudsync_set_dberror(data);
     dbvm_reset(vm);
     return rc;
 }
@@ -1222,8 +1215,8 @@ int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, c
     // bind value
     if (col_value) {
         rc = database_bind_value(vm, table->npks+1, col_value);
-        if (rc == SQLITE_OK) rc = database_bind_value(vm, table->npks+2, col_value);
-        if (rc != SQLITE_OK) {
+        if (rc == DBRES_OK) rc = database_bind_value(vm, table->npks+2, col_value);
+        if (rc != DBRES_OK) {
             cloudsync_set_dberror(data);
             dbvm_reset(vm);
             return rc;
@@ -1245,7 +1238,7 @@ int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, c
     SYNCBIT_RESET(data);
     if (table->algo == table_algo_crdt_gos) table->enabled = 1;
     
-    if (rc != SQLITE_DONE) {
+    if (rc != DBRES_DONE) {
         cloudsync_set_dberror(data);
         return rc;
     }
@@ -1254,7 +1247,7 @@ int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, c
 }
 
 int merge_delete (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, const char *colname, db_int64 cl, db_int64 db_version, const char *site_id, int site_len, db_int64 seq, db_int64 *rowid) {
-    int rc = SQLITE_OK;
+    int rc = DBRES_OK;
     
     // reset return value
     *rowid = 0;
@@ -1274,24 +1267,24 @@ int merge_delete (cloudsync_context *data, cloudsync_table_context *table, const
     DEBUG_MERGE("merge_delete(%02x%02x): %s (%d)", data->site_id[UUID_LEN-2], data->site_id[UUID_LEN-1], database_sql(vm), rc);
     dbvm_reset(vm);
     SYNCBIT_RESET(data);
-    if (rc == SQLITE_DONE) rc = SQLITE_OK;
-    if (rc != SQLITE_OK) {
+    if (rc == DBRES_DONE) rc = DBRES_OK;
+    if (rc != DBRES_OK) {
         cloudsync_set_dberror(data);
         return rc;
     }
     
     rc = merge_set_winner_clock(data, table, pk, pklen, colname, cl, db_version, site_id, site_len, seq, rowid);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != DBRES_OK) return rc;
     
     // drop clocks _after_ setting the winner clock so we don't lose track of the max db_version!!
     // this must never come before `set_winner_clock`
     vm = table->meta_merge_delete_drop;
     rc = database_bind_blob(vm, 1, (const void *)pk, pklen);
-    if (rc == SQLITE_OK) rc = database_step(vm);
+    if (rc == DBRES_OK) rc = database_step(vm);
     dbvm_reset(vm);
     
-    if (rc == SQLITE_DONE) rc = SQLITE_OK;
-    if (rc != SQLITE_OK) cloudsync_set_dberror(data);
+    if (rc == DBRES_DONE) rc = DBRES_OK;
+    if (rc != DBRES_OK) cloudsync_set_dberror(data);
     return rc;
 }
 
@@ -1299,16 +1292,16 @@ int merge_zeroclock_on_resurrect(cloudsync_table_context *table, db_int64 db_ver
     dbvm_t *vm = table->meta_zero_clock_stmt;
     
     int rc = database_bind_int(vm, 1, db_version);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_blob(vm, 2, (const void *)pk, pklen);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_step(vm);
-    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
-    if (rc != SQLITE_OK) cloudsync_set_dberror(table->context);
+    if (rc != DBRES_OK) cloudsync_set_dberror(table->context);
     dbvm_reset(vm);
     return rc;
 }
@@ -1320,20 +1313,20 @@ int merge_did_cid_win (cloudsync_context *data, cloudsync_table_context *table, 
     
     db_int64 local_version;
     int rc = merge_get_col_version(table, col_name, pk, pklen, &local_version);
-    if (rc == SQLITE_DONE) {
+    if (rc == DBRES_DONE) {
         // no rows returned, the incoming change wins if there's nothing there locally
         *didwin_flag = true;
-        return SQLITE_OK;
+        return DBRES_OK;
     }
-    if (rc != SQLITE_OK) return rc;
+    if (rc != DBRES_OK) return rc;
     
-    // rc == SQLITE_OK, means that a row with a version exists
+    // rc == DBRES_OK, means that a row with a version exists
     if (local_version != col_version) {
-        if (col_version > local_version) {*didwin_flag = true; return SQLITE_OK;}
-        if (col_version < local_version) {*didwin_flag = false; return SQLITE_OK;}
+        if (col_version > local_version) {*didwin_flag = true; return DBRES_OK;}
+        if (col_version < local_version) {*didwin_flag = false; return DBRES_OK;}
     }
     
-    // rc == SQLITE_ROW and col_version == local_version, need to compare values
+    // rc == DBRES_ROW and col_version == local_version, need to compare values
     
     // retrieve col_value precompiled statement
     dbvm_t *vm = table_column_lookup(table, col_name, false, NULL);
@@ -1350,15 +1343,15 @@ int merge_did_cid_win (cloudsync_context *data, cloudsync_table_context *table, 
     // execute vm
     dbvalue_t *local_value;
     rc = database_step(vm);
-    if (rc == SQLITE_DONE) {
+    if (rc == DBRES_DONE) {
         // meta entry exists but the actual value is missing
         // we should allow the value_compare function to make a decision
         // value_compare has been modified to handle the case where lvalue is NULL
         local_value = NULL;
-        rc = SQLITE_OK;
-    } else if (rc == SQLITE_ROW) {
+        rc = DBRES_OK;
+    } else if (rc == DBRES_ROW) {
         local_value = database_column_value(vm, 0);
-        rc = SQLITE_OK;
+        rc = DBRES_OK;
     } else {
         goto cleanup;
     }
@@ -1377,18 +1370,18 @@ int merge_did_cid_win (cloudsync_context *data, cloudsync_table_context *table, 
     // values are the same and merge_equal_values is true
     vm = table->meta_site_id_stmt;
     rc = database_bind_blob(vm, 1, (const void *)pk, pklen);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_text(vm, 2, col_name, -1);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_step(vm);
-    if (rc == SQLITE_ROW) {
+    if (rc == DBRES_ROW) {
         const void *local_site_id = database_column_blob(vm, 0);
         ret = memcmp(site_id, local_site_id, site_len);
         *didwin_flag = (ret > 0);
         dbvm_reset(vm);
-        return SQLITE_OK;
+        return DBRES_OK;
     }
     
     // handle error condition here
@@ -1396,7 +1389,7 @@ int merge_did_cid_win (cloudsync_context *data, cloudsync_table_context *table, 
     return cloudsync_set_error(data, "Unable to find site_id for previous change, cloudsync table is probably corrupted", DBRES_ERROR);
     
 cleanup:
-    if (rc != SQLITE_OK) cloudsync_set_dberror(data);
+    if (rc != DBRES_OK) cloudsync_set_dberror(data);
     if (vm) dbvm_reset(vm);
     return rc;
 }
@@ -1420,14 +1413,14 @@ int merge_sentinel_only_insert (cloudsync_context *data, cloudsync_table_context
     rc = database_step(vm);
     dbvm_reset(vm);
     SYNCBIT_RESET(data);
-    if (rc == SQLITE_DONE) rc = SQLITE_OK;
-    if (rc != SQLITE_OK) {
+    if (rc == DBRES_DONE) rc = DBRES_OK;
+    if (rc != DBRES_OK) {
         cloudsync_set_dberror(data);
         return rc;
     }
     
     rc = merge_zeroclock_on_resurrect(table, db_version, pk, pklen);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != DBRES_OK) return rc;
     
     return merge_set_winner_clock(data, table, pk, pklen, NULL, cl, db_version, site_id, site_len, seq, rowid);
 }
@@ -1446,7 +1439,7 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
     
     // if the incoming causal length is older than the local causal length, we can safely ignore it
     // because the local changes are more recent
-    if (insert_cl < local_cl) return SQLITE_OK;
+    if (insert_cl < local_cl) return DBRES_OK;
     
     // check if the operation is a delete by examining the causal length
     // even causal lengths typically signify delete operations
@@ -1454,24 +1447,24 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
     if (is_delete) {
         // if it's a delete, check if the local state is at the same causal length
         // if it is, no further action is needed
-        if (local_cl == insert_cl) return SQLITE_OK;
+        if (local_cl == insert_cl) return DBRES_OK;
         
         // perform a delete merge if the causal length is newer than the local one
         int rc = merge_delete(data, table, insert_pk, insert_pk_len, insert_name, insert_col_version,
                               insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
-        if (rc != SQLITE_OK) cloudsync_set_error(data, "Unable to perform merge_delete", rc);
+        if (rc != DBRES_OK) cloudsync_set_error(data, "Unable to perform merge_delete", rc);
         return rc;
     }
     
     // if the operation is a sentinel-only insert (indicating a new row or resurrected row with no column update), handle it separately.
     bool is_sentinel_only = (strcmp(insert_name, CLOUDSYNC_TOMBSTONE_VALUE) == 0);
     if (is_sentinel_only) {
-        if (local_cl == insert_cl) return SQLITE_OK;
+        if (local_cl == insert_cl) return DBRES_OK;
         
         // perform a sentinel-only insert to track the existence of the row
         int rc = merge_sentinel_only_insert(data, table, insert_pk, insert_pk_len, insert_col_version,
                                             insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
-        if (rc != SQLITE_OK) cloudsync_set_error(data, "Unable to perform merge_sentinel_only_insert", rc);
+        if (rc != DBRES_OK) cloudsync_set_error(data, "Unable to perform merge_sentinel_only_insert", rc);
         return rc;
     }
     
@@ -1487,22 +1480,22 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
     if (needs_resurrect && (row_exists_locally || (!row_exists_locally && insert_cl > 1))) {
         int rc = merge_sentinel_only_insert(data, table, insert_pk, insert_pk_len, insert_cl,
                                             insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
-        if (rc != SQLITE_OK) return cloudsync_set_error(data, "Unable to perform merge_sentinel_only_insert", rc);
+        if (rc != DBRES_OK) return cloudsync_set_error(data, "Unable to perform merge_sentinel_only_insert", rc);
     }
     
     // at this point, we determine whether the incoming change wins based on causal length
     // this can be due to a resurrection, a non-existent local row, or a conflict resolution
     bool flag = false;
     int rc = merge_did_cid_win(data, table, insert_pk, insert_pk_len, insert_value, insert_site_id, insert_site_id_len, insert_name, insert_col_version, &flag);
-    if (rc != SQLITE_OK) return cloudsync_set_error(data, "Unable to perform merge_did_cid_win", rc);
+    if (rc != DBRES_OK) return cloudsync_set_error(data, "Unable to perform merge_did_cid_win", rc);
     
     // check if the incoming change wins and should be applied
     bool does_cid_win = ((needs_resurrect) || (!row_exists_locally) || (flag));
-    if (!does_cid_win) return SQLITE_OK;
+    if (!does_cid_win) return DBRES_OK;
     
     // perform the final column insert or update if the incoming change wins
     rc = merge_insert_col(data, table, insert_pk, insert_pk_len, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
-    if (rc != SQLITE_OK) cloudsync_set_error(data, "Unable to perform merge_insert_col", rc);
+    if (rc != DBRES_OK) cloudsync_set_error(data, "Unable to perform merge_insert_col", rc);
     
     return rc;
 }
@@ -1553,9 +1546,9 @@ const char *cloudsync_context_init (cloudsync_context *data, void *db) {
     // cloudsync_context_init was previously called in init transaction that was rolled back
     // because of an error during the init process.
     if (data->site_id[0] == 0 || !dbutils_table_exists(db, CLOUDSYNC_SITEID_NAME)) {
-        if (dbutils_settings_init(db, data, NULL) != SQLITE_OK) return NULL;
-        if (cloudsync_add_dbvms(db, data) != SQLITE_OK) return NULL;
-        if (cloudsync_load_siteid(db, data) != SQLITE_OK) return NULL;
+        if (dbutils_settings_init(db, data, NULL) != DBRES_OK) return NULL;
+        if (cloudsync_add_dbvms(db, data) != DBRES_OK) return NULL;
+        if (cloudsync_load_siteid(db, data) != DBRES_OK) return NULL;
         
         data->db = db;
         data->schema_hash = dbutils_schema_hash(db);
@@ -1595,7 +1588,7 @@ int cloudsync_commit_hook (void *ctx) {
     data->pending_db_version = CLOUDSYNC_VALUE_NOTSET;
     data->seq = 0;
     
-    return SQLITE_OK;
+    return DBRES_OK;
 }
 
 void cloudsync_rollback_hook (void *ctx) {
@@ -1610,7 +1603,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     
     // init cloudsync_settings
     if (cloudsync_context_init(data, db) == NULL) {
-        return cloudsync_set_error(data, "Unable to initialize cloudsync context", SQLITE_MISUSE);
+        return cloudsync_set_error(data, "Unable to initialize cloudsync context", DBRES_MISUSE);
     }
     
     // lookup table
@@ -1618,13 +1611,13 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     if (!table) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to find table %s", table_name);
-        return cloudsync_set_error(data, buffer, SQLITE_MISUSE);
+        return cloudsync_set_error(data, buffer, DBRES_MISUSE);
     }
     
     // create a savepoint to manage the alter operations as a transaction
-    int rc = database_exec(db, "SAVEPOINT cloudsync_alter;");
-    if (rc != SQLITE_OK) {
-        return cloudsync_set_error(data, "Unable to create cloudsync_begin_alter savepoint", SQLITE_MISUSE);
+    int rc = database_begin_savepoint(db, "cloudsync_alter");
+    if (rc != DBRES_OK) {
+        return cloudsync_set_error(data, "Unable to create cloudsync_begin_alter savepoint", DBRES_MISUSE);
     }
     
     // retrieve primary key(s)
@@ -1634,7 +1627,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     if (rc != DBRES_OK) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to get primary keys for table %s", table_name);
-        cloudsync_set_error(data, buffer, SQLITE_MISUSE);
+        cloudsync_set_error(data, buffer, DBRES_MISUSE);
         goto rollback_begin_alter;
     }
     
@@ -1642,16 +1635,16 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     if (nrows != table_count_pks(table)) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Number of primary keys for table %s changed before ALTER", table_name);
-        cloudsync_set_error(data, buffer, SQLITE_MISUSE);
+        cloudsync_set_error(data, buffer, DBRES_MISUSE);
         goto rollback_begin_alter;
     }
     
     // drop original triggers
     dbutils_delete_triggers(db, table_name);
-    if (rc != SQLITE_OK) {
+    if (rc != DBRES_OK) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to delete triggers for table %s in cloudsync_begin_alter.", table_name);
-        cloudsync_set_error(data, buffer, SQLITE_ERROR);
+        cloudsync_set_error(data, buffer, DBRES_ERROR);
         goto rollback_begin_alter;
     }
     
@@ -1659,7 +1652,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     return DBRES_OK;
     
 rollback_begin_alter:
-    database_exec(db, "ROLLBACK TO cloudsync_alter; RELEASE cloudsync_alter;");
+    database_rollback_savepoint(db, "cloudsync_alter");
     if (names) table_pknames_free(names, nrows);
     return rc;
 }
@@ -1700,8 +1693,8 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
         char *sql = cloudsync_memory_mprintf("DROP TABLE IF EXISTS \"%w_cloudsync\";", table->name);
         rc = database_exec(db, sql);
         cloudsync_memory_free(sql);
-        if (rc != SQLITE_OK) {
-            DEBUG_SQLITE_ERROR(rc, "cloudsync_finalize_alter", db);
+        if (rc != DBRES_OK) {
+            DEBUG_DBERROR(rc, "cloudsync_finalize_alter", db);
             goto finalize;
         }
     } else {
@@ -1712,8 +1705,8 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
                                              ")", table->name, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
         rc = database_exec(db, sql);
         cloudsync_memory_free(sql);
-        if (rc != SQLITE_OK) {
-            DEBUG_SQLITE_ERROR(rc, "cloudsync_finalize_alter", db);
+        if (rc != DBRES_OK) {
+            DEBUG_DBERROR(rc, "cloudsync_finalize_alter", db);
             goto finalize;
         }
         
@@ -1721,7 +1714,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
         sql = cloudsync_memory_mprintf("SELECT group_concat('\"%w\".\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%s') WHERE pk>0 ORDER BY pk;", singlequote_escaped_table_name, singlequote_escaped_table_name);
         cloudsync_memory_free(singlequote_escaped_table_name);
         if (!sql) {
-            rc = SQLITE_NOMEM;
+            rc = DBRES_NOMEM;
             goto finalize;
         }
         char *pkclause = dbutils_text_select(db, sql);
@@ -1733,8 +1726,8 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
         rc = database_exec(db, sql);
         if (pkclause) cloudsync_memory_free(pkclause);
         cloudsync_memory_free(sql);
-        if (rc != SQLITE_OK) {
-            DEBUG_SQLITE_ERROR(rc, "cloudsync_finalize_alter", db);
+        if (rc != DBRES_OK) {
+            DEBUG_DBERROR(rc, "cloudsync_finalize_alter", db);
             goto finalize;
         }
 
@@ -1771,7 +1764,7 @@ int cloudsync_commit_alter (cloudsync_context *data, const char *table_name) {
     }
     
     rc = cloudsync_finalize_alter(data, table);
-    if (rc != SQLITE_OK) goto rollback_finalize_alter;
+    if (rc != DBRES_OK) goto rollback_finalize_alter;
     
     // the table is outdated, delete it and it will be reloaded in the cloudsync_init_internal
     table_remove(data, table);
@@ -1782,11 +1775,11 @@ int cloudsync_commit_alter (cloudsync_context *data, const char *table_name) {
     table_algo algo_current = dbutils_table_settings_get_algo(db, table_name);
     if (algo_current == table_algo_none) algo_current = dbutils_table_settings_get_algo(db, "*");
     rc = cloudsync_init_table(data, table_name, crdt_algo_name(algo_current), true);
-    if (rc != SQLITE_OK) goto rollback_finalize_alter;
+    if (rc != DBRES_OK) goto rollback_finalize_alter;
 
     // release savepoint
-    rc = database_exec(db, "RELEASE cloudsync_alter;");
-    if (rc != SQLITE_OK) {
+    rc = database_commit_savepoint(db, "cloudsync_alter");
+    if (rc != DBRES_OK) {
         cloudsync_set_dberror(data);
         goto rollback_finalize_alter;
     }
@@ -1795,14 +1788,14 @@ int cloudsync_commit_alter (cloudsync_context *data, const char *table_name) {
     return DBRES_OK;
     
 rollback_finalize_alter:
-    database_exec(db, "ROLLBACK TO cloudsync_alter; RELEASE cloudsync_alter;");
+    database_rollback_savepoint(db, "cloudsync_alter");
     if (table) table_set_pknames(table, NULL);
     return rc;
 }
 
 int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name) {
     cloudsync_table_context *table = table_lookup(data, table_name);
-    if (!table) return SQLITE_INTERNAL;
+    if (!table) return DBRES_ERROR;
     
     db_t *db= data->db;
     dbvm_t *vm = NULL;
@@ -1821,7 +1814,7 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     sql = cloudsync_memory_mprintf("SELECT cloudsync_insert('%q', %s) FROM (SELECT %s FROM \"%w\" EXCEPT SELECT %s FROM \"%w_cloudsync\");", table_name, pkvalues_identifiers, pkvalues_identifiers, table_name, pkdecodeval, table_name);
     int rc = database_exec(db, sql);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto finalize;
+    if (rc != DBRES_OK) goto finalize;
     
     // fill missing colums
     // for each non-pk column:
@@ -1829,36 +1822,36 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     // The old plan does many decodes per candidate and can’t use an index to rule out matches quickly—so it burns CPU and I/O.
     
     sql = cloudsync_memory_mprintf("WITH _cstemp1 AS (SELECT cloudsync_pk_encode(%s) AS pk FROM \"%w\") SELECT _cstemp1.pk FROM _cstemp1 WHERE NOT EXISTS (SELECT 1 FROM \"%w_cloudsync\" _cstemp2 WHERE _cstemp2.pk = _cstemp1.pk AND _cstemp2.col_name = ?);", pkvalues_identifiers, table_name, table_name);
-    rc = database_prepare(db, sql, (void **)&vm, SQLITE_PREPARE_PERSISTENT);
+    rc = database_prepare(db, sql, (void **)&vm, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) goto finalize;
+    if (rc != DBRES_OK) goto finalize;
      
     for (int i=0; i<table->ncols; ++i) {
         char *col_name = table->col_name[i];
 
         rc = database_bind_text(vm, 1, col_name, -1);
-        if (rc != SQLITE_OK) goto finalize;
+        if (rc != DBRES_OK) goto finalize;
         
         while (1) {
             rc = database_step(vm);
-            if (rc == SQLITE_ROW) {
+            if (rc == DBRES_ROW) {
                 const char *pk = (const char *)database_column_text(vm, 0);
                 size_t pklen = strlen(pk);
-                rc = local_mark_insert_or_update_meta(table, pk, pklen, col_name, db_version, BUMP_SEQ(data));
-            } else if (rc == SQLITE_DONE) {
-                rc = SQLITE_OK;
+                rc = local_mark_insert_or_update_meta(table, pk, pklen, col_name, db_version, cloudsync_bumpseq(data));
+            } else if (rc == DBRES_DONE) {
+                rc = DBRES_OK;
                 break;
             } else {
                 break;
             }
         }
-        if (rc != SQLITE_OK) goto finalize;
+        if (rc != DBRES_OK) goto finalize;
 
         database_reset(vm);
     }
     
 finalize:
-    if (rc != SQLITE_OK) DEBUG_ALWAYS("cloudsync_refill_metatable error: %s", database_errmsg(db));
+    if (rc != DBRES_OK) DEBUG_ALWAYS("cloudsync_refill_metatable error: %s", database_errmsg(db));
     if (pkclause_identifiers) cloudsync_memory_free(pkclause_identifiers);
     if (pkdecode) cloudsync_memory_free(pkdecode);
     if (vm) database_finalize(vm);
@@ -1872,19 +1865,19 @@ int local_update_sentinel (cloudsync_table_context *table, const char *pk, size_
     if (!vm) return -1;
     
     int rc = database_bind_int(vm, 1, db_version);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_int(vm, 2, seq);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_blob(vm, 3, pk, (int)pklen);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_step(vm);
-    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
-    //DEBUG_SQLITE_ERROR(rc, "local_update_sentinel", db);
+    DEBUG_DBERROR(rc, "local_update_sentinel", table->context->db);
     database_reset(vm);
     return rc;
 }
@@ -1894,25 +1887,25 @@ int local_mark_insert_sentinel_meta (cloudsync_table_context *table, const char 
     if (!vm) return -1;
     
     int rc = database_bind_blob(vm, 1, pk, (int)pklen);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_int(vm, 2, db_version);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_int(vm, 3, seq);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_int(vm, 4, db_version);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_int(vm, 5, seq);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_step(vm);
-    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
-    //DEBUG_SQLITE_ERROR(rc, "local_insert_sentinel", db);
+    DEBUG_DBERROR(rc, "local_insert_sentinel", table->context->db);
     database_reset(vm);
     return rc;
 }
@@ -1923,31 +1916,31 @@ int local_mark_insert_or_update_meta_impl (cloudsync_table_context *table, const
     if (!vm) return -1;
     
     int rc = database_bind_blob(vm, 1, pk, pklen);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_text(vm, 2, (col_name) ? col_name : CLOUDSYNC_TOMBSTONE_VALUE, -1);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_int(vm, 3, col_version);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_int(vm, 4, db_version);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_int(vm, 5, seq);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_int(vm, 6, db_version);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_bind_int(vm, 7, seq);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_step(vm);
-    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
-    //DEBUG_SQLITE_ERROR(rc, "local_insert_or_update", db);
+    DEBUG_DBERROR(rc, "local_insert_or_update", table->context->db);
     database_reset(vm);
     return rc;
 }
@@ -1965,13 +1958,13 @@ int local_drop_meta (cloudsync_table_context *table, const char *pk, size_t pkle
     if (!vm) return -1;
     
     int rc = database_bind_blob(vm, 1, pk, pklen);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_step(vm);
-    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
-    //DEBUG_SQLITE_ERROR(rc, "local_drop_meta", db);
+    DEBUG_DBERROR(rc, "local_drop_meta", table->context->db);
     database_reset(vm);
     return rc;
 }
@@ -1989,7 +1982,7 @@ int local_update_move_meta (cloudsync_table_context *table, const char *pk, size
       * may be applied incorrectly, leading to data inconsistency.
       *
       * When performing the update, a unique `seq` must be assigned to each metadata row. This can be achieved
-      * by either incrementing the maximum sequence value in the table or using a function (e.g., `bump_seq(data)`)
+      * by either incrementing the maximum sequence value in the table or using a function (e.g., cloudsync_bumpseq(data))
       * that generates a unique sequence for each row. The update query should ensure that each row moved
       * from OLD.pk to NEW.pk gets a distinct `seq` to maintain proper versioning and ordering of changes.
      */
@@ -2002,37 +1995,28 @@ int local_update_move_meta (cloudsync_table_context *table, const char *pk, size
     
     // new primary key
     int rc = database_bind_blob(vm, 1, pk, pklen);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     // new db_version
     rc = database_bind_int(vm, 2, db_version);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     // old primary key
     rc = database_bind_blob(vm, 3, pk2, pklen2);
-    if (rc != SQLITE_OK) goto cleanup;
+    if (rc != DBRES_OK) goto cleanup;
     
     rc = database_step(vm);
-    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
-    //DEBUG_SQLITE_ERROR(rc, "local_update_move_meta", db);
+    DEBUG_DBERROR(rc, "local_update_move_meta", table->context->db);
     database_reset(vm);
     return rc;
 }
 
 // MARK: - Payload Encode / Decode -
 
-bool cloudsync_buffer_free (cloudsync_data_payload *payload) {
-    if (payload) {
-        if (payload->buffer) cloudsync_memory_free(payload->buffer);
-        memset(payload, 0, sizeof(cloudsync_data_payload));
-    }
-        
-    return false;
-}
-
-bool cloudsync_buffer_check (cloudsync_data_payload *payload, size_t needed) {
+bool cloudsync_datapayload_check (cloudsync_payload_context *payload, size_t needed) {
     if (payload->nrows == 0) needed += sizeof(cloudsync_payload_header);
     
     // alloc/resize buffer
@@ -2041,7 +2025,11 @@ bool cloudsync_buffer_check (cloudsync_data_payload *payload, size_t needed) {
         size_t balloc = payload->balloc + needed;
         
         char *buffer = cloudsync_memory_realloc(payload->buffer, balloc);
-        if (!buffer) return cloudsync_buffer_free(payload);
+        if (!buffer) {
+            if (payload->buffer) cloudsync_memory_free(payload->buffer);
+            memset(payload, 0, sizeof(cloudsync_payload_context));
+            return false;
+        }
         
         payload->buffer = buffer;
         payload->balloc = balloc;
@@ -2049,6 +2037,11 @@ bool cloudsync_buffer_check (cloudsync_data_payload *payload, size_t needed) {
     }
     
     return true;
+}
+
+size_t cloudsync_payload_context_size (size_t *header_size) {
+    if (header_size) *header_size = sizeof(cloudsync_payload_header);
+    return sizeof(cloudsync_payload_context);
 }
 
 void cloudsync_payload_header_init (cloudsync_payload_header *header, uint32_t expanded_size, uint16_t ncols, uint32_t nrows, uint64_t hash) {
@@ -2069,136 +2062,130 @@ void cloudsync_payload_header_init (cloudsync_payload_header *header, uint32_t e
     header->schema_hash = htonll(hash);
 }
 
-void cloudsync_payload_encode_step (sqlite3_context *context, int argc, sqlite3_value **argv) {
+int cloudsync_payload_encode_step (cloudsync_payload_context *payload, cloudsync_context *data, int argc, dbvalue_t **argv) {
     DEBUG_FUNCTION("cloudsync_payload_encode_step");
     // debug_values(argc, argv);
-    
-    // allocate/get the session context
-    cloudsync_data_payload *payload = (cloudsync_data_payload *)sqlite3_aggregate_context(context, sizeof(cloudsync_data_payload));
-    if (!payload) return;
     
     // check if the step function is called for the first time
     if (payload->nrows == 0) payload->ncols = argc;
     
     size_t breq = pk_encode_size((dbvalue_t **)argv, argc, 0);
-    if (cloudsync_buffer_check(payload, breq) == false) return;
+    if (cloudsync_datapayload_check(payload, breq) == false) {
+        return cloudsync_set_error(data, "Not enough memory to resize payload internal buffer", DBRES_NOMEM);
+    }
     
     char *buffer = payload->buffer + payload->bused;
-    char *ptr = pk_encode((dbvalue_t **)argv, argc, buffer, false, NULL);
-    assert(buffer == ptr);
+    pk_encode((dbvalue_t **)argv, argc, buffer, false, NULL);
     
     // update buffer
     payload->bused += breq;
     
     // increment row counter
     ++payload->nrows;
+    
+    return DBRES_OK;
 }
 
-void cloudsync_payload_encode_final (sqlite3_context *context) {
-    DEBUG_FUNCTION("cloudsync_payload_encode_final");
+char *cloudsync_payload_blob (cloudsync_payload_context *payload, db_int64 *blob_size, db_int64 *nrows) {
+    DEBUG_FUNCTION("cloudsync_payload_blob");
+    
+    if (blob_size) *blob_size = (db_int64)payload->bsize;
+    if (nrows) *nrows = (db_int64)payload->nrows;
+    return payload->buffer;
+}
 
-    // get the session context
-    cloudsync_data_payload *payload = (cloudsync_data_payload *)sqlite3_aggregate_context(context, sizeof(cloudsync_data_payload));
-    if (!payload) return;
+int cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsync_context *data) {
+    DEBUG_FUNCTION("cloudsync_payload_encode_final");
     
     if (payload->nrows == 0) {
-        sqlite3_result_null(context);
-        return;
+        if (payload->buffer) cloudsync_memory_free(payload->buffer);
+        payload->buffer = NULL;
+        payload->bsize = 0;
+        return DBRES_OK;
     }
     
-    // encode payload
+    // try to allocate buffer used for compressed data
     int header_size = (int)sizeof(cloudsync_payload_header);
     int real_buffer_size = (int)(payload->bused - header_size);
     int zbound = LZ4_compressBound(real_buffer_size);
-    char *buffer = cloudsync_memory_alloc(zbound + header_size);
-    if (!buffer) {
-        cloudsync_buffer_free(payload);
-        sqlite3_result_error_code(context, SQLITE_NOMEM);
-        return;
-    }
+    char *zbuffer = cloudsync_memory_alloc(zbound + header_size); // if for some reasons allocation fails then just skip compression
     
-    // adjust buffer to compress to skip the reserved header
+    // skip the reserved header from the buffer to compress
     char *src_buffer = payload->buffer + sizeof(cloudsync_payload_header);
-    int zused = LZ4_compress_default(src_buffer, buffer+header_size, real_buffer_size, zbound);
+    int zused = (zbuffer) ? LZ4_compress_default(src_buffer, zbuffer+header_size, real_buffer_size, zbound) : 0;
     bool use_uncompressed_buffer = (!zused || zused > real_buffer_size);
     CHECK_FORCE_UNCOMPRESSED_BUFFER();
     
     // setup payload header
-    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    cloudsync_payload_header header;
-    cloudsync_payload_header_init(&header, (use_uncompressed_buffer) ? 0 : real_buffer_size, payload->ncols, (uint32_t)payload->nrows, data->schema_hash);
+    cloudsync_payload_header header = {0};
+    uint32_t expanded_size = (use_uncompressed_buffer) ? 0 : real_buffer_size;
+    cloudsync_payload_header_init(&header, expanded_size, payload->ncols, (uint32_t)payload->nrows, data->schema_hash);
     
     // if compression fails or if compressed size is bigger than original buffer, then use the uncompressed buffer
     if (use_uncompressed_buffer) {
-        cloudsync_memory_free(buffer);
-        buffer = payload->buffer;
+        if (zbuffer) cloudsync_memory_free(zbuffer);
+        zbuffer = payload->buffer;
         zused = real_buffer_size;
     }
     
     // copy header and data to SQLite BLOB
-    memcpy(buffer, &header, sizeof(cloudsync_payload_header));
-    int blob_size = zused+sizeof(cloudsync_payload_header);
-    sqlite3_result_blob(context, buffer, blob_size, SQLITE_TRANSIENT);
+    memcpy(zbuffer, &header, sizeof(cloudsync_payload_header));
+    int blob_size = zused + sizeof(cloudsync_payload_header);
+    payload->bsize = blob_size;
     
     // cleanup memory
-    cloudsync_buffer_free(payload);
-    if (!use_uncompressed_buffer) cloudsync_memory_free(buffer);
-}
-
-cloudsync_payload_apply_callback_t cloudsync_get_payload_apply_callback(sqlite3 *db) {
-    return (sqlite3_libversion_number() >= 3044000) ? sqlite3_get_clientdata(db, CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY) : NULL;
-}
-
-void cloudsync_set_payload_apply_callback(db_t *db, cloudsync_payload_apply_callback_t callback) {
-    if (sqlite3_libversion_number() >= 3044000) {
-        sqlite3_set_clientdata(db, CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY, (void*)callback, NULL);
+    if (zbuffer != payload->buffer) {
+        cloudsync_memory_free (payload->buffer);
+        payload->buffer = zbuffer;
     }
+    
+    return DBRES_OK;
 }
 
 int cloudsync_pk_decode_bind_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
     cloudsync_pk_decode_bind_context *decode_context = (cloudsync_pk_decode_bind_context*)xdata;
     int rc = pk_decode_bind_callback(decode_context->vm, index, type, ival, dval, pval);
     
-    if (rc == SQLITE_OK) {
+    if (rc == DBRES_OK) {
         // the dbversion index is smaller than seq index, so it is processed first
         // when processing the dbversion column: save the value to the tmp_dbversion field
         // when processing the seq column: update the dbversion and seq fields only if the current dbversion is greater than the last max value
         switch (index) {
             case CLOUDSYNC_PK_INDEX_TBL:
-                if (type == SQLITE_TEXT) {
+                if (type == DBTYPE_TEXT) {
                     decode_context->tbl = pval;
                     decode_context->tbl_len = ival;
                 }
                 break;
             case CLOUDSYNC_PK_INDEX_PK:
-                if (type == SQLITE_BLOB) {
+                if (type == DBTYPE_BLOB) {
                     decode_context->pk = pval;
                     decode_context->pk_len = ival;
                 }
                 break;
             case CLOUDSYNC_PK_INDEX_COLNAME:
-                if (type == SQLITE_TEXT) {
+                if (type == DBTYPE_TEXT) {
                     decode_context->col_name = pval;
                     decode_context->col_name_len = ival;
                 }
                 break;
             case CLOUDSYNC_PK_INDEX_COLVERSION:
-                if (type == SQLITE_INTEGER) decode_context->col_version = ival;
+                if (type == DBTYPE_INTEGER) decode_context->col_version = ival;
                 break;
             case CLOUDSYNC_PK_INDEX_DBVERSION:
-                if (type == SQLITE_INTEGER) decode_context->db_version = ival;
+                if (type == DBTYPE_INTEGER) decode_context->db_version = ival;
                 break;
             case CLOUDSYNC_PK_INDEX_SITEID:
-                if (type == SQLITE_BLOB) {
+                if (type == DBTYPE_BLOB) {
                     decode_context->site_id = pval;
                     decode_context->site_id_len = ival;
                 }
                 break;
             case CLOUDSYNC_PK_INDEX_CL:
-                if (type == SQLITE_INTEGER) decode_context->cl = ival;
+                if (type == DBTYPE_INTEGER) decode_context->cl = ival;
                 break;
             case CLOUDSYNC_PK_INDEX_SEQ:
-                if (type == SQLITE_INTEGER) decode_context->seq = ival;
+                if (type == DBTYPE_INTEGER) decode_context->seq = ival;
                 break;
         }
     }
@@ -2224,13 +2211,13 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         if (!dbutils_check_schema_hash(db, header.schema_hash)) {
             char buffer[1024];
             snprintf(buffer, sizeof(buffer), "Cannot apply the received payload because the schema hash is unknown %llu.", header.schema_hash);
-            return cloudsync_set_error(data, buffer, SQLITE_MISMATCH);
+            return cloudsync_set_error(data, buffer, DBRES_MISUSE);
         }
     }
     
     // sanity check header
     if ((header.signature != CLOUDSYNC_PAYLOAD_SIGNATURE) || (header.ncols == 0)) {
-        return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid signature or column size", SQLITE_MISUSE);
+        return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid signature or column size", DBRES_MISUSE);
     }
     
     const char *buffer = payload + sizeof(cloudsync_payload_header);
@@ -2240,11 +2227,11 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     char *clone = NULL;
     if (header.expanded_size != 0) {
         clone = (char *)cloudsync_memory_alloc(header.expanded_size);
-        if (!clone) return cloudsync_set_error(data, "Unable to allocate memory to uncompress payload", SQLITE_NOMEM);
+        if (!clone) return cloudsync_set_error(data, "Unable to allocate memory to uncompress payload", DBRES_NOMEM);
         
         uint32_t rc = LZ4_decompress_safe(buffer, clone, blen, header.expanded_size);
         if (rc <= 0 || rc != header.expanded_size) {
-            return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to decompress BLOB", SQLITE_MISUSE);
+            return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to decompress BLOB", DBRES_MISUSE);
         }
         
         buffer = (const char *)clone;
@@ -2254,7 +2241,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     dbvm_t *vm = NULL;
     const char *sql = "INSERT INTO cloudsync_changes(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) VALUES (?,?,?,?,?,?,?,?,?);";
     int rc = database_prepare(db, sql, &vm, 0);
-    if (rc != SQLITE_OK) {
+    if (rc != DBRES_OK) {
         if (clone) cloudsync_memory_free(clone);
         return cloudsync_set_error(data, "Error on cloudsync_payload_apply: error while compiling SQL statement", rc);
     }
@@ -2277,7 +2264,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         // assert(n == ncols);
                 
         bool approved = true;
-        if (payload_apply_callback) approved = payload_apply_callback(&payload_apply_xdata, &decoded_context, db, data, CLOUDSYNC_PAYLOAD_APPLY_WILL_APPLY, SQLITE_OK);
+        if (payload_apply_callback) approved = payload_apply_callback(&payload_apply_xdata, &decoded_context, db, data, CLOUDSYNC_PAYLOAD_APPLY_WILL_APPLY, DBRES_OK);
         
         // Apply consecutive rows with the same db_version inside a transaction if no
         // transaction has already been opened.
@@ -2291,8 +2278,8 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
 
         // Release existing savepoint if db_version changed
         if (in_savepoint && db_version_changed) {
-            rc = database_exec(db, "RELEASE cloudsync_payload_apply;");
-            if (rc != SQLITE_OK) {
+            rc = database_commit_savepoint(db, "cloudsync_payload_apply");
+            if (rc != DBRES_OK) {
                 if (clone) cloudsync_memory_free(clone);
                 return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to release a savepoint", rc);
             }
@@ -2302,8 +2289,8 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         // Start new savepoint if needed
         bool in_transaction = database_in_transaction(db);
         if (!in_transaction && db_version_changed) {
-            rc = database_exec(db, "SAVEPOINT cloudsync_payload_apply;");
-            if (rc != SQLITE_OK) {
+            rc = database_begin_savepoint(db, "cloudsync_payload_apply");
+            if (rc != DBRES_OK) {
                 if (clone) cloudsync_memory_free(clone);
                 return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to start a transaction", rc);
             }
@@ -2313,7 +2300,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         
         if (approved) {
             rc = database_step(vm);
-            if (rc != SQLITE_DONE) {
+            if (rc != DBRES_DONE) {
                 // don't "break;", the error can be due to a RLS policy.
                 // in case of error we try to apply the following changes
                 // printf("cloudsync_payload_apply error on db_version %lld/%lld: (%d) %s\n", decoded_context.db_version, decoded_context.seq, rc, database_errmsg(db));
@@ -2332,11 +2319,11 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     if (in_savepoint) {
         sql = "RELEASE cloudsync_payload_apply;";
         int rc1 = database_exec(db, sql);
-        if (rc1 != SQLITE_OK) rc = rc1;
+        if (rc1 != DBRES_OK) rc = rc1;
     }
 
     // save last error (unused if function returns OK)
-    if (rc != SQLITE_OK && rc != SQLITE_DONE) {
+    if (rc != DBRES_OK && rc != DBRES_DONE) {
         cloudsync_set_dberror(data);
     }
     
@@ -2344,8 +2331,8 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         payload_apply_callback(&payload_apply_xdata, &decoded_context, db, data, CLOUDSYNC_PAYLOAD_APPLY_CLEANUP, rc);
     }
 
-    if (rc == SQLITE_DONE) rc = SQLITE_OK;
-    if (rc == SQLITE_OK) {
+    if (rc == DBRES_DONE) rc = DBRES_OK;
+    if (rc == DBRES_OK) {
         char buf[256];
         if (decoded_context.db_version >= dbversion) {
             snprintf(buf, sizeof(buf), "%lld", decoded_context.db_version);
@@ -2365,29 +2352,24 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     if (clone) cloudsync_memory_free(clone);
     
     // error already saved in (save last error)
-    if (rc != SQLITE_OK) return rc;
+    if (rc != DBRES_OK) return rc;
     
     // return the number of processed rows
-    *pnrows = nrows;
+    if (pnrows) *pnrows = nrows;
     return DBRES_OK;
-}
-
-int cloudsync_payload_header_size (void) {
-    return (int)sizeof(cloudsync_payload_header);
 }
 
 // MARK: - Payload load/store -
 
 int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int *seq, db_int64 *new_db_version, db_int64 *new_seq) {
-    
     db_t *db = data->db;
     
     // retrieve current db_version and seq
     *db_version = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_SEND_DBVERSION);
-    if (*db_version < 0) return SQLITE_ERROR;
+    if (*db_version < 0) return DBRES_ERROR;
 
     *seq = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_SEND_SEQ);
-    if (*seq < 0) return SQLITE_ERROR;
+    if (*seq < 0) return DBRES_ERROR;
     
     // retrieve BLOB
     char sql[1024];
@@ -2395,10 +2377,10 @@ int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size,
                                "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq), max_db_version AS max_db_version, MAX(IIF(db_version = max_db_version, seq, NULL)) FROM cloudsync_changes, max_db_version WHERE site_id=cloudsync_siteid() AND (db_version>%d OR (db_version=%d AND seq>%d))", *db_version, *db_version, *seq);
     
     int rc = dbutils_blob_int_int_select(db, sql, blob, blob_size, new_db_version, new_seq);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != DBRES_OK) return rc;
     
     // exit if there is no data to send
-    if (blob == NULL || blob_size == 0) return SQLITE_OK;
+    if (blob == NULL || blob_size == 0) return DBRES_OK;
     return rc;
 }
 
@@ -2414,7 +2396,7 @@ int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, i
     int blob_size = 0, db_version = 0, seq = 0;
     db_int64 new_db_version = 0, new_seq = 0;
     int rc = cloudsync_payload_get(data, &blob, &blob_size, &db_version, &seq, &new_db_version, &new_seq);
-    if (rc != SQLITE_OK) {
+    if (rc != DBRES_OK) {
         if (db_version < 0) return cloudsync_set_error(data, "Unable to retrieve db_version", rc);
         else if (seq < 0) return cloudsync_set_error(data, "Unable to retrieve seq", rc);
         return cloudsync_set_error(data, "Unable to retrieve changes in cloudsync_payload_save", rc);
@@ -2423,14 +2405,14 @@ int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, i
     // exit if there is no data to save
     if (blob == NULL || blob_size == 0) {
         if (size) *size = 0;
-        return SQLITE_OK;
+        return DBRES_OK;
     }
     
     // write payload to file
     bool res = cloudsync_file_write(payload_path, blob, (size_t)blob_size);
     cloudsync_memory_free(blob);
     if (res == false) {
-        return cloudsync_set_error(data, "Unable to write payload to file path", SQLITE_IOERR);
+        return cloudsync_set_error(data, "Unable to write payload to file path", DBRES_IOERR);
     }
     
     // TODO: dbutils_settings_set_key_value remove context and return error here (in case of error)
@@ -2448,7 +2430,7 @@ int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, i
     
     // returns blob size
     if (size) *size = blob_size;
-    return SQLITE_OK;
+    return DBRES_OK;
 }
 #endif
 
@@ -2456,14 +2438,14 @@ int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, i
 
 int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context *table) {
     db_t *db = data->db;
-    if (cloudsync_context_init(data, db) == NULL) return SQLITE_MISUSE;
+    if (cloudsync_context_init(data, db) == NULL) return DBRES_MISUSE;
     
     // drop meta-table
     const char *table_name = table->name;
     char *sql = cloudsync_memory_mprintf("DROP TABLE IF EXISTS \"%w_cloudsync\";", table_name);
     int rc = database_exec(db, sql);
     cloudsync_memory_free(sql);
-    if (rc != SQLITE_OK) {
+    if (rc != DBRES_OK) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to drop cloudsync table %s_cloudsync in cloudsync_cleanup", table_name);
         return cloudsync_set_error(data, buffer, rc);
@@ -2471,7 +2453,7 @@ int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context
     
     // drop original triggers
     dbutils_delete_triggers(db, table_name);
-    if (rc != SQLITE_OK) {
+    if (rc != DBRES_OK) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to delete triggers for table %s", table_name);
         return cloudsync_set_error(data, buffer, rc);
@@ -2479,18 +2461,18 @@ int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context
     
     // remove all table related settings
     dbutils_table_settings_set_key_value(db, NULL, table_name, NULL, NULL, NULL);
-    return SQLITE_OK;
+    return DBRES_OK;
 }
 
 int cloudsync_cleanup (cloudsync_context *data, const char *table_name) {
     cloudsync_table_context *table = table_lookup(data, table_name);
-    if (!table) return SQLITE_OK;
+    if (!table) return DBRES_OK;
     
     // TODO: check what happen if cloudsync_cleanup_internal failes (not eveything dropped)
     // and the table is still in memory?
     
     int rc = cloudsync_cleanup_internal(data, table);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != DBRES_OK) return rc;
     
     int counter = table_remove(data, table);
     table_free(table);
@@ -2505,7 +2487,7 @@ int cloudsync_cleanup (cloudsync_context *data, const char *table_name) {
         }
     }
     
-    return SQLITE_OK;
+    return DBRES_OK;
 }
 
 int cloudsync_terminate (cloudsync_context *data) {
@@ -2539,13 +2521,13 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     // sanity check table and its primary key(s)
     if (dbutils_table_sanity_check(db, NULL, table_name, skip_int_pk_check) == false) {
         // TODO: check error message here
-        return SQLITE_MISUSE;
+        return DBRES_MISUSE;
     }
     
     // init cloudsync_settings
     if (cloudsync_context_init(data, db) == NULL) {
         // TODO: check error message here
-        return SQLITE_MISUSE;
+        return DBRES_MISUSE;
     }
     
     // sanity check algo name (if exists)
@@ -2556,7 +2538,7 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     if (algo_new == table_algo_none) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unknown CRDT algorithm name %s", algo_name);
-        return cloudsync_set_error(data, buffer, SQLITE_ERROR);
+        return cloudsync_set_error(data, buffer, DBRES_ERROR);
     }
     
     // check if table name was already augmented
@@ -2577,7 +2559,7 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
         dbutils_table_settings_set_key_value(db, NULL, table_name, "*", "algo", algo_name);
     } else {
         // error condition
-        return cloudsync_set_error(data, "The function cloudsync_cleanup(table) must be called before changing a table algorithm", SQLITE_MISUSE);
+        return cloudsync_set_error(data, "The function cloudsync_cleanup(table) must be called before changing a table algorithm", DBRES_MISUSE);
     }
     
     // Run the following function even if table was already augmented.
@@ -2589,27 +2571,27 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     
     // check triggers
     int rc = dbutils_check_triggers(db, table_name, algo_new);
-    if (rc != SQLITE_OK) return cloudsync_set_error(data, "An error occurred while creating triggers", SQLITE_MISUSE);
+    if (rc != DBRES_OK) return cloudsync_set_error(data, "An error occurred while creating triggers", DBRES_MISUSE);
     
     // check meta-table
     rc = dbutils_check_metatable(db, table_name, algo_new);
-    if (rc != SQLITE_OK) return cloudsync_set_error(data, "An error occurred while creating metatable", SQLITE_MISUSE);
+    if (rc != DBRES_OK) return cloudsync_set_error(data, "An error occurred while creating metatable", DBRES_MISUSE);
     
     // add prepared statements
-    if (cloudsync_add_dbvms(db, data) != SQLITE_OK) {
-        return cloudsync_set_error(data, "An error occurred while trying to compile prepared SQL statements", SQLITE_MISUSE);
+    if (cloudsync_add_dbvms(db, data) != DBRES_OK) {
+        return cloudsync_set_error(data, "An error occurred while trying to compile prepared SQL statements", DBRES_MISUSE);
     }
     
     // add table to in-memory data context
     if (table_add_to_context(db, data, algo_new, table_name) == false) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "An error occurred while adding %s table information to global context", table_name);
-        return cloudsync_set_error(data, buffer, SQLITE_MISUSE);
+        return cloudsync_set_error(data, buffer, DBRES_MISUSE);
     }
     
-    if (cloudsync_refill_metatable(data, table_name) != SQLITE_OK) {
-        return cloudsync_set_error(data, "An error occurred while trying to fill the augmented table", SQLITE_MISUSE);
+    if (cloudsync_refill_metatable(data, table_name) != DBRES_OK) {
+        return cloudsync_set_error(data, "An error occurred while trying to fill the augmented table", DBRES_MISUSE);
     }
         
-    return SQLITE_OK;
+    return DBRES_OK;
 }

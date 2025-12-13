@@ -19,8 +19,10 @@ extern "C" {
 
 #define CLOUDSYNC_VERSION                       "0.9.0"
 
-// CLOUDSYNC CONTEXT
+// Opaque structures
 typedef struct cloudsync_context cloudsync_context;
+typedef struct cloudsync_payload_context cloudsync_payload_context;
+typedef struct cloudsync_table_context cloudsync_table_context;
 
 cloudsync_context *cloudsync_context_create (void *db);
 const char *cloudsync_context_init (cloudsync_context *data, void *db);
@@ -45,12 +47,13 @@ int cloudsync_commit_alter (cloudsync_context *data, const char *table_name);
 
 void *cloudsync_db (cloudsync_context *data);
 const char *cloudsync_errmsg (cloudsync_context *data);
+void *cloudsync_auxdata (cloudsync_context *data);
+void cloudsync_set_auxdata (cloudsync_context *data, void *xdata);
 
 int cloudsync_commit_hook (void *ctx);
 void cloudsync_rollback_hook (void *ctx);
 
 // PAYLOAD
-int cloudsync_payload_header_size (void);
 
 //#ifdef CLOUDSYNC_DESKTOP_OS
 int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, int *blob_size);
@@ -58,10 +61,15 @@ int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, i
 
 int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int blen, int *nrows);
 
+// Payload context (used to encode changes)
+int    cloudsync_payload_encode_step  (cloudsync_payload_context *payload, cloudsync_context *data, int argc, dbvalue_t **argv);
+int    cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsync_context *data);
+char  *cloudsync_payload_blob (cloudsync_payload_context *payload, db_int64 *blob_size, db_int64 *nrows);
+size_t cloudsync_payload_context_size (size_t *header_size);
+
 // END OK
 
 // CLOUDSYNCTABLE CONTEXT
-typedef struct cloudsync_table_context cloudsync_table_context;
 cloudsync_table_context *table_lookup (cloudsync_context *data, const char *table_name);
 void *table_column_lookup (cloudsync_table_context *table, const char *col_name, bool is_merge, int *index);
 bool table_enabled (cloudsync_table_context *table);

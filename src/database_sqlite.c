@@ -21,6 +21,8 @@
 SQLITE_EXTENSION_INIT3
 #endif
 
+#define CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY    "cloudsync_payload_apply_callback"
+
 // MARK: GENERAL -
 
 int database_exec (db_t *db, const char *sql) {
@@ -80,7 +82,7 @@ int database_pk_rowid (db_t *db, const char *table_name, char ***names, int *cou
     if (rc != SQLITE_OK) goto cleanup;
     
     if (rc == SQLITE_OK) {
-        char **r = (char**)dbmem_alloc(sizeof(char*));
+        char **r = (char**)cloudsync_memory_alloc(sizeof(char*));
         if (!r) return SQLITE_NOMEM;
         r[0] = cloudsync_string_dup("rowid", false);
         *names = r;
@@ -122,7 +124,7 @@ int database_pk_names (db_t *db, const char *table_name, char ***names, int *cou
     if (rc != SQLITE_OK) goto cleanup;
     
     // allocate array
-    char **r = (char**)dbmem_alloc(sizeof(char*) * rows);
+    char **r = (char**)cloudsync_memory_alloc(sizeof(char*) * rows);
     if (!r) {rc = SQLITE_NOMEM; goto cleanup;}
     
     int i = 0;
@@ -248,6 +250,26 @@ int database_column_type (dbvm_t *vm, int index) {
     return sqlite3_column_type((sqlite3_stmt *)vm, index);
 }
 
+// MARK: - SAVEPOINT -
+
+int database_begin_savepoint (db_t *db, const char *savepoint_name) {
+    char sql[1024];
+    snprintf(sql, sizeof(sql), "SAVEPOINT %s;", savepoint_name);
+    return database_exec(db, sql);
+}
+
+int database_commit_savepoint (db_t *db, const char *savepoint_name) {
+    char sql[1024];
+    snprintf(sql, sizeof(sql), "RELEASE %s;", savepoint_name);
+    return database_exec(db, sql);
+}
+
+int database_rollback_savepoint (db_t *db, const char *savepoint_name) {
+    char sql[1024];
+    snprintf(sql, sizeof(sql), "ROLLBACK TO %s; RELEASE %s;", savepoint_name, savepoint_name);
+    return database_exec(db, sql);
+}
+
 // MARK: - MEMORY -
 
 void *dbmem_alloc (db_uint64 size) {
@@ -287,4 +309,16 @@ void dbmem_free (void *ptr) {
 
 db_uint64 dbmem_size (void *ptr) {
     return (db_uint64)sqlite3_msize(ptr);
+}
+
+// MARK: - Used to implement Server Side RLS -
+
+cloudsync_payload_apply_callback_t cloudsync_get_payload_apply_callback(db_t *db) {
+    return (sqlite3_libversion_number() >= 3044000) ? sqlite3_get_clientdata(db, CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY) : NULL;
+}
+
+void cloudsync_set_payload_apply_callback(db_t *db, cloudsync_payload_apply_callback_t callback) {
+    if (sqlite3_libversion_number() >= 3044000) {
+        sqlite3_set_clientdata(db, CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY, (void*)callback, NULL);
+    }
 }

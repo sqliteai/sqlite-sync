@@ -11,6 +11,7 @@
 #include "network.h"
 #include "dbutils.h"
 #include "utils.h"
+#include "cloudsync.h"
 #include "cloudsync_private.h"
 #include "network_private.h"
 
@@ -328,7 +329,8 @@ int network_set_sqlite_result (sqlite3_context *context, NETWORK_RESULT *result)
 int network_download_changes (sqlite3_context *context, const char *download_url) {
     DEBUG_FUNCTION("network_download_changes");
     
-    network_data *data = (network_data *)cloudsync_get_auxdata(context);
+    cloudsync_context *xdata = (cloudsync_context *)sqlite3_user_data(context);
+    network_data *data = (network_data *)cloudsync_auxdata(xdata);
     if (!data) {
         sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1);
         return -1;
@@ -338,7 +340,7 @@ int network_download_changes (sqlite3_context *context, const char *download_url
     
     int rc = SQLITE_OK;
     if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
-        rc = cloudsync_payload_apply(context, result.buffer, (int)result.blen);
+        rc = cloudsync_payload_apply(xdata, result.buffer, (int)result.blen, NULL);
         network_result_cleanup(&result);
     } else {
         rc = network_set_sqlite_result(context, &result);
@@ -558,11 +560,12 @@ void network_result_to_sqlite_error (sqlite3_context *context, NETWORK_RESULT re
 // MARK: - Init / Cleanup -
 
 network_data *cloudsync_network_data(sqlite3_context *context) {
-    network_data *data = (network_data *)cloudsync_get_auxdata(context);
+    cloudsync_context *xdata = (cloudsync_context *)sqlite3_user_data(context);
+    network_data *data = (network_data *)cloudsync_auxdata(xdata);
     if (data) return data;
     
     data = (network_data *)cloudsync_memory_zeroalloc(sizeof(network_data));
-    if (data) cloudsync_set_auxdata(context, data);
+    if (data) cloudsync_set_auxdata(xdata, data);
     return data;
 }
 
@@ -579,7 +582,8 @@ void cloudsync_network_init (sqlite3_context *context, int argc, sqlite3_value *
     if (!data) goto abort_memory;
     
     // init context
-    uint8_t *site_id = (uint8_t *)cloudsync_context_init((cloudsync_context *)sqlite3_user_data(context), sqlite3_context_db_handle(context), context);
+    cloudsync_context *xdata = (cloudsync_context *)sqlite3_user_data(context);
+    uint8_t *site_id = (uint8_t *)cloudsync_context_init(xdata, cloudsync_db(xdata));
     if (!site_id) goto abort_siteid;
     
     // save site_id string representation: 01957493c6c07e14803727e969f1d2cc
@@ -598,17 +602,17 @@ void cloudsync_network_init (sqlite3_context *context, int argc, sqlite3_value *
         goto abort_cleanup;
     }
     
-    cloudsync_set_auxdata(context, data);
+    cloudsync_set_auxdata(xdata, data);
     sqlite3_result_int(context, SQLITE_OK);
     return;
     
 abort_memory:
-    dbutils_set_error(context, "Unable to allocate memory in cloudsync_network_init.");
+    sqlite3_result_error(context, "Unable to allocate memory in cloudsync_network_init.", -1);
     sqlite3_result_error_code(context, SQLITE_NOMEM);
     goto abort_cleanup;
     
 abort_siteid:
-    dbutils_set_error(context, "Unable to compute/retrieve site_id.");
+    sqlite3_result_error(context, "Unable to compute/retrieve site_id.", -1);
     sqlite3_result_error_code(context, SQLITE_MISUSE);
     goto abort_cleanup;
     
@@ -624,7 +628,8 @@ abort_cleanup:
 void cloudsync_network_cleanup (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_cleanup");
     
-    network_data *data = (network_data *)cloudsync_get_auxdata(context);
+    cloudsync_context *xdata = (cloudsync_context *)sqlite3_user_data(context);
+    network_data *data = (network_data *)cloudsync_auxdata(xdata);
     if (data) {
         if (data->authentication) cloudsync_memory_free(data->authentication);
         if (data->check_endpoint) cloudsync_memory_free(data->check_endpoint);
@@ -693,7 +698,8 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     // retrieve global context
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     
-    network_data *netdata = (network_data *)cloudsync_get_auxdata(context);
+    cloudsync_context *xdata = (cloudsync_context *)sqlite3_user_data(context);
+    network_data *netdata = (network_data *)cloudsync_auxdata(xdata);
     if (!netdata) {sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1); return SQLITE_ERROR;}
     
     // retrieve payload
@@ -764,7 +770,8 @@ void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3
 }
 
 int cloudsync_network_check_internal(sqlite3_context *context) {
-    network_data *data = (network_data *)cloudsync_get_auxdata(context);
+    cloudsync_context *xdata = (cloudsync_context *)sqlite3_user_data(context);
+    network_data *data = (network_data *)cloudsync_auxdata(xdata);
     if (!data) {sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1); return -1;}
      
     sqlite3 *db = sqlite3_context_db_handle(context);
@@ -867,13 +874,14 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
     }
     
     // run everything in a savepoint
-    rc = sqlite3_exec(db, "SAVEPOINT cloudsync_logout_sp;", NULL, NULL, NULL);
+    rc = database_begin_savepoint(db, "cloudsync_logout_savepoint;");
     if (rc != SQLITE_OK) {
         errmsg = cloudsync_memory_mprintf("Unable to create cloudsync_logout savepoint. %s", sqlite3_errmsg(db));
         return;
     }
 
     // disable cloudsync for all the previously enabled tables: cloudsync_cleanup('*')
+    // TODO: fix me because we disabled * from cloudsync_cleanup
     rc = sqlite3_exec(db, "SELECT cloudsync_cleanup('*')", NULL, NULL, NULL);
     if (rc != SQLITE_OK) {
         errmsg = cloudsync_memory_mprintf("Unable to cleanup current cloudsync configuration. %s", sqlite3_errmsg(db));
@@ -910,13 +918,12 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
         
 finalize:
     if (completed) {
-        sqlite3_exec(db, "RELEASE cloudsync_logout_sp;", NULL, NULL, NULL);
+        database_commit_savepoint(db, "cloudsync_logout_savepoint");
     } else {
         // cleanup:
         // ROLLBACK TO command reverts the state of the database back to what it was just after the corresponding SAVEPOINT
         // then RELEASE to remove the SAVEPOINT from the transaction stack
-        sqlite3_exec(db, "ROLLBACK TO cloudsync_logout_sp;", NULL, NULL, NULL);
-        sqlite3_exec(db, "RELEASE cloudsync_logout_sp;", NULL, NULL, NULL);
+        database_rollback_savepoint(db, "cloudsync_logout_savepoint");
         sqlite3_result_error(context, errmsg, -1);
         sqlite3_result_error_code(context, rc);
     }
@@ -970,4 +977,5 @@ cleanup:
     
     return rc;
 }
+
 #endif

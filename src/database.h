@@ -22,6 +22,7 @@ typedef void dbcontext_t;
 #define DBRES_ERROR         1
 #define DBRES_ABORT         4
 #define DBRES_NOMEM         7
+#define DBRES_IOERR         10
 #define DBRES_CONSTRAINT    19
 #define DBRES_MISUSE        21
 #define DBRES_ROW           100
@@ -32,6 +33,8 @@ typedef void dbcontext_t;
 #define DBTYPE_TEXT         3
 #define DBTYPE_BLOB         4
 #define DBTYPE_NULL         5
+
+#define DBFLAG_PERSISTENT   0x01
 
 #ifndef UNUSED_PARAMETER
 #define UNUSED_PARAMETER(X) (void)(X)
@@ -58,6 +61,10 @@ int database_bind_int (dbvm_t *vm, int index, db_int64 value);                  
 int database_bind_null (dbvm_t *vm, int index);                                     // SQLITE_OK
 int database_bind_text (dbvm_t *vm, int index, const char *value, int size);        // SQLITE_OK
 int database_bind_value (dbvm_t *vm, int index, dbvalue_t *value);                  // SQLITE_OK
+
+int database_begin_savepoint (db_t *db, const char *savepoint_name);
+int database_commit_savepoint (db_t *db, const char *savepoint_name);
+int database_rollback_savepoint (db_t *db, const char *savepoint_name);
 
 // VALUE
 const void *database_value_blob (dbvalue_t *value);
@@ -102,5 +109,10 @@ db_uint64 dbmem_size (void *ptr);
 int database_pk_names (db_t *db, const char *table_name, char ***names, int *count);
 char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta);
 
+// USED ONLY by SQLite Cloud to implement RLS
+typedef struct cloudsync_pk_decode_bind_context cloudsync_pk_decode_bind_context;
+typedef bool (*cloudsync_payload_apply_callback_t)(void **xdata, cloudsync_pk_decode_bind_context *decoded_change, db_t *db, void *data, int step, int rc);
+void cloudsync_set_payload_apply_callback(db_t *db, cloudsync_payload_apply_callback_t callback);
+cloudsync_payload_apply_callback_t cloudsync_get_payload_apply_callback(db_t *db);
 
 #endif

@@ -40,8 +40,8 @@ sqlite3_int64 dbutils_select (sqlite3 *db, const char *sql, const char **values,
 int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values, char **names);
 int dbutils_settings_check_version (sqlite3 *db, const char *version);
 bool dbutils_migrate (sqlite3 *db);
-const char *opname_from_value (int value);
-int colname_is_legal (const char *name);
+const char *vtab_opname_from_value (int value);
+int vtab_colname_is_legal (const char *name);
 int binary_comparison (int x, int y);
 sqlite3 *do_create_database (void);
 
@@ -336,7 +336,10 @@ int unittest_payload_apply_reset_transaction(sqlite3 *db, unittest_payload_apply
     return rc;
 }
 
-bool unittest_payload_apply_rls_callback(void **xdata, cloudsync_pk_decode_bind_context *d, sqlite3 *db, cloudsync_context *data, int step, int rc) {
+bool unittest_payload_apply_rls_callback(void **xdata, cloudsync_pk_decode_bind_context *d, db_t *_db, void *_data, int step, int rc) {
+    sqlite3 *db = (sqlite3 *)_db;
+    cloudsync_context *data = (cloudsync_context *)_data;
+    
     bool is_approved = false;
     unittest_payload_apply_rls_status *s;
     if (*xdata) {
@@ -936,13 +939,13 @@ bool do_test_vtab(sqlite3 *db) {
     rc = sqlite3_exec(db, "SELECT tbl FROM cloudsync_changes WHERE db_version LIKE 1;", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
     
-    const char *name = opname_from_value (666);
+    const char *name = vtab_opname_from_value (666);
     if (name != NULL) goto finalize;
     
-    rc = colname_is_legal("db_version");
+    rc = vtab_colname_is_legal("db_version");
     if (rc != 1) goto finalize;
     
-    rc = colname_is_legal("non_existing_column");
+    rc = vtab_colname_is_legal("non_existing_column");
     if (rc != 0) goto finalize;
     
     return do_test_vtab2();
@@ -1937,7 +1940,7 @@ bool do_test_others (sqlite3 *db) {
     int count = dbutils_debug_stmt(db, false);
     sqlite3_finalize(stmt);
     // to increase code coverage
-    dbutils_set_error(NULL, "Test is: %s", "Hello World");
+    // dbutils_set_error(NULL, "Test is: %s", "Hello World");
     return (count == 1);
 }
 
