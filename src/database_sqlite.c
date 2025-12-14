@@ -58,7 +58,7 @@ int database_select1value (db_t *db, const char *sql, char **ptr_value, db_int64
     if (rc != SQLITE_ROW) goto cleanup_select;
     
     // sanity check column type
-    int type = sqlite3_column_type(vm, 0);
+    DBTYPE type = (DBTYPE)sqlite3_column_type(vm, 0);
     if (type == SQLITE_NULL) {rc = SQLITE_OK; goto cleanup_select;}
     if (type != expected_type) {rc = SQLITE_MISMATCH; goto cleanup_select;}
     

@@ -9,8 +9,8 @@
 
 #include <stdint.h>
 #include "network.h"
-#include "dbutils.h"
 #include "utils.h"
+#include "dbutils.h"
 #include "cloudsync.h"
 #include "cloudsync_private.h"
 #include "network_private.h"
@@ -683,7 +683,14 @@ void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, s
     
     // TODO: why hex(site_id) here if only one int column is returned?
     char *sql = "SELECT max(db_version), hex(site_id) FROM cloudsync_changes WHERE site_id == (SELECT site_id FROM cloudsync_site_id WHERE rowid=0)";
-    int last_local_change = (int)dbutils_int_select(db, sql);
+    db_int64 last_local_change = 0;
+    int rc = database_select_int(db, sql, &last_local_change);
+    if (rc != DBRES_OK) {
+        sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+    
     if (last_local_change == 0) {
         sqlite3_result_int(context, 0);
         return;
