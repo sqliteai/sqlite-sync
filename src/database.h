@@ -18,24 +18,43 @@ typedef void dbvm_t;
 typedef void dbvalue_t;
 typedef void dbcontext_t;
 
-#define DBRES_OK            0
-#define DBRES_ERROR         1
-#define DBRES_ABORT         4
-#define DBRES_NOMEM         7
-#define DBRES_IOERR         10
-#define DBRES_CONSTRAINT    19
-#define DBRES_MISUSE        21
-#define DBRES_ROW           100
-#define DBRES_DONE          101
+typedef enum {
+    DBRES_OK         = 0,
+    DBRES_ERROR      = 1,
+    DBRES_ABORT      = 4,
+    DBRES_NOMEM      = 7,
+    DBRES_IOERR      = 10,
+    DBRES_CONSTRAINT = 19,
+    DBRES_MISUSE     = 21,
+    DBRES_ROW        = 100,
+    DBRES_DONE       = 101
+} DBRES;
 
-#define DBTYPE_INTEGER      1
-#define DBTYPE_FLOAT        2
-#define DBTYPE_TEXT         3
-#define DBTYPE_BLOB         4
-#define DBTYPE_NULL         5
+typedef enum {
+    DBTYPE_INTEGER = 1,
+    DBTYPE_FLOAT   = 2,
+    DBTYPE_TEXT    = 3,
+    DBTYPE_BLOB    = 4,
+    DBTYPE_NULL    = 5
+} DBTYPE;
+    
+typedef enum {
+    DBFLAG_PERSISTENT = 0x01
+} DBFLAG;
 
-#define DBFLAG_PERSISTENT   0x01
-
+/*
+typedef struct {
+    DBTYPE   type;
+    db_int64 len;
+    DBRES    rc;
+    union {
+        db_int64 int_value;
+        double   double_value;
+        char     *ptr_value;
+    } value;
+} DATABASE_RESULT;
+*/
+ 
 #ifndef UNUSED_PARAMETER
 #define UNUSED_PARAMETER(X) (void)(X)
 #endif
@@ -45,6 +64,17 @@ typedef int (*database_exec_cb) (void *xdata, int argc, char **values, char **na
 
 int database_exec (db_t *db, const char *sql);
 int database_exec_callback (db_t *db, const char *sql, database_exec_cb, void *xdata);
+int database_select_int (db_t *db, const char *sql, db_int64 *value);
+int database_select_text (db_t *db, const char *sql, char **value);
+int database_select_blob (db_t *db, const char *sql, char **value, db_int64 *value_len);
+int database_select_blob_2int (db_t *db, const char *sql, char **value, db_int64 *value_len, db_int64 *value2, db_int64 *value3);
+int database_write (db_t *db, const char *sql, const char **values, DBTYPE types[], int lens[], int count);
+
+db_int64 database_schema_version (db_t *db);
+uint64_t database_schema_hash (db_t *db);
+bool database_check_schema_hash (db_t *db, uint64_t hash);
+int database_update_schema_hash (db_t *db, uint64_t *hash);
+
 int database_begin_savepoint (db_t *db, const char *savepoint_name);
 int database_commit_savepoint (db_t *db, const char *savepoint_name);
 int database_rollback_savepoint (db_t *db, const char *savepoint_name);

@@ -681,6 +681,7 @@ void cloudsync_network_set_apikey (sqlite3_context *context, int argc, sqlite3_v
 void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, sqlite3_value **argv) {
     sqlite3 *db = sqlite3_context_db_handle(context);
     
+    // TODO: why hex(site_id) here if only one int column is returned?
     char *sql = "SELECT max(db_version), hex(site_id) FROM cloudsync_changes WHERE site_id == (SELECT site_id FROM cloudsync_site_id WHERE rowid=0)";
     int last_local_change = (int)dbutils_int_select(db, sql);
     if (last_local_change == 0) {
@@ -880,6 +881,8 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
         return;
     }
 
+    // TODO: is it right to use the tables in cloudsync_context?
+    // What happen if another connection later augmented another table not originally loaded in this cloudsync_context?
     // disable cloudsync for all the previously enabled tables: cloudsync_cleanup('*')
     cloudsync_context *xdata = (cloudsync_context *)sqlite3_user_data(context);
     rc = cloudsync_cleanup_all(xdata);

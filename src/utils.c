@@ -37,7 +37,7 @@
 #define FNV_PRIME           0x100000001b3ULL
 #define HASH_CHAR(_c)       do { h ^= (uint8_t)(_c); h *= FNV_PRIME; h_final = h;} while (0)
 
-// MARK: UUIDv7 -
+// MARK: - UUIDv7 -
 
 /*
     UUIDv7 is a 128-bit unique identifier like it's older siblings, such as the widely used UUIDv4.

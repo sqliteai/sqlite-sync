@@ -33,11 +33,7 @@
 #define CLOUDSYNC_KEY_ALGO                  "algo"
 
 // general
-int dbutils_write (sqlite3 *db, sqlite3_context *context, const char *sql, const char **values, int types[], int len[], int count);
-sqlite3_int64 dbutils_int_select (sqlite3 *db, const char *sql);
-char *dbutils_text_select (sqlite3 *db, const char *sql);
-char *dbutils_blob_select (sqlite3 *db, const char *sql, int *size, sqlite3_context *context, int *rc);
-int dbutils_blob_int_int_select (sqlite3 *db, const char *sql, char **blob, int *size, sqlite3_int64 *int1, sqlite3_int64 *int2);
+//int dbutils_write (sqlite3 *db, sqlite3_context *context, const char *sql, const char **values, int types[], int len[], int count);
 
 int dbutils_debug_stmt (sqlite3 *db, bool print_result);
 void dbutils_debug_values (int argc, sqlite3_value **argv);
@@ -53,7 +49,6 @@ bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const ch
 int dbutils_delete_triggers (sqlite3 *db, const char *table);
 int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo);
 int dbutils_check_metatable (sqlite3 *db, const char *table, table_algo algo);
-sqlite3_int64 dbutils_schema_version (sqlite3 *db);
 
 // settings
 int dbutils_settings_cleanup (sqlite3 *db);
@@ -65,8 +60,5 @@ int dbutils_table_settings_set_key_value (sqlite3 *db, sqlite3_context *context,
 sqlite3_int64 dbutils_table_settings_count_tables (sqlite3 *db);
 char *dbutils_table_settings_get_value (sqlite3 *db, const char *table, const char *column, const char *key, char *buffer, size_t blen);
 table_algo dbutils_table_settings_get_algo (sqlite3 *db, const char *table_name);
-int dbutils_update_schema_hash(sqlite3 *db, uint64_t *hash);
-sqlite3_uint64 dbutils_schema_hash (sqlite3 *db);
-bool dbutils_check_schema_hash (sqlite3 *db, sqlite3_uint64 hash);
 
 #endif

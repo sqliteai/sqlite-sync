@@ -10,6 +10,7 @@
 #include "utils.h"
 
 #include <string.h>
+#include <stdlib.h>
 
 #ifndef SQLITE_CORE
 #include "sqlite3ext.h"
@@ -37,7 +38,101 @@ char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, boo
     return sql;
 }
 
-// MARK: GENERAL -
+// MARK: - PRIVATE -
+
+int database_select1value (db_t *db, const char *sql, char **ptr_value, db_int64 *int_value, DBTYPE expected_type) {
+    // init values and sanity check expected_type
+    if (ptr_value) *ptr_value = NULL;
+    *int_value = 0;
+    if (expected_type != DBTYPE_INTEGER && expected_type != DBTYPE_TEXT && expected_type != DBTYPE_BLOB) return SQLITE_MISUSE;
+    
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2((sqlite3 *)db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup_select;
+    
+    // ensure at least one column
+    if (sqlite3_column_count(vm) < 1) {rc = SQLITE_MISMATCH; goto cleanup_select;}
+    
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_DONE) {rc = SQLITE_OK; goto cleanup_select;} // no rows OK
+    if (rc != SQLITE_ROW) goto cleanup_select;
+    
+    // sanity check column type
+    int type = sqlite3_column_type(vm, 0);
+    if (type == SQLITE_NULL) {rc = SQLITE_OK; goto cleanup_select;}
+    if (type != expected_type) {rc = SQLITE_MISMATCH; goto cleanup_select;}
+    
+    if (expected_type == DBTYPE_INTEGER) {
+        *int_value = (db_int64)sqlite3_column_int64(vm, 0);
+    } else {
+        const void *value = (expected_type == DBTYPE_TEXT) ? (const void *)sqlite3_column_text(vm, 0) : (const void *)sqlite3_column_blob(vm, 0);
+        int len = sqlite3_column_bytes(vm, 0);
+        if (len) {
+            char *ptr = cloudsync_memory_alloc(len + 1);
+            if (!ptr) {rc = SQLITE_NOMEM; goto cleanup_select;}
+            
+            if (len > 0 && value) memcpy(ptr, value, len);
+            if (expected_type == DBTYPE_TEXT) ptr[len] = 0; // NULL terminate in case of TEXT
+            *int_value = len;
+            
+            *ptr_value = ptr;
+            *int_value = len;
+        }
+    }
+    rc = SQLITE_OK;
+    
+cleanup_select:
+    if (vm) sqlite3_finalize(vm);
+    return rc;
+}
+
+int database_select3values (db_t *db, const char *sql, char **value, db_int64 *len, db_int64 *value2, db_int64 *value3) {
+    // init values and sanity check expected_type
+    *value = NULL;
+    *value2 = 0;
+    *value3 = 0;
+    *len = 0;
+    
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2((sqlite3 *)db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup_select;
+    
+    // ensure at least one column
+    if (sqlite3_column_count(vm) < 3) {rc = SQLITE_MISMATCH; goto cleanup_select;}
+    
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_DONE) {rc = SQLITE_OK; goto cleanup_select;} // no rows OK
+    if (rc != SQLITE_ROW) goto cleanup_select;
+    
+    // sanity check column types
+    if (sqlite3_column_type(vm, 0) != SQLITE_BLOB) {rc = SQLITE_MISMATCH; goto cleanup_select;}
+    if (sqlite3_column_type(vm, 1) != SQLITE_INTEGER) {rc = SQLITE_MISMATCH; goto cleanup_select;}
+    if (sqlite3_column_type(vm, 2) != SQLITE_INTEGER) {rc = SQLITE_MISMATCH; goto cleanup_select;}
+    
+    // 1st column is BLOB
+    const void *blob = (const void *)sqlite3_column_blob(vm, 0);
+    int blob_len = sqlite3_column_bytes(vm, 0);
+    if (blob_len) {
+        char *ptr = cloudsync_memory_alloc(blob_len);
+        if (!ptr) {rc = SQLITE_NOMEM; goto cleanup_select;}
+        
+        if (blob_len > 0 && blob) memcpy(ptr, blob, blob_len);
+        *value = ptr;
+        *len = blob_len;
+    }
+    
+    // 2nd and 3rd columns are INTEGERS
+    *value2 = (db_int64)sqlite3_column_int64(vm, 1);
+    *value3 = (db_int64)sqlite3_column_int64(vm, 2);
+    
+    rc = SQLITE_OK;
+    
+cleanup_select:
+    if (vm) sqlite3_finalize(vm);
+    return rc;
+}
+
+// MARK: - GENERAL -
 
 int database_exec (db_t *db, const char *sql) {
     return sqlite3_exec((sqlite3 *)db, sql, NULL, NULL, NULL);
@@ -45,6 +140,60 @@ int database_exec (db_t *db, const char *sql) {
 
 int database_exec_callback (db_t *db, const char *sql, int (*callback)(void *xdata, int argc, char **values, char **names), void *xdata) {
     return sqlite3_exec((sqlite3 *)db, sql, callback, xdata, NULL);
+}
+
+int database_write (db_t *db, const char *sql, const char **bind_values, DBTYPE bind_types[], int bind_lens[], int bind_count) {
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2((sqlite3 *)db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup_write;
+    
+    for (int i=0; i<bind_count; ++i) {
+        switch (bind_types[i]) {
+            case SQLITE_NULL:
+                rc = sqlite3_bind_null(vm, i+1);
+                break;
+            case SQLITE_TEXT:
+                rc = sqlite3_bind_text(vm, i+1, bind_values[i], bind_lens[i], SQLITE_STATIC);
+                break;
+            case SQLITE_BLOB:
+                rc = sqlite3_bind_blob(vm, i+1, bind_values[i], bind_lens[i], SQLITE_STATIC);
+                break;
+            case SQLITE_INTEGER: {
+                sqlite3_int64 value = strtoll(bind_values[i], NULL, 0);
+                rc = sqlite3_bind_int64(vm, i+1, value);
+            }   break;
+            case SQLITE_FLOAT: {
+                double value = strtod(bind_values[i], NULL);
+                rc = sqlite3_bind_double(vm, i+1, value);
+            }   break;
+        }
+        if (rc != SQLITE_OK) goto cleanup_write;
+    }
+        
+    // execute statement
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    
+cleanup_write:
+    if (vm) sqlite3_finalize(vm);
+    return rc;
+}
+
+int database_select_int (db_t *db, const char *sql, db_int64 *value) {
+    return database_select1value(db, sql, NULL, value, DBTYPE_INTEGER);
+}
+
+int database_select_text (db_t *db, const char *sql, char **value) {
+    db_int64 len = 0;
+    return database_select1value(db, sql, value, &len, DBTYPE_TEXT);
+}
+
+int database_select_blob (db_t *db, const char *sql, char **value, db_int64 *len) {
+    return database_select1value(db, sql, value, len, DBTYPE_BLOB);
+}
+
+int database_select_blob_2int (db_t *db, const char *sql, char **value, db_int64 *len, db_int64 *value2, db_int64 *value3) {
+    return database_select3values(db, sql, value, len, value2, value3);
 }
 
 const char *database_errmsg (db_t *db) {
@@ -58,6 +207,59 @@ int database_errcode (db_t *db) {
 bool database_in_transaction (db_t *db) {
     bool in_transaction = (sqlite3_get_autocommit(db) != true);
     return in_transaction;
+}
+
+// MARK: - SCHEMA -
+
+db_int64 database_schema_version (db_t *db) {
+    db_int64 value = 0;
+    int rc = database_select_int(db, "PRAGMA schema_version;", &value);
+    return (rc == DBRES_OK) ? value : 0;
+}
+
+uint64_t database_schema_hash (db_t *db) {
+    db_int64 value = 0;
+    int rc = database_select_int(db, "SELECT hash FROM cloudsync_schema_versions ORDER BY seq DESC limit 1;", &value);
+    return (rc == DBRES_OK) ? (uint64_t)value : 0;
+}
+
+bool database_check_schema_hash (db_t *db, uint64_t hash) {
+    // a change from the current version of the schema or from previous known schema can be applied
+    // a change from a newer schema version not yet applied to this peer cannot be applied
+    // so a schema hash is valid if it exists in the cloudsync_schema_versions table
+    
+    // the idea is to allow changes on stale peers and to be able to apply these changes on peers with newer schema,
+    // but it requires alter table operation on augmented tables only add new columns and never drop columns for backward compatibility
+    char sql[1024];
+    snprintf(sql, sizeof(sql), "SELECT 1 FROM cloudsync_schema_versions WHERE hash = (%lld)", hash);
+    
+    db_int64 value = 0;
+    database_select_int(db, sql, &value);
+    return (value == 1);
+}
+
+int database_update_schema_hash (db_t *db, uint64_t *hash) {
+    char *schemasql = "SELECT group_concat(LOWER(sql)) FROM sqlite_master "
+            "WHERE type = 'table' AND name IN (SELECT tbl_name FROM cloudsync_table_settings ORDER BY tbl_name) "
+            "ORDER BY name;";
+    
+    char *schema = NULL;
+    int rc = database_select_text(db, schemasql, &schema);
+    if (rc != DBRES_OK) return rc;
+    if (!schema) return DBRES_ERROR;
+        
+    uint64_t h = fnv1a_hash(schema, strlen(schema));
+    cloudsync_memory_free(schema);
+    if (hash && *hash == h) return SQLITE_CONSTRAINT;
+    
+    char sql[1024];
+    snprintf(sql, sizeof(sql), "INSERT INTO cloudsync_schema_versions (hash, seq) "
+                               "VALUES (%lld, COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
+                               "ON CONFLICT(hash) DO UPDATE SET "
+                               "seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);", (long long)h);
+    rc = database_exec(db, sql);
+    if (rc == SQLITE_OK && hash) *hash = h;
+    return rc;
 }
 
 // MARK: - VM -

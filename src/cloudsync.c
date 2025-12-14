@@ -315,7 +315,10 @@ char *cloudsync_dbversion_build_query (db_t *db) {
                       "SELECT GROUP_CONCAT(part, ' UNION ALL ') || ' UNION SELECT value as version FROM cloudsync_settings WHERE key = ''pre_alter_dbversion''' as full_query FROM query_parts"
                       ") "
                       "SELECT 'SELECT max(version) as version FROM (' || full_query || ');' FROM combined_query;";
-    return dbutils_text_select(db, sql);
+    
+    char *value = NULL;
+    int rc = database_select_text(db, sql, &value);
+    return (rc == DBRES_OK) ? value : NULL;
 }
 
 int cloudsync_dbversion_rebuild (db_t *db, cloudsync_context *data) {
@@ -419,10 +422,14 @@ int cloudsync_load_siteid (db_t *db, cloudsync_context *data) {
     if (data->site_id[0] != 0) return DBRES_OK;
     
     // load site_id
-    int size, rc;
-    char *buffer = dbutils_blob_select(db, "SELECT site_id FROM cloudsync_site_id WHERE rowid=0;", &size, NULL, &rc);
-    if (!buffer) return rc;
-    if (size != UUID_LEN) return DBRES_MISUSE;
+    char *buffer = NULL;
+    db_int64 size = 0;
+    int rc = database_select_blob(db, "SELECT site_id FROM cloudsync_site_id WHERE rowid=0;", &buffer, &size);
+    if (rc != DBRES_OK) return rc;
+    if (!buffer || size != UUID_LEN) {
+        if (buffer) cloudsync_memory_free(buffer);
+        return DBRES_MISUSE;
+    }
     
     memcpy(data->site_id, buffer, UUID_LEN);
     cloudsync_memory_free(buffer);
@@ -441,7 +448,7 @@ int cloudsync_bumpseq (cloudsync_context *data) {
 }
 
 void cloudsync_update_schema_hash (cloudsync_context *data) {
-    dbutils_update_schema_hash(data->db, &data->schema_hash);
+    database_update_schema_hash(data->db, &data->schema_hash);
 }
 
 void *cloudsync_db (cloudsync_context *data) {
@@ -575,10 +582,12 @@ process_process:
 #endif
     cloudsync_memory_free(singlequote_escaped_table_name);
     if (!sql) return NULL;
-    char *query = dbutils_text_select(db, sql);
+    
+    char *query = NULL;
+    int rc = database_select_text(db, sql, &query);
     cloudsync_memory_free(sql);
     
-    return query;
+    return (rc == DBRES_OK) ? query : NULL;
 }
 
 char *table_build_mergedelete_sql (db_t *db, cloudsync_table_context *table) {
@@ -594,10 +603,11 @@ char *table_build_mergedelete_sql (db_t *db, cloudsync_table_context *table) {
     cloudsync_memory_free(singlequote_escaped_table_name);
     if (!sql) return NULL;
     
-    char *query = dbutils_text_select(db, sql);
+    char *query = NULL;
+    int rc = database_select_text(db, sql, &query);
     cloudsync_memory_free(sql);
     
-    return query;
+    return (rc == DBRES_OK) ? query : NULL;
 }
 
 char *table_build_mergeinsert_sql (db_t *db, cloudsync_table_context *table, const char *colname) {
@@ -630,10 +640,11 @@ char *table_build_mergeinsert_sql (db_t *db, cloudsync_table_context *table, con
     cloudsync_memory_free(singlequote_escaped_table_name);
     if (!sql) return NULL;
     
-    char *query = dbutils_text_select(db, sql);
+    char *query = NULL;
+    int rc = database_select_text(db, sql, &query);
     cloudsync_memory_free(sql);
     
-    return query;
+    return (rc == DBRES_OK) ? query : NULL;
 }
 
 char *table_build_value_sql (db_t *db, cloudsync_table_context *table, const char *colname) {
@@ -654,10 +665,11 @@ char *table_build_value_sql (db_t *db, cloudsync_table_context *table, const cha
     cloudsync_memory_free(singlequote_escaped_table_name);
     if (!sql) return NULL;
     
-    char *query = dbutils_text_select(db, sql);
+    char *query = NULL;
+    int rc = database_select_text(db, sql, &query);
     cloudsync_memory_free(sql);
     
-    return query;
+    return (rc == DBRES_OK) ? query : NULL;
 }
     
 cloudsync_table_context *table_create (cloudsync_context *data, const char *name, table_algo algo) {
@@ -993,9 +1005,11 @@ bool table_add_to_context (db_t *db, cloudsync_context *data, table_algo algo, c
     // fill remaining metadata in the table
     char *sql = cloudsync_memory_mprintf("SELECT count(*) FROM pragma_table_info('%q') WHERE pk>0;", table_name);
     if (!sql) goto abort_add_table;
-    table->npks = (int)dbutils_int_select(db, sql);
+    db_int64 value = 0;
+    int rc = database_select_int(db, sql, &value);
+    table->npks = (int)value;
     cloudsync_memory_free(sql);
-    if (table->npks == -1) {
+    if (rc != DBRES_OK) {
         cloudsync_set_dberror(data);
         goto abort_add_table;
     }
@@ -1011,14 +1025,16 @@ bool table_add_to_context (db_t *db, cloudsync_context *data, table_algo algo, c
     
     sql = cloudsync_memory_mprintf("SELECT count(*) FROM pragma_table_info('%q') WHERE pk=0;", table_name);
     if (!sql) goto abort_add_table;
-    int64_t ncols = (int64_t)dbutils_int_select(db, sql);
+    
+    db_int64 ncols = 0;
+    rc = database_select_int(db, sql, &ncols);
     cloudsync_memory_free(sql);
-    if (ncols == -1) {
+    if (rc != DBRES_OK) {
         cloudsync_set_dberror(data);
         goto abort_add_table;
     }
     
-    int rc = table_add_stmts(db, table, (int)ncols);
+    rc = table_add_stmts(db, table, (int)ncols);
     if (rc != DBRES_OK) goto abort_add_table;
     
     // a table with only pk(s) is totally legal
@@ -1553,7 +1569,7 @@ const char *cloudsync_context_init (cloudsync_context *data, void *db) {
         if (cloudsync_load_siteid(db, data) != DBRES_OK) return NULL;
         
         data->db = db;
-        data->schema_hash = dbutils_schema_hash(db);
+        data->schema_hash = database_schema_hash(db);
     }
     
     return (const char *)data->site_id;
@@ -1719,9 +1735,11 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
             rc = DBRES_NOMEM;
             goto finalize;
         }
-        char *pkclause = dbutils_text_select(db, sql);
-        char *pkvalues = (pkclause) ? pkclause : "rowid";
+        char *pkclause = NULL;
+        int rc = database_select_text(db, sql, &pkclause);
         cloudsync_memory_free(sql);
+        if (rc != DBRES_OK) goto finalize;
+        char *pkvalues = (pkclause) ? pkclause : "rowid";
         
         // delete entries related to rows that no longer exist in the original table, but preserve tombstone
         sql = cloudsync_memory_mprintf("DELETE FROM \"%w_cloudsync\" WHERE (\"col_name\" != '%s' OR (\"col_name\" = '%s' AND col_version %% 2 != 0)) AND NOT EXISTS (SELECT 1 FROM \"%w\" WHERE \"%w_cloudsync\".pk = cloudsync_pk_encode(%s) LIMIT 1);", table->name, CLOUDSYNC_TOMBSTONE_VALUE, CLOUDSYNC_TOMBSTONE_VALUE, table->name, table->name, pkvalues);
@@ -1802,19 +1820,23 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     db_t *db= data->db;
     dbvm_t *vm = NULL;
     db_int64 db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
+    char *pkdecode = NULL;
     
     char *sql = cloudsync_memory_mprintf("SELECT group_concat('\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
-    char *pkclause_identifiers = dbutils_text_select(db, sql);
-    char *pkvalues_identifiers = (pkclause_identifiers) ? pkclause_identifiers : "rowid";
+    char *pkclause_identifiers = NULL;
+    int rc = database_select_text(db, sql, &pkclause_identifiers);
     cloudsync_memory_free(sql);
+    if (rc != DBRES_OK) goto finalize;
+    char *pkvalues_identifiers = (pkclause_identifiers) ? pkclause_identifiers : "rowid";
     
     sql = cloudsync_memory_mprintf("SELECT group_concat('cloudsync_pk_decode(pk, ' || pk || ') AS ' || '\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
-    char *pkdecode = dbutils_text_select(db, sql);
-    char *pkdecodeval = (pkdecode) ? pkdecode : "cloudsync_pk_decode(pk, 1) AS rowid";
+    rc = database_select_text(db, sql, &pkdecode);
     cloudsync_memory_free(sql);
+    if (rc != DBRES_OK) goto finalize;
+    char *pkdecodeval = (pkdecode) ? pkdecode : "cloudsync_pk_decode(pk, 1) AS rowid";
      
     sql = cloudsync_memory_mprintf("SELECT cloudsync_insert('%q', %s) FROM (SELECT %s FROM \"%w\" EXCEPT SELECT %s FROM \"%w_cloudsync\");", table_name, pkvalues_identifiers, pkvalues_identifiers, table_name, pkdecodeval, table_name);
-    int rc = database_exec(db, sql);
+    rc = database_exec(db, sql);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
     
@@ -1853,7 +1875,7 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     }
     
 finalize:
-    if (rc != DBRES_OK) DEBUG_ALWAYS("cloudsync_refill_metatable error: %s", database_errmsg(db));
+    if (rc != DBRES_OK) {DEBUG_ALWAYS("cloudsync_refill_metatable error: %s", database_errmsg(db));}
     if (pkclause_identifiers) cloudsync_memory_free(pkclause_identifiers);
     if (pkdecode) cloudsync_memory_free(pkdecode);
     if (vm) databasevm_finalize(vm);
@@ -2210,7 +2232,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     
     db_t *db = data->db;
     if (!data || header.schema_hash != data->schema_hash) {
-        if (!dbutils_check_schema_hash(db, header.schema_hash)) {
+        if (!database_check_schema_hash(db, header.schema_hash)) {
             char buffer[1024];
             snprintf(buffer, sizeof(buffer), "Cannot apply the received payload because the schema hash is unknown %llu.", header.schema_hash);
             return cloudsync_set_error(data, buffer, DBRES_MISUSE);
@@ -2378,7 +2400,9 @@ int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size,
     snprintf(sql, sizeof(sql), "WITH max_db_version AS (SELECT MAX(db_version) AS max_db_version FROM cloudsync_changes) "
                                "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq), max_db_version AS max_db_version, MAX(IIF(db_version = max_db_version, seq, NULL)) FROM cloudsync_changes, max_db_version WHERE site_id=cloudsync_siteid() AND (db_version>%d OR (db_version=%d AND seq>%d))", *db_version, *db_version, *seq);
     
-    int rc = dbutils_blob_int_int_select(db, sql, blob, blob_size, new_db_version, new_seq);
+    db_int64 len = 0;
+    int rc = database_select_blob_2int(db, sql, blob, &len, new_db_version, new_seq);
+    *blob_size = (int)len;
     if (rc != DBRES_OK) return rc;
     
     // exit if there is no data to send

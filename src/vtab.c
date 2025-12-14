@@ -189,11 +189,12 @@ char *vtab_build_changes_sql (sqlite3 *db, const char *idxs) {
     memcpy(sql, query, query_len);
     memcpy(sql + (query_len), idxs, idx_len);
     memcpy(sql + (query_len + idx_len), final_query, final_query_len+1);
-        
-    char *value = dbutils_text_select(db, sql);
+    
+    char *value = NULL;
+    int rc = database_select_text(db, sql, &value);
     cloudsync_memory_free(sql);
     
-    return value;
+    return (rc == DBRES_OK) ? value : NULL;
 }
 
 // MARK: -

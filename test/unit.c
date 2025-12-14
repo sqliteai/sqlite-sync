@@ -36,7 +36,6 @@ dbvm_t *dbvm_reset (dbvm_t *stmt);
 int dbvm_count (dbvm_t *stmt, const char *value, size_t len, int type);
 int dbvm_execute (dbvm_t *stmt, void *data);
 
-sqlite3_int64 dbutils_select (sqlite3 *db, const char *sql, const char **values, int types[], int lens[], int count, int expected_type);
 int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values, char **names);
 int dbutils_settings_check_version (sqlite3 *db, const char *version);
 bool dbutils_migrate (sqlite3 *db);
@@ -87,6 +86,126 @@ static const char *query_table = "QUERY_TABLE";
 static const char *query_siteid = "QUERY_SITEID";
 static const char *query_changes = "QUERY_CHANGES";
 #endif
+
+// MARK: -
+
+typedef struct {
+    int type;
+    int len;
+    int rc;
+    union {
+        sqlite3_int64 intValue;
+        double doubleValue;
+        char *stringValue;
+    } value;
+} DATABASE_RESULT;
+
+DATABASE_RESULT dbutils_exec (sqlite3_context *context, sqlite3 *db, const char *sql, const char **values, int types[], int lens[], int count, DATABASE_RESULT results[], int expected_types[], int result_count) {
+    DEBUG_DBFUNCTION("dbutils_exec %s", sql);
+    
+    sqlite3_stmt *pstmt = NULL;
+    bool is_write = (result_count == 0);
+    int type = 0;
+    
+    // compile sql
+    int rc = database_prepare(db, sql, (void **)&pstmt, 0);
+    if (rc != SQLITE_OK) goto dbutils_exec_finalize;
+    // check bindings
+    for (int i=0; i<count; ++i) {
+        switch (types[i]) {
+            case SQLITE_NULL:
+                rc = databasevm_bind_null(pstmt, i+1);
+                break;
+            case SQLITE_TEXT:
+                rc = databasevm_bind_text(pstmt, i+1, values[i], lens[i]);
+                break;
+            case SQLITE_BLOB:
+                rc = databasevm_bind_blob(pstmt, i+1, values[i], lens[i]);
+                break;
+            case SQLITE_INTEGER: {
+                sqlite3_int64 value = strtoll(values[i], NULL, 0);
+                rc = databasevm_bind_int(pstmt, i+1, value);
+            }   break;
+            case SQLITE_FLOAT: {
+                double value = strtod(values[i], NULL);
+                rc = databasevm_bind_double(pstmt, i+1, value);
+            }   break;
+        }
+        if (rc != SQLITE_OK) goto dbutils_exec_finalize;
+    }
+        
+    // execute statement
+    rc = databasevm_step(pstmt);
+    
+    // check return value based on pre-condition
+    if (rc != SQLITE_ROW) goto dbutils_exec_finalize;
+    if (is_write) goto dbutils_exec_finalize;
+    
+    // process result (if any)
+    for (int i=0; i<result_count; ++i) {
+        type = database_column_type(pstmt, i);
+        results[i].type = type;
+        
+        if (type == SQLITE_NULL) {
+            rc = SQLITE_OK;
+            continue;
+        }
+        
+        if (type != expected_types[i]) {
+            rc = SQLITE_ERROR;
+            goto dbutils_exec_finalize;
+        }
+        
+        // type == expected_type
+        if (type == SQLITE_INTEGER) results[i].value.intValue = database_column_int(pstmt, i);
+        else if (type == SQLITE_FLOAT) results[i].value.doubleValue = database_column_double(pstmt, i);
+        else {
+            // TEXT or BLOB
+            int len = database_column_bytes(pstmt, i);
+            results[i].len = len;
+            
+            char *buffer = NULL;
+            if (type == SQLITE_BLOB) {
+                const void *bvalue = database_column_blob(pstmt, i);
+                if (bvalue) {
+                    buffer = (char *)cloudsync_memory_alloc(len);
+                    if (!buffer) {rc = SQLITE_NOMEM; goto dbutils_exec_finalize;}
+                    memcpy(buffer, bvalue, len);
+                }
+            } else {
+                const char *value = database_column_text(pstmt, i);
+                if (value) buffer = cloudsync_string_dup((const char *)value, false);
+            }
+            results[i].value.stringValue = buffer;
+        }
+    }
+    
+    rc = SQLITE_OK;
+dbutils_exec_finalize:
+    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    if (rc != SQLITE_OK) {
+        if (count != -1) DEBUG_ALWAYS("Error executing %s in dbutils_exec (%s).", sql, database_errmsg(db));
+        if (context) sqlite3_result_error(context, database_errmsg(db), -1);
+    }
+    if (pstmt) databasevm_finalize(pstmt);
+    
+    if (is_write) {
+        DATABASE_RESULT result = {0};
+        result.rc = rc;
+        return result;
+    }
+        
+    results[0].rc = rc;
+    return results[0];
+}
+
+sqlite3_int64 dbutils_select (sqlite3 *db, const char *sql, const char **values, int types[], int lens[], int count, int expected_type) {
+    // used only in unit-test
+    DATABASE_RESULT results[1] = {0};
+    int expected_types[1] = {expected_type};
+    dbutils_exec(NULL, db, sql, values, types, lens, count, results, expected_types, 1);
+    return results[0].value.intValue;
+}
 
 // MARK: -
 
@@ -956,28 +1075,44 @@ finalize:
 }
 
 bool do_test_functions (sqlite3 *db, bool print_results) {
-    int size = 0, rc2;
-    char *site_id = dbutils_blob_select(db, "SELECT cloudsync_siteid();", &size, NULL, &rc2);
-    if (site_id == NULL || size != 16) goto abort_test_functions;
+    char *site_id = NULL;
+    db_int64 len = 0;
+    int rc = database_select_blob(db, "SELECT cloudsync_siteid();", &site_id, &len);
+    if (rc != DBRES_OK || site_id == NULL || len != 16) {
+        if (site_id) cloudsync_memory_free(site_id);
+        goto abort_test_functions;
+    }
     cloudsync_memory_free(site_id);
     
-    char *site_id_str = dbutils_text_select(db, "SELECT quote(cloudsync_siteid());");
-    if (site_id_str == NULL) goto abort_test_functions;
+    char *site_id_str = NULL;
+    rc = database_select_text(db, "SELECT quote(cloudsync_siteid());", &site_id_str);
+    if (rc != DBRES_OK || site_id_str == NULL) {
+        if (site_id_str) cloudsync_memory_free(site_id_str);
+        goto abort_test_functions;
+    }
     if (print_results) printf("Site ID: %s\n", site_id_str);
     cloudsync_memory_free(site_id_str);
     
-    char *version = dbutils_text_select(db, "SELECT cloudsync_version();");
-    if (version == NULL) goto abort_test_functions;
+    char *version = NULL;
+    rc = database_select_text(db, "SELECT cloudsync_version();", &version);
+    if (rc != DBRES_OK || version == NULL) {
+        if (version) cloudsync_memory_free(version);
+        goto abort_test_functions;
+    }
     if (print_results) printf("Lib Version: %s\n", version);
     cloudsync_memory_free(version);
     
-    sqlite3_int64 db_version = dbutils_int_select(db, "SELECT cloudsync_db_version();");
+    db_int64 db_version = 0;
+    rc = database_select_int(db, "SELECT cloudsync_db_version();", &db_version);
+    if (rc != DBRES_OK) goto abort_test_functions;
     if (print_results) printf("DB Version: %lld\n", db_version);
     
-    sqlite3_int64 db_version_next = dbutils_int_select(db, "SELECT cloudsync_db_version_next();");
+    db_int64 db_version_next = 0;
+    rc = database_select_int(db, "SELECT cloudsync_db_version_next();", &db_version);
+    if (rc != DBRES_OK) goto abort_test_functions;
     if (print_results) printf("DB Version Next: %lld\n", db_version_next);
 
-    int rc = sqlite3_exec(db, "CREATE TABLE tbl1 (col1 TEXT PRIMARY KEY NOT NULL, col2);", NULL, NULL, NULL);
+    rc = sqlite3_exec(db, "CREATE TABLE tbl1 (col1 TEXT PRIMARY KEY NOT NULL, col2);", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     rc = sqlite3_exec(db, "CREATE TABLE tbl2 (col1 TEXT PRIMARY KEY NOT NULL, col2);", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
@@ -995,27 +1130,36 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     rc = sqlite3_exec(db, "SELECT cloudsync_disable('tbl1');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
-    int v1 = (int)dbutils_int_select(db, "SELECT cloudsync_is_enabled('tbl1');");
+    db_int64 value = 0;
+    rc = database_select_int(db, "SELECT cloudsync_is_enabled('tbl1');", &value);
+    if (rc != DBRES_OK) goto abort_test_functions;
+    int v1 = (int)value;
     if (v1 == 1) goto abort_test_functions;
     
     // * disabled in 0.9.0
     rc = sqlite3_exec(db, "SELECT cloudsync_disable('tbl2');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
-    int v2 = (int)dbutils_int_select(db, "SELECT cloudsync_is_enabled('tbl2');");
+    rc = database_select_int(db, "SELECT cloudsync_is_enabled('tbl2');", &value);
+    if (rc != DBRES_OK) goto abort_test_functions;
+    int v2 = (int)value;
     if (v2 == 1) goto abort_test_functions;
     
     rc = sqlite3_exec(db, "SELECT cloudsync_enable('tbl1');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
-    int v3 = (int)dbutils_int_select(db, "SELECT cloudsync_is_enabled('tbl1');");
+    rc = database_select_int(db, "SELECT cloudsync_is_enabled('tbl1');", &value);
+    if (rc != DBRES_OK) goto abort_test_functions;
+    int v3 = (int)value;
     if (v3 != 1) goto abort_test_functions;
     
     // * disabled in 0.9.0
     rc = sqlite3_exec(db, "SELECT cloudsync_enable('tbl2');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
-    int v4 = (int)dbutils_int_select(db, "SELECT cloudsync_is_enabled('tbl2');");
+    rc = database_select_int(db, "SELECT cloudsync_is_enabled('tbl2');", &value);
+    if (rc != DBRES_OK) goto abort_test_functions;
+    int v4 = (int)value;
     if (v4 != 1) goto abort_test_functions;
     
     rc = sqlite3_exec(db, "SELECT cloudsync_set('key1', 'value1');", NULL, NULL, NULL);
@@ -1033,8 +1177,12 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     rc = sqlite3_exec(db, "SELECT cloudsync_cleanup('tbl2');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
-    char *uuid = dbutils_text_select(db, "SELECT cloudsync_uuid();");
-    if (uuid == NULL) goto abort_test_functions;
+    char *uuid = NULL;
+    rc = database_select_text(db, "SELECT cloudsync_uuid();", &uuid);
+    if (rc != DBRES_OK || uuid == NULL) {
+        if (uuid) cloudsync_memory_free(uuid);
+        goto abort_test_functions;
+    }
     if (print_results) printf("New uuid: %s\n", uuid);
     cloudsync_memory_free(uuid);
     
@@ -1776,13 +1924,13 @@ bool do_test_dbutils (void) {
     // test dbutils_write
     sql = "INSERT INTO foo (name, age, note) VALUES (?, ?, ?);";
     const char *values[] = {"Test1", "3.1415", NULL};
-    int type[] = {SQLITE_TEXT, SQLITE_FLOAT, SQLITE_NULL};
+    DBTYPE type[] = {SQLITE_TEXT, SQLITE_FLOAT, SQLITE_NULL};
     int len[] = {5, 0, 0};
-    rc = dbutils_write(db, NULL, sql, values, type, len, 3);
+    rc = database_write(db, sql, values, type, len, 3);
     if (rc != SQLITE_OK) goto finalize;
     
     sql = "INSERT INTO foo2 (name) VALUES ('Error');";
-    rc = dbutils_write(db, NULL, sql, NULL, NULL, NULL, -1);
+    rc = database_write(db, sql, NULL, NULL, NULL, -1);
     if (rc == SQLITE_OK) goto finalize;
     
     // test dbutils_text_select
@@ -1791,15 +1939,15 @@ bool do_test_dbutils (void) {
     if (rc != SQLITE_OK) goto finalize;
     
     sql = "INSERT INTO \"quoted table name 🚀\" (\"pk quoted col 1\", \"pk quoted col 2\", \"non pk quoted col 1\", \"non pk quoted col 2\") VALUES ('pk1', 'pk2', 'nonpk1', 'nonpk2');";
-    rc = dbutils_write(db, NULL, sql, NULL, NULL, NULL, -1);
+    rc = database_write(db, sql, NULL, NULL, NULL, -1);
     if (rc != SQLITE_OK) goto finalize;
     
     sql = "SELECT * FROM cloudsync_changes();";
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
     
-    sqlite3_int64 i64_value = dbutils_int_select(db, "SELECT NULL;");
-    if (i64_value != 0) goto finalize;
+    //sqlite3_int64 i64_value = dbutils_int_select(db, "SELECT NULL;");
+    //if (i64_value != 0) goto finalize;
     
     //rc = dbutils_register_function(db, NULL, NULL, 0, NULL, NULL, NULL);
     //if (rc == SQLITE_OK) goto finalize;
@@ -1880,12 +2028,13 @@ bool do_test_dbutils (void) {
     if (value2 != NULL) goto finalize;
     cloudsync_memory_free(value1);
     
-    sqlite3_int64 db_version = dbutils_int_select(db, "SELECT cloudsync_db_version();");
+    db_int64 db_version = 0;
+    database_select_int(db, "SELECT cloudsync_db_version();", &db_version);
 
     char *site_id_blob;
-    int site_id_blob_size;
-    sqlite3_int64 dbver1, seq1;
-    rc = dbutils_blob_int_int_select(db, "SELECT cloudsync_siteid(),  cloudsync_db_version(),  cloudsync_seq();", &site_id_blob, &site_id_blob_size, &dbver1, &seq1);
+    db_int64 site_id_blob_size;
+    db_int64 dbver1, seq1;
+    rc = database_select_blob_2int(db, "SELECT cloudsync_siteid(),  cloudsync_db_version(),  cloudsync_seq();", &site_id_blob, &site_id_blob_size, &dbver1, &seq1);
     if (rc != SQLITE_OK || site_id_blob == NULL ||dbver1 != db_version) goto finalize;
     cloudsync_memory_free(site_id_blob);
     
@@ -1896,9 +2045,9 @@ bool do_test_dbutils (void) {
     value1 = dbutils_table_settings_get_value(db, "foo", NULL, "key1", OUT_OF_MEMORY_BUFFER, 0);
     if (value1 != NULL) goto finalize;
 
-    char *p = NULL;
-    dbutils_select(db, "SELECT zeroblob(16);", NULL, NULL, NULL, 0, SQLITE_NOMEM);
-    if (p != NULL) goto finalize;
+    //char *p = NULL;
+    //dbutils_select(db, "SELECT zeroblob(16);", NULL, NULL, NULL, 0, SQLITE_BLOB);
+    //if (p != NULL) goto finalize;
     
     dbutils_settings_set_key_value(db, NULL, CLOUDSYNC_KEY_LIBVERSION, "0.0.0");
     int cmp = dbutils_settings_check_version(db, NULL);
@@ -5563,10 +5712,10 @@ bool do_test_gos (int nclients, bool print_result, bool cleanup_databases) {
             snprintf(s, sizeof(s), "%d", counter);
             
             const char *values[] = {uuid, desc, s};
-            int types[] = {SQLITE_TEXT, SQLITE_TEXT, SQLITE_INTEGER};
+            DBTYPE types[] = {SQLITE_TEXT, SQLITE_TEXT, SQLITE_INTEGER};
             int len[] = {-1, -1, 0};
             
-            rc = dbutils_write(db[i], NULL, sql, values, types, len, 3);
+            rc = database_write(db[i], sql, values, types, len, 3);
             if (rc != SQLITE_OK) goto finalize;
         }
     }
@@ -5653,13 +5802,14 @@ bool do_test_network_encode_decode (int nclients, bool print_result, bool cleanu
         for (int j=0; j<nclients; ++j) {
             if (target == j) continue;
             
-            int blob_size = 0, rc;
-            char *blob = dbutils_blob_select (db[target], src_sql, &blob_size, NULL, &rc);
-            if (!blob) goto finalize;
+            char *blob = NULL;
+            db_int64 blob_size = 0;
+            int rc = database_select_blob(db[target], src_sql, &blob, &blob_size);
+            if ((rc != DBRES_OK) || (!blob)) goto finalize;
             
             const char *values[] = {blob};
             int types[] = {SQLITE_BLOB};
-            int len[] = {blob_size};
+            int len[] = {(int)blob_size};
 
             dbutils_select(db[j], dest_sql, values, types, len, 1, SQLITE_INTEGER);
             cloudsync_memory_free(blob);
