@@ -397,31 +397,6 @@ bool cloudsync_file_write (const char *path, const char *buffer, size_t len) {
 
 #endif
 
-// MARK: - CRDT algos -
-
-table_algo crdt_algo_from_name (const char *algo_name) {
-    if (algo_name == NULL) return table_algo_none;
-    
-    if ((strcasecmp(algo_name, "CausalLengthSet") == 0) || (strcasecmp(algo_name, "cls") == 0)) return table_algo_crdt_cls;
-    if ((strcasecmp(algo_name, "GrowOnlySet") == 0) || (strcasecmp(algo_name, "gos") == 0)) return table_algo_crdt_gos;
-    if ((strcasecmp(algo_name, "DeleteWinsSet") == 0) || (strcasecmp(algo_name, "dws") == 0)) return table_algo_crdt_dws;
-    if ((strcasecmp(algo_name, "AddWinsSet") == 0) || (strcasecmp(algo_name, "aws") == 0)) return table_algo_crdt_aws;
-    
-    // if nothing is found
-    return table_algo_none;
-}
-
-const char *crdt_algo_name (table_algo algo) {
-    switch (algo) {
-        case table_algo_crdt_cls: return "cls";
-        case table_algo_crdt_gos: return "gos";
-        case table_algo_crdt_dws: return "dws";
-        case table_algo_crdt_aws: return "aws";
-        case table_algo_none: return NULL;
-    }
-    return NULL;
-}
-
 // MARK: - Memory Debugger -
 
 #if CLOUDSYNC_DEBUG_MEMORY

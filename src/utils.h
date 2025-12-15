@@ -93,7 +93,6 @@
 #define cloudsync_memory_free                         memdebug_free
 #define cloudsync_memory_realloc                      memdebug_realloc
 #define cloudsync_memory_size                         memdebug_msize
-#define cloudsync_memory_vmprintf                     memdebug_vmprintf
 #define cloudsync_memory_mprintf                      memdebug_mprintf
 
 void memdebug_init (int once);
@@ -112,32 +111,19 @@ db_uint64 memdebug_msize (void *ptr);
 #define cloudsync_memory_free                         dbmem_free
 #define cloudsync_memory_realloc                      dbmem_realloc
 #define cloudsync_memory_size                         dbmem_size
-#define cloudsync_memory_vmprintf                     dbmem_vmprintf
 #define cloudsync_memory_mprintf                      dbmem_mprintf
 #endif
 
 #define UUID_STR_MAXLEN                     37
 #define UUID_LEN                            16
 
-// The type of CRDT chosen for a table controls what rows are included or excluded when merging tables together from different databases
-typedef enum {
-    table_algo_none = 0,
-    table_algo_crdt_cls = 100,   // CausalLengthSet
-    table_algo_crdt_gos,         // GrowOnlySet
-    table_algo_crdt_dws,         // DeleteWinsSet
-    table_algo_crdt_aws          // AddWinsSet
-} table_algo;
-
-table_algo crdt_algo_from_name (const char *name);
-const char *crdt_algo_name (table_algo algo);
-
 int cloudsync_uuid_v7 (uint8_t value[UUID_LEN]);
 int cloudsync_uuid_v7_compare (uint8_t value1[UUID_LEN], uint8_t value2[UUID_LEN]);
 char *cloudsync_uuid_v7_string (char value[UUID_STR_MAXLEN], bool dash_format);
 char *cloudsync_uuid_v7_stringify (uint8_t uuid[UUID_LEN], char value[UUID_STR_MAXLEN], bool dash_format);
-char *cloudsync_string_replace_prefix(const char *input, char *prefix, char *replacement);
 uint64_t fnv1a_hash(const char *data, size_t len);
 
+char *cloudsync_string_replace_prefix(const char *input, char *prefix, char *replacement);
 char *cloudsync_string_ndup (const char *str, size_t len, bool lowercase);
 char *cloudsync_string_dup (const char *str, bool lowercase);
 int cloudsync_blob_compare(const char *blob1, size_t size1, const char *blob2, size_t size2);

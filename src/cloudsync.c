@@ -215,6 +215,31 @@ bool force_uncompressed_blob = false;
 int local_mark_insert_or_update_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, db_int64 db_version, int seq);
 int cloudsync_set_dberror (cloudsync_context *data);
 
+// MARK: - CRDT algos -
+
+table_algo cloudsync_algo_from_name (const char *algo_name) {
+    if (algo_name == NULL) return table_algo_none;
+    
+    if ((strcasecmp(algo_name, "CausalLengthSet") == 0) || (strcasecmp(algo_name, "cls") == 0)) return table_algo_crdt_cls;
+    if ((strcasecmp(algo_name, "GrowOnlySet") == 0) || (strcasecmp(algo_name, "gos") == 0)) return table_algo_crdt_gos;
+    if ((strcasecmp(algo_name, "DeleteWinsSet") == 0) || (strcasecmp(algo_name, "dws") == 0)) return table_algo_crdt_dws;
+    if ((strcasecmp(algo_name, "AddWinsSet") == 0) || (strcasecmp(algo_name, "aws") == 0)) return table_algo_crdt_aws;
+    
+    // if nothing is found
+    return table_algo_none;
+}
+
+const char *cloudsync_algo_name (table_algo algo) {
+    switch (algo) {
+        case table_algo_crdt_cls: return "cls";
+        case table_algo_crdt_gos: return "gos";
+        case table_algo_crdt_dws: return "dws";
+        case table_algo_crdt_aws: return "aws";
+        case table_algo_none: return NULL;
+    }
+    return NULL;
+}
+
 // MARK: - DBVM Utils -
 
 DBVM_VALUE dbvm_execute (dbvm_t *stmt, cloudsync_context *data) {
@@ -273,13 +298,11 @@ cleanup:
     return result;
 }
 
-dbvm_t *dbvm_reset (dbvm_t *stmt) {
+void dbvm_reset (dbvm_t *stmt) {
+    if (!stmt) return;
     databasevm_clear_bindings(stmt);
     databasevm_reset(stmt);
-    return NULL;
 }
-
-// MARK: - Settings -
 
 // MARK: - Database Version -
 
@@ -1377,7 +1400,8 @@ int merge_did_cid_win (cloudsync_context *data, cloudsync_table_context *table, 
     // compare values
     int ret = dbutils_value_compare(insert_value, local_value);
     // reset after compare, otherwise local value would be deallocated
-    vm = dbvm_reset(vm);
+    dbvm_reset(vm);
+    vm = NULL;
     
     bool compare_site_id = (ret == 0 && data->merge_equal_values == true);
     if (!compare_site_id) {
@@ -1408,7 +1432,7 @@ int merge_did_cid_win (cloudsync_context *data, cloudsync_table_context *table, 
     
 cleanup:
     if (rc != DBRES_OK) cloudsync_set_dberror(data);
-    if (vm) dbvm_reset(vm);
+    dbvm_reset(vm);
     return rc;
 }
 
@@ -1521,7 +1545,7 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
 // MARK: - Private -
 
 bool cloudsync_config_exists (db_t *db) {
-    return dbutils_table_exists(db, CLOUDSYNC_SITEID_NAME) == true;
+    return database_table_exists(db, CLOUDSYNC_SITEID_NAME) == true;
 }
 
 cloudsync_context *cloudsync_context_create (void *db) {
@@ -1563,8 +1587,8 @@ const char *cloudsync_context_init (cloudsync_context *data, void *db) {
     // The data->site_id value could exists while settings tables don't exists if the
     // cloudsync_context_init was previously called in init transaction that was rolled back
     // because of an error during the init process.
-    if (data->site_id[0] == 0 || !dbutils_table_exists(db, CLOUDSYNC_SITEID_NAME)) {
-        if (dbutils_settings_init(db, data, NULL) != DBRES_OK) return NULL;
+    if (data->site_id[0] == 0 || !database_table_exists(db, CLOUDSYNC_SITEID_NAME)) {
+        if (dbutils_settings_init(db, data) != DBRES_OK) return NULL;
         if (cloudsync_add_dbvms(db, data) != DBRES_OK) return NULL;
         if (cloudsync_load_siteid(db, data) != DBRES_OK) return NULL;
         
@@ -1658,7 +1682,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     }
     
     // drop original triggers
-    dbutils_delete_triggers(db, table_name);
+    database_delete_triggers(db, table_name);
     if (rc != DBRES_OK) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to delete triggers for table %s in cloudsync_begin_alter.", table_name);
@@ -1705,7 +1729,6 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
         }
     }
     
-    // TODO: FIX SQL
     if (pk_diff) {
         // drop meta-table, it will be recreated
         char *sql = cloudsync_memory_mprintf("DROP TABLE IF EXISTS \"%w_cloudsync\";", table->name);
@@ -1794,7 +1817,7 @@ int cloudsync_commit_alter (cloudsync_context *data, const char *table_name) {
     // init again cloudsync for the table
     table_algo algo_current = dbutils_table_settings_get_algo(db, table_name);
     if (algo_current == table_algo_none) algo_current = dbutils_table_settings_get_algo(db, "*");
-    rc = cloudsync_init_table(data, table_name, crdt_algo_name(algo_current), true);
+    rc = cloudsync_init_table(data, table_name, cloudsync_algo_name(algo_current), true);
     if (rc != DBRES_OK) goto rollback_finalize_alter;
 
     // release savepoint
@@ -2462,6 +2485,81 @@ int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, i
 
 // MARK: - Core -
 
+int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, bool skip_int_pk_check) {
+    DEBUG_DBFUNCTION("cloudsync_table_sanity_check %s", name);
+    
+    db_t *db = data->db;
+    char buffer[2048];
+    
+    // sanity check table name
+    if (name == NULL) {
+        return cloudsync_set_error(data, "cloudsync_init requires a non-null table parameter", DBRES_ERROR);
+    }
+    
+    // avoid allocating heap memory for SQL statements by setting a maximum length of 1900 characters
+    // for table names. This limit is reasonable and helps prevent memory management issues.
+    const size_t maxlen = CLOUDSYNC_MAX_TABLENAME_LEN;
+    if (strlen(name) > maxlen) {
+        snprintf(buffer, sizeof(buffer), "Table name cannot be longer than %d characters", (int)maxlen);
+        return cloudsync_set_error(data, buffer, DBRES_ERROR);
+    }
+    
+    // check if table exists
+    if (database_table_exists(db, name) == false) {
+        snprintf(buffer, sizeof(buffer), "Table %s does not exist", name);
+        return cloudsync_set_error(data, buffer, DBRES_ERROR);
+    }
+    
+    // no more than 128 columns can be used as a composite primary key (SQLite hard limit)
+    int npri_keys = database_count_pk(db, name, false);
+    if (npri_keys < 0) return cloudsync_set_dberror(data);
+    if (npri_keys > 128) return cloudsync_set_error(data, "No more than 128 columns can be used to form a composite primary key", DBRES_ERROR);
+    
+    #if CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
+    // if count == 0 means that rowid will be used as primary key (BTW: very bad choice for the user)
+    if (npri_keys == 0) {
+        snprintf(buffer, sizeof(buffer), "Rowid only tables are not supported, all primary keys must be explicitly set and declared as NOT NULL (table %s)", name);
+        return cloudsync_set_error(data, buffer, DBRES_ERROR);
+    }
+    #endif
+        
+    if (!skip_int_pk_check) {
+        if (npri_keys == 1) {
+            // the affinity of a column is determined by the declared type of the column,
+            // according to the following rules in the order shown:
+            // 1. If the declared type contains the string "INT" then it is assigned INTEGER affinity.
+            int npri_keys_int = database_count_int_pk(db, name);
+            if (npri_keys_int < 0) return cloudsync_set_dberror(data);
+            if (npri_keys == npri_keys_int) {
+                snprintf(buffer, sizeof(buffer), "Table %s uses an single-column INTEGER primary key. For CRDT replication, primary keys must be globally unique. Consider using a TEXT primary key with UUIDs or ULID to avoid conflicts across nodes. If you understand the risk and still want to use this INTEGER primary key, set the third argument of the cloudsync_init function to 1 to skip this check.", name);
+                return cloudsync_set_error(data, buffer, DBRES_ERROR);
+            }
+            
+        }
+    }
+        
+    // if user declared explicit primary key(s) then make sure they are all declared as NOT NULL
+    if (npri_keys > 0) {
+        int npri_keys_notnull = database_count_pk(db, name, true);
+        if (npri_keys_notnull < 0) return cloudsync_set_dberror(data);
+        if (npri_keys != npri_keys_notnull) {
+            snprintf(buffer, sizeof(buffer), "All primary keys must be explicitly declared as NOT NULL (table %s)", name);
+            return cloudsync_set_error(data, buffer, DBRES_ERROR);
+        }
+    }
+    
+    // check for columns declared as NOT NULL without a DEFAULT value.
+    // Otherwise, col_merge_stmt would fail if changes to other columns are inserted first.
+    int n_notnull_nodefault = database_count_notnull_without_default(db, name);
+    if (n_notnull_nodefault < 0) return cloudsync_set_dberror(data);
+    if (n_notnull_nodefault > 0) {
+        snprintf(buffer, sizeof(buffer), "All non-primary key columns declared as NOT NULL must have a DEFAULT value. (table %s)", name);
+        return cloudsync_set_error(data, buffer, DBRES_ERROR);
+    }
+    
+    return DBRES_OK;
+}
+
 int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context *table) {
     db_t *db = data->db;
     if (cloudsync_context_init(data, db) == NULL) return DBRES_MISUSE;
@@ -2478,7 +2576,7 @@ int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context
     }
     
     // drop original triggers
-    dbutils_delete_triggers(db, table_name);
+    database_delete_triggers(db, table_name);
     if (rc != DBRES_OK) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to delete triggers for table %s", table_name);
@@ -2508,7 +2606,7 @@ int cloudsync_cleanup (cloudsync_context *data, const char *table_name) {
         cloudsync_reset_siteid(data);
         dbutils_settings_cleanup(data->db);
     } else {
-        if (dbutils_table_exists(data->db, CLOUDSYNC_TABLE_SETTINGS_NAME) == true) {
+        if (database_table_exists(data->db, CLOUDSYNC_TABLE_SETTINGS_NAME) == true) {
             cloudsync_update_schema_hash(data);
         }
     }
@@ -2560,10 +2658,8 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     db_t *db = data->db;
     
     // sanity check table and its primary key(s)
-    if (dbutils_table_sanity_check(db, NULL, table_name, skip_int_pk_check) == false) {
-        // TODO: check error message here
-        return DBRES_MISUSE;
-    }
+    int rc = cloudsync_table_sanity_check(data, table_name, skip_int_pk_check);
+    if (rc != DBRES_OK) return rc;
     
     // init cloudsync_settings
     if (cloudsync_context_init(data, db) == NULL) {
@@ -2575,7 +2671,7 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     table_algo algo_new = table_algo_none;
     if (!algo_name) algo_name = CLOUDSYNC_DEFAULT_ALGO;
     
-    algo_new = crdt_algo_from_name(algo_name);
+    algo_new = cloudsync_algo_from_name(algo_name);
     if (algo_new == table_algo_none) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unknown CRDT algorithm name %s", algo_name);
@@ -2611,11 +2707,11 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     // cloudsync_sync_table_key(data, table_name, "*", CLOUDSYNC_KEY_ALGO, crdt_algo_name(algo_new));
     
     // check triggers
-    int rc = dbutils_check_triggers(db, table_name, algo_new);
+    rc = database_create_triggers(db, table_name, algo_new);
     if (rc != DBRES_OK) return cloudsync_set_error(data, "An error occurred while creating triggers", DBRES_MISUSE);
     
     // check meta-table
-    rc = dbutils_check_metatable(db, table_name, algo_new);
+    rc = database_create_metatable(db, table_name);
     if (rc != DBRES_OK) return cloudsync_set_error(data, "An error occurred while creating metatable", DBRES_MISUSE);
     
     // add prepared statements

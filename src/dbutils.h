@@ -12,12 +12,6 @@
 #include "utils.h"
 #include "cloudsync_private.h"
 
-#ifndef SQLITE_CORE
-#include "sqlite3ext.h"
-#else
-#include "sqlite3.h"
-#endif
-
 #define CLOUDSYNC_SETTINGS_NAME             "cloudsync_settings"
 #define CLOUDSYNC_SITEID_NAME               "cloudsync_site_id"
 #define CLOUDSYNC_TABLE_SETTINGS_NAME       "cloudsync_table_settings"
@@ -32,33 +26,22 @@
 #define CLOUDSYNC_KEY_DEBUG                 "debug"
 #define CLOUDSYNC_KEY_ALGO                  "algo"
 
-// general
-//int dbutils_write (sqlite3 *db, sqlite3_context *context, const char *sql, const char **values, int types[], int len[], int count);
-
-int dbutils_debug_stmt (sqlite3 *db, bool print_result);
-void dbutils_debug_values (int argc, sqlite3_value **argv);
-void dbutils_debug_value (sqlite3_value *value);
-
-int dbutils_value_compare (sqlite3_value *v1, sqlite3_value *v2);
-
-bool dbutils_system_exists (sqlite3 *db, const char *name, const char *type);
-bool dbutils_table_exists (sqlite3 *db, const char *name);
-bool dbutils_trigger_exists (sqlite3 *db, const char *name);
-bool dbutils_table_sanity_check (sqlite3 *db, sqlite3_context *context, const char *name, bool skip_int_pk_check);
-
-int dbutils_delete_triggers (sqlite3 *db, const char *table);
-int dbutils_check_triggers (sqlite3 *db, const char *table, table_algo algo);
-int dbutils_check_metatable (sqlite3 *db, const char *table, table_algo algo);
-
 // settings
-int dbutils_settings_cleanup (sqlite3 *db);
-int dbutils_settings_init (sqlite3 *db, void *cloudsync_data, sqlite3_context *context);
-int dbutils_settings_set_key_value (sqlite3 *db, sqlite3_context *context, const char *key, const char *value);
-int dbutils_settings_get_int_value (sqlite3 *db, const char *key);
-char *dbutils_settings_get_value (sqlite3 *db, const char *key, char *buffer, size_t blen);
-int dbutils_table_settings_set_key_value (sqlite3 *db, sqlite3_context *context, const char *table, const char *column, const char *key, const char *value);
-sqlite3_int64 dbutils_table_settings_count_tables (sqlite3 *db);
-char *dbutils_table_settings_get_value (sqlite3 *db, const char *table, const char *column, const char *key, char *buffer, size_t blen);
-table_algo dbutils_table_settings_get_algo (sqlite3 *db, const char *table_name);
+int dbutils_settings_check_version (db_t *db, const char *version);
+int dbutils_settings_init (db_t *db, void *cloudsync_data);
+int dbutils_settings_cleanup (db_t *db);
+int dbutils_settings_set_key_value (db_t *db, cloudsync_context *data, const char *key, const char *value);
+int dbutils_settings_get_int_value (db_t *db, const char *key);
+
+// table settings
+int        dbutils_table_settings_set_key_value (db_t *db, cloudsync_context *data, const char *table, const char *column, const char *key, const char *value);
+db_int64   dbutils_table_settings_count_tables (db_t *db);
+char      *dbutils_table_settings_get_value (db_t *db, const char *table_name, const char *column, const char *key, char *buffer, size_t blen);
+table_algo dbutils_table_settings_get_algo (db_t *db, const char *table_name);
+
+// others
+void dbutils_debug_values (int argc, dbvalue_t **argv);
+void dbutils_debug_value (dbvalue_t *value);
+int  dbutils_value_compare (dbvalue_t *v1, dbvalue_t *v2);
 
 #endif

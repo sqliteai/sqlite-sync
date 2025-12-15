@@ -18,6 +18,11 @@ extern "C" {
 #endif
 
 #define CLOUDSYNC_VERSION                       "0.9.0"
+#define CLOUDSYNC_MAX_TABLENAME_LEN             512
+
+// algos
+table_algo cloudsync_algo_from_name (const char *algo_name);
+const char *cloudsync_algo_name (table_algo algo);
 
 // Opaque structures
 typedef struct cloudsync_context cloudsync_context;
@@ -28,7 +33,7 @@ cloudsync_context *cloudsync_context_create (void *db);
 const char *cloudsync_context_init (cloudsync_context *data, void *db);
 void cloudsync_context_free (void *ctx);
 
-// OK
+
 int cloudsync_cleanup (cloudsync_context *data, const char *table_name);
 int cloudsync_cleanup_all (cloudsync_context *data);
 
@@ -70,15 +75,12 @@ int    cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloud
 char  *cloudsync_payload_blob (cloudsync_payload_context *payload, db_int64 *blob_size, db_int64 *nrows);
 size_t cloudsync_payload_context_size (size_t *header_size);
 
-
-
-// END OK
-
 // CLOUDSYNCTABLE CONTEXT
 cloudsync_table_context *table_lookup (cloudsync_context *data, const char *table_name);
 void *table_column_lookup (cloudsync_table_context *table, const char *col_name, bool is_merge, int *index);
 bool table_enabled (cloudsync_table_context *table);
 void table_set_enabled (cloudsync_table_context *table, bool value);
+bool table_add_to_context (db_t *db, cloudsync_context *data, table_algo algo, const char *table_name);
 
 bool table_pk_exists (cloudsync_table_context *table, const char *value, size_t len);
 int table_count_cols (cloudsync_table_context *table);

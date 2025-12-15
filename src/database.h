@@ -8,7 +8,6 @@
 #ifndef __CLOUDSYNC_DATABASE__
 #define __CLOUDSYNC_DATABASE__
 
-#include <stdarg.h>         // va_list
 #include <stdbool.h>
 
 typedef long long int db_int64;
@@ -42,18 +41,14 @@ typedef enum {
     DBFLAG_PERSISTENT = 0x01
 } DBFLAG;
 
-/*
-typedef struct {
-    DBTYPE   type;
-    db_int64 len;
-    DBRES    rc;
-    union {
-        db_int64 int_value;
-        double   double_value;
-        char     *ptr_value;
-    } value;
-} DATABASE_RESULT;
-*/
+// The type of CRDT chosen for a table controls what rows are included or excluded when merging tables together from different databases
+typedef enum {
+    table_algo_none = 0,
+    table_algo_crdt_cls = 100,   // CausalLengthSet
+    table_algo_crdt_gos,         // GrowOnlySet
+    table_algo_crdt_dws,         // DeleteWinsSet
+    table_algo_crdt_aws          // AddWinsSet
+} table_algo;
  
 #ifndef UNUSED_PARAMETER
 #define UNUSED_PARAMETER(X) (void)(X)
@@ -62,18 +57,28 @@ typedef struct {
 // GENERAL
 typedef int (*database_exec_cb) (void *xdata, int argc, char **values, char **names);
 
-int database_exec (db_t *db, const char *sql);
-int database_exec_callback (db_t *db, const char *sql, database_exec_cb, void *xdata);
-int database_select_int (db_t *db, const char *sql, db_int64 *value);
-int database_select_text (db_t *db, const char *sql, char **value);
-int database_select_blob (db_t *db, const char *sql, char **value, db_int64 *value_len);
-int database_select_blob_2int (db_t *db, const char *sql, char **value, db_int64 *value_len, db_int64 *value2, db_int64 *value3);
-int database_write (db_t *db, const char *sql, const char **values, DBTYPE types[], int lens[], int count);
+int  database_exec (db_t *db, const char *sql);
+int  database_exec_callback (db_t *db, const char *sql, database_exec_cb, void *xdata);
+int  database_select_int (db_t *db, const char *sql, db_int64 *value);
+int  database_select_text (db_t *db, const char *sql, char **value);
+int  database_select_blob (db_t *db, const char *sql, char **value, db_int64 *value_len);
+int  database_select_blob_2int (db_t *db, const char *sql, char **value, db_int64 *value_len, db_int64 *value2, db_int64 *value3);
+int  database_write (db_t *db, const char *sql, const char **values, DBTYPE types[], int lens[], int count);
+bool database_table_exists (db_t *db, const char *table_name);
+bool database_trigger_exists (db_t *db, const char *table_name);
+int  database_create_metatable (db_t *db, const char *table_name);
+int  database_create_triggers (db_t *db, const char *table_name, table_algo algo);
+int  database_delete_triggers (db_t *db, const char *table_name);
+int  database_debug (db_t *db, bool print_result);
+
+int database_count_pk (db_t *db, const char *table_name, bool not_null);
+int database_count_int_pk (db_t *db, const char *table_name);
+int database_count_notnull_without_default (db_t *db, const char *table_name);
 
 db_int64 database_schema_version (db_t *db);
 uint64_t database_schema_hash (db_t *db);
-bool database_check_schema_hash (db_t *db, uint64_t hash);
-int database_update_schema_hash (db_t *db, uint64_t *hash);
+bool     database_check_schema_hash (db_t *db, uint64_t hash);
+int      database_update_schema_hash (db_t *db, uint64_t *hash);
 
 int database_begin_savepoint (db_t *db, const char *savepoint_name);
 int database_commit_savepoint (db_t *db, const char *savepoint_name);
@@ -129,7 +134,6 @@ void database_result_value (dbcontext_t *context, dbvalue_t *value);
 void *dbmem_alloc (db_uint64 size);
 void *dbmem_zeroalloc (db_uint64 size);
 void *dbmem_realloc (void *ptr, db_uint64 new_size);
-char *dbmem_vmprintf (const char *format, va_list list);
 char *dbmem_mprintf(const char *format, ...);
 void dbmem_free (void *ptr);
 db_uint64 dbmem_size (void *ptr);

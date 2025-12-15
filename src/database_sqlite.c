@@ -7,6 +7,7 @@
 
 #include "cloudsync.h"
 #include "database.h"
+#include "dbutils.h"
 #include "utils.h"
 
 #include <string.h>
@@ -40,7 +41,7 @@ char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, boo
 
 // MARK: - PRIVATE -
 
-int database_select1value (db_t *db, const char *sql, char **ptr_value, db_int64 *int_value, DBTYPE expected_type) {
+int database_select1_value (db_t *db, const char *sql, char **ptr_value, db_int64 *int_value, DBTYPE expected_type) {
     // init values and sanity check expected_type
     if (ptr_value) *ptr_value = NULL;
     *int_value = 0;
@@ -73,7 +74,6 @@ int database_select1value (db_t *db, const char *sql, char **ptr_value, db_int64
             
             if (len > 0 && value) memcpy(ptr, value, len);
             if (expected_type == DBTYPE_TEXT) ptr[len] = 0; // NULL terminate in case of TEXT
-            *int_value = len;
             
             *ptr_value = ptr;
             *int_value = len;
@@ -86,7 +86,7 @@ cleanup_select:
     return rc;
 }
 
-int database_select3values (db_t *db, const char *sql, char **value, db_int64 *len, db_int64 *value2, db_int64 *value3) {
+int database_select3_values (db_t *db, const char *sql, char **value, db_int64 *len, db_int64 *value2, db_int64 *value3) {
     // init values and sanity check expected_type
     *value = NULL;
     *value2 = 0;
@@ -130,6 +130,30 @@ int database_select3values (db_t *db, const char *sql, char **value, db_int64 *l
 cleanup_select:
     if (vm) sqlite3_finalize(vm);
     return rc;
+}
+
+bool database_system_exists (db_t *db, const char *name, const char *type) {
+    sqlite3_stmt *vm = NULL;
+    bool result = false;
+    
+    char sql[1024];
+    snprintf(sql, sizeof(sql), "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type='%s' AND name=?1 COLLATE NOCASE);", type);
+    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    
+    rc = sqlite3_bind_text(vm, 1, name, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto finalize;
+    
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_ROW) {
+        result = (bool)sqlite3_column_int(vm, 0);
+        rc = SQLITE_OK;
+    }
+    
+finalize:
+    if (rc != SQLITE_OK) DEBUG_ALWAYS("Error executing %s in dbutils_system_exists for type %s name %s (%s).", sql, type, name, database_errmsg(db));
+    if (vm) sqlite3_finalize(vm);
+    return result;
 }
 
 // MARK: - GENERAL -
@@ -180,20 +204,20 @@ cleanup_write:
 }
 
 int database_select_int (db_t *db, const char *sql, db_int64 *value) {
-    return database_select1value(db, sql, NULL, value, DBTYPE_INTEGER);
+    return database_select1_value(db, sql, NULL, value, DBTYPE_INTEGER);
 }
 
 int database_select_text (db_t *db, const char *sql, char **value) {
     db_int64 len = 0;
-    return database_select1value(db, sql, value, &len, DBTYPE_TEXT);
+    return database_select1_value(db, sql, value, &len, DBTYPE_TEXT);
 }
 
 int database_select_blob (db_t *db, const char *sql, char **value, db_int64 *len) {
-    return database_select1value(db, sql, value, len, DBTYPE_BLOB);
+    return database_select1_value(db, sql, value, len, DBTYPE_BLOB);
 }
 
 int database_select_blob_2int (db_t *db, const char *sql, char **value, db_int64 *len, db_int64 *value2, db_int64 *value3) {
-    return database_select3values(db, sql, value, len, value2, value3);
+    return database_select3_values(db, sql, value, len, value2, value3);
 }
 
 const char *database_errmsg (db_t *db) {
@@ -207,6 +231,282 @@ int database_errcode (db_t *db) {
 bool database_in_transaction (db_t *db) {
     bool in_transaction = (sqlite3_get_autocommit(db) != true);
     return in_transaction;
+}
+
+bool database_table_exists (db_t *db, const char *name) {
+    return database_system_exists(db, name, "table");
+}
+
+bool database_trigger_exists (db_t *db, const char *name) {
+    return database_system_exists(db, name, "trigger");
+}
+
+int database_count_pk (db_t *db, const char *table_name, bool not_null) {
+    char buffer[1024];
+    char *sql = NULL;
+    
+    if (not_null) {
+        sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk>0 AND \"notnull\"=1;", table_name);
+    } else {
+        sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk>0;", table_name);
+    }
+    
+    db_int64 count = 0;
+    int rc = database_select_int(db, sql, &count);
+    if (rc != DBRES_OK) return -1;
+    return (int)count;
+}
+
+int database_count_int_pk (db_t *db, const char *table_name) {
+    char buffer[1024];
+    char *sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk=1 AND \"type\" LIKE '%%INT%%';", table_name);
+    
+    db_int64 count = 0;
+    int rc = database_select_int(db, sql, &count);
+    if (rc != DBRES_OK) return -1;
+    return (int)count;
+}
+
+int database_count_notnull_without_default (db_t *db, const char *table_name) {
+    char buffer[1024];
+    char *sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk=0 AND \"notnull\"=1 AND \"dflt_value\" IS NULL;", table_name);
+    
+    db_int64 count = 0;
+    int rc = database_select_int(db, sql, &count);
+    if (rc != DBRES_OK) return -1;
+    return (int)count;
+}
+
+int database_debug (db_t *db, bool print_result) {
+    sqlite3_stmt *stmt = NULL;
+    int counter = 0;
+    while ((stmt = sqlite3_next_stmt(db, stmt))) {
+        ++counter;
+        if (print_result) printf("Unfinalized stmt statement: %p\n", stmt);
+    }
+    return counter;
+}
+
+// MARK: - TRIGGERS and META -
+
+int database_create_metatable (db_t *db, const char *table_name) {
+    DEBUG_DBFUNCTION("database_create_metatable %s", table);
+    
+    // table_name cannot be longer than 512 characters so static buffer size is computed accordling to that value
+    char buffer[2048];
+    
+    // WITHOUT ROWID is available starting from SQLite version 3.8.2 (2013-12-06) and later
+    char *sql = sqlite3_snprintf(sizeof(buffer), buffer, "CREATE TABLE IF NOT EXISTS \"%w_cloudsync\" (pk BLOB NOT NULL, col_name TEXT NOT NULL, col_version INTEGER, db_version INTEGER, site_id INTEGER DEFAULT 0, seq INTEGER, PRIMARY KEY (pk, col_name)) WITHOUT ROWID; CREATE INDEX IF NOT EXISTS \"%w_cloudsync_db_idx\" ON \"%w_cloudsync\" (db_version);", table_name, table_name, table_name);
+    
+    int rc = database_exec(db, sql);
+    DEBUG_SQL("\n%s", sql);
+    return rc;
+}
+
+int database_create_insert_trigger (db_t *db, const char *table_name, char *trigger_when) {
+    // NEW.prikey1, NEW.prikey2...
+    char buffer[1024];
+    char *trigger_name = sqlite3_snprintf(sizeof(buffer), buffer, "cloudsync_after_insert_%s", table_name);
+    if (database_trigger_exists(db, trigger_name)) return SQLITE_OK;
+    
+    char buffer2[2048];
+    char *sql2 = sqlite3_snprintf(sizeof(buffer2), buffer2, "SELECT group_concat('NEW.\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
+    
+    char *pkclause = NULL;
+    int rc = database_select_text(db, sql2, &pkclause);
+    if (rc != SQLITE_OK) return rc;
+    char *pkvalues = (pkclause) ? pkclause : "NEW.rowid";
+    
+    char *sql = sqlite3_mprintf("CREATE TRIGGER \"%w\" AFTER INSERT ON \"%w\" %s BEGIN SELECT cloudsync_insert('%q', %s); END", trigger_name, table_name, trigger_when, table_name, pkvalues);
+    if (pkclause) cloudsync_memory_free(pkclause);
+    if (!sql) return SQLITE_NOMEM;
+    
+    rc = database_exec(db, sql);
+    DEBUG_SQL("\n%s", sql);
+    cloudsync_memory_free(sql);
+    return rc;
+}
+
+int database_create_update_trigger_gos (db_t *db, const char *table_name) {
+    // Grow Only Set
+    // In a grow-only set, the update operation is not allowed.
+    // A grow-only set is a type of CRDT (Conflict-free Replicated Data Type) where the only permissible operation is to add elements to the set,
+    // without ever removing or modifying them.
+    // Once an element is added to the set, it remains there permanently, which guarantees that the set only grows over time.
+    
+    char buffer[1024];
+    char *trigger_name = sqlite3_snprintf(sizeof(buffer), buffer, "cloudsync_before_update_%s", table_name);
+    if (database_trigger_exists(db, trigger_name)) return SQLITE_OK;
+    
+    char buffer2[2048+512];
+    char *sql = sqlite3_snprintf(sizeof(buffer2), buffer2, "CREATE TRIGGER \"%w\" BEFORE UPDATE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%q') = 1 BEGIN SELECT RAISE(ABORT, 'Error: UPDATE operation is not allowed on table %w.'); END", trigger_name, table_name, table_name, table_name);
+    
+    int rc = database_exec(db, sql);
+    DEBUG_SQL("\n%s", sql);
+    return rc;
+}
+
+int database_create_update_trigger (db_t *db, const char *table_name, const char *trigger_when) {
+    // NEW.prikey1, NEW.prikey2, OLD.prikey1, OLD.prikey2, NEW.col1, OLD.col1, NEW.col2, OLD.col2...
+    
+    char buffer[1024];
+    char *trigger_name = sqlite3_snprintf(sizeof(buffer), buffer, "cloudsync_after_update_%s", table_name);
+    if (database_trigger_exists(db, trigger_name)) return SQLITE_OK;
+    
+    // generate VALUES clause for all columns using a CTE to avoid compound SELECT limits
+    // first, get all primary key columns in order
+    char buffer2[2048];
+    char *sql2 = sqlite3_snprintf(sizeof(buffer2), buffer2, "SELECT group_concat('('||quote('%q')||', NEW.\"' || format('%%w', name) || '\", OLD.\"' || format('%%w', name) || '\")', ', ') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name, table_name);
+    
+    char *pk_values_list = NULL;
+    int rc = database_select_text(db, sql2, &pk_values_list);
+    if (rc != SQLITE_OK) return rc;
+    
+    // then get all regular columns in order
+    sql2 = sqlite3_snprintf(sizeof(buffer2), buffer2, "SELECT group_concat('('||quote('%q')||', NEW.\"' || format('%%w', name) || '\", OLD.\"' || format('%%w', name) || '\")', ', ') FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid;", table_name, table_name);
+    
+    char *col_values_list = NULL;
+    rc = database_select_text(db, sql2, &col_values_list);
+    if (rc != SQLITE_OK) {
+        if (pk_values_list) cloudsync_memory_free(pk_values_list);
+        return rc;
+    }
+    
+    // build the complete VALUES query
+    char *values_query = NULL;
+    if (col_values_list && strlen(col_values_list) > 0) {
+        // Table has both primary keys and regular columns
+        values_query = sqlite3_mprintf(
+                                                "WITH column_data(table_name, new_value, old_value) AS (VALUES %s, %s) "
+                                                "SELECT table_name, new_value, old_value FROM column_data",
+                                                pk_values_list, col_values_list);
+    } else {
+        // Table has only primary keys
+        values_query = sqlite3_mprintf(
+                                                "WITH column_data(table_name, new_value, old_value) AS (VALUES %s) "
+                                                "SELECT table_name, new_value, old_value FROM column_data",
+                                                pk_values_list);
+    }
+    
+    if (pk_values_list) cloudsync_memory_free(pk_values_list);
+    if (col_values_list) cloudsync_memory_free(col_values_list);
+    if (!values_query) return SQLITE_NOMEM;
+    
+    // create the trigger with aggregate function
+    char *sql = sqlite3_mprintf(
+                                         "CREATE TRIGGER \"%w\" AFTER UPDATE ON \"%w\" %s BEGIN "
+                                         "SELECT cloudsync_update(table_name, new_value, old_value) FROM (%s); "
+                                         "END",
+                                         trigger_name, table_name, trigger_when, values_query);
+    
+    sqlite3_free(values_query);
+    if (!sql) return SQLITE_NOMEM;
+    
+    rc = database_exec(db, sql);
+    DEBUG_SQL("\n%s", sql);
+    sqlite3_free(sql);
+    return rc;
+}
+
+int database_create_delete_trigger_gos (db_t *db, const char *table_name) {
+    // Grow Only Set
+    // In a grow-only set, the delete operation is not allowed.
+    
+    char buffer[1024];
+    char *trigger_name = sqlite3_snprintf(sizeof(buffer), buffer, "cloudsync_before_delete_%s", table_name);
+    if (database_trigger_exists(db, trigger_name)) return SQLITE_OK;
+    
+    char buffer2[2048+512];
+    char *sql = sqlite3_snprintf(sizeof(buffer2), buffer2, "CREATE TRIGGER \"%w\" BEFORE DELETE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%q') = 1 BEGIN SELECT RAISE(ABORT, 'Error: DELETE operation is not allowed on table %w.'); END", trigger_name, table_name, table_name, table_name);
+        
+    int rc = database_exec(db, sql);
+    DEBUG_SQL("\n%s", sql);
+    return rc;
+}
+
+int database_create_delete_trigger (db_t *db, const char *table_name, const char *trigger_when) {
+    // OLD.prikey1, OLD.prikey2...
+    
+    char buffer[1024];
+    char *trigger_name = sqlite3_snprintf(sizeof(buffer), buffer, "cloudsync_after_delete_%s", table_name);
+    if (database_trigger_exists(db, trigger_name)) return SQLITE_OK;
+    
+    char buffer2[1024];
+    char *sql2 = sqlite3_snprintf(sizeof(buffer2), buffer2, "SELECT group_concat('OLD.\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
+        
+    char *pkclause = NULL;
+    int rc = database_select_text(db, sql2, &pkclause);
+    if (rc != SQLITE_OK) return rc;
+    char *pkvalues = (pkclause) ? pkclause : "OLD.rowid";
+    
+    char *sql = sqlite3_mprintf("CREATE TRIGGER \"%w\" AFTER DELETE ON \"%w\" %s BEGIN SELECT cloudsync_delete('%q',%s); END", trigger_name, table_name, trigger_when, table_name, pkvalues);
+    if (pkclause) cloudsync_memory_free(pkclause);
+    if (!sql) return SQLITE_NOMEM;
+        
+    rc = database_exec(db, sql);
+    DEBUG_SQL("\n%s", sql);
+    sqlite3_free(sql);
+    return rc;
+}
+
+int database_create_triggers (db_t *db, const char *table_name, table_algo algo) {
+    DEBUG_DBFUNCTION("dbutils_check_triggers %s", table);
+    
+    if (dbutils_settings_check_version(db, "0.8.25") <= 0) {
+        database_delete_triggers(db, table_name);
+    }
+    
+    // common part
+    char buffer1[1024];
+    char *trigger_when = sqlite3_snprintf(sizeof(buffer1), buffer1, "FOR EACH ROW WHEN cloudsync_is_sync('%q') = 0", table_name);
+    
+    // INSERT TRIGGER
+    int rc = database_create_insert_trigger(db, table_name, trigger_when);
+    if (rc != SQLITE_OK) return rc;
+    
+    // UPDATE TRIGGER
+    if (algo == table_algo_crdt_gos) rc = database_create_update_trigger_gos(db, table_name);
+    else rc = database_create_update_trigger(db, table_name, trigger_when);
+    
+    // DELETE TRIGGER
+    if (algo == table_algo_crdt_gos) rc = database_create_delete_trigger_gos(db, table_name);
+    else rc = database_create_delete_trigger(db, table_name, trigger_when);
+    
+    if (rc != SQLITE_OK) DEBUG_ALWAYS("database_create_triggers error %s (%d)", database_errmsg(db), rc);
+    return rc;
+}
+
+int database_delete_triggers (db_t *db, const char *table) {
+    DEBUG_DBFUNCTION("database_delete_triggers %s", table);
+    
+    // from cloudsync_table_sanity_check we already know that 2048 is OK
+    char buffer[2048];
+    size_t blen = sizeof(buffer);
+    int rc = SQLITE_ERROR;
+    
+    char *sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_before_update_%w\";", table);
+    rc = database_exec(db, sql);
+    if (rc != SQLITE_OK) goto finalize;
+    
+    sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_before_delete_%w\";", table);
+    rc = database_exec(db, sql);
+    if (rc != SQLITE_OK) goto finalize;
+    
+    sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_after_insert_%w\";", table);
+    rc = database_exec(db, sql);
+    if (rc != SQLITE_OK) goto finalize;
+    
+    sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_after_update_%w\";", table);
+    rc = database_exec(db, sql);
+    if (rc != SQLITE_OK) goto finalize;
+    
+    sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_after_delete_%w\";", table);
+    rc = database_exec(db, sql);
+    if (rc != SQLITE_OK) goto finalize;
+    
+finalize:
+    if (rc != SQLITE_OK) DEBUG_ALWAYS("dbutils_delete_triggers error %s (%s)", database_errmsg(db), sql);
+    return rc;
 }
 
 // MARK: - SCHEMA -

@@ -31,18 +31,21 @@ extern char *OUT_OF_MEMORY_BUFFER;
 extern bool force_vtab_filter_abort;
 extern bool force_uncompressed_blob;
 
-// private prototypes
-dbvm_t *dbvm_reset (dbvm_t *stmt);
+void dbvm_reset (dbvm_t *stmt);
 int dbvm_count (dbvm_t *stmt, const char *value, size_t len, int type);
 int dbvm_execute (dbvm_t *stmt, void *data);
 
+char *dbutils_settings_get_value (db_t *db, const char *key, char *buffer, size_t blen);;
 int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values, char **names);
-int dbutils_settings_check_version (sqlite3 *db, const char *version);
-bool dbutils_migrate (sqlite3 *db);
+int dbutils_settings_check_version (db_t *db, const char *version);
+bool dbutils_settings_migrate (db_t *db);
 const char *vtab_opname_from_value (int value);
 int vtab_colname_is_legal (const char *name);
 int dbutils_binary_comparison (int x, int y);
 sqlite3 *do_create_database (void);
+
+int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, bool skip_int_pk_check);
+bool database_system_exists (db_t *db, const char *name, const char *type);
 
 static int stdout_backup = -1; // Backup file descriptor for stdout
 static int dev_null_fd = -1;   // File descriptor for /dev/null
@@ -373,7 +376,7 @@ const char *build_huge_table (void) {
 sqlite3 *close_db (sqlite3 *db) {
     if (db) {
         sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
-        dbutils_debug_stmt(db, true);
+        database_debug(db, true);
         int rc = sqlite3_close(db);
         if (rc != SQLITE_OK) printf("Error while closing db (%d)\n", rc);
     }
@@ -384,7 +387,7 @@ int close_db_v2 (sqlite3 *db) {
     int counter = 0;
     if (db) {
         sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
-        counter = dbutils_debug_stmt(db, true);
+        counter = database_debug(db, true);
         sqlite3_close(db);
     }
     return counter;
@@ -1358,18 +1361,18 @@ bool do_augment_tables (int table_mask, sqlite3 *db, table_algo algo) {
     char sql[512];
     
     if (table_mask & TEST_PRIKEYS) {
-        sqlite3_snprintf(sizeof(sql), sql, "SELECT cloudsync_init('%q', '%s');", CUSTOMERS_TABLE, crdt_algo_name(algo));
+        sqlite3_snprintf(sizeof(sql), sql, "SELECT cloudsync_init('%q', '%s');", CUSTOMERS_TABLE, cloudsync_algo_name(algo));
         int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto abort_augment_tables;
     }
     
     if (table_mask & TEST_NOCOLS) {
-        sqlite3_snprintf(sizeof(sql), sql, "SELECT cloudsync_init('%q', '%s');", CUSTOMERS_NOCOLS_TABLE, crdt_algo_name(algo));
+        sqlite3_snprintf(sizeof(sql), sql, "SELECT cloudsync_init('%q', '%s');", CUSTOMERS_NOCOLS_TABLE, cloudsync_algo_name(algo));
         if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) goto abort_augment_tables;
     }
     
     if (table_mask & TEST_NOPRIKEYS) {
-        sqlite3_snprintf(sizeof(sql), sql, "SELECT cloudsync_init('customers_noprikey', '%s');", crdt_algo_name(algo));
+        sqlite3_snprintf(sizeof(sql), sql, "SELECT cloudsync_init('customers_noprikey', '%s');", cloudsync_algo_name(algo));
         if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) goto abort_augment_tables;
     }
     
@@ -1519,7 +1522,7 @@ finalize:
         exit(-666);
     }
     if (stmt) sqlite3_finalize(stmt);
-    dbutils_debug_stmt(db, true);
+    database_debug(db, true);
     
     return result;
 }
@@ -1576,7 +1579,7 @@ finalize:
         exit(-666);
     }
     if (stmt) sqlite3_finalize(stmt);
-    dbutils_debug_stmt(db, true);
+    database_debug(db, true);
     return result;
 }
 
@@ -1691,7 +1694,7 @@ finalize:
         exit(-666);
     }
     if (stmt) sqlite3_finalize(stmt);
-    dbutils_debug_stmt(db, true);
+    database_debug(db, true);
     return result;
 }
 
@@ -1760,7 +1763,7 @@ int do_test_compare_values (sqlite3 *db, char *sql1, char *sql2, int *result, bo
     
     // print result (force calling the pk_decode_print_callback for code coverage)
     if (print_result == false) suppress_printf_output();
-    dbutils_debug_values(2, values);
+    dbutils_debug_values(2, (dbvalue_t **)values);
     if (print_result == false) resume_printf_output();
     
     *result = dbutils_value_compare(value1, value2);
@@ -1873,12 +1876,12 @@ bool do_test_rowid (int ntest, bool print_result) {
 }
 
 bool do_test_algo_names (void) {
-    if (crdt_algo_name(table_algo_none) != NULL) return false;
-    if (strcmp(crdt_algo_name(table_algo_crdt_cls), "cls") != 0) return false;
-    if (strcmp(crdt_algo_name(table_algo_crdt_gos), "gos") != 0) return false;
-    if (strcmp(crdt_algo_name(table_algo_crdt_dws), "dws") != 0) return false;
-    if (strcmp(crdt_algo_name(table_algo_crdt_aws), "aws") != 0) return false;
-    if (crdt_algo_name(666) != NULL) return false;
+    if (cloudsync_algo_name(table_algo_none) != NULL) return false;
+    if (strcmp(cloudsync_algo_name(table_algo_crdt_cls), "cls") != 0) return false;
+    if (strcmp(cloudsync_algo_name(table_algo_crdt_gos), "gos") != 0) return false;
+    if (strcmp(cloudsync_algo_name(table_algo_crdt_dws), "dws") != 0) return false;
+    if (strcmp(cloudsync_algo_name(table_algo_crdt_aws), "aws") != 0) return false;
+    if (cloudsync_algo_name(666) != NULL) return false;
     
     return true;
 }
@@ -1892,7 +1895,10 @@ bool do_test_dbutils (void) {
     // manually load extension
     sqlite3_cloudsync_init(db, NULL, NULL);
     cloudsync_set_payload_apply_callback(db, unittest_payload_apply_rls_callback);
-
+    
+    void *data = cloudsync_context_create(db);
+    if (!data) return false;
+    
     const char *sql = "CREATE TABLE IF NOT EXISTS foo (name TEXT PRIMARY KEY NOT NULL, age INTEGER, note TEXT, stamp TEXT DEFAULT CURRENT_TIME);"
     "CREATE TABLE IF NOT EXISTS bar (name TEXT PRIMARY KEY NOT NULL, age INTEGER, note TEXT, stamp TEXT DEFAULT CURRENT_TIME);"
     "CREATE TABLE IF NOT EXISTS rowid_table (name TEXT, age INTEGER);"
@@ -1955,33 +1961,33 @@ bool do_test_dbutils (void) {
     //rc = dbutils_register_aggregate(db, NULL, NULL, NULL, 0, NULL, NULL, NULL);
     //if (rc == SQLITE_OK) goto finalize;
     
-    bool b = dbutils_system_exists(db, "non_existing_table", "non_existing_type");
+    bool b = database_system_exists(db, "non_existing_table", "non_existing_type");
     if (b == true) goto finalize;
     
-    // test dbutils_table_sanity_check
-    b = dbutils_table_sanity_check(db, NULL, NULL, false);
+    // test cloudsync_table_sanity_check
+    b = cloudsync_table_sanity_check(data, NULL, false);
     if (b == true) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, "rowid_table", false);
+    b = cloudsync_table_sanity_check(data, "rowid_table", false);
     if (b == true) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, "foo2", false);
+    b = cloudsync_table_sanity_check(data, "foo2", false);
     if (b == true) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, build_long_tablename(), false);
+    b = cloudsync_table_sanity_check(data, build_long_tablename(), false);
     if (b == true) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, "nonnull_prikey_table", false);
+    b = cloudsync_table_sanity_check(data, "nonnull_prikey_table", false);
     if (b == true) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, "nonnull_nodefault_table", false);
+    b = cloudsync_table_sanity_check(data, "nonnull_nodefault_table", false);
     if (b == true) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, "nonnull_default_table", false);
+    b = cloudsync_table_sanity_check(data, "nonnull_default_table", false);
     if (b == false) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, "integer_pk", false);
+    b = cloudsync_table_sanity_check(data, "integer_pk", false);
     if (b == true) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, "integer_pk", true);
+    b = cloudsync_table_sanity_check(data, "integer_pk", true);
     if (b == false) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, "int_pk", false);
+    b = cloudsync_table_sanity_check(data, "int_pk", false);
     if (b == true) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, "int_pk", true);
+    b = cloudsync_table_sanity_check(data, "int_pk", true);
     if (b == false) goto finalize;
-    b = dbutils_table_sanity_check(db, NULL, "quoted table name 🚀", true);
+    b = cloudsync_table_sanity_check(data, "quoted table name 🚀", true);
     if (b == false) goto finalize;
     
     // create huge dummy_table table
@@ -1989,7 +1995,7 @@ bool do_test_dbutils (void) {
     if (rc != SQLITE_OK) goto finalize;
     
     // sanity check the huge dummy_table table
-    b = dbutils_table_sanity_check(db, NULL, "dummy_table", false);
+    b = cloudsync_table_sanity_check(data, "dummy_table", false);
     if (b == true) goto finalize;
     
     // de-augment bar with cloudsync
@@ -2061,7 +2067,7 @@ bool do_test_dbutils (void) {
     if (cmp <= 0) goto finalize;
     
     //dbutils_settings_table_load_callback(NULL, 0, NULL, NULL);
-    dbutils_migrate(NULL);
+    dbutils_settings_migrate(NULL);
     
     dbutils_settings_cleanup(db);
     
@@ -2086,7 +2092,7 @@ bool do_test_others (sqlite3 *db) {
     // test unfinalized statement just to increase code coverage
     sqlite3_stmt *stmt = NULL;
     sqlite3_prepare_v2(db, "SELECT 1;", -1, &stmt, NULL);
-    int count = dbutils_debug_stmt(db, false);
+    int count = database_debug(db, false);
     sqlite3_finalize(stmt);
     // to increase code coverage
     // dbutils_set_error(NULL, "Test is: %s", "Hello World");
@@ -6185,7 +6191,7 @@ int test_report(const char *description, bool result){
     return result ? 0 : 1;
 }
 
-int main(int argc, const char * argv[]) {
+int main (int argc, const char * argv[]) {
     sqlite3 *db = NULL;
     int result = 0;
     bool print_result = false;

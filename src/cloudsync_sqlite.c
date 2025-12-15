@@ -137,7 +137,8 @@ void dbsync_set (sqlite3_context *context, int argc, sqlite3_value **argv) {
     if (key == NULL) return;
     
     sqlite3 *db = sqlite3_context_db_handle(context);
-    dbutils_settings_set_key_value(db, context, key, value);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    dbutils_settings_set_key_value(db, data, key, value);
 }
 
 void dbsync_set_column (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -147,7 +148,10 @@ void dbsync_set_column (sqlite3_context *context, int argc, sqlite3_value **argv
     const char *col = (const char *)database_value_text(argv[1]);
     const char *key = (const char *)database_value_text(argv[2]);
     const char *value = (const char *)database_value_text(argv[3]);
-    dbutils_table_settings_set_key_value(NULL, context, tbl, col, key, value);
+    
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    dbutils_table_settings_set_key_value(db, data, tbl, col, key, value);
 }
 
 void dbsync_set_table (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -156,7 +160,10 @@ void dbsync_set_table (sqlite3_context *context, int argc, sqlite3_value **argv)
     const char *tbl = (const char *)database_value_text(argv[0]);
     const char *key = (const char *)database_value_text(argv[1]);
     const char *value = (const char *)database_value_text(argv[2]);
-    dbutils_table_settings_set_key_value(NULL, context, tbl, "*", key, value);
+    
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    dbutils_table_settings_set_key_value(db, data, tbl, "*", key, value);
 }
 
 void dbsync_is_sync (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -874,7 +881,7 @@ int dbsync_register (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_contex
     int rc = sqlite3_create_function_v2(db, name, nargs, DEFAULT_FLAGS, ctx, xfunc, xstep, xfinal, ctx_free);
     
     if (rc != SQLITE_OK) {
-        if (pzErrMsg) *pzErrMsg = cloudsync_memory_mprintf("Error creating function %s: %s", name, database_errmsg(db));
+        if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("Error creating function %s: %s", name, database_errmsg(db));
         return rc;
     }
     return SQLITE_OK;
