@@ -1896,6 +1896,7 @@ bool do_test_dbutils (void) {
     sqlite3_cloudsync_init(db, NULL, NULL);
     cloudsync_set_payload_apply_callback(db, unittest_payload_apply_rls_callback);
     
+    // test context create and free
     void *data = cloudsync_context_create(db);
     if (!data) return false;
     
@@ -2085,6 +2086,7 @@ bool do_test_dbutils (void) {
 finalize:
     if (rc != SQLITE_OK) printf("%s\n", sqlite3_errmsg(db));
     db = close_db(db);
+    if (data) cloudsync_context_free(data);
     return (rc == SQLITE_OK);
 }
 
@@ -6284,15 +6286,15 @@ int main (int argc, const char * argv[]) {
     result += test_report("Test Alter Table 3:", do_test_alter(3, 3, print_result, cleanup_databases));
     
 finalize:
-    printf("\n");
     if (rc != SQLITE_OK) printf("%s (%d)\n", (db) ? sqlite3_errmsg(db) : "N/A", rc);
     db = close_db(db);
     
     cloudsync_memory_finalize();
 
     sqlite3_int64 memory_used = sqlite3_memory_used();
+    result += test_report("Memory leak check:", memory_used == 0);
     if (memory_used > 0) {
-        printf("Memory leaked: %lld B\n", memory_used);
+        printf("\tleaked: %lld B\n", memory_used);
         result++;
     }
     
