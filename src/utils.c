@@ -600,7 +600,7 @@ void *memdebug_zeroalloc (db_uint64 size) {
     if (!ptr) return NULL;
     
     memset(ptr, 0, (size_t)size);
-    return NULL;
+    return ptr;
 }
 
 void *memdebug_realloc (void *ptr, db_uint64 new_size) {
