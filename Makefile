@@ -204,6 +204,11 @@ ifneq ($(COVERAGE),false)
 	genhtml $(COV_DIR)/coverage.info --output-directory $(COV_DIR)
 endif
 
+# Run only unit tests
+unittest: $(TARGET) $(DIST_DIR)/unit$(EXE)
+	$(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$(TARGET)" "SELECT cloudsync_version();"
+	./$(DIST_DIR)/unit$(EXE)
+
 $(OPENSSL):
 	git clone https://github.com/openssl/openssl.git $(CURL_DIR)/src/openssl
 
@@ -404,8 +409,9 @@ help:
 	@echo "  all	   				- Build the extension (default)"
 	@echo "  clean	 				- Remove built files"
 	@echo "  test [COVERAGE=true]	- Test the extension with optional coverage output"
+	@echo "  unittest				- Run only unit tests (test/unit.c)"
 	@echo "  help	  				- Display this help message"
 	@echo "  xcframework			- Build the Apple XCFramework"
 	@echo "  aar					- Build the Android AAR package"
 
-.PHONY: all clean test extension help version xcframework aar
+.PHONY: all clean test unittest extension help version xcframework aar
