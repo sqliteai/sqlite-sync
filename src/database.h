@@ -8,6 +8,8 @@
 #ifndef __CLOUDSYNC_DATABASE__
 #define __CLOUDSYNC_DATABASE__
 
+#include <stdarg.h>
+#include <stdint.h>
 #include <stdbool.h>
 
 typedef long long int db_int64;
@@ -135,6 +137,7 @@ void *dbmem_alloc (db_uint64 size);
 void *dbmem_zeroalloc (db_uint64 size);
 void *dbmem_realloc (void *ptr, db_uint64 new_size);
 char *dbmem_mprintf(const char *format, ...);
+char *dbmem_vmprintf (const char *format, va_list list);
 void dbmem_free (void *ptr);
 db_uint64 dbmem_size (void *ptr);
 

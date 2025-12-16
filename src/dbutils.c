@@ -387,7 +387,7 @@ int dbutils_settings_load (db_t *db, cloudsync_context *data) {
 }
 
 int dbutils_settings_init (db_t *db, void *cloudsync_data) {
-    DEBUG_SETTINGS("dbutils_settings_init %p", context);
+    DEBUG_SETTINGS("dbutils_settings_init %p", cloudsync_data);
     
     cloudsync_context *data = (cloudsync_context *)cloudsync_data;
     

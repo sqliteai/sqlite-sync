@@ -98,6 +98,7 @@
 void memdebug_init (int once);
 void memdebug_finalize (void);
 void *memdebug_alloc (db_uint64 size);
+void *memdebug_zeroalloc (db_uint64 size);
 void *memdebug_realloc (void *ptr, db_uint64 new_size);
 char *memdebug_vmprintf (const char *format, va_list list);
 char *memdebug_mprintf(const char *format, ...);
