@@ -317,7 +317,7 @@ int database_create_insert_trigger (db_t *db, const char *table_name, char *trig
     if (rc != SQLITE_OK) return rc;
     char *pkvalues = (pkclause) ? pkclause : "NEW.rowid";
     
-    char *sql = sqlite3_mprintf("CREATE TRIGGER \"%w\" AFTER INSERT ON \"%w\" %s BEGIN SELECT cloudsync_insert('%q', %s); END", trigger_name, table_name, trigger_when, table_name, pkvalues);
+    char *sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%w\" AFTER INSERT ON \"%w\" %s BEGIN SELECT cloudsync_insert('%q', %s); END", trigger_name, table_name, trigger_when, table_name, pkvalues);
     if (pkclause) cloudsync_memory_free(pkclause);
     if (!sql) return SQLITE_NOMEM;
     
@@ -376,13 +376,13 @@ int database_create_update_trigger (db_t *db, const char *table_name, const char
     char *values_query = NULL;
     if (col_values_list && strlen(col_values_list) > 0) {
         // Table has both primary keys and regular columns
-        values_query = sqlite3_mprintf(
+        values_query = cloudsync_memory_mprintf(
                                                 "WITH column_data(table_name, new_value, old_value) AS (VALUES %s, %s) "
                                                 "SELECT table_name, new_value, old_value FROM column_data",
                                                 pk_values_list, col_values_list);
     } else {
         // Table has only primary keys
-        values_query = sqlite3_mprintf(
+        values_query = cloudsync_memory_mprintf(
                                                 "WITH column_data(table_name, new_value, old_value) AS (VALUES %s) "
                                                 "SELECT table_name, new_value, old_value FROM column_data",
                                                 pk_values_list);
@@ -393,18 +393,18 @@ int database_create_update_trigger (db_t *db, const char *table_name, const char
     if (!values_query) return SQLITE_NOMEM;
     
     // create the trigger with aggregate function
-    char *sql = sqlite3_mprintf(
+    char *sql = cloudsync_memory_mprintf(
                                          "CREATE TRIGGER \"%w\" AFTER UPDATE ON \"%w\" %s BEGIN "
                                          "SELECT cloudsync_update(table_name, new_value, old_value) FROM (%s); "
                                          "END",
                                          trigger_name, table_name, trigger_when, values_query);
     
-    sqlite3_free(values_query);
+    cloudsync_memory_free(values_query);
     if (!sql) return SQLITE_NOMEM;
     
     rc = database_exec(db, sql);
     DEBUG_SQL("\n%s", sql);
-    sqlite3_free(sql);
+    cloudsync_memory_free(sql);
     return rc;
 }
 
@@ -439,13 +439,13 @@ int database_create_delete_trigger (db_t *db, const char *table_name, const char
     if (rc != SQLITE_OK) return rc;
     char *pkvalues = (pkclause) ? pkclause : "OLD.rowid";
     
-    char *sql = sqlite3_mprintf("CREATE TRIGGER \"%w\" AFTER DELETE ON \"%w\" %s BEGIN SELECT cloudsync_delete('%q',%s); END", trigger_name, table_name, trigger_when, table_name, pkvalues);
+    char *sql = cloudsync_memory_mprintf("CREATE TRIGGER \"%w\" AFTER DELETE ON \"%w\" %s BEGIN SELECT cloudsync_delete('%q',%s); END", trigger_name, table_name, trigger_when, table_name, pkvalues);
     if (pkclause) cloudsync_memory_free(pkclause);
     if (!sql) return SQLITE_NOMEM;
         
     rc = database_exec(db, sql);
     DEBUG_SQL("\n%s", sql);
-    sqlite3_free(sql);
+    cloudsync_memory_free(sql);
     return rc;
 }
 
