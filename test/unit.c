@@ -1888,6 +1888,7 @@ bool do_test_algo_names (void) {
 
 bool do_test_dbutils (void) {
     // test in an in-memory database
+    void *data = NULL;
     sqlite3 *db = NULL;
     int rc = sqlite3_open(":memory:", &db);
     if (rc != SQLITE_OK) goto finalize;
@@ -1897,7 +1898,7 @@ bool do_test_dbutils (void) {
     cloudsync_set_payload_apply_callback(db, unittest_payload_apply_rls_callback);
     
     // test context create and free
-    void *data = cloudsync_context_create(db);
+    data = cloudsync_context_create(db);
     if (!data) return false;
     
     const char *sql = "CREATE TABLE IF NOT EXISTS foo (name TEXT PRIMARY KEY NOT NULL, age INTEGER, note TEXT, stamp TEXT DEFAULT CURRENT_TIME);"
