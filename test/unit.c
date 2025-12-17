@@ -2459,9 +2459,9 @@ sqlite3 *do_create_database (void) {
 
 void do_build_database_path (char buf[256], int i, time_t timestamp, int ntest) {
     #ifdef __ANDROID__
-    sprintf(buf, "%s/cloudsync-test-%ld-%d-%d.sqlite", ".", timestamp, ntest, i);
+    snprintf(buf, 256, "%s/cloudsync-test-%ld-%d-%d.sqlite", ".", timestamp, ntest, i);
     #else
-    sprintf(buf, "%s/cloudsync-test-%ld-%d-%d.sqlite", getenv("HOME"), timestamp, ntest, i);
+    snprintf(buf, 256, "%s/cloudsync-test-%ld-%d-%d.sqlite", getenv("HOME"), timestamp, ntest, i);
     #endif
 }
 
@@ -2958,8 +2958,7 @@ bool do_test_merge_check_db_version (int nclients, bool print_result, bool clean
     
     if (print_result) {
         printf("\n-> customers\n");
-        char *sql = "SELECT * FROM cloudsync_changes;";
-        do_query(db[1], sql, query_changes);
+        do_query(db[1], "SELECT * FROM cloudsync_changes;", query_changes);
     }
     
     result = true;
@@ -3064,8 +3063,7 @@ bool do_test_merge_check_db_version_2 (int nclients, bool print_result, bool cle
     
     if (print_result) {
         printf("\n-> customers\n");
-        char *sql = "SELECT * FROM cloudsync_changes();";
-        do_query(db[1], sql, query_changes);
+        do_query(db[1], "SELECT * FROM cloudsync_changes();", query_changes);
     }
     
     result = true;
@@ -4411,7 +4409,7 @@ bool do_test_merge_partial_failure (int nclients, bool print_result, bool cleanu
     if (rc != SQLITE_OK) goto finalize;
     
     // attempt merge - should handle any constraint violations gracefully
-    bool merge_result = do_merge(db, nclients, false);
+    do_merge(db, nclients, false);
     
     // verify that databases are still in consistent state even if merge had issues
     for (int i=0; i<nclients; ++i) {
