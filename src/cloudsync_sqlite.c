@@ -844,7 +844,7 @@ void dbsync_payload_load (sqlite3_context *context, int argc, sqlite3_value **ar
     // retrieve full path to file
     const char *path = (const char *)database_value_text(argv[0]);
     
-    sqlite3_int64 payload_size = 0;
+    int64_t payload_size = 0;
     char *payload = cloudsync_file_read(path, &payload_size);
     if (!payload) {
         if (payload_size < 0) {
