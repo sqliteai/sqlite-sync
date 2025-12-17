@@ -130,7 +130,7 @@ int cloudsync_uuid_v7_compare (uint8_t value1[UUID_LEN], uint8_t value2[UUID_LEN
 char *cloudsync_string_ndup (const char *str, size_t len, bool lowercase) {
     if (str == NULL) return NULL;
     
-    char *s = (char *)cloudsync_memory_alloc((db_uint64)(len + 1));
+    char *s = (char *)cloudsync_memory_alloc((uint64_t)(len + 1));
     if (!s) return NULL;
     
     if (lowercase) {
@@ -160,21 +160,21 @@ int cloudsync_blob_compare(const char *blob1, size_t size1, const char *blob2, s
     return memcmp(blob1, blob2, size1); // use memcmp for byte-by-byte comparison
 }
 
-void cloudsync_rowid_decode (db_int64 rowid, db_int64 *db_version, db_int64 *seq) {
+void cloudsync_rowid_decode (int64_t rowid, int64_t *db_version, int64_t *seq) {
     // use unsigned 64-bit integer for intermediate calculations
     // when db_version is large enough, it can cause overflow, leading to negative values
     // to handle this correctly, we need to ensure the calculations are done in an unsigned 64-bit integer context
-    // before converting back to db_int64 as needed
+    // before converting back to int64_t as needed
     uint64_t urowid = (uint64_t)rowid;
     
     // define the bit mask for seq (30 bits)
     const uint64_t SEQ_MASK = 0x3FFFFFFF; // (2^30 - 1)
 
     // extract seq by masking the lower 30 bits
-    *seq = (db_int64)(urowid & SEQ_MASK);
+    *seq = (int64_t)(urowid & SEQ_MASK);
 
     // extract db_version by shifting 30 bits to the right
-    *db_version = (db_int64)(urowid >> 30);
+    *db_version = (int64_t)(urowid >> 30);
 }
 
 char *cloudsync_string_replace_prefix(const char *input, char *prefix, char *replacement) {
@@ -310,7 +310,7 @@ static bool cloudsync_file_read_all (int fd, char *buf, size_t n) {
     return true;
 }
 
-char *cloudsync_file_read (const char *path, db_int64 *len) {
+char *cloudsync_file_read (const char *path, int64_t *len) {
     int fd = -1;
     char *buffer = NULL;
 
@@ -583,7 +583,7 @@ void memdebug_finalize (void) {
     }
 }
 
-void *memdebug_alloc (db_uint64 size) {
+void *memdebug_alloc (uint64_t size) {
     void *ptr = dbmem_alloc(size);
     if (!ptr) {
         BUILD_ERROR("Unable to allocated a block of %lld bytes", size);
@@ -595,7 +595,7 @@ void *memdebug_alloc (db_uint64 size) {
     return ptr;
 }
 
-void *memdebug_zeroalloc (db_uint64 size) {
+void *memdebug_zeroalloc (uint64_t size) {
     void *ptr = memdebug_alloc(size);
     if (!ptr) return NULL;
     
@@ -603,7 +603,7 @@ void *memdebug_zeroalloc (db_uint64 size) {
     return ptr;
 }
 
-void *memdebug_realloc (void *ptr, db_uint64 new_size) {
+void *memdebug_realloc (void *ptr, uint64_t new_size) {
     if (!ptr) return memdebug_alloc(new_size);
     
     mem_slot *slot = _ptr_lookup(ptr);
@@ -651,7 +651,7 @@ char *memdebug_mprintf(const char *format, ...) {
     return z;
 }
 
-db_uint64 memdebug_msize (void *ptr) {
+uint64_t memdebug_msize (void *ptr) {
     return dbmem_size(ptr);
 }
 

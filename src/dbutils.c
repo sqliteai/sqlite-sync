@@ -35,8 +35,8 @@ int dbutils_value_compare (dbvalue_t *lvalue, dbvalue_t *rvalue) {
     // at this point lvalue and rvalue are of the same type
     switch (l_type) {
         case DBTYPE_INTEGER: {
-            db_int64 l_int = database_value_int(lvalue);
-            db_int64 r_int = database_value_int(rvalue);
+            int64_t l_int = database_value_int(lvalue);
+            int64_t r_int = database_value_int(rvalue);
             return (l_int < r_int) ? -1 : (l_int > r_int);
         } break;
             
@@ -131,7 +131,7 @@ char *dbutils_settings_get_value (db_t *db, const char *key, char *buffer, size_
     size = (size_t)database_column_bytes(vm, 0);
     #endif
     if (size + 1 > blen) {
-        buffer = cloudsync_memory_alloc((db_uint64)(size + 1));
+        buffer = cloudsync_memory_alloc((uint64_t)(size + 1));
         if (!buffer) {
             rc = DBRES_NOMEM;
             goto finalize_get_value;
@@ -243,7 +243,7 @@ char *dbutils_table_settings_get_value (db_t *db, const char *table, const char 
     size = (size_t)database_column_bytes(vm, 0);
     #endif
     if (size + 1 > blen) {
-        buffer = cloudsync_memory_alloc((db_uint64)(size + 1));
+        buffer = cloudsync_memory_alloc((uint64_t)(size + 1));
         if (!buffer) {
             rc = DBRES_NOMEM;
             goto finalize_get_value;
@@ -310,9 +310,9 @@ int dbutils_table_settings_set_key_value (db_t *db, cloudsync_context *data, con
     return rc;
 }
 
-db_int64 dbutils_table_settings_count_tables (db_t *db) {
+int64_t dbutils_table_settings_count_tables (db_t *db) {
     DEBUG_SETTINGS("dbutils_table_settings_count_tables");
-    db_int64 count = 0;
+    int64_t count = 0;
     int rc = database_select_int(db, SQL_TABLE_SETTINGS_COUNT_TABLES, &count);
     return (rc == DBRES_OK) ? count : 0;
 }

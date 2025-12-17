@@ -46,7 +46,7 @@ char *sql_escape_name (const char *name, char *buffer, size_t bsize) {
 
 // MARK: - PRIVATE -
 
-int database_select1_value (db_t *db, const char *sql, char **ptr_value, db_int64 *int_value, DBTYPE expected_type) {
+int database_select1_value (db_t *db, const char *sql, char **ptr_value, int64_t *int_value, DBTYPE expected_type) {
     // init values and sanity check expected_type
     if (ptr_value) *ptr_value = NULL;
     *int_value = 0;
@@ -69,7 +69,7 @@ int database_select1_value (db_t *db, const char *sql, char **ptr_value, db_int6
     if (type != expected_type) {rc = SQLITE_MISMATCH; goto cleanup_select;}
     
     if (expected_type == DBTYPE_INTEGER) {
-        *int_value = (db_int64)sqlite3_column_int64(vm, 0);
+        *int_value = (int64_t)sqlite3_column_int64(vm, 0);
     } else {
         const void *value = (expected_type == DBTYPE_TEXT) ? (const void *)sqlite3_column_text(vm, 0) : (const void *)sqlite3_column_blob(vm, 0);
         int len = sqlite3_column_bytes(vm, 0);
@@ -91,7 +91,7 @@ cleanup_select:
     return rc;
 }
 
-int database_select3_values (db_t *db, const char *sql, char **value, db_int64 *len, db_int64 *value2, db_int64 *value3) {
+int database_select3_values (db_t *db, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
     // init values and sanity check expected_type
     *value = NULL;
     *value2 = 0;
@@ -127,8 +127,8 @@ int database_select3_values (db_t *db, const char *sql, char **value, db_int64 *
     }
     
     // 2nd and 3rd columns are INTEGERS
-    *value2 = (db_int64)sqlite3_column_int64(vm, 1);
-    *value3 = (db_int64)sqlite3_column_int64(vm, 2);
+    *value2 = (int64_t)sqlite3_column_int64(vm, 1);
+    *value3 = (int64_t)sqlite3_column_int64(vm, 2);
     
     rc = SQLITE_OK;
     
@@ -208,20 +208,20 @@ cleanup_write:
     return rc;
 }
 
-int database_select_int (db_t *db, const char *sql, db_int64 *value) {
+int database_select_int (db_t *db, const char *sql, int64_t *value) {
     return database_select1_value(db, sql, NULL, value, DBTYPE_INTEGER);
 }
 
 int database_select_text (db_t *db, const char *sql, char **value) {
-    db_int64 len = 0;
+    int64_t len = 0;
     return database_select1_value(db, sql, value, &len, DBTYPE_TEXT);
 }
 
-int database_select_blob (db_t *db, const char *sql, char **value, db_int64 *len) {
+int database_select_blob (db_t *db, const char *sql, char **value, int64_t *len) {
     return database_select1_value(db, sql, value, len, DBTYPE_BLOB);
 }
 
-int database_select_blob_2int (db_t *db, const char *sql, char **value, db_int64 *len, db_int64 *value2, db_int64 *value3) {
+int database_select_blob_2int (db_t *db, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
     return database_select3_values(db, sql, value, len, value2, value3);
 }
 
@@ -256,7 +256,7 @@ int database_count_pk (db_t *db, const char *table_name, bool not_null) {
         sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk>0;", table_name);
     }
     
-    db_int64 count = 0;
+    int64_t count = 0;
     int rc = database_select_int(db, sql, &count);
     if (rc != DBRES_OK) return -1;
     return (int)count;
@@ -267,7 +267,7 @@ int database_count_nonpk (db_t *db, const char *table_name) {
     char *sql = NULL;
     
     sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk=0;", table_name);
-    db_int64 count = 0;
+    int64_t count = 0;
     int rc = database_select_int(db, sql, &count);
     if (rc != DBRES_OK) return -1;
     return (int)count;
@@ -277,7 +277,7 @@ int database_count_int_pk (db_t *db, const char *table_name) {
     char buffer[1024];
     char *sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk=1 AND \"type\" LIKE '%%INT%%';", table_name);
     
-    db_int64 count = 0;
+    int64_t count = 0;
     int rc = database_select_int(db, sql, &count);
     if (rc != DBRES_OK) return -1;
     return (int)count;
@@ -287,7 +287,7 @@ int database_count_notnull_without_default (db_t *db, const char *table_name) {
     char buffer[1024];
     char *sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk=0 AND \"notnull\"=1 AND \"dflt_value\" IS NULL;", table_name);
     
-    db_int64 count = 0;
+    int64_t count = 0;
     int rc = database_select_int(db, sql, &count);
     if (rc != DBRES_OK) return -1;
     return (int)count;
@@ -527,14 +527,14 @@ finalize:
 
 // MARK: - SCHEMA -
 
-db_int64 database_schema_version (db_t *db) {
-    db_int64 value = 0;
+int64_t database_schema_version (db_t *db) {
+    int64_t value = 0;
     int rc = database_select_int(db, SQL_SCHEMA_VERSION, &value);
     return (rc == DBRES_OK) ? value : 0;
 }
 
 uint64_t database_schema_hash (db_t *db) {
-    db_int64 value = 0;
+    int64_t value = 0;
     int rc = database_select_int(db, "SELECT hash FROM cloudsync_schema_versions ORDER BY seq DESC limit 1;", &value);
     return (rc == DBRES_OK) ? (uint64_t)value : 0;
 }
@@ -549,7 +549,7 @@ bool database_check_schema_hash (db_t *db, uint64_t hash) {
     char sql[1024];
     snprintf(sql, sizeof(sql), "SELECT 1 FROM cloudsync_schema_versions WHERE hash = (%lld)", hash);
     
-    db_int64 value = 0;
+    int64_t value = 0;
     database_select_int(db, sql, &value);
     return (value == 1);
 }
@@ -679,7 +679,7 @@ cleanup:
 
 // MARK: - BINDING -
 
-int databasevm_bind_blob (dbvm_t *vm, int index, const void *value, db_uint64 size) {
+int databasevm_bind_blob (dbvm_t *vm, int index, const void *value, uint64_t size) {
     return sqlite3_bind_blob64((sqlite3_stmt *)vm, index, value, size, SQLITE_STATIC);
 }
 
@@ -687,7 +687,7 @@ int databasevm_bind_double (dbvm_t *vm, int index, double value) {
     return sqlite3_bind_double((sqlite3_stmt *)vm, index, value);
 }
 
-int databasevm_bind_int (dbvm_t *vm, int index, db_int64 value) {
+int databasevm_bind_int (dbvm_t *vm, int index, int64_t value) {
     return sqlite3_bind_int64((sqlite3_stmt *)vm, index, value);
 }
 
@@ -713,8 +713,8 @@ double database_value_double (dbvalue_t *value) {
     return sqlite3_value_double((sqlite3_value *)value);
 }
 
-db_int64 database_value_int (dbvalue_t *value) {
-    return (db_int64)sqlite3_value_int64((sqlite3_value *)value);
+int64_t database_value_int (dbvalue_t *value) {
+    return (int64_t)sqlite3_value_int64((sqlite3_value *)value);
 }
 
 const char *database_value_text (dbvalue_t *value) {
@@ -748,8 +748,8 @@ double database_column_double (dbvm_t *vm, int index) {
     return sqlite3_column_double((sqlite3_stmt *)vm, index);
 }
 
-db_int64 database_column_int (dbvm_t *vm, int index) {
-    return (db_int64)sqlite3_column_int64((sqlite3_stmt *)vm, index);
+int64_t database_column_int (dbvm_t *vm, int index) {
+    return (int64_t)sqlite3_column_int64((sqlite3_stmt *)vm, index);
 }
 
 const char *database_column_text (dbvm_t *vm, int index) {
@@ -790,7 +790,7 @@ int database_rollback_savepoint (db_t *db, const char *savepoint_name) {
 
 // MARK: - MEMORY -
 
-void *dbmem_alloc (db_uint64 size) {
+void *dbmem_alloc (uint64_t size) {
     return sqlite3_malloc64((sqlite3_uint64)size);
 }
 
@@ -802,7 +802,7 @@ void *dbmem_zeroalloc (uint64_t size) {
     return ptr;
 }
 
-void *dbmem_realloc (void *ptr, db_uint64 new_size) {
+void *dbmem_realloc (void *ptr, uint64_t new_size) {
     return sqlite3_realloc64(ptr, (sqlite3_uint64)new_size);
 }
 
@@ -825,8 +825,8 @@ void dbmem_free (void *ptr) {
     sqlite3_free(ptr);
 }
 
-db_uint64 dbmem_size (void *ptr) {
-    return (db_uint64)sqlite3_msize(ptr);
+uint64_t dbmem_size (void *ptr) {
+    return (uint64_t)sqlite3_msize(ptr);
 }
 
 // MARK: - Used to implement Server Side RLS -

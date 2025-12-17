@@ -13,8 +13,6 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-typedef long long int db_int64;
-typedef unsigned long long int db_uint64;
 typedef void db_t;
 typedef void dbvm_t;
 typedef void dbvalue_t;
@@ -62,10 +60,10 @@ typedef int (*database_exec_cb) (void *xdata, int argc, char **values, char **na
 
 int  database_exec (db_t *db, const char *sql);
 int  database_exec_callback (db_t *db, const char *sql, database_exec_cb, void *xdata);
-int  database_select_int (db_t *db, const char *sql, db_int64 *value);
+int  database_select_int (db_t *db, const char *sql, int64_t *value);
 int  database_select_text (db_t *db, const char *sql, char **value);
-int  database_select_blob (db_t *db, const char *sql, char **value, db_int64 *value_len);
-int  database_select_blob_2int (db_t *db, const char *sql, char **value, db_int64 *value_len, db_int64 *value2, db_int64 *value3);
+int  database_select_blob (db_t *db, const char *sql, char **value, int64_t *value_len);
+int  database_select_blob_2int (db_t *db, const char *sql, char **value, int64_t *value_len, int64_t *value2, int64_t *value3);
 int  database_write (db_t *db, const char *sql, const char **values, DBTYPE types[], int lens[], int count);
 bool database_table_exists (db_t *db, const char *table_name);
 bool database_trigger_exists (db_t *db, const char *table_name);
@@ -80,7 +78,7 @@ int database_count_nonpk (db_t *db, const char *table_name);
 int database_count_int_pk (db_t *db, const char *table_name);
 int database_count_notnull_without_default (db_t *db, const char *table_name);
 
-db_int64 database_schema_version (db_t *db);
+int64_t database_schema_version (db_t *db);
 uint64_t database_schema_hash (db_t *db);
 bool     database_check_schema_hash (db_t *db, uint64_t hash);
 int      database_update_schema_hash (db_t *db, uint64_t *hash);
@@ -101,9 +99,9 @@ void databasevm_clear_bindings (dbvm_t *vm);
 const char *databasevm_sql (dbvm_t *vm);
 
 // BINDING
-int databasevm_bind_blob (dbvm_t *vm, int index, const void *value, db_uint64 size);
+int databasevm_bind_blob (dbvm_t *vm, int index, const void *value, uint64_t size);
 int databasevm_bind_double (dbvm_t *vm, int index, double value);
-int databasevm_bind_int (dbvm_t *vm, int index, db_int64 value);
+int databasevm_bind_int (dbvm_t *vm, int index, int64_t value);
 int databasevm_bind_null (dbvm_t *vm, int index);
 int databasevm_bind_text (dbvm_t *vm, int index, const char *value, int size);
 int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value);
@@ -111,7 +109,7 @@ int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value);
 // VALUE
 const void *database_value_blob (dbvalue_t *value);
 double database_value_double (dbvalue_t *value);
-db_int64 database_value_int (dbvalue_t *value);
+int64_t database_value_int (dbvalue_t *value);
 const char *database_value_text (dbvalue_t *value);
 int database_value_bytes (dbvalue_t *value);
 int database_value_type (dbvalue_t *value);
@@ -121,28 +119,28 @@ void *database_value_dup (dbvalue_t *value);
 // COLUMN
 const void *database_column_blob (dbvm_t *vm, int index);
 double database_column_double (dbvm_t *vm, int index);
-db_int64 database_column_int (dbvm_t *vm, int index);
+int64_t database_column_int (dbvm_t *vm, int index);
 const char *database_column_text (dbvm_t *vm, int index);
 dbvalue_t *database_column_value (dbvm_t *vm, int index);
 int database_column_bytes (dbvm_t *vm, int index);
 int database_column_type (dbvm_t *vm, int index);
 
 // RESULT
-void database_result_blob (dbcontext_t *context, const void *value, db_uint64 size, void(*)(void*));
+void database_result_blob (dbcontext_t *context, const void *value, uint64_t size, void(*)(void*));
 void database_result_double (dbcontext_t *context, double value);
-void database_result_int (dbcontext_t *context, db_int64 value);
+void database_result_int (dbcontext_t *context, int64_t value);
 void database_result_null (dbcontext_t *context);
 void database_result_text (dbcontext_t *context, const char *value, int size, void(*)(void*));
 void database_result_value (dbcontext_t *context, dbvalue_t *value);
 
 // MEMORY
-void *dbmem_alloc (db_uint64 size);
-void *dbmem_zeroalloc (db_uint64 size);
-void *dbmem_realloc (void *ptr, db_uint64 new_size);
+void *dbmem_alloc (uint64_t size);
+void *dbmem_zeroalloc (uint64_t size);
+void *dbmem_realloc (void *ptr, uint64_t new_size);
 char *dbmem_mprintf(const char *format, ...);
 char *dbmem_vmprintf (const char *format, va_list list);
 void dbmem_free (void *ptr);
-db_uint64 dbmem_size (void *ptr);
+uint64_t dbmem_size (void *ptr);
 
 // SQL
 char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta);

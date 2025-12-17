@@ -684,7 +684,7 @@ void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, s
     
     // TODO: why hex(site_id) here if only one int column is returned?
     char *sql = "SELECT max(db_version), hex(site_id) FROM cloudsync_changes WHERE site_id == (SELECT site_id FROM cloudsync_site_id WHERE rowid=0)";
-    db_int64 last_local_change = 0;
+    int64_t last_local_change = 0;
     int rc = database_select_int(db, sql, &last_local_change);
     if (rc != DBRES_OK) {
         sqlite3_result_error(context, sqlite3_errmsg(db), -1);

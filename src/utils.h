@@ -97,13 +97,13 @@
 
 void memdebug_init (int once);
 void memdebug_finalize (void);
-void *memdebug_alloc (db_uint64 size);
-void *memdebug_zeroalloc (db_uint64 size);
-void *memdebug_realloc (void *ptr, db_uint64 new_size);
+void *memdebug_alloc (uint64_t size);
+void *memdebug_zeroalloc (uint64_t size);
+void *memdebug_realloc (void *ptr, uint64_t new_size);
 char *memdebug_vmprintf (const char *format, va_list list);
 char *memdebug_mprintf(const char *format, ...);
 void memdebug_free (void *ptr);
-db_uint64 memdebug_msize (void *ptr);
+uint64_t memdebug_msize (void *ptr);
 #else
 #define cloudsync_memory_init(_once)
 #define cloudsync_memory_finalize()
@@ -129,12 +129,12 @@ char *cloudsync_string_ndup (const char *str, size_t len, bool lowercase);
 char *cloudsync_string_dup (const char *str, bool lowercase);
 int cloudsync_blob_compare(const char *blob1, size_t size1, const char *blob2, size_t size2);
 
-void cloudsync_rowid_decode (db_int64 rowid, db_int64 *db_version, db_int64 *seq);
+void cloudsync_rowid_decode (int64_t rowid, int64_t *db_version, int64_t *seq);
 
 // available only on Desktop OS (no WASM, no mobile)
 #ifdef CLOUDSYNC_DESKTOP_OS
 bool cloudsync_file_delete (const char *path);
-char *cloudsync_file_read (const char *path, db_int64 *len);
+char *cloudsync_file_read (const char *path, int64_t *len);
 bool cloudsync_file_write (const char *path, const char *buffer, size_t len);
 #endif
 

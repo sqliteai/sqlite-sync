@@ -25,16 +25,16 @@ typedef enum {
 
 
 // used by vtab.c
-int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, const char *col_name, dbvalue_t *col_value, db_int64 col_version, db_int64 db_version, const char *site_id, int site_len, db_int64 seq, db_int64 *rowid);
+int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, const char *col_name, dbvalue_t *col_value, int64_t col_version, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid);
 
-int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, db_int64 insert_cl, const char *insert_name, dbvalue_t *insert_value, db_int64 insert_col_version, db_int64 insert_db_version, const char *insert_site_id, int insert_site_id_len, db_int64 insert_seq, db_int64 *rowid);
+int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, int64_t insert_cl, const char *insert_name, dbvalue_t *insert_value, int64_t insert_col_version, int64_t insert_db_version, const char *insert_site_id, int insert_site_id_len, int64_t insert_seq, int64_t *rowid);
 
 
 
 void cloudsync_sync_key (cloudsync_context *data, const char *key, const char *value);
 
 // used by network layer
-int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int *seq, db_int64 *new_db_version, db_int64 *new_seq);
+int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int *seq, int64_t *new_db_version, int64_t *new_seq);
 
 // used by core
 bool cloudsync_config_exists (db_t *db);

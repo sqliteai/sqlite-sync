@@ -327,7 +327,7 @@ void dbsync_insert (sqlite3_context *context, int argc, sqlite3_value **argv) {
     }
     
     // compute the next database version for tracking changes
-    db_int64 db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
+    int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
     
     // check if a row with the same primary key already exists
     // if so, this means the row might have been previously deleted (sentinel)
@@ -374,7 +374,7 @@ void dbsync_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
     }
     
     // compute the next database version for tracking changes
-    db_int64 db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
+    int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
     int rc = SQLITE_OK;
     
     // encode the primary key values into a buffer
@@ -482,7 +482,7 @@ void dbsync_update_final (sqlite3_context *context) {
     }
 
     // compute the next database version for tracking changes
-    db_int64 db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
+    int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
     int rc = SQLITE_OK;
     
     // Check if the primary key(s) have changed
@@ -752,7 +752,7 @@ void dbsync_payload_encode_final (sqlite3_context *context) {
     }
     
     // result is OK so get BLOB and returns it
-    db_int64 blob_size = 0;
+    int64_t blob_size = 0;
     char *blob = cloudsync_payload_blob (payload, &blob_size, NULL);
     if (!blob) {
         sqlite3_result_null(context);

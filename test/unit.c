@@ -1079,7 +1079,7 @@ finalize:
 
 bool do_test_functions (sqlite3 *db, bool print_results) {
     char *site_id = NULL;
-    db_int64 len = 0;
+    int64_t len = 0;
     int rc = database_select_blob(db, "SELECT cloudsync_siteid();", &site_id, &len);
     if (rc != DBRES_OK || site_id == NULL || len != 16) {
         if (site_id) cloudsync_memory_free(site_id);
@@ -1105,12 +1105,12 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     if (print_results) printf("Lib Version: %s\n", version);
     cloudsync_memory_free(version);
     
-    db_int64 db_version = 0;
+    int64_t db_version = 0;
     rc = database_select_int(db, "SELECT cloudsync_db_version();", &db_version);
     if (rc != DBRES_OK) goto abort_test_functions;
     if (print_results) printf("DB Version: %lld\n", db_version);
     
-    db_int64 db_version_next = 0;
+    int64_t db_version_next = 0;
     rc = database_select_int(db, "SELECT cloudsync_db_version_next();", &db_version);
     if (rc != DBRES_OK) goto abort_test_functions;
     if (print_results) printf("DB Version Next: %lld\n", db_version_next);
@@ -1133,7 +1133,7 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     rc = sqlite3_exec(db, "SELECT cloudsync_disable('tbl1');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
-    db_int64 value = 0;
+    int64_t value = 0;
     rc = database_select_int(db, "SELECT cloudsync_is_enabled('tbl1');", &value);
     if (rc != DBRES_OK) goto abort_test_functions;
     int v1 = (int)value;
@@ -2036,12 +2036,12 @@ bool do_test_dbutils (void) {
     if (value2 != NULL) goto finalize;
     cloudsync_memory_free(value1);
     
-    db_int64 db_version = 0;
+    int64_t db_version = 0;
     database_select_int(db, "SELECT cloudsync_db_version();", &db_version);
 
     char *site_id_blob;
-    db_int64 site_id_blob_size;
-    db_int64 dbver1, seq1;
+    int64_t site_id_blob_size;
+    int64_t dbver1, seq1;
     rc = database_select_blob_2int(db, "SELECT cloudsync_siteid(),  cloudsync_db_version(),  cloudsync_seq();", &site_id_blob, &site_id_blob_size, &dbver1, &seq1);
     if (rc != SQLITE_OK || site_id_blob == NULL ||dbver1 != db_version) goto finalize;
     cloudsync_memory_free(site_id_blob);
@@ -5811,7 +5811,7 @@ bool do_test_network_encode_decode (int nclients, bool print_result, bool cleanu
             if (target == j) continue;
             
             char *blob = NULL;
-            db_int64 blob_size = 0;
+            int64_t blob_size = 0;
             rc = database_select_blob(db[target], src_sql, &blob, &blob_size);
             if ((rc != DBRES_OK) || (!blob)) goto finalize;
             

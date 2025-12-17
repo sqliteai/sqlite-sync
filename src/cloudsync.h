@@ -44,8 +44,8 @@ int cloudsync_insync (cloudsync_context *data);
 int cloudsync_bumpseq (cloudsync_context *data);
 void *cloudsync_siteid (cloudsync_context *data);
 void cloudsync_reset_siteid (cloudsync_context *data);
-db_int64 cloudsync_dbversion_next (cloudsync_context *data, db_int64 merging_version);
-db_int64 cloudsync_dbversion (cloudsync_context *data);
+int64_t cloudsync_dbversion_next (cloudsync_context *data, int64_t merging_version);
+int64_t cloudsync_dbversion (cloudsync_context *data);
 void cloudsync_update_schema_hash (cloudsync_context *data);
 int cloudsync_dbversion_check_uptodate (cloudsync_context *data);
 
@@ -72,7 +72,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
 // Payload context (used to encode changes)
 int    cloudsync_payload_encode_step  (cloudsync_payload_context *payload, cloudsync_context *data, int argc, dbvalue_t **argv);
 int    cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsync_context *data);
-char  *cloudsync_payload_blob (cloudsync_payload_context *payload, db_int64 *blob_size, db_int64 *nrows);
+char  *cloudsync_payload_blob (cloudsync_payload_context *payload, int64_t *blob_size, int64_t *nrows);
 size_t cloudsync_payload_context_size (size_t *header_size);
 
 // CLOUDSYNCTABLE CONTEXT
@@ -94,12 +94,12 @@ bool table_algo_isgos (cloudsync_table_context *table);
 int table_remove (cloudsync_context *data, cloudsync_table_context *table);
 void table_free (cloudsync_table_context *table);
 
-int local_mark_insert_sentinel_meta (cloudsync_table_context *table, const char *pk, size_t pklen, db_int64 db_version, int seq);
-int local_update_sentinel (cloudsync_table_context *table, const char *pk, size_t pklen, db_int64 db_version, int seq);
-int local_mark_insert_or_update_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, db_int64 db_version, int seq);
-int local_mark_delete_meta (cloudsync_table_context *table, const char *pk, size_t pklen, db_int64 db_version, int seq);
+int local_mark_insert_sentinel_meta (cloudsync_table_context *table, const char *pk, size_t pklen, int64_t db_version, int seq);
+int local_update_sentinel (cloudsync_table_context *table, const char *pk, size_t pklen, int64_t db_version, int seq);
+int local_mark_insert_or_update_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, int64_t db_version, int seq);
+int local_mark_delete_meta (cloudsync_table_context *table, const char *pk, size_t pklen, int64_t db_version, int seq);
 int local_drop_meta (cloudsync_table_context *table, const char *pk, size_t pklen);
-int local_update_move_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *pk2, size_t pklen2, db_int64 db_version);
+int local_update_move_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *pk2, size_t pklen2, int64_t db_version);
 
 #ifdef __cplusplus
 }

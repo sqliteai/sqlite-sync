@@ -121,9 +121,9 @@ struct cloudsync_context {
     uint64_t    schema_hash;
     
     // set at transaction start and reset on commit/rollback
-    db_int64    db_version;
+    int64_t    db_version;
     // version the DB would have if the transaction committed now
-    db_int64    pending_db_version;
+    int64_t    pending_db_version;
     // used to set an order inside each transaction
     int         seq;
     
@@ -213,7 +213,7 @@ bool force_uncompressed_blob = false;
 #endif
 
 // Internal prototypes
-int local_mark_insert_or_update_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, db_int64 db_version, int seq);
+int local_mark_insert_or_update_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, int64_t db_version, int seq);
 int cloudsync_set_dberror (cloudsync_context *data);
 
 // MARK: - CRDT algos -
@@ -338,7 +338,7 @@ int cloudsync_dbversion_rebuild (db_t *db, cloudsync_context *data) {
         data->db_version_stmt = NULL;
     }
     
-    db_int64 count = dbutils_table_settings_count_tables(db);
+    int64_t count = dbutils_table_settings_count_tables(db);
     if (count == 0) return DBRES_OK;
     else if (count == -1) return cloudsync_set_dberror(data);
     
@@ -377,11 +377,11 @@ int cloudsync_dbversion_check_uptodate (cloudsync_context *data) {
     return cloudsync_dbversion_rerun(data->db, data);
 }
 
-db_int64 cloudsync_dbversion_next (cloudsync_context *data, db_int64 merging_version) {
+int64_t cloudsync_dbversion_next (cloudsync_context *data, int64_t merging_version) {
     int rc = cloudsync_dbversion_check_uptodate(data);
     if (rc != DBRES_OK) return -1;
     
-    db_int64 result = data->db_version + 1;
+    int64_t result = data->db_version + 1;
     if (result < data->pending_db_version) result = data->pending_db_version;
     if (merging_version != CLOUDSYNC_VALUE_NOTSET && result < merging_version) result = merging_version;
     data->pending_db_version = result;
@@ -434,7 +434,7 @@ int cloudsync_load_siteid (db_t *db, cloudsync_context *data) {
     
     // load site_id
     char *buffer = NULL;
-    db_int64 size = 0;
+    int64_t size = 0;
     int rc = database_select_blob(db, SQL_SITEID_SELECT_ROWID0, &buffer, &size);
     if (rc != DBRES_OK) return rc;
     if (!buffer || size != UUID_LEN) {
@@ -448,7 +448,7 @@ int cloudsync_load_siteid (db_t *db, cloudsync_context *data) {
     return DBRES_OK;
 }
 
-db_int64 cloudsync_dbversion (cloudsync_context *data) {
+int64_t cloudsync_dbversion (cloudsync_context *data) {
     return data->db_version;
 }
 
@@ -1027,16 +1027,16 @@ bool table_add_to_context (db_t *db, cloudsync_context *data, table_algo algo, c
     
     // a table with only pk(s) is totally legal
     if (ncols > 0) {
-        table->col_name = (char **)cloudsync_memory_alloc((db_uint64)(sizeof(char *) * ncols));
+        table->col_name = (char **)cloudsync_memory_alloc((uint64_t)(sizeof(char *) * ncols));
         if (!table->col_name) goto abort_add_table;
         
-        table->col_id = (int *)cloudsync_memory_alloc((db_uint64)(sizeof(int) * ncols));
+        table->col_id = (int *)cloudsync_memory_alloc((uint64_t)(sizeof(int) * ncols));
         if (!table->col_id) goto abort_add_table;
         
-        table->col_merge_stmt = (dbvm_t **)cloudsync_memory_alloc((db_uint64)(sizeof(void *) * ncols));
+        table->col_merge_stmt = (dbvm_t **)cloudsync_memory_alloc((uint64_t)(sizeof(void *) * ncols));
         if (!table->col_merge_stmt) goto abort_add_table;
         
-        table->col_value_stmt = (dbvm_t **)cloudsync_memory_alloc((db_uint64)(sizeof(void *) * ncols));
+        table->col_value_stmt = (dbvm_t **)cloudsync_memory_alloc((uint64_t)(sizeof(void *) * ncols));
         if (!table->col_value_stmt) goto abort_add_table;
         
         char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID, table_name);
@@ -1118,9 +1118,9 @@ bool table_algo_isgos (cloudsync_table_context *table) {
 
 // MARK: - Merge Insert -
 
-db_int64 merge_get_local_cl (cloudsync_table_context *table, const char *pk, int pklen) {
+int64_t merge_get_local_cl (cloudsync_table_context *table, const char *pk, int pklen) {
     dbvm_t *vm = table->meta_local_cl_stmt;
-    db_int64 result = -1;
+    int64_t result = -1;
     
     int rc = databasevm_bind_blob(vm, 1, (const void *)pk, pklen);
     if (rc != DBRES_OK) goto cleanup;
@@ -1138,7 +1138,7 @@ cleanup:
     return result;
 }
 
-int merge_get_col_version (cloudsync_table_context *table, const char *col_name, const char *pk, int pklen, db_int64 *version) {
+int merge_get_col_version (cloudsync_table_context *table, const char *col_name, const char *pk, int pklen, int64_t *version) {
     dbvm_t *vm = table->meta_col_version_stmt;
     
     int rc = databasevm_bind_blob(vm, 1, (const void *)pk, pklen);
@@ -1159,7 +1159,7 @@ cleanup:
     return rc;
 }
 
-int merge_set_winner_clock (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pk_len, const char *colname, db_int64 col_version, db_int64 db_version, const char *site_id, int site_len, db_int64 seq, db_int64 *rowid) {
+int merge_set_winner_clock (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pk_len, const char *colname, int64_t col_version, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid) {
     
     // get/set site_id
     dbvm_t *vm = data->getset_siteid_stmt;
@@ -1203,7 +1203,7 @@ cleanup_merge:
     return rc;
 }
 
-int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, const char *col_name, dbvalue_t *col_value, db_int64 col_version, db_int64 db_version, const char *site_id, int site_len, db_int64 seq, db_int64 *rowid) {
+int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, const char *col_name, dbvalue_t *col_value, int64_t col_version, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid) {
     int index;
     dbvm_t *vm = table_column_lookup(table, col_name, true, &index);
     if (vm == NULL) return cloudsync_set_error(data, "Unable to retrieve column merge precompiled statement in merge_insert_col", DBRES_MISUSE);
@@ -1252,7 +1252,7 @@ int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, c
     return merge_set_winner_clock(data, table, pk, pklen, col_name, col_version, db_version, site_id, site_len, seq, rowid);
 }
 
-int merge_delete (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, const char *colname, db_int64 cl, db_int64 db_version, const char *site_id, int site_len, db_int64 seq, db_int64 *rowid) {
+int merge_delete (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, const char *colname, int64_t cl, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid) {
     int rc = DBRES_OK;
     
     // reset return value
@@ -1294,7 +1294,7 @@ int merge_delete (cloudsync_context *data, cloudsync_table_context *table, const
     return rc;
 }
 
-int merge_zeroclock_on_resurrect(cloudsync_table_context *table, db_int64 db_version, const char *pk, int pklen) {
+int merge_zeroclock_on_resurrect(cloudsync_table_context *table, int64_t db_version, const char *pk, int pklen) {
     dbvm_t *vm = table->meta_zero_clock_stmt;
     
     int rc = databasevm_bind_int(vm, 1, db_version);
@@ -1313,11 +1313,11 @@ cleanup:
 }
 
 // executed only if insert_cl == local_cl
-int merge_did_cid_win (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, dbvalue_t *insert_value, const char *site_id, int site_len, const char *col_name, db_int64 col_version, bool *didwin_flag) {
+int merge_did_cid_win (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, dbvalue_t *insert_value, const char *site_id, int site_len, const char *col_name, int64_t col_version, bool *didwin_flag) {
     
     if (col_name == NULL) col_name = CLOUDSYNC_TOMBSTONE_VALUE;
     
-    db_int64 local_version;
+    int64_t local_version;
     int rc = merge_get_col_version(table, col_name, pk, pklen, &local_version);
     if (rc == DBRES_DONE) {
         // no rows returned, the incoming change wins if there's nothing there locally
@@ -1401,7 +1401,7 @@ cleanup:
     return rc;
 }
 
-int merge_sentinel_only_insert (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, db_int64 cl, db_int64 db_version, const char *site_id, int site_len, db_int64 seq, db_int64 *rowid) {
+int merge_sentinel_only_insert (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, int64_t cl, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid) {
     
     // reset return value
     *rowid = 0;
@@ -1432,7 +1432,7 @@ int merge_sentinel_only_insert (cloudsync_context *data, cloudsync_table_context
     return merge_set_winner_clock(data, table, pk, pklen, NULL, cl, db_version, site_id, site_len, seq, rowid);
 }
 
-int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, db_int64 insert_cl, const char *insert_name, dbvalue_t *insert_value, db_int64 insert_col_version, db_int64 insert_db_version, const char *insert_site_id, int insert_site_id_len, db_int64 insert_seq, db_int64 *rowid) {
+int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, int64_t insert_cl, const char *insert_name, dbvalue_t *insert_value, int64_t insert_col_version, int64_t insert_db_version, const char *insert_site_id, int insert_site_id_len, int64_t insert_seq, int64_t *rowid) {
     // Handle DWS and AWS algorithms here
     // Delete-Wins Set (DWS): table_algo_crdt_dws
     // Add-Wins Set (AWS): table_algo_crdt_aws
@@ -1441,7 +1441,7 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
     
     // compute the local causal length for the row based on the primary key
     // the causal length is used to determine the order of operations and resolve conflicts.
-    db_int64 local_cl = merge_get_local_cl(table, insert_pk, insert_pk_len);
+    int64_t local_cl = merge_get_local_cl(table, insert_pk, insert_pk_len);
     if (local_cl < 0) return cloudsync_set_error(data, "Unable to compute local causal length", DBRES_ERROR);
     
     // if the incoming causal length is older than the local causal length, we can safely ignore it
@@ -1803,7 +1803,7 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     
     db_t *db= data->db;
     dbvm_t *vm = NULL;
-    db_int64 db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
+    int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
     char *pkdecode = NULL;
     
     char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_COLLIST, table_name);
@@ -1868,7 +1868,7 @@ finalize:
 
 // MARK: - Local -
 
-int local_update_sentinel (cloudsync_table_context *table, const char *pk, size_t pklen, db_int64 db_version, int seq) {
+int local_update_sentinel (cloudsync_table_context *table, const char *pk, size_t pklen, int64_t db_version, int seq) {
     dbvm_t *vm = table->meta_sentinel_update_stmt;
     if (!vm) return -1;
     
@@ -1890,7 +1890,7 @@ cleanup:
     return rc;
 }
 
-int local_mark_insert_sentinel_meta (cloudsync_table_context *table, const char *pk, size_t pklen, db_int64 db_version, int seq) {
+int local_mark_insert_sentinel_meta (cloudsync_table_context *table, const char *pk, size_t pklen, int64_t db_version, int seq) {
     dbvm_t *vm = table->meta_sentinel_insert_stmt;
     if (!vm) return -1;
     
@@ -1918,7 +1918,7 @@ cleanup:
     return rc;
 }
 
-int local_mark_insert_or_update_meta_impl (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, int col_version, db_int64 db_version, int seq) {
+int local_mark_insert_or_update_meta_impl (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, int col_version, int64_t db_version, int seq) {
     
     dbvm_t *vm = table->meta_row_insert_update_stmt;
     if (!vm) return -1;
@@ -1953,11 +1953,11 @@ cleanup:
     return rc;
 }
 
-int local_mark_insert_or_update_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, db_int64 db_version, int seq) {
+int local_mark_insert_or_update_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, int64_t db_version, int seq) {
     return local_mark_insert_or_update_meta_impl(table, pk, pklen, col_name, 1, db_version, seq);
 }
 
-int local_mark_delete_meta (cloudsync_table_context *table, const char *pk, size_t pklen, db_int64 db_version, int seq) {
+int local_mark_delete_meta (cloudsync_table_context *table, const char *pk, size_t pklen, int64_t db_version, int seq) {
     return local_mark_insert_or_update_meta_impl(table, pk, pklen, NULL, 2, db_version, seq);
 }
 
@@ -1977,7 +1977,7 @@ cleanup:
     return rc;
 }
 
-int local_update_move_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *pk2, size_t pklen2, db_int64 db_version) {
+int local_update_move_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *pk2, size_t pklen2, int64_t db_version) {
     /*
       * This function moves non-sentinel metadata entries from an old primary key (OLD.pk)
       * to a new primary key (NEW.pk) when a primary key change occurs.
@@ -2094,11 +2094,11 @@ int cloudsync_payload_encode_step (cloudsync_payload_context *payload, cloudsync
     return DBRES_OK;
 }
 
-char *cloudsync_payload_blob (cloudsync_payload_context *payload, db_int64 *blob_size, db_int64 *nrows) {
+char *cloudsync_payload_blob (cloudsync_payload_context *payload, int64_t *blob_size, int64_t *nrows) {
     DEBUG_FUNCTION("cloudsync_payload_blob");
     
-    if (blob_size) *blob_size = (db_int64)payload->bsize;
-    if (nrows) *nrows = (db_int64)payload->nrows;
+    if (blob_size) *blob_size = (int64_t)payload->bsize;
+    if (nrows) *nrows = (int64_t)payload->nrows;
     return payload->buffer;
 }
 
@@ -2367,7 +2367,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
 
 // MARK: - Payload load/store -
 
-int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int *seq, db_int64 *new_db_version, db_int64 *new_seq) {
+int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int *seq, int64_t *new_db_version, int64_t *new_seq) {
     db_t *db = data->db;
     
     // retrieve current db_version and seq
@@ -2382,7 +2382,7 @@ int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size,
     snprintf(sql, sizeof(sql), "WITH max_db_version AS (SELECT MAX(db_version) AS max_db_version FROM cloudsync_changes) "
                                "SELECT * FROM (SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) AS payload, max_db_version AS max_db_version, MAX(IIF(db_version = max_db_version, seq, NULL)) FROM cloudsync_changes, max_db_version WHERE site_id=cloudsync_siteid() AND (db_version>%d OR (db_version=%d AND seq>%d))) WHERE payload IS NOT NULL", *db_version, *db_version, *seq);
     
-    db_int64 len = 0;
+    int64_t len = 0;
     int rc = database_select_blob_2int(db, sql, blob, &len, new_db_version, new_seq);
     *blob_size = (int)len;
     if (rc != DBRES_OK) return rc;
@@ -2402,7 +2402,7 @@ int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, i
     // retrieve payload
     char *blob = NULL;
     int blob_size = 0, db_version = 0, seq = 0;
-    db_int64 new_db_version = 0, new_seq = 0;
+    int64_t new_db_version = 0, new_seq = 0;
     int rc = cloudsync_payload_get(data, &blob, &blob_size, &db_version, &seq, &new_db_version, &new_seq);
     if (rc != DBRES_OK) {
         if (db_version < 0) return cloudsync_set_error(data, "Unable to retrieve db_version", rc);
