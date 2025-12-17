@@ -1850,24 +1850,24 @@ finalize:
 bool do_test_rowid (int ntest, bool print_result) {
     for (int i=0; i<ntest; ++i) {
         // for an explanation see https://github.com/sqliteai/sqlite-sync/blob/main/docs/RowID.md
-        sqlite3_int64 db_version = (sqlite3_int64)random_int64_range(1, 17179869183);
-        sqlite3_int64 seq = (sqlite3_int64)random_int64_range(1, 1073741823);
-        sqlite3_int64 rowid = (db_version << 30) | seq;
+        int64_t db_version = random_int64_range(1, 17179869183);
+        int64_t seq = random_int64_range(1, 1073741823);
+        int64_t rowid = (db_version << 30) | seq;
         
-        sqlite3_int64 value1;
-        sqlite3_int64 value2;
+        int64_t value1;
+        int64_t value2;
         cloudsync_rowid_decode(rowid, &value1, &value2);
         if (value1 != db_version)  return false;
         if (value2 != seq) return false;
     }
     
     // special case that failed in an old version
-    sqlite3_int64 db_version = 14963874252;
-    sqlite3_int64 seq = 172784902;
-    sqlite3_int64 rowid = (db_version << 30) | seq;
+    int64_t db_version = 14963874252;
+    int64_t seq = 172784902;
+    int64_t rowid = (db_version << 30) | seq;
     
-    sqlite3_int64 value1;
-    sqlite3_int64 value2;
+    int64_t value1;
+    int64_t value2;
     cloudsync_rowid_decode(rowid, &value1, &value2);
     if (value1 != db_version)  return false;
     if (value2 != seq) return false;
