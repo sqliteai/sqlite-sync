@@ -713,7 +713,7 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     // retrieve payload
     char *blob = NULL;
     int blob_size = 0, db_version = 0, seq = 0;
-    sqlite3_int64 new_db_version = 0, new_seq = 0;
+    int64_t new_db_version = 0, new_seq = 0;
     int rc = cloudsync_payload_get(data, &blob, &blob_size, &db_version, &seq, &new_db_version, &new_seq);
     if (rc != SQLITE_OK) {
         if (db_version < 0) sqlite3_result_error(context, "Unable to retrieve db_version.", -1);
