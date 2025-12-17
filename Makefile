@@ -55,7 +55,7 @@ TEST_SRC = $(wildcard $(TEST_DIR)/*.c)
 TEST_FILES = $(SRC_FILES) $(TEST_SRC) $(wildcard $(SQLITE_DIR)/*.c)
 RELEASE_OBJ = $(patsubst %.c, $(BUILD_RELEASE)/%.o, $(notdir $(SRC_FILES)))
 TEST_OBJ = $(patsubst %.c, $(BUILD_TEST)/%.o, $(notdir $(TEST_FILES)))
-COV_FILES = $(filter-out $(SRC_DIR)/lz4.c $(SRC_DIR)/network.c, $(SRC_FILES))
+COV_FILES = $(filter-out $(SRC_DIR)/lz4.c $(SRC_DIR)/network.c $(SRC_DIR)/database_postgresql.c, $(SRC_FILES))
 CURL_LIB = $(CURL_DIR)/$(PLATFORM)/libcurl.a
 TEST_TARGET = $(patsubst %.c,$(DIST_DIR)/%$(EXE), $(notdir $(TEST_SRC)))
 
@@ -196,8 +196,11 @@ $(BUILD_TEST)/%.o: %.c
 
 # Run code coverage (--css-file $(CUSTOM_CSS))
 test: $(TARGET) $(TEST_TARGET)
-	$(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();"
-	set -e; for t in $(TEST_TARGET); do ./$$t; done
+	@if [ -f .env ]; then \
+		export $$(grep -v '^#' .env | xargs); \
+	fi; \
+	set -e; $(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();" && \
+	for t in $(TEST_TARGET); do ./$$t; done
 ifneq ($(COVERAGE),false)
 	mkdir -p $(COV_DIR)
 	lcov --capture --directory . --output-file $(COV_DIR)/coverage.info $(subst src, --include src,${COV_FILES})
@@ -206,8 +209,7 @@ endif
 
 # Run only unit tests
 unittest: $(TARGET) $(DIST_DIR)/unit$(EXE)
-	$(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$(TARGET)" "SELECT cloudsync_version();"
-	./$(DIST_DIR)/unit$(EXE)
+	@./$(DIST_DIR)/unit$(EXE)
 
 $(OPENSSL):
 	git clone https://github.com/openssl/openssl.git $(CURL_DIR)/src/openssl
