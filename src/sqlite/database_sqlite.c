@@ -5,11 +5,11 @@
 //  Created by Marco Bambini on 03/12/25.
 //
 
-#include "cloudsync.h"
-#include "database.h"
-#include "dbutils.h"
-#include "utils.h"
-#include "sql.h"
+#include "../cloudsync.h"
+#include "../database.h"
+#include "../dbutils.h"
+#include "../utils.h"
+#include "../sql.h"
 
 #include <inttypes.h>
 #include <string.h>

@@ -1,14 +1,14 @@
 //
-//  vtab.h
+//  cloudsync_changes_sqlite.h
 //  cloudsync
 //
 //  Created by Marco Bambini on 23/09/24.
 //
 
-#ifndef __CLOUDSYNC_VTAB__
-#define __CLOUDSYNC_VTAB__
+#ifndef __CLOUDSYNC_CHANGES_SQLITE__
+#define __CLOUDSYNC_CHANGES_SQLITE__
 
-#include "cloudsync.h"
+#include "../cloudsync.h"
 
 #ifndef SQLITE_CORE
 #include "sqlite3ext.h"

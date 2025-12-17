@@ -29,7 +29,7 @@ MAKEFLAGS += -j$(CPUS)
 
 # Compiler and flags
 CC = gcc
-CFLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(SQLITE_DIR) -I$(CURL_DIR)/include
+CFLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(SRC_DIR)/sqlite -I$(SRC_DIR)/postgresql -I$(SQLITE_DIR) -I$(CURL_DIR)/include
 T_CFLAGS = $(CFLAGS) -DSQLITE_CORE -DCLOUDSYNC_UNITTEST -DCLOUDSYNC_OMIT_NETWORK -DCLOUDSYNC_OMIT_PRINT_RESULT
 COVERAGE = false
 ifndef NATIVE_NETWORK
@@ -38,10 +38,12 @@ endif
 
 # Directories
 SRC_DIR = src
+SQLITE_IMPL_DIR = $(SRC_DIR)/sqlite
+POSTGRES_IMPL_DIR = $(SRC_DIR)/postgresql
 DIST_DIR = dist
 TEST_DIR = test
 SQLITE_DIR = sqlite
-VPATH = $(SRC_DIR):$(SQLITE_DIR):$(TEST_DIR)
+VPATH = $(SRC_DIR):$(SQLITE_IMPL_DIR):$(POSTGRES_IMPL_DIR):$(SQLITE_DIR):$(TEST_DIR)
 BUILD_RELEASE = build/release
 BUILD_TEST = build/test
 BUILD_DIRS = $(BUILD_TEST) $(BUILD_RELEASE)
@@ -50,12 +52,18 @@ CURL_SRC = $(CURL_DIR)/src/curl-$(CURL_VERSION)
 COV_DIR = coverage
 CUSTOM_CSS = $(TEST_DIR)/sqliteai.css
 
-SRC_FILES = $(wildcard $(SRC_DIR)/*.c)
+# Multi-platform source files (at src/ root) - exclude database_*.c as they're in subdirs
+CORE_SRC = $(filter-out $(SRC_DIR)/database_%.c, $(wildcard $(SRC_DIR)/*.c))
+# SQLite-specific files
+SQLITE_SRC = $(wildcard $(SQLITE_IMPL_DIR)/*.c)
+# Combined for SQLite extension build
+SRC_FILES = $(CORE_SRC) $(SQLITE_SRC)
+
 TEST_SRC = $(wildcard $(TEST_DIR)/*.c)
 TEST_FILES = $(SRC_FILES) $(TEST_SRC) $(wildcard $(SQLITE_DIR)/*.c)
 RELEASE_OBJ = $(patsubst %.c, $(BUILD_RELEASE)/%.o, $(notdir $(SRC_FILES)))
 TEST_OBJ = $(patsubst %.c, $(BUILD_TEST)/%.o, $(notdir $(TEST_FILES)))
-COV_FILES = $(filter-out $(SRC_DIR)/lz4.c $(SRC_DIR)/network.c $(SRC_DIR)/sql_sqlite.c $(SRC_DIR)/database_postgresql.c, $(SRC_FILES))
+COV_FILES = $(filter-out $(SRC_DIR)/lz4.c $(SRC_DIR)/network.c $(SQLITE_IMPL_DIR)/sql_sqlite.c $(POSTGRES_IMPL_DIR)/database_postgresql.c, $(SRC_FILES))
 CURL_LIB = $(CURL_DIR)/$(PLATFORM)/libcurl.a
 TEST_TARGET = $(patsubst %.c,$(DIST_DIR)/%$(EXE), $(notdir $(TEST_SRC)))
 

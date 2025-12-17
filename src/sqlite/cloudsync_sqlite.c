@@ -5,16 +5,16 @@
 //  Created by Marco Bambini on 05/12/25.
 //
 
-#include "cloudsync.h"
+#include "../cloudsync.h"
 #include "cloudsync_sqlite.h"
-#include "cloudsync_private.h"
-#include "database.h"
-#include "dbutils.h"
-#include "vtab.h"
-#include "pk.h"
+#include "../cloudsync_private.h"
+#include "../database.h"
+#include "../dbutils.h"
+#include "cloudsync_changes_sqlite.h"
+#include "../pk.h"
 
 #ifndef CLOUDSYNC_OMIT_NETWORK
-#include "network.h"
+#include "../network.h"
 #endif
 
 #ifndef SQLITE_CORE
