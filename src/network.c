@@ -8,6 +8,8 @@
 #ifndef CLOUDSYNC_OMIT_NETWORK
 
 #include <stdint.h>
+#include <inttypes.h>
+
 #include "network.h"
 #include "utils.h"
 #include "dbutils.h"
