@@ -262,6 +262,17 @@ int database_count_pk (db_t *db, const char *table_name, bool not_null) {
     return (int)count;
 }
 
+int database_count_nonpk (db_t *db, const char *table_name) {
+    char buffer[1024];
+    char *sql = NULL;
+    
+    sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk=0;", table_name);
+    db_int64 count = 0;
+    int rc = database_select_int(db, sql, &count);
+    if (rc != DBRES_OK) return -1;
+    return (int)count;
+}
+
 int database_count_int_pk (db_t *db, const char *table_name) {
     char buffer[1024];
     char *sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk=1 AND \"type\" LIKE '%%INT%%';", table_name);

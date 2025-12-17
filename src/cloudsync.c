@@ -578,12 +578,12 @@ char *table_build_values_sql (db_t *db, cloudsync_table_context *table) {
     
     #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
     if (table->rowid_only) {
-        sql = memory_mprintf("WITH col_names AS (SELECT group_concat('\"' || format('%%w', name) || '\"', ',') AS cols FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid) SELECT 'SELECT ' || (SELECT cols FROM col_names) || ' FROM \"%w\" WHERE rowid=?;'", table->name, table->name);
+        sql = memory_mprintf(SQL_BUILD_SELECT_NONPK_COLS_BY_ROWID, table->name, table->name);
         goto process_process;
     }
     #endif
     
-    sql = cloudsync_memory_mprintf("WITH col_names AS (SELECT group_concat('\"' || format('%%w', name) || '\"', ',') AS cols FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid), pk_where AS (SELECT group_concat('\"' || format('%%w', name) || '\"', '=? AND ') || '=?' AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'SELECT ' || (SELECT cols FROM col_names) || ' FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'", table->name, table->name, singlequote_escaped_table_name);
+    sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_NONPK_COLS_BY_PK, table->name, table->name, singlequote_escaped_table_name);
     
 #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
 process_process:
@@ -600,14 +600,14 @@ process_process:
 char *table_build_mergedelete_sql (db_t *db, cloudsync_table_context *table) {
     #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
     if (table->rowid_only) {
-        char *sql = memory_mprintf("DELETE FROM \"%w\" WHERE rowid=?;", table->name);
+        char *sql = memory_mprintf(SQL_DELETE_ROW_BY_ROWID, table->name);
         return sql;
     }
     #endif
     
     char buffer[1024];
     char *singlequote_escaped_table_name = sql_escape_name(table->name, buffer, sizeof(buffer));
-    char *sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || format('%%w', name) || '\"', '=? AND ') || '=?' AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'DELETE FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'", table->name, singlequote_escaped_table_name);
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_DELETE_ROW_BY_PK, table->name, singlequote_escaped_table_name);
     if (!sql) return NULL;
     
     char *query = NULL;
@@ -624,10 +624,10 @@ char *table_build_mergeinsert_sql (db_t *db, cloudsync_table_context *table, con
     if (table->rowid_only) {
         if (colname == NULL) {
             // INSERT OR IGNORE INTO customers (first_name,last_name) VALUES (?,?);
-            sql = memory_mprintf("INSERT OR IGNORE INTO \"%w\" (rowid) VALUES (?);", table->name);
+            sql = memory_mprintf(SQL_INSERT_ROWID_IGNORE, table->name);
         } else {
             // INSERT INTO customers (first_name,last_name,age) VALUES (?,?,?) ON CONFLICT DO UPDATE SET age=?;
-            sql = memory_mprintf("INSERT INTO \"%w\" (rowid, \"%w\") VALUES (?, ?) ON CONFLICT DO UPDATE SET \"%w\"=?;", table->name, colname, colname);
+            sql = memory_mprintf(SQL_UPSERT_ROWID_AND_COL_BY_ROWID, table->name, colname, colname);
         }
         return sql;
     }
@@ -638,11 +638,11 @@ char *table_build_mergeinsert_sql (db_t *db, cloudsync_table_context *table, con
     
     if (colname == NULL) {
         // is sentinel insert
-        sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || format('%%w', name) || '\"') AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk), pk_bind AS (SELECT group_concat('?') AS pk_binding FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'INSERT OR IGNORE INTO \"%w\" (' || (SELECT pk_clause FROM pk_where) || ') VALUES ('  || (SELECT pk_binding FROM pk_bind) || ');'", table->name, table->name, singlequote_escaped_table_name);
+        sql = cloudsync_memory_mprintf(SQL_BUILD_INSERT_PK_IGNORE, table->name, table->name, singlequote_escaped_table_name);
     } else {
         char buffer2[1024];
         char *singlequote_escaped_col_name = sql_escape_name(colname, buffer2, sizeof(buffer2));
-        sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || format('%%w', name) || '\"') AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk), pk_bind AS (SELECT group_concat('?') AS pk_binding FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'INSERT INTO \"%w\" (' || (SELECT pk_clause FROM pk_where) || ',\"%w\") VALUES ('  || (SELECT pk_binding FROM pk_bind) || ',?) ON CONFLICT DO UPDATE SET \"%w\"=?;'", table->name, table->name, singlequote_escaped_table_name, singlequote_escaped_col_name, singlequote_escaped_col_name);
+        sql = cloudsync_memory_mprintf(SQL_BUILD_UPSERT_PK_AND_COL, table->name, table->name, singlequote_escaped_table_name, singlequote_escaped_col_name, singlequote_escaped_col_name);
     }
     if (!sql) return NULL;
     
@@ -658,7 +658,7 @@ char *table_build_value_sql (db_t *db, cloudsync_table_context *table, const cha
 
     #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
     if (table->rowid_only) {
-        char *sql = memory_mprintf("SELECT %s%w%s FROM \"%w\" WHERE rowid=?;", colnamequote, colname, colnamequote, table->name);
+        char *sql = memory_mprintf(SQL_SELECT_COLS_BY_ROWID_FMT, colnamequote, colname, colnamequote, table->name);
         return sql;
     }
     #endif
@@ -668,7 +668,7 @@ char *table_build_value_sql (db_t *db, cloudsync_table_context *table, const cha
     char buffer2[1024];
     char *singlequote_escaped_table_name = sql_escape_name(table->name, buffer, sizeof(buffer));
     char *singlequote_escaped_col_name = sql_escape_name(colname, buffer2, sizeof(buffer2));
-    char *sql = cloudsync_memory_mprintf("WITH pk_where AS (SELECT group_concat('\"' || format('%%w', name) || '\"', '=? AND ') || '=?' AS pk_clause FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk) SELECT 'SELECT %s%w%s FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'", table->name, colnamequote, singlequote_escaped_col_name, colnamequote, singlequote_escaped_table_name);
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_COLS_BY_PK_FMT, table->name, colnamequote, singlequote_escaped_col_name, colnamequote, singlequote_escaped_table_name);
     if (!sql) return NULL;
     
     char *query = NULL;
@@ -757,17 +757,16 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     // precompile the pk exists statement
     // we do not need an index on the pk column because it is already covered by the fact that it is part of the prikeys
     // EXPLAIN QUERY PLAN reports: SEARCH table_name USING PRIMARY KEY (pk=?)
-    sql = cloudsync_memory_mprintf("SELECT EXISTS(SELECT 1 FROM \"%w_cloudsync\" WHERE pk = ? LIMIT 1);", table->name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_ROW_EXISTS_BY_PK, table->name);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_pkexists_stmt: %s", sql);
     
     rc = database_prepare(db, sql, (void **)&table->meta_pkexists_stmt, DBFLAG_PERSISTENT);
-    
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
     // precompile the update local sentinel statement
-    sql = cloudsync_memory_mprintf("UPDATE \"%w_cloudsync\" SET col_version = CASE col_version %% 2 WHEN 0 THEN col_version + 1 ELSE col_version + 2 END, db_version = ?, seq = ?, site_id = 0 WHERE pk = ? AND col_name = '%s';", table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_UPDATE_COL_BUMP_VERSION, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_sentinel_update_stmt: %s", sql);
     
@@ -776,7 +775,7 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // precompile the insert local sentinel statement
-    sql = cloudsync_memory_mprintf("INSERT INTO \"%w_cloudsync\" (pk, col_name, col_version, db_version, seq, site_id) SELECT ?, '%s', 1, ?, ?, 0 WHERE 1 ON CONFLICT DO UPDATE SET col_version = CASE col_version %% 2 WHEN 0 THEN col_version + 1 ELSE col_version + 2 END, db_version = ?, seq = ?, site_id = 0;", table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_UPSERT_COL_INIT_OR_BUMP_VERSION, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_sentinel_insert_stmt: %s", sql);
     
@@ -785,7 +784,7 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
 
     // precompile the insert/update local row statement
-    sql = cloudsync_memory_mprintf("INSERT INTO \"%w_cloudsync\" (pk, col_name, col_version, db_version, seq, site_id ) SELECT ?, ?, ?, ?, ?, 0 WHERE 1 ON CONFLICT DO UPDATE SET col_version = col_version + 1, db_version = ?, seq = ?, site_id = 0;", table->name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_UPSERT_RAW_COLVERSION, table->name);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_row_insert_update_stmt: %s", sql);
     
@@ -794,7 +793,7 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // precompile the delete rows from meta
-    sql = cloudsync_memory_mprintf("DELETE FROM \"%w_cloudsync\" WHERE pk=? AND col_name!='%s';", table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_row_drop_stmt: %s", sql);
     
@@ -804,7 +803,7 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     
     // precompile the update rows from meta when pk changes
     // see https://github.com/sqliteai/sqlite-sync/blob/main/docs/PriKey.md for more details
-    sql = cloudsync_memory_mprintf("UPDATE OR REPLACE \"%w_cloudsync\" SET pk=?, db_version=?, col_version=1, seq=cloudsync_seq(), site_id=0 WHERE (pk=? AND col_name!='%s');", table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_update_move_stmt: %s", sql);
     
@@ -813,7 +812,7 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // local cl
-    sql = cloudsync_memory_mprintf("SELECT COALESCE((SELECT col_version FROM \"%w_cloudsync\" WHERE pk=? AND col_name='%s'), (SELECT 1 FROM \"%w_cloudsync\" WHERE pk=?));", table->name, CLOUDSYNC_TOMBSTONE_VALUE, table->name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_GET_COL_VERSION_OR_ROW_EXISTS, table->name, CLOUDSYNC_TOMBSTONE_VALUE, table->name);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_local_cl_stmt: %s", sql);
     
@@ -822,7 +821,7 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // rowid of the last inserted/updated row in the meta table
-    sql = cloudsync_memory_mprintf("INSERT OR REPLACE INTO \"%w_cloudsync\" (pk, col_name, col_version, db_version, seq, site_id) VALUES (?, ?, ?, cloudsync_db_version_next(?), ?, ?) RETURNING ((db_version << 30) | seq);", table->name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_INSERT_RETURN_CHANGE_ID, table->name);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_winner_clock_stmt: %s", sql);
     
@@ -830,7 +829,7 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
-    sql = cloudsync_memory_mprintf("DELETE FROM \"%w_cloudsync\" WHERE pk=? AND col_name!='%s';", table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_merge_delete_drop: %s", sql);
     
@@ -839,7 +838,7 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // zero clock
-    sql = cloudsync_memory_mprintf("UPDATE \"%w_cloudsync\" SET col_version = 0, db_version = cloudsync_db_version_next(?) WHERE pk=? AND col_name!='%s';", table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_TOMBSTONE_PK_EXCEPT_COL, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_zero_clock_stmt: %s", sql);
     
@@ -848,7 +847,7 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // col_version
-    sql = cloudsync_memory_mprintf("SELECT col_version FROM \"%w_cloudsync\" WHERE pk=? AND col_name=?;", table->name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_SELECT_COL_VERSION_BY_PK_COL, table->name);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_col_version_stmt: %s", sql);
     
@@ -857,7 +856,7 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // site_id
-    sql = cloudsync_memory_mprintf("SELECT site_id FROM \"%w_cloudsync\" WHERE pk=? AND col_name=?;", table->name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_SELECT_SITE_ID_BY_PK_COL, table->name);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_site_id_stmt: %s", sql);
     
@@ -1009,17 +1008,9 @@ bool table_add_to_context (db_t *db, cloudsync_context *data, table_algo algo, c
     if (!table) return false;
     
     // fill remaining metadata in the table
-    char *sql = cloudsync_memory_mprintf("SELECT count(*) FROM pragma_table_info('%q') WHERE pk>0;", table_name);
-    if (!sql) goto abort_add_table;
-    db_int64 value = 0;
-    int rc = database_select_int(db, sql, &value);
-    table->npks = (int)value;
-    cloudsync_memory_free(sql);
-    if (rc != DBRES_OK) {
-        cloudsync_set_dberror(data);
-        goto abort_add_table;
-    }
-    
+    int count = database_count_pk(db, table_name, false);
+    if (count < 0) {cloudsync_set_dberror(data); goto abort_add_table;}
+    table->npks = count;
     if (table->npks == 0) {
         #if CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
         return false;
@@ -1029,18 +1020,9 @@ bool table_add_to_context (db_t *db, cloudsync_context *data, table_algo algo, c
         #endif
     }
     
-    sql = cloudsync_memory_mprintf("SELECT count(*) FROM pragma_table_info('%q') WHERE pk=0;", table_name);
-    if (!sql) goto abort_add_table;
-    
-    db_int64 ncols = 0;
-    rc = database_select_int(db, sql, &ncols);
-    cloudsync_memory_free(sql);
-    if (rc != DBRES_OK) {
-        cloudsync_set_dberror(data);
-        goto abort_add_table;
-    }
-    
-    rc = table_add_stmts(db, table, (int)ncols);
+    int ncols = database_count_nonpk(db, table_name);
+    if (count < 0) {cloudsync_set_dberror(data); goto abort_add_table;}
+    int rc = table_add_stmts(db, table, ncols);
     if (rc != DBRES_OK) goto abort_add_table;
     
     // a table with only pk(s) is totally legal
@@ -1057,7 +1039,7 @@ bool table_add_to_context (db_t *db, cloudsync_context *data, table_algo algo, c
         table->col_value_stmt = (dbvm_t **)cloudsync_memory_alloc((db_uint64)(sizeof(void *) * ncols));
         if (!table->col_value_stmt) goto abort_add_table;
         
-        sql = cloudsync_memory_mprintf("SELECT name, cid FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid;", table_name);
+        char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID, table_name);
         if (!sql) goto abort_add_table;
         int rc = database_exec_callback(db, sql, table_add_to_context_cb, (void *)table);
         cloudsync_memory_free(sql);
@@ -1714,7 +1696,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
     
     if (pk_diff) {
         // drop meta-table, it will be recreated
-        char *sql = cloudsync_memory_mprintf("DROP TABLE IF EXISTS \"%w_cloudsync\";", table->name);
+        char *sql = cloudsync_memory_mprintf(SQL_DROP_CLOUDSYNC_TABLE, table->name);
         rc = database_exec(db, sql);
         cloudsync_memory_free(sql);
         if (rc != DBRES_OK) {
@@ -1724,9 +1706,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
     } else {
         // compact meta-table
         // delete entries for removed columns
-        char *sql = cloudsync_memory_mprintf("DELETE FROM \"%w_cloudsync\" WHERE \"col_name\" NOT IN ("
-                                             "SELECT name FROM pragma_table_info('%q') UNION SELECT '%s'"
-                                             ")", table->name, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+        char *sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_DELETE_COLS_NOT_IN_SCHEMA_OR_PKCOL, table->name, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
         rc = database_exec(db, sql);
         cloudsync_memory_free(sql);
         if (rc != DBRES_OK) {
@@ -1736,7 +1716,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
         
         char buffer[1024];
         char *singlequote_escaped_table_name = sql_escape_name(table->name, buffer, sizeof(buffer));
-        sql = cloudsync_memory_mprintf("SELECT group_concat('\"%w\".\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%s') WHERE pk>0 ORDER BY pk;", singlequote_escaped_table_name, singlequote_escaped_table_name);
+        sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_QUALIFIED_COLLIST_FMT, singlequote_escaped_table_name, singlequote_escaped_table_name);
         if (!sql) {rc = DBRES_NOMEM; goto finalize;}
         
         char *pkclause = NULL;
@@ -1746,7 +1726,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
         char *pkvalues = (pkclause) ? pkclause : "rowid";
         
         // delete entries related to rows that no longer exist in the original table, but preserve tombstone
-        sql = cloudsync_memory_mprintf("DELETE FROM \"%w_cloudsync\" WHERE (\"col_name\" != '%s' OR (\"col_name\" = '%s' AND col_version %% 2 != 0)) AND NOT EXISTS (SELECT 1 FROM \"%w\" WHERE \"%w_cloudsync\".pk = cloudsync_pk_encode(%s) LIMIT 1);", table->name, CLOUDSYNC_TOMBSTONE_VALUE, CLOUDSYNC_TOMBSTONE_VALUE, table->name, table->name, pkvalues);
+        sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK, table->name, CLOUDSYNC_TOMBSTONE_VALUE, CLOUDSYNC_TOMBSTONE_VALUE, table->name, table->name, pkvalues);
         rc = database_exec(db, sql);
         if (pkclause) cloudsync_memory_free(pkclause);
         cloudsync_memory_free(sql);
@@ -1826,20 +1806,20 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     db_int64 db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
     char *pkdecode = NULL;
     
-    char *sql = cloudsync_memory_mprintf("SELECT group_concat('\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
+    char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_COLLIST, table_name);
     char *pkclause_identifiers = NULL;
     int rc = database_select_text(db, sql, &pkclause_identifiers);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
     char *pkvalues_identifiers = (pkclause_identifiers) ? pkclause_identifiers : "rowid";
     
-    sql = cloudsync_memory_mprintf("SELECT group_concat('cloudsync_pk_decode(pk, ' || pk || ') AS ' || '\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
+    sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_DECODE_SELECTLIST, table_name);
     rc = database_select_text(db, sql, &pkdecode);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
     char *pkdecodeval = (pkdecode) ? pkdecode : "cloudsync_pk_decode(pk, 1) AS rowid";
      
-    sql = cloudsync_memory_mprintf("SELECT cloudsync_insert('%q', %s) FROM (SELECT %s FROM \"%w\" EXCEPT SELECT %s FROM \"%w_cloudsync\");", table_name, pkvalues_identifiers, pkvalues_identifiers, table_name, pkdecodeval, table_name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_INSERT_MISSING_PKS_FROM_BASE_EXCEPT_SYNC, table_name, pkvalues_identifiers, pkvalues_identifiers, table_name, pkdecodeval, table_name);
     rc = database_exec(db, sql);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
@@ -1849,7 +1829,7 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     // The new query does 1 encode per source row and one indexed NOT-EXISTS probe.
     // The old plan does many decodes per candidate and can’t use an index to rule out matches quickly—so it burns CPU and I/O.
     
-    sql = cloudsync_memory_mprintf("WITH _cstemp1 AS (SELECT cloudsync_pk_encode(%s) AS pk FROM \"%w\") SELECT _cstemp1.pk FROM _cstemp1 WHERE NOT EXISTS (SELECT 1 FROM \"%w_cloudsync\" _cstemp2 WHERE _cstemp2.pk = _cstemp1.pk AND _cstemp2.col_name = ?);", pkvalues_identifiers, table_name, table_name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL, pkvalues_identifiers, table_name, table_name);
     rc = database_prepare(db, sql, (void **)&vm, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
@@ -2267,8 +2247,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     
     // precompile the insert statement
     dbvm_t *vm = NULL;
-    const char *sql = "INSERT INTO cloudsync_changes(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) VALUES (?,?,?,?,?,?,?,?,?);";
-    int rc = database_prepare(db, sql, &vm, 0);
+    int rc = database_prepare(db, SQL_CHANGES_INSERT_ROW, &vm, 0);
     if (rc != DBRES_OK) {
         if (clone) cloudsync_memory_free(clone);
         return cloudsync_set_error(data, "Error on cloudsync_payload_apply: error while compiling SQL statement", rc);
@@ -2345,8 +2324,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     }
     
     if (in_savepoint) {
-        sql = "RELEASE cloudsync_payload_apply;";
-        int rc1 = database_exec(db, sql);
+        int rc1 = database_commit_savepoint(db, "cloudsync_payload_apply");
         if (rc1 != DBRES_OK) rc = rc1;
     }
 
@@ -2547,7 +2525,7 @@ int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context
     
     // drop meta-table
     const char *table_name = table->name;
-    char *sql = cloudsync_memory_mprintf("DROP TABLE IF EXISTS \"%w_cloudsync\";", table_name);
+    char *sql = cloudsync_memory_mprintf(SQL_DROP_CLOUDSYNC_TABLE, table_name);
     int rc = database_exec(db, sql);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) {

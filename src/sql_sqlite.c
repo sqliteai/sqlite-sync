@@ -99,3 +99,172 @@ const char * const SQL_SITEID_GETSET_ROWID_BY_SITEID =
     "RETURNING rowid;";
 
 // Format
+const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_ROWID =
+    "WITH col_names AS ("
+    "SELECT group_concat('\"' || format('%%w', name) || '\"', ',') AS cols "
+    "FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid"
+    ") "
+    "SELECT 'SELECT ' || (SELECT cols FROM col_names) || ' FROM \"%w\" WHERE rowid=?;'";
+
+const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_PK =
+    "WITH col_names AS ("
+    "SELECT group_concat('\"' || format('%%w', name) || '\"', ',') AS cols "
+    "FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid"
+    "), "
+    "pk_where AS ("
+    "SELECT group_concat('\"' || format('%%w', name) || '\"', '=? AND ') || '=?' AS pk_clause "
+    "FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk"
+    ") "
+    "SELECT 'SELECT ' || (SELECT cols FROM col_names) || ' FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'";
+
+const char * const SQL_DELETE_ROW_BY_ROWID =
+    "DELETE FROM \"%w\" WHERE rowid=?;";
+
+const char * const SQL_BUILD_DELETE_ROW_BY_PK =
+    "WITH pk_where AS ("
+    "SELECT group_concat('\"' || format('%%w', name) || '\"', '=? AND ') || '=?' AS pk_clause "
+    "FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk"
+    ") "
+    "SELECT 'DELETE FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'";
+
+const char * const SQL_INSERT_ROWID_IGNORE =
+    "INSERT OR IGNORE INTO \"%w\" (rowid) VALUES (?);";
+
+const char * const SQL_UPSERT_ROWID_AND_COL_BY_ROWID =
+    "INSERT INTO \"%w\" (rowid, \"%w\") VALUES (?, ?) ON CONFLICT DO UPDATE SET \"%w\"=?;";
+
+const char * const SQL_BUILD_INSERT_PK_IGNORE =
+    "WITH pk_where AS ("
+    "SELECT group_concat('\"' || format('%%w', name) || '\"') AS pk_clause "
+    "FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk"
+    "), "
+    "pk_bind AS ("
+    "SELECT group_concat('?') AS pk_binding "
+    "FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk"
+    ") "
+    "SELECT 'INSERT OR IGNORE INTO \"%w\" (' || (SELECT pk_clause FROM pk_where) || ') VALUES ('  || (SELECT pk_binding FROM pk_bind) || ');'";
+
+const char * const SQL_BUILD_UPSERT_PK_AND_COL =
+    "WITH pk_where AS ("
+    "SELECT group_concat('\"' || format('%%w', name) || '\"') AS pk_clause "
+    "FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk"
+    "), "
+    "pk_bind AS ("
+    "SELECT group_concat('?') AS pk_binding "
+    "FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk"
+    ") "
+    "SELECT 'INSERT INTO \"%w\" (' || (SELECT pk_clause FROM pk_where) || ',\"%w\") VALUES ('  || (SELECT pk_binding FROM pk_bind) || ',?) ON CONFLICT DO UPDATE SET \"%w\"=?;'";
+
+const char * const SQL_SELECT_COLS_BY_ROWID_FMT =
+    "SELECT %s%w%s FROM \"%w\" WHERE rowid=?;";
+
+const char * const SQL_BUILD_SELECT_COLS_BY_PK_FMT =
+    "WITH pk_where AS ("
+    "SELECT group_concat('\"' || format('%%w', name) || '\"', '=? AND ') || '=?' AS pk_clause "
+    "FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk"
+    ") "
+    "SELECT 'SELECT %s%w%s FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'";
+
+const char * const SQL_CLOUDSYNC_ROW_EXISTS_BY_PK =
+    "SELECT EXISTS(SELECT 1 FROM \"%w_cloudsync\" WHERE pk = ? LIMIT 1);";
+
+const char * const SQL_CLOUDSYNC_UPDATE_COL_BUMP_VERSION =
+    "UPDATE \"%w_cloudsync\" "
+    "SET col_version = CASE col_version %% 2 WHEN 0 THEN col_version + 1 ELSE col_version + 2 END, "
+    "db_version = ?, seq = ?, site_id = 0 "
+    "WHERE pk = ? AND col_name = '%s';";
+
+const char * const SQL_CLOUDSYNC_UPSERT_COL_INIT_OR_BUMP_VERSION =
+    "INSERT INTO \"%w_cloudsync\" (pk, col_name, col_version, db_version, seq, site_id) "
+    "SELECT ?, '%s', 1, ?, ?, 0 "
+    "WHERE 1 "
+    "ON CONFLICT DO UPDATE SET "
+    "col_version = CASE col_version %% 2 WHEN 0 THEN col_version + 1 ELSE col_version + 2 END, "
+    "db_version = ?, seq = ?, site_id = 0;";
+
+const char * const SQL_CLOUDSYNC_UPSERT_RAW_COLVERSION =
+    "INSERT INTO \"%w_cloudsync\" (pk, col_name, col_version, db_version, seq, site_id ) "
+    "SELECT ?, ?, ?, ?, ?, 0 "
+    "WHERE 1 "
+    "ON CONFLICT DO UPDATE SET "
+    "col_version = col_version + 1, db_version = ?, seq = ?, site_id = 0;";
+
+const char * const SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL =
+    "DELETE FROM \"%w_cloudsync\" WHERE pk=? AND col_name!='%s';";
+
+const char * const SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL =
+    "UPDATE OR REPLACE \"%w_cloudsync\" "
+    "SET pk=?, db_version=?, col_version=1, seq=cloudsync_seq(), site_id=0 "
+    "WHERE (pk=? AND col_name!='%s');";
+
+const char * const SQL_CLOUDSYNC_GET_COL_VERSION_OR_ROW_EXISTS =
+    "SELECT COALESCE("
+    "(SELECT col_version FROM \"%w_cloudsync\" WHERE pk=? AND col_name='%s'), "
+    "(SELECT 1 FROM \"%w_cloudsync\" WHERE pk=?)"
+    ");";
+
+const char * const SQL_CLOUDSYNC_INSERT_RETURN_CHANGE_ID =
+    "INSERT OR REPLACE INTO \"%w_cloudsync\" "
+    "(pk, col_name, col_version, db_version, seq, site_id) "
+    "VALUES (?, ?, ?, cloudsync_db_version_next(?), ?, ?) "
+    "RETURNING ((db_version << 30) | seq);";
+
+const char * const SQL_CLOUDSYNC_TOMBSTONE_PK_EXCEPT_COL =
+    "UPDATE \"%w_cloudsync\" "
+    "SET col_version = 0, db_version = cloudsync_db_version_next(?) "
+    "WHERE pk=? AND col_name!='%s';";
+
+const char * const SQL_CLOUDSYNC_SELECT_COL_VERSION_BY_PK_COL =
+    "SELECT col_version FROM \"%w_cloudsync\" WHERE pk=? AND col_name=?;";
+
+const char * const SQL_CLOUDSYNC_SELECT_SITE_ID_BY_PK_COL =
+    "SELECT site_id FROM \"%w_cloudsync\" WHERE pk=? AND col_name=?;";
+
+const char * const SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID =
+    "SELECT name, cid FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid;";
+
+const char * const SQL_DROP_CLOUDSYNC_TABLE =
+    "DROP TABLE IF EXISTS \"%w_cloudsync\";";
+
+const char * const SQL_CLOUDSYNC_DELETE_COLS_NOT_IN_SCHEMA_OR_PKCOL =
+    "DELETE FROM \"%w_cloudsync\" WHERE \"col_name\" NOT IN ("
+    "SELECT name FROM pragma_table_info('%q') UNION SELECT '%s'"
+    ")";
+
+const char * const SQL_PRAGMA_TABLEINFO_PK_QUALIFIED_COLLIST_FMT =
+    "SELECT group_concat('\"%w\".\"' || format('%%w', name) || '\"', ',') "
+    "FROM pragma_table_info('%s') WHERE pk>0 ORDER BY pk;";
+
+const char * const SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK =
+    "DELETE FROM \"%w_cloudsync\" "
+    "WHERE (\"col_name\" != '%s' OR (\"col_name\" = '%s' AND col_version %% 2 != 0)) "
+    "AND NOT EXISTS ("
+    "SELECT 1 FROM \"%w\" "
+    "WHERE \"%w_cloudsync\".pk = cloudsync_pk_encode(%s) LIMIT 1"
+    ");";
+
+const char * const SQL_PRAGMA_TABLEINFO_PK_COLLIST =
+    "SELECT group_concat('\"' || format('%%w', name) || '\"', ',') "
+    "FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;";
+
+const char * const SQL_PRAGMA_TABLEINFO_PK_DECODE_SELECTLIST =
+    "SELECT group_concat("
+    "'cloudsync_pk_decode(pk, ' || pk || ') AS ' || '\"' || format('%%w', name) || '\"', ','"
+    ") "
+    "FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;";
+
+const char * const SQL_CLOUDSYNC_INSERT_MISSING_PKS_FROM_BASE_EXCEPT_SYNC =
+    "SELECT cloudsync_insert('%q', %s) "
+    "FROM (SELECT %s FROM \"%w\" EXCEPT SELECT %s FROM \"%w_cloudsync\");";
+
+const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL =
+    "WITH _cstemp1 AS (SELECT cloudsync_pk_encode(%s) AS pk FROM \"%w\") "
+    "SELECT _cstemp1.pk FROM _cstemp1 "
+    "WHERE NOT EXISTS ("
+    "SELECT 1 FROM \"%w_cloudsync\" _cstemp2 "
+    "WHERE _cstemp2.pk = _cstemp1.pk AND _cstemp2.col_name = ?"
+    ");";
+
+const char * const SQL_CHANGES_INSERT_ROW =
+    "INSERT INTO cloudsync_changes(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) "
+    "VALUES (?,?,?,?,?,?,?,?,?);";

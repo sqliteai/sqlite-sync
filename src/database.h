@@ -75,6 +75,7 @@ int  database_debug (db_t *db, bool print_result);
 int  database_pk_names (db_t *db, const char *table_name, char ***names, int *count);
 
 int database_count_pk (db_t *db, const char *table_name, bool not_null);
+int database_count_nonpk (db_t *db, const char *table_name);
 int database_count_int_pk (db_t *db, const char *table_name);
 int database_count_notnull_without_default (db_t *db, const char *table_name);
 
