@@ -326,7 +326,7 @@ int network_set_sqlite_result (sqlite3_context *context, NETWORK_RESULT *result)
     return rc;
 }
 
-int network_download_changes (sqlite3_context *context, const char *download_url) {
+int network_download_changes (sqlite3_context *context, const char *download_url, int *pnrows) {
     DEBUG_FUNCTION("network_download_changes");
     
     cloudsync_context *xdata = (cloudsync_context *)sqlite3_user_data(context);
@@ -340,10 +340,11 @@ int network_download_changes (sqlite3_context *context, const char *download_url
     
     int rc = SQLITE_OK;
     if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
-        rc = cloudsync_payload_apply(xdata, result.buffer, (int)result.blen, NULL);
+        rc = cloudsync_payload_apply(xdata, result.buffer, (int)result.blen, pnrows);
         network_result_cleanup(&result);
     } else {
         rc = network_set_sqlite_result(context, &result);
+        if (pnrows) *pnrows = 0;
     }
     
     return rc;
@@ -706,8 +707,7 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     // retrieve global context
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     
-    cloudsync_context *xdata = (cloudsync_context *)sqlite3_user_data(context);
-    network_data *netdata = (network_data *)cloudsync_auxdata(xdata);
+    network_data *netdata = (network_data *)cloudsync_auxdata(data);
     if (!netdata) {sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1); return SQLITE_ERROR;}
     
     // retrieve payload
@@ -760,11 +760,11 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     sqlite3 *db = sqlite3_context_db_handle(context);
     if (new_db_version != db_version) {
         snprintf(buf, sizeof(buf), "%lld", new_db_version);
-        dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
+        dbutils_settings_set_key_value(db, data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
     }
     if (new_seq != seq) {
         snprintf(buf, sizeof(buf), "%lld", new_seq);
-        dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_SEND_SEQ, buf);
+        dbutils_settings_set_key_value(db, data, CLOUDSYNC_KEY_SEND_SEQ, buf);
     }
     
     network_result_cleanup(&res);
@@ -777,7 +777,7 @@ void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3
     cloudsync_network_send_changes_internal(context, argc, argv);
 }
 
-int cloudsync_network_check_internal(sqlite3_context *context) {
+int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows) {
     cloudsync_context *xdata = (cloudsync_context *)sqlite3_user_data(context);
     network_data *data = (network_data *)cloudsync_auxdata(xdata);
     if (!data) {sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1); return -1;}
@@ -798,7 +798,7 @@ int cloudsync_network_check_internal(sqlite3_context *context) {
     NETWORK_RESULT result = network_receive_buffer(data, endpoint, data->authentication, true, true, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
     int rc = SQLITE_OK;
     if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
-        rc = network_download_changes(context, result.buffer);
+        rc = network_download_changes(context, result.buffer, pnrows);
     } else {
         rc = network_set_sqlite_result(context, &result);
     }
@@ -814,8 +814,8 @@ void cloudsync_network_sync (sqlite3_context *context, int wait_ms, int max_retr
     int nrows = 0;
     while (ntries < max_retries) {
         if (ntries > 0) sqlite3_sleep(wait_ms);
-        nrows = cloudsync_network_check_internal(context);
-        if (nrows > 0) break;
+        rc = cloudsync_network_check_internal(context, &nrows);
+        if (rc == DBRES_OK && nrows > 0) break;
         ntries++;
     }
     
@@ -843,18 +843,23 @@ void cloudsync_network_sync2 (sqlite3_context *context, int argc, sqlite3_value 
 void cloudsync_network_check_changes (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_check_changes");
     
-    cloudsync_network_check_internal(context);
+    int nrows = 0;
+    cloudsync_network_check_internal(context, &nrows);
+    
+    // returns number of applied rows
+    sqlite3_result_int(context, nrows);
 }
 
 void cloudsync_network_reset_sync_version (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_reset_sync_version");
     
     sqlite3 *db = sqlite3_context_db_handle(context);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     char *buf = "0";
-    dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
-    dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_CHECK_SEQ, buf);
-    dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
-    dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_SEND_SEQ, buf);
+    dbutils_settings_set_key_value(db, data, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
+    dbutils_settings_set_key_value(db, data, CLOUDSYNC_KEY_CHECK_SEQ, buf);
+    dbutils_settings_set_key_value(db, data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
+    dbutils_settings_set_key_value(db, data, CLOUDSYNC_KEY_SEND_SEQ, buf);
 }
 
 /**

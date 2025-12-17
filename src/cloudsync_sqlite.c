@@ -801,7 +801,7 @@ void dbsync_payload_decode (sqlite3_context *context, int argc, sqlite3_value **
     
     // TODO: check me
     // returns number of applied rows
-    // sqlite3_result_int(context, nrows);
+    sqlite3_result_int(context, nrows);
 }
 
 #ifdef CLOUDSYNC_DESKTOP_OS
