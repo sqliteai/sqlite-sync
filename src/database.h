@@ -72,6 +72,7 @@ int  database_create_metatable (db_t *db, const char *table_name);
 int  database_create_triggers (db_t *db, const char *table_name, table_algo algo);
 int  database_delete_triggers (db_t *db, const char *table_name);
 int  database_debug (db_t *db, bool print_result);
+int  database_pk_names (db_t *db, const char *table_name, char ***names, int *count);
 
 int database_count_pk (db_t *db, const char *table_name, bool not_null);
 int database_count_int_pk (db_t *db, const char *table_name);
@@ -141,8 +142,9 @@ char *dbmem_vmprintf (const char *format, va_list list);
 void dbmem_free (void *ptr);
 db_uint64 dbmem_size (void *ptr);
 
-int database_pk_names (db_t *db, const char *table_name, char ***names, int *count);
+// SQL
 char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta);
+char *sql_escape_name (const char *name, char *buffer, size_t bsize);
 
 // USED ONLY by SQLite Cloud to implement RLS
 typedef struct cloudsync_pk_decode_bind_context cloudsync_pk_decode_bind_context;

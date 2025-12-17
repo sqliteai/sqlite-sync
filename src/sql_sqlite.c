@@ -7,7 +7,7 @@
 
 #include "sql.h"
 
-// MARK: - Settings -
+// MARK: Settings
 
 const char * const SQL_SETTINGS_GET_VALUE =
     "SELECT value FROM cloudsync_settings WHERE key=?1;";
@@ -67,7 +67,7 @@ const char * const SQL_SETTINGS_CLEANUP_DROP_ALL =
     "DROP TABLE IF EXISTS cloudsync_table_settings; "
     "DROP TABLE IF EXISTS cloudsync_schema_versions; ";
 
-// MARK: - CloudSync -
+// MARK: CloudSync
 
 const char * const SQL_DBVERSION_BUILD_QUERY =
     "WITH table_names AS ("
@@ -97,3 +97,5 @@ const char * const SQL_SITEID_GETSET_ROWID_BY_SITEID =
     "INSERT INTO cloudsync_site_id (site_id) VALUES (?) "
     "ON CONFLICT(site_id) DO UPDATE SET site_id = site_id "
     "RETURNING rowid;";
+
+// Format

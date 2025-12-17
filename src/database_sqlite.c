@@ -40,6 +40,10 @@ char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, boo
     return sql;
 }
 
+char *sql_escape_name (const char *name, char *buffer, size_t bsize) {
+    return sqlite3_snprintf((int)bsize, buffer, "%q", name);
+}
+
 // MARK: - PRIVATE -
 
 int database_select1_value (db_t *db, const char *sql, char **ptr_value, db_int64 *int_value, DBTYPE expected_type) {
