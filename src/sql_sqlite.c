@@ -67,3 +67,33 @@ const char * const SQL_SETTINGS_CLEANUP_DROP_ALL =
     "DROP TABLE IF EXISTS cloudsync_table_settings; "
     "DROP TABLE IF EXISTS cloudsync_schema_versions; ";
 
+// MARK: - CloudSync -
+
+const char * const SQL_DBVERSION_BUILD_QUERY =
+    "WITH table_names AS ("
+    "SELECT format('%w', name) as tbl_name "
+    "FROM sqlite_master "
+    "WHERE type='table' "
+    "AND name LIKE '%_cloudsync'"
+    "), "
+    "query_parts AS ("
+    "SELECT 'SELECT max(db_version) as version FROM \"' || tbl_name || '\"' as part FROM table_names"
+    "), "
+    "combined_query AS ("
+    "SELECT GROUP_CONCAT(part, ' UNION ALL ') || ' UNION SELECT value as version FROM cloudsync_settings WHERE key = ''pre_alter_dbversion''' as full_query FROM query_parts"
+    ") "
+    "SELECT 'SELECT max(version) as version FROM (' || full_query || ');' FROM combined_query;";
+
+const char * const SQL_SITEID_SELECT_ROWID0 =
+    "SELECT site_id FROM cloudsync_site_id WHERE rowid=0;";
+
+const char * const SQL_DATA_VERSION =
+    "PRAGMA data_version;";
+
+const char * const SQL_SCHEMA_VERSION =
+    "PRAGMA schema_version;";
+
+const char * const SQL_SITEID_GETSET_ROWID_BY_SITEID =
+    "INSERT INTO cloudsync_site_id (site_id) VALUES (?) "
+    "ON CONFLICT(site_id) DO UPDATE SET site_id = site_id "
+    "RETURNING rowid;";

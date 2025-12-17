@@ -9,6 +9,7 @@
 #include "database.h"
 #include "dbutils.h"
 #include "utils.h"
+#include "sql.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -513,7 +514,7 @@ finalize:
 
 db_int64 database_schema_version (db_t *db) {
     db_int64 value = 0;
-    int rc = database_select_int(db, "PRAGMA schema_version;", &value);
+    int rc = database_select_int(db, SQL_SCHEMA_VERSION, &value);
     return (rc == DBRES_OK) ? value : 0;
 }
 

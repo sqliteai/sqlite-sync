@@ -20,6 +20,7 @@
 #include "cloudsync_private.h"
 #include "lz4.h"
 #include "pk.h"
+#include "sql.h"
 #include "utils.h"
 #include "dbutils.h"
 
@@ -325,22 +326,9 @@ char *cloudsync_dbversion_build_query (db_t *db) {
      */
     
     // the good news is that the query can be computed in SQLite without the need to do any extra computation from the host language
-    const char *sql = "WITH table_names AS ("
-                      "SELECT format('%w', name) as tbl_name "
-                      "FROM sqlite_master "
-                      "WHERE type='table' "
-                      "AND name LIKE '%_cloudsync'"
-                      "), "
-                      "query_parts AS ("
-                      "SELECT 'SELECT max(db_version) as version FROM \"' || tbl_name || '\"' as part FROM table_names"
-                      "), "
-                      "combined_query AS ("
-                      "SELECT GROUP_CONCAT(part, ' UNION ALL ') || ' UNION SELECT value as version FROM cloudsync_settings WHERE key = ''pre_alter_dbversion''' as full_query FROM query_parts"
-                      ") "
-                      "SELECT 'SELECT max(version) as version FROM (' || full_query || ');' FROM combined_query;";
     
     char *value = NULL;
-    int rc = database_select_text(db, sql, &value);
+    int rc = database_select_text(db, SQL_DBVERSION_BUILD_QUERY, &value);
     return (rc == DBRES_OK) ? value : NULL;
 }
 
@@ -447,7 +435,7 @@ int cloudsync_load_siteid (db_t *db, cloudsync_context *data) {
     // load site_id
     char *buffer = NULL;
     db_int64 size = 0;
-    int rc = database_select_blob(db, "SELECT site_id FROM cloudsync_site_id WHERE rowid=0;", &buffer, &size);
+    int rc = database_select_blob(db, SQL_SITEID_SELECT_ROWID0, &buffer, &size);
     if (rc != DBRES_OK) return rc;
     if (!buffer || size != UUID_LEN) {
         if (buffer) cloudsync_memory_free(buffer);
@@ -482,16 +470,14 @@ int cloudsync_add_dbvms (db_t *db, cloudsync_context *data) {
     DEBUG_DBFUNCTION("cloudsync_add_stmts");
     
     if (data->data_version_stmt == NULL) {
-        const char *sql = "PRAGMA data_version;";
-        int rc = database_prepare(db, sql, (void **)&data->data_version_stmt, DBFLAG_PERSISTENT);
+        int rc = database_prepare(db, SQL_DATA_VERSION, (void **)&data->data_version_stmt, DBFLAG_PERSISTENT);
         DEBUG_STMT("data_version_stmt %p", data->data_version_stmt);
         if (rc != DBRES_OK) return rc;
         DEBUG_SQL("data_version_stmt: %s", sql);
     }
     
     if (data->schema_version_stmt == NULL) {
-        const char *sql = "PRAGMA schema_version;";
-        int rc = database_prepare(db, sql, (void **)&data->schema_version_stmt, DBFLAG_PERSISTENT);
+        int rc = database_prepare(db, SQL_SCHEMA_VERSION, (void **)&data->schema_version_stmt, DBFLAG_PERSISTENT);
         DEBUG_STMT("schema_version_stmt %p", data->schema_version_stmt);
         if (rc != DBRES_OK) return rc;
         DEBUG_SQL("schema_version_stmt: %s", sql);
@@ -501,8 +487,7 @@ int cloudsync_add_dbvms (db_t *db, cloudsync_context *data) {
         // get and set index of the site_id
         // in SQLite, we can’t directly combine an INSERT and a SELECT to both insert a row and return an identifier (rowid) in a single statement,
         // however, we can use a workaround by leveraging the INSERT statement with ON CONFLICT DO UPDATE and then combining it with RETURNING rowid
-        const char *sql = "INSERT INTO cloudsync_site_id (site_id) VALUES (?) ON CONFLICT(site_id) DO UPDATE SET site_id = site_id RETURNING rowid;";
-        int rc = database_prepare(db, sql, (void **)&data->getset_siteid_stmt, DBFLAG_PERSISTENT);
+        int rc = database_prepare(db, SQL_SITEID_GETSET_ROWID_BY_SITEID, (void **)&data->getset_siteid_stmt, DBFLAG_PERSISTENT);
         DEBUG_STMT("getset_siteid_stmt %p", data->getset_siteid_stmt);
         if (rc != DBRES_OK) return rc;
         DEBUG_SQL("getset_siteid_stmt: %s", sql);
