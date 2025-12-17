@@ -489,7 +489,7 @@ int cloudsync_changesvtab_insert_gos (sqlite3_vtab *vtab, cloudsync_context *dat
     DEBUG_VTAB("cloudsync_changesvtab_insert_gos");
     
     // Grow-Only Set (GOS) Algorithm: Only insertions are allowed, deletions and updates are prevented from a trigger.
-    int rc = merge_insert_col(data, table, insert_pk, insert_pk_len, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
+    int rc = merge_insert_col(data, table, insert_pk, insert_pk_len, insert_name, insert_value, (int64_t)insert_col_version, (int64_t)insert_db_version, insert_site_id, insert_site_id_len, (int64_t)insert_seq, (int64_t *)rowid);
     
     if (rc != SQLITE_OK) {
         vtab_set_error(vtab, "%s", cloudsync_errmsg(data));
@@ -537,17 +537,17 @@ int cloudsync_changesvtab_insert (sqlite3_vtab *vtab, int argc, sqlite3_value **
     int insert_pk_len = sqlite3_value_bytes(argv[1]);
     const char *insert_name = (sqlite3_value_type(argv[2]) == SQLITE_NULL) ? CLOUDSYNC_TOMBSTONE_VALUE : (const char *)sqlite3_value_text(argv[2]);
     sqlite3_value *insert_value = argv[3];
-    sqlite3_int64 insert_col_version = sqlite3_value_int(argv[4]);
-    sqlite3_int64 insert_db_version = sqlite3_value_int(argv[5]);
+    int64_t insert_col_version = (int64_t)sqlite3_value_int(argv[4]);
+    int64_t insert_db_version = (int64_t)sqlite3_value_int(argv[5]);
     const char *insert_site_id = (const char *)sqlite3_value_blob(argv[6]);
     int insert_site_id_len = sqlite3_value_bytes(argv[6]);
-    sqlite3_int64 insert_cl = sqlite3_value_int(argv[7]);
-    sqlite3_int64 insert_seq = sqlite3_value_int(argv[8]);
+    int64_t insert_cl = (int64_t)sqlite3_value_int(argv[7]);
+    int64_t insert_seq = (int64_t)sqlite3_value_int(argv[8]);
     
     // perform different logic for each different table algorithm
-    if (table_algo_isgos(table)) return cloudsync_changesvtab_insert_gos(vtab, data, table, insert_pk, insert_pk_len, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
+    if (table_algo_isgos(table)) return cloudsync_changesvtab_insert_gos(vtab, data, table, insert_pk, insert_pk_len, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, (int64_t *)rowid);
     
-    int rc = merge_insert (data, table, insert_pk, insert_pk_len, insert_cl, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
+    int rc = merge_insert (data, table, insert_pk, insert_pk_len, insert_cl, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, (int64_t *)rowid);
     if (rc != SQLITE_OK) {
         return vtab_set_error(vtab, "%s", cloudsync_errmsg(data));
     }
