@@ -10,6 +10,7 @@
 
 #include <stdarg.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdbool.h>
 
 typedef long long int db_int64;
