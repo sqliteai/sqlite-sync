@@ -55,7 +55,7 @@ TEST_SRC = $(wildcard $(TEST_DIR)/*.c)
 TEST_FILES = $(SRC_FILES) $(TEST_SRC) $(wildcard $(SQLITE_DIR)/*.c)
 RELEASE_OBJ = $(patsubst %.c, $(BUILD_RELEASE)/%.o, $(notdir $(SRC_FILES)))
 TEST_OBJ = $(patsubst %.c, $(BUILD_TEST)/%.o, $(notdir $(TEST_FILES)))
-COV_FILES = $(filter-out $(SRC_DIR)/lz4.c $(SRC_DIR)/network.c $(SRC_DIR)/database_postgresql.c, $(SRC_FILES))
+COV_FILES = $(filter-out $(SRC_DIR)/lz4.c $(SRC_DIR)/network.c $(SRC_DIR)/sql_sqlite.c $(SRC_DIR)/database_postgresql.c, $(SRC_FILES))
 CURL_LIB = $(CURL_DIR)/$(PLATFORM)/libcurl.a
 TEST_TARGET = $(patsubst %.c,$(DIST_DIR)/%$(EXE), $(notdir $(TEST_SRC)))
 
