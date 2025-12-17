@@ -11,6 +11,7 @@
 #include "utils.h"
 #include "sql.h"
 
+#include <inttypes.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -547,7 +548,7 @@ bool database_check_schema_hash (db_t *db, uint64_t hash) {
     // the idea is to allow changes on stale peers and to be able to apply these changes on peers with newer schema,
     // but it requires alter table operation on augmented tables only add new columns and never drop columns for backward compatibility
     char sql[1024];
-    snprintf(sql, sizeof(sql), "SELECT 1 FROM cloudsync_schema_versions WHERE hash = (%lld)", hash);
+    snprintf(sql, sizeof(sql), "SELECT 1 FROM cloudsync_schema_versions WHERE hash = (%" PRId64 ")", hash);
     
     int64_t value = 0;
     database_select_int(db, sql, &value);
@@ -570,9 +571,9 @@ int database_update_schema_hash (db_t *db, uint64_t *hash) {
     
     char sql[1024];
     snprintf(sql, sizeof(sql), "INSERT INTO cloudsync_schema_versions (hash, seq) "
-                               "VALUES (%lld, COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
+                               "VALUES (%" PRId64 ", COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
                                "ON CONFLICT(hash) DO UPDATE SET "
-                               "seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);", (long long)h);
+                               "seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);", h);
     rc = database_exec(db, sql);
     if (rc == SQLITE_OK && hash) *hash = h;
     return rc;

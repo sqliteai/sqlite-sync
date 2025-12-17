@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <inttypes.h>
 #include <fcntl.h>
 #include "sqlite3.h"
 
@@ -1108,12 +1109,12 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     int64_t db_version = 0;
     rc = database_select_int(db, "SELECT cloudsync_db_version();", &db_version);
     if (rc != DBRES_OK) goto abort_test_functions;
-    if (print_results) printf("DB Version: %lld\n", db_version);
+    if (print_results) printf("DB Version: %" PRId64 "\n", db_version);
     
     int64_t db_version_next = 0;
     rc = database_select_int(db, "SELECT cloudsync_db_version_next();", &db_version);
     if (rc != DBRES_OK) goto abort_test_functions;
-    if (print_results) printf("DB Version Next: %lld\n", db_version_next);
+    if (print_results) printf("DB Version Next: %" PRId64 "\n", db_version_next);
 
     rc = sqlite3_exec(db, "CREATE TABLE tbl1 (col1 TEXT PRIMARY KEY NOT NULL, col2);", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
@@ -1472,7 +1473,7 @@ bool do_test_pk_single_value (sqlite3 *db, int type, int64_t ivalue, double dval
     
     pklist[0].type = type;
     if (type == SQLITE_INTEGER) {
-        snprintf(sql, sizeof(sql), "SELECT cloudsync_pk_encode(%lld);", ivalue);
+        snprintf(sql, sizeof(sql), "SELECT cloudsync_pk_encode(%" PRId64 ");", ivalue);
         pklist[0].ivalue = ivalue;
     } else if (type == SQLITE_FLOAT) {
         snprintf(sql, sizeof(sql), "SELECT cloudsync_pk_encode(%f);", dvalue);
@@ -6289,10 +6290,10 @@ finalize:
     
     cloudsync_memory_finalize();
 
-    sqlite3_int64 memory_used = sqlite3_memory_used();
+    int64_t memory_used = (int64_t)sqlite3_memory_used();
     result += test_report("Memory Leaks Check:", memory_used == 0);
     if (memory_used > 0) {
-        printf("\tleaked: %lld B\n", memory_used);
+        printf("\tleaked: %" PRId64 " B\n", memory_used);
         result++;
     }
     

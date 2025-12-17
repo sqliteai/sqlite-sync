@@ -682,8 +682,7 @@ void cloudsync_network_set_apikey (sqlite3_context *context, int argc, sqlite3_v
 void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, sqlite3_value **argv) {
     sqlite3 *db = sqlite3_context_db_handle(context);
     
-    // TODO: why hex(site_id) here if only one int column is returned?
-    char *sql = "SELECT max(db_version), hex(site_id) FROM cloudsync_changes WHERE site_id == (SELECT site_id FROM cloudsync_site_id WHERE rowid=0)";
+    char *sql = "SELECT max(db_version) FROM cloudsync_changes WHERE site_id == (SELECT site_id FROM cloudsync_site_id WHERE rowid=0)";
     int64_t last_local_change = 0;
     int rc = database_select_int(db, sql, &last_local_change);
     if (rc != DBRES_OK) {
@@ -759,11 +758,11 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     char buf[256];
     sqlite3 *db = sqlite3_context_db_handle(context);
     if (new_db_version != db_version) {
-        snprintf(buf, sizeof(buf), "%lld", new_db_version);
+        snprintf(buf, sizeof(buf), "%" PRId64, new_db_version);
         dbutils_settings_set_key_value(db, data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
     }
     if (new_seq != seq) {
-        snprintf(buf, sizeof(buf), "%lld", new_seq);
+        snprintf(buf, sizeof(buf), "%" PRId64, new_seq);
         dbutils_settings_set_key_value(db, data, CLOUDSYNC_KEY_SEND_SEQ, buf);
     }
     
@@ -793,7 +792,7 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows) {
     // http://uuid.g5.sqlite.cloud/v1/cloudsync/{dbname}/{site_id}/{db_version}/{seq}/check
     // the data->check_endpoint stops after {site_id}, just need to append /{db_version}/{seq}/check
     char endpoint[2024];
-    snprintf(endpoint, sizeof(endpoint), "%s/%lld/%d/%s", data->check_endpoint, (long long)db_version, seq, CLOUDSYNC_ENDPOINT_CHECK);
+    snprintf(endpoint, sizeof(endpoint), "%s/%" PRId64 "/%d/%s", data->check_endpoint, db_version, seq, CLOUDSYNC_ENDPOINT_CHECK);
     
     NETWORK_RESULT result = network_receive_buffer(data, endpoint, data->authentication, true, true, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
     int rc = SQLITE_OK;

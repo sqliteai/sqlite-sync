@@ -6,6 +6,8 @@
 //
 
 #include <stdlib.h>
+#include <inttypes.h>
+
 #include "sql.h"
 #include "utils.h"
 #include "dbutils.h"
@@ -71,7 +73,7 @@ int dbutils_value_compare (dbvalue_t *lvalue, dbvalue_t *rvalue) {
 void dbutils_debug_value (dbvalue_t *value) {
     switch (database_value_type(value)) {
         case DBTYPE_INTEGER:
-            printf("\t\tINTEGER: %lld\n", database_value_int(value));
+            printf("\t\tINTEGER: %" PRId64 "\n", database_value_int(value));
             break;
         case DBTYPE_FLOAT:
             printf("\t\tFLOAT: %f\n", database_value_double(value));

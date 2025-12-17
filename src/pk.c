@@ -7,6 +7,7 @@
 
 #include "pk.h"
 #include "utils.h"
+#include <inttypes.h>
  
 /*
  
@@ -110,7 +111,7 @@ int pk_decode_bind_callback (void *xdata, int index, int type, int64_t ival, dou
 int pk_decode_print_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
     switch (type) {
         case DBTYPE_INTEGER:
-            printf("%d\tINTEGER:\t%lld\n", index, (long long)ival);
+            printf("%d\tINTEGER:\t%" PRId64 "\n", index, ival);
             break;
         
         case DBTYPE_FLOAT:
@@ -126,7 +127,7 @@ int pk_decode_print_callback (void *xdata, int index, int type, int64_t ival, do
             break;
             
         case DBTYPE_BLOB:
-            printf("%d\tBLOB:\t%lld bytes\n", index, (long long)ival);
+            printf("%d\tBLOB:\t%" PRId64 " bytes\n", index, ival);
             break;
     }
     

@@ -1739,7 +1739,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
     
     // update key to be later used in cloudsync_dbversion_rebuild
     char buf[256];
-    snprintf(buf, sizeof(buf), "%lld", data->db_version);
+    snprintf(buf, sizeof(buf), "%" PRId64, data->db_version);
     dbutils_settings_set_key_value(db, NULL, "pre_alter_dbversion", buf);
     
 finalize:
@@ -2310,7 +2310,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
             if (rc != DBRES_DONE) {
                 // don't "break;", the error can be due to a RLS policy.
                 // in case of error we try to apply the following changes
-                // printf("cloudsync_payload_apply error on db_version %lld/%lld: (%d) %s\n", decoded_context.db_version, decoded_context.seq, rc, database_errmsg(db));
+                // printf("cloudsync_payload_apply error on db_version %PRId64/%PRId64: (%d) %s\n", decoded_context.db_version, decoded_context.seq, rc, database_errmsg(db));
             }
         }
         
@@ -2341,11 +2341,11 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     if (rc == DBRES_OK) {
         char buf[256];
         if (decoded_context.db_version >= dbversion) {
-            snprintf(buf, sizeof(buf), "%lld", decoded_context.db_version);
+            snprintf(buf, sizeof(buf), "%" PRId64, decoded_context.db_version);
             dbutils_settings_set_key_value(db, NULL, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
             
             if (decoded_context.seq != seq) {
-                snprintf(buf, sizeof(buf), "%lld", decoded_context.seq);
+                snprintf(buf, sizeof(buf), "%" PRId64, decoded_context.seq);
                 dbutils_settings_set_key_value(db, NULL, CLOUDSYNC_KEY_CHECK_SEQ, buf);
             }
         }
@@ -2428,11 +2428,11 @@ int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, i
     char buf[256];
     db_t *db = data->db;
     if (new_db_version != db_version) {
-        snprintf(buf, sizeof(buf), "%lld", new_db_version);
+        snprintf(buf, sizeof(buf), "%" PRId64, new_db_version);
         dbutils_settings_set_key_value(db, NULL, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
     }
     if (new_seq != seq) {
-        snprintf(buf, sizeof(buf), "%lld", new_seq);
+        snprintf(buf, sizeof(buf), "%" PRId64, new_seq);
         dbutils_settings_set_key_value(db, NULL, CLOUDSYNC_KEY_SEND_SEQ, buf);
     }
     

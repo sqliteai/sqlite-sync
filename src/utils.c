@@ -586,7 +586,7 @@ void memdebug_finalize (void) {
 void *memdebug_alloc (uint64_t size) {
     void *ptr = dbmem_alloc(size);
     if (!ptr) {
-        BUILD_ERROR("Unable to allocated a block of %lld bytes", size);
+        BUILD_ERROR("Unable to allocated a block of %" PRIu64" bytes", size);
         BUILD_STACK(n, stack);
         memdebug_report(current_error, stack, n, NULL);
         return NULL;
@@ -617,7 +617,7 @@ void *memdebug_realloc (void *ptr, uint64_t new_size) {
     void *back_ptr = ptr;
     void *new_ptr = dbmem_realloc(ptr, new_size);
     if (!new_ptr) {
-        BUILD_ERROR("Unable to reallocate a block of %lld bytes.", new_size);
+        BUILD_ERROR("Unable to reallocate a block of %" PRIu64 " bytes.", new_size);
         BUILD_STACK(n, stack);
         memdebug_report(current_error, stack, n, slot);
         return NULL;
