@@ -1041,7 +1041,7 @@ bool table_add_to_context (db_t *db, cloudsync_context *data, table_algo algo, c
         
         char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID, table_name);
         if (!sql) goto abort_add_table;
-        int rc = database_exec_callback(db, sql, table_add_to_context_cb, (void *)table);
+        rc = database_exec_callback(db, sql, table_add_to_context_cb, (void *)table);
         cloudsync_memory_free(sql);
         if (rc == DBRES_ABORT) goto abort_add_table;
     }
@@ -1720,7 +1720,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
         if (!sql) {rc = DBRES_NOMEM; goto finalize;}
         
         char *pkclause = NULL;
-        int rc = database_select_text(db, sql, &pkclause);
+        rc = database_select_text(db, sql, &pkclause);
         cloudsync_memory_free(sql);
         if (rc != DBRES_OK) goto finalize;
         char *pkvalues = (pkclause) ? pkclause : "rowid";
@@ -2061,9 +2061,9 @@ void cloudsync_payload_header_init (cloudsync_payload_header *header, uint32_t e
     
     header->signature = htonl(CLOUDSYNC_PAYLOAD_SIGNATURE);
     header->version = CLOUDSYNC_PAYLOAD_VERSION;
-    header->libversion[0] = major;
-    header->libversion[1] = minor;
-    header->libversion[2] = patch;
+    header->libversion[0] = (uint8_t)major;
+    header->libversion[1] = (uint8_t)minor;
+    header->libversion[2] = (uint8_t)patch;
     header->expanded_size = htonl(expanded_size);
     header->ncols = htons(ncols);
     header->nrows = htonl(nrows);
@@ -2075,7 +2075,7 @@ int cloudsync_payload_encode_step (cloudsync_payload_context *payload, cloudsync
     // debug_values(argc, argv);
     
     // check if the step function is called for the first time
-    if (payload->nrows == 0) payload->ncols = argc;
+    if (payload->nrows == 0) payload->ncols = (uint16_t)argc;
     
     size_t breq = pk_encode_size((dbvalue_t **)argv, argc, 0);
     if (cloudsync_datapayload_check(payload, breq) == false) {

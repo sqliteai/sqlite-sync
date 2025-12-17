@@ -305,7 +305,7 @@ char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bs
         if (!buffer) return NULL;
         
         // the first u8 value is the total number of items in the primary key(s)
-        bseek = pk_encode_u8(buffer, 0, argc);
+        bseek = pk_encode_u8(buffer, 0, (uint8_t)argc);
     }
         
     for (int i = 0; i < argc; i++) {
@@ -319,7 +319,7 @@ char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bs
                 }
                 if (value < 0) {value = -value; type = DATABASE_TYPE_NEGATIVE_INTEGER;}
                 size_t nbytes = pk_encode_nbytes_needed(value);
-                uint8_t type_byte = (nbytes << 3) | type;
+                uint8_t type_byte = (uint8_t)((nbytes << 3) | type);
                 bseek = pk_encode_u8(buffer, bseek, type_byte);
                 bseek = pk_encode_int64(buffer, bseek, value, nbytes);
             }
@@ -329,7 +329,7 @@ char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bs
                 if (value < 0) {value = -value; type = DATABASE_TYPE_NEGATIVE_FLOAT;}
                 int64_t net_double;
                 memcpy(&net_double, &value, sizeof(int64_t));
-                bseek = pk_encode_u8(buffer, bseek, type);
+                bseek = pk_encode_u8(buffer, bseek, (uint8_t)type);
                 bseek = pk_encode_int64(buffer, bseek, net_double, sizeof(int64_t));
             }
                 break;
@@ -337,7 +337,7 @@ char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bs
             case DBTYPE_BLOB: {
                 int32_t len = (int32_t)database_value_bytes(argv[i]);
                 size_t nbytes = pk_encode_nbytes_needed(len);
-                uint8_t type_byte = (nbytes << 3) | database_value_type(argv[i]);
+                uint8_t type_byte = (uint8_t)((nbytes << 3) | database_value_type(argv[i]));
                 bseek = pk_encode_u8(buffer, bseek, type_byte);
                 bseek = pk_encode_int64(buffer, bseek, len, nbytes);
                 bseek = pk_encode_data(buffer, bseek, (char *)database_value_blob(argv[i]), len);

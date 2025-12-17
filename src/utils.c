@@ -136,7 +136,7 @@ char *cloudsync_string_ndup (const char *str, size_t len, bool lowercase) {
     if (lowercase) {
         // convert each character to lowercase and copy it to the new string
         for (size_t i = 0; i < len; i++) {
-            s[i] = tolower(str[i]);
+            s[i] = (char)tolower(str[i]);
         }
     } else {
         memcpy(s, str, len);

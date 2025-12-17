@@ -885,7 +885,7 @@ void do_delete (sqlite3 *db, int table_mask, bool print_result) {
         if (print_result) printf("TESTING DELETE on %s\n", table_name);
         
         char *sql = sqlite3_mprintf("DELETE FROM \"%w\" WHERE first_name='name5';", table_name);
-        int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
         sqlite3_free(sql);
         if (rc != SQLITE_OK) goto finalize;
         
@@ -899,7 +899,7 @@ void do_delete (sqlite3 *db, int table_mask, bool print_result) {
         const char *table_name = CUSTOMERS_NOCOLS_TABLE;
         if (print_result) printf("TESTING DELETE on %s\n", table_name);
         
-        int rc = sqlite3_exec(db, "DELETE FROM \"" CUSTOMERS_NOCOLS_TABLE "\" WHERE first_name='name100005';", NULL, NULL, NULL);
+        rc = sqlite3_exec(db, "DELETE FROM \"" CUSTOMERS_NOCOLS_TABLE "\" WHERE first_name='name100005';", NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto finalize;
         
         rc = sqlite3_exec(db, "DELETE FROM \"" CUSTOMERS_NOCOLS_TABLE "\" WHERE first_name='name100007';", NULL, NULL, NULL);
@@ -910,7 +910,7 @@ void do_delete (sqlite3 *db, int table_mask, bool print_result) {
         const char *table_name = "customers_noprikey";
         if (print_result) printf("TESTING DELETE on %s\n", table_name);
         
-        int rc = sqlite3_exec(db, "DELETE FROM customers_noprikey WHERE first_name='name200005';", NULL, NULL, NULL);
+        rc = sqlite3_exec(db, "DELETE FROM customers_noprikey WHERE first_name='name200005';", NULL, NULL, NULL);
         if (rc != SQLITE_OK) goto finalize;
         
         rc = sqlite3_exec(db, "DELETE FROM customers_noprikey WHERE first_name='name200007';", NULL, NULL, NULL);
@@ -1667,9 +1667,9 @@ bool do_test_pk (sqlite3 *db, int ntest, bool print_result) {
         // cleanup memory
         sqlite3_finalize(stmt);
         stmt = NULL;
-        for (int i=0; i<nkeys; ++i) {
-            int t = pklist[i].type;
-            if ((t == SQLITE_TEXT) || (t == SQLITE_BLOB)) free(pklist[i].pvalue);
+        for (int k=0; k<nkeys; ++k) {
+            int t = pklist[k].type;
+            if ((t == SQLITE_TEXT) || (t == SQLITE_BLOB)) free(pklist[k].pvalue);
         }
     }
     
@@ -2537,7 +2537,7 @@ bool do_test_merge (int nclients, bool print_result, bool cleanup_databases) {
     // compare results
     for (int i=1; i<nclients; ++i) {
         char *sql = sqlite3_mprintf("SELECT * FROM \"%w\" ORDER BY first_name, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\";", CUSTOMERS_TABLE);
-        bool result = do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result);
+        result = do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result);
         sqlite3_free(sql);
         if (result == false) goto finalize;
     }
@@ -2662,7 +2662,7 @@ bool do_test_merge_2 (int nclients, int table_mask, bool print_result, bool clea
     for (int i=1; i<nclients; ++i) {
         if (table_mask & TEST_PRIKEYS) {
             char *sql = sqlite3_mprintf("SELECT * FROM \"%w\" ORDER BY first_name, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\";", CUSTOMERS_TABLE);
-            bool result = do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result);
+            result = do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result);
             sqlite3_free(sql);
             if (result == false) goto finalize;
         }
@@ -2763,7 +2763,7 @@ bool do_test_merge_4 (int nclients, bool print_result, bool cleanup_databases) {
     // compare results
     for (int i=1; i<nclients; ++i) {
         sqlite3_snprintf(sizeof(buf), buf, "SELECT * FROM \"%w\" ORDER BY first_name, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\";", CUSTOMERS_TABLE);
-        bool result = do_compare_queries(db[0], buf, db[i], buf, -1, -1, print_result);
+        result = do_compare_queries(db[0], buf, db[i], buf, -1, -1, print_result);
         if (result == false) goto finalize;
     
         const char *sql2 = "SELECT 'name1', 'surname1', 3, 'note3', 'stamp9'";
@@ -2784,9 +2784,9 @@ finalize:
         if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK)) printf("do_test_merge_4 error: %s\n", sqlite3_errmsg(db[i]));
         if (db[i]) close_db(db[i]);
         if (cleanup_databases) {
-            char buf[256];
-            do_build_database_path(buf, i, timestamp, saved_counter++);
-            file_delete_internal(buf);
+            char path[256];
+            do_build_database_path(path, i, timestamp, saved_counter++);
+            file_delete_internal(path);
         }
     }
     return result;
@@ -2886,9 +2886,9 @@ finalize:
         if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK)) printf("do_test_merge_5: %s\n", sqlite3_errmsg(db[i]));
         if (db[i]) close_db(db[i]);
         if (cleanup_databases) {
-            char buf[256];
-            do_build_database_path(buf, i, timestamp, saved_counter++);
-            file_delete_internal(buf);
+            char path[256];
+            do_build_database_path(path, i, timestamp, saved_counter++);
+            file_delete_internal(path);
         }
     }
     return result;
@@ -3056,9 +3056,9 @@ bool do_test_merge_check_db_version_2 (int nclients, bool print_result, bool cle
     }
     
     // check grouped values from cloudsync_changes
-    char *query_changes = "SELECT db_version, COUNT(distinct(seq)) AS cnt FROM cloudsync_changes GROUP BY db_version;";
+    char *sql_changes = "SELECT db_version, COUNT(distinct(seq)) AS cnt FROM cloudsync_changes GROUP BY db_version;";
     char *query_expected_results = "SELECT * FROM (VALUES (1,2),(2,2),(3,2),(4,2),(5,4));";
-    if (do_compare_queries(db[0], query_changes, db[0], query_expected_results, -1, -1, print_result) == false) {
+    if (do_compare_queries(db[0], sql_changes, db[0], query_expected_results, -1, -1, print_result) == false) {
         goto finalize;
     }
     
@@ -3139,8 +3139,7 @@ bool do_test_insert_cloudsync_changes (bool print_result, bool cleanup_databases
     
     if (print_result) {
         printf("\n-> customers\n");
-        char *sql = "SELECT * FROM todo;";
-        do_query(db, sql, query_changes);
+        do_query(db, "SELECT * FROM todo;", query_changes);
     }
     
     result = true;
@@ -3221,7 +3220,7 @@ bool do_test_merge_alter_schema_1 (int nclients, bool print_result, bool cleanup
     // compare results
     for (int i=1; i<nclients; ++i) {
         char *sql = sqlite3_mprintf("SELECT * FROM \"%w\" ORDER BY first_name, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\";", CUSTOMERS_TABLE);
-        bool result = do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result);
+        result = do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result);
         sqlite3_free(sql);
         if (result == false) goto finalize;
     }
@@ -4971,9 +4970,9 @@ bool do_test_merge_index_consistency (int nclients, bool print_result, bool clea
         rc = sqlite3_prepare_v2(db[i], sql, -1, &stmt, NULL);
         if (rc == SQLITE_OK) {
             if (sqlite3_step(stmt) == SQLITE_ROW) {
-                const char *result = (const char*)sqlite3_column_text(stmt, 0);
-                if (strcmp(result, "ok") != 0) {
-                    printf("Index integrity issue in client %d: %s\n", i, result);
+                const char *result2 = (const char*)sqlite3_column_text(stmt, 0);
+                if (strcmp(result2, "ok") != 0) {
+                    printf("Index integrity issue in client %d: %s\n", i, result2);
                     sqlite3_finalize(stmt);
                     goto finalize;
                 }
@@ -5607,8 +5606,8 @@ bool do_test_prikey (int nclients, bool print_result, bool cleanup_databases) {
     
     // compare results
     for (int i=1; i<nclients; ++i) {
-        const char *sql = "SELECT * FROM foo ORDER BY a;";
-        if (do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result) == false) goto finalize;
+        const char *sql_query = "SELECT * FROM foo ORDER BY a;";
+        if (do_compare_queries(db[0], sql_query, db[i], sql_query, -1, -1, print_result) == false) goto finalize;
     }
     
     result = true;
@@ -5736,8 +5735,8 @@ bool do_test_gos (int nclients, bool print_result, bool cleanup_databases) {
     
     // compare results
     for (int i=1; i<nclients; ++i) {
-        const char *sql = "SELECT * FROM log ORDER BY id;";
-        if (do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result) == false) goto finalize;
+        const char *sql_query = "SELECT * FROM log ORDER BY id;";
+        if (do_compare_queries(db[0], sql_query, db[i], sql_query, -1, -1, print_result) == false) goto finalize;
     }
     
     if (print_result) {
@@ -5813,7 +5812,7 @@ bool do_test_network_encode_decode (int nclients, bool print_result, bool cleanu
             
             char *blob = NULL;
             db_int64 blob_size = 0;
-            int rc = database_select_blob(db[target], src_sql, &blob, &blob_size);
+            rc = database_select_blob(db[target], src_sql, &blob, &blob_size);
             if ((rc != DBRES_OK) || (!blob)) goto finalize;
             
             const char *values[] = {blob};
@@ -5830,7 +5829,7 @@ bool do_test_network_encode_decode (int nclients, bool print_result, bool cleanu
     // compare results
     for (int i=1; i<nclients; ++i) {
         char *sql = sqlite3_mprintf("SELECT * FROM \"%w\" ORDER BY first_name, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\";", CUSTOMERS_TABLE);
-        bool result = do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result);
+        result = do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result);
         sqlite3_free(sql);
         if (result == false) goto finalize;
     }
@@ -6018,7 +6017,7 @@ bool do_test_alter(int nclients, int alter_version, bool print_result, bool clea
                     sql = sqlite3_mprintf("SELECT * FROM \"%w\" ORDER BY first_name, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\";", CUSTOMERS_TABLE);
                     break;
             }
-            bool result = do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result);
+            result = do_compare_queries(db[0], sql, db[i], sql, -1, -1, print_result);
             sqlite3_free(sql);
             if (result == false) goto finalize;
         }
