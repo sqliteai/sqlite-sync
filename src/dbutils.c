@@ -6,6 +6,7 @@
 //
 
 #include <stdlib.h>
+#include "sql.h"
 #include "utils.h"
 #include "dbutils.h"
 #include "cloudsync.h"
@@ -107,8 +108,7 @@ char *dbutils_settings_get_value (db_t *db, const char *key, char *buffer, size_
     size_t size = 0;
     
     dbvm_t *vm = NULL;
-    char *sql = "SELECT value FROM cloudsync_settings WHERE key=?1;";
-    int rc = database_prepare(db, sql, (void **)&vm, 0);
+    int rc = database_prepare(db, SQL_SETTINGS_GET_VALUE, (void **)&vm, 0);
     if (rc != DBRES_OK) goto finalize_get_value;
     
     rc = databasevm_bind_text(vm, 1, key, -1);
@@ -158,19 +158,17 @@ int dbutils_settings_set_key_value (db_t *db, cloudsync_context *data, const cha
     if (db == NULL) db = cloudsync_db(data);
     
     if (key && value) {
-        char *sql = "REPLACE INTO cloudsync_settings (key, value) VALUES (?1, ?2);";
         const char *values[] = {key, value};
         DBTYPE types[] = {DBTYPE_TEXT, DBTYPE_TEXT};
         int lens[] = {-1, -1};
-        rc = database_write(db, sql, values, types, lens, 2);
+        rc = database_write(db, SQL_SETTINGS_SET_KEY_VALUE_REPLACE, values, types, lens, 2);
     }
     
     if (value == NULL) {
-        char *sql = "DELETE FROM cloudsync_settings WHERE key = ?1;";
         const char *values[] = {key};
         DBTYPE types[] = {DBTYPE_TEXT};
         int lens[] = {-1};
-        rc = database_write(db, sql, values, types, lens, 1);
+        rc = database_write(db, SQL_SETTINGS_SET_KEY_VALUE_DELETE, values, types, lens, 1);
     }
     
     if (rc == DBRES_OK && data) cloudsync_sync_key(data, key, value);
@@ -216,8 +214,7 @@ char *dbutils_table_settings_get_value (db_t *db, const char *table, const char 
     size_t size = 0;
     
     dbvm_t *vm = NULL;
-    char *sql = "SELECT value FROM cloudsync_table_settings WHERE (tbl_name=?1 AND col_name=?2 AND key=?3);";
-    int rc = database_prepare(db, sql, (void **)&vm, 0);
+    int rc = database_prepare(db, SQL_TABLE_SETTINGS_GET_VALUE, (void **)&vm, 0);
     if (rc != DBRES_OK) goto finalize_get_value;
     
     rc = databasevm_bind_text(vm, 1, table, -1);
@@ -276,6 +273,7 @@ int dbutils_table_settings_set_key_value (db_t *db, cloudsync_context *data, con
     
     // sanity check tbl_name
     if (table == NULL) {
+        // TODO: fix me
         //if (context) sqlite3_result_error(context, "cloudsync_set_table/set_column requires a non-null table parameter", -1);
         return DBRES_ERROR;
     }
@@ -285,28 +283,25 @@ int dbutils_table_settings_set_key_value (db_t *db, cloudsync_context *data, con
     
     // remove all table_name entries
     if (key == NULL) {
-        char *sql = "DELETE FROM cloudsync_table_settings WHERE tbl_name=?1;";
         const char *values[] = {table};
         DBTYPE types[] = {DBTYPE_TEXT};
         int lens[] = {-1};
-        rc = database_write(db, sql, values, types, lens, 1);
+        rc = database_write(db, SQL_TABLE_SETTINGS_DELETE_ALL_FOR_TABLE, values, types, lens, 1);
         return rc;
     }
     
     if (key && value) {
-        char *sql = "REPLACE INTO cloudsync_table_settings (tbl_name, col_name, key, value) VALUES (?1, ?2, ?3, ?4);";
         const char *values[] = {table, column, key, value};
         DBTYPE types[] = {DBTYPE_TEXT, DBTYPE_TEXT, DBTYPE_TEXT, DBTYPE_TEXT};
         int lens[] = {-1, -1, -1, -1};
-        rc = database_write(db, sql, values, types, lens, 4);
+        rc = database_write(db, SQL_TABLE_SETTINGS_REPLACE, values, types, lens, 4);
     }
     
     if (value == NULL) {
-        char *sql = "DELETE FROM cloudsync_table_settings WHERE (tbl_name=?1 AND col_name=?2 AND key=?3);";
         const char *values[] = {table, column, key};
         DBTYPE types[] = {DBTYPE_TEXT, DBTYPE_TEXT, DBTYPE_TEXT};
         int lens[] = {-1, -1, -1};
-        rc = database_write(db, sql, values, types, lens, 3);
+        rc = database_write(db, SQL_TABLE_SETTINGS_DELETE_ONE, values, types, lens, 3);
     }
     
     // unused in this version
@@ -318,7 +313,7 @@ int dbutils_table_settings_set_key_value (db_t *db, cloudsync_context *data, con
 db_int64 dbutils_table_settings_count_tables (db_t *db) {
     DEBUG_SETTINGS("dbutils_table_settings_count_tables");
     db_int64 count = 0;
-    int rc = database_select_int(db, "SELECT count(*) FROM cloudsync_table_settings WHERE key='algo';", &count);
+    int rc = database_select_int(db, SQL_TABLE_SETTINGS_COUNT_TABLES, &count);
     return (rc == DBRES_OK) ? count : 0;
 }
 
@@ -374,12 +369,12 @@ int dbutils_settings_load (db_t *db, cloudsync_context *data) {
     DEBUG_SETTINGS("dbutils_settings_load %p", data);
     
     // load global settings
-    const char *sql = "SELECT key, value FROM cloudsync_settings;";
+    const char *sql = SQL_SETTINGS_LOAD_GLOBAL;
     int rc = database_exec_callback(db, sql, dbutils_settings_load_callback, data);
     if (rc != DBRES_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", database_errmsg(db));
     
     // load table-specific settings
-    sql = "SELECT lower(tbl_name), lower(col_name), key, value FROM cloudsync_table_settings ORDER BY tbl_name;";
+    sql = SQL_SETTINGS_LOAD_TABLE;
     rc = database_exec_callback(db, sql, dbutils_settings_table_load_callback, data);
     if (rc != DBRES_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", database_errmsg(db));
     
@@ -397,20 +392,18 @@ int dbutils_settings_init (db_t *db, void *cloudsync_data) {
     if (settings_exists == false) {
         DEBUG_SETTINGS("cloudsync_settings does not exist (creating a new one)");
         
-        char sql[1024];
-        
         // create table and fill-in initial data
-        snprintf(sql, sizeof(sql), "CREATE TABLE IF NOT EXISTS cloudsync_settings (key TEXT PRIMARY KEY NOT NULL COLLATE NOCASE, value TEXT);");
-        rc = database_exec(db, sql);
+        rc = database_exec(db, SQL_CREATE_SETTINGS_TABLE);
         if (rc != DBRES_OK) return rc;
         
         // library version
-        snprintf(sql, sizeof(sql), "INSERT INTO cloudsync_settings (key, value) VALUES ('%s', '%s');", CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
+        char sql[1024];
+        snprintf(sql, sizeof(sql), SQL_INSERT_SETTINGS_STR_FORMAT, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
         rc = database_exec(db, sql);
         if (rc != DBRES_OK) return rc;
         
         // schema version
-        snprintf(sql, sizeof(sql), "INSERT INTO cloudsync_settings (key, value) VALUES ('%s', %lld);", CLOUDSYNC_KEY_SCHEMAVERSION, (long long)database_schema_version(db));
+        snprintf(sql, sizeof(sql), SQL_INSERT_SETTINGS_INT_FORMAT, CLOUDSYNC_KEY_SCHEMAVERSION, (long long)database_schema_version(db));
         rc = database_exec(db, sql);
         if (rc != DBRES_OK) return rc;
     }
@@ -421,8 +414,7 @@ int dbutils_settings_init (db_t *db, void *cloudsync_data) {
         // create table and fill-in initial data
         // site_id is implicitly indexed
         // the rowid column is the primary key
-        char *sql = "CREATE TABLE IF NOT EXISTS cloudsync_site_id (site_id BLOB UNIQUE NOT NULL);";
-        rc = database_exec(db, sql);
+        rc = database_exec(db, SQL_CREATE_SITE_ID_TABLE);
         if (rc != DBRES_OK) return rc;
         
         // siteid (to uniquely identify this local copy of the database)
@@ -430,11 +422,10 @@ int dbutils_settings_init (db_t *db, void *cloudsync_data) {
         if (cloudsync_uuid_v7(site_id) == -1) return DBRES_ERROR;
         
         // rowid 0 means local site_id
-        sql = "INSERT INTO cloudsync_site_id (rowid, site_id) VALUES (?, ?);";
         const char *values[] = {"0", (const char *)&site_id};
         DBTYPE types[] = {DBTYPE_INTEGER, DBTYPE_BLOB};
         int lens[] = {-1, UUID_LEN};
-        rc = database_write(db, sql, values, types, lens, 2);
+        rc = database_write(db, SQL_INSERT_SITE_ID_ROWID, values, types, lens, 2);
         if (rc != DBRES_OK) return rc;
     }
     
@@ -442,8 +433,7 @@ int dbutils_settings_init (db_t *db, void *cloudsync_data) {
     if (database_table_exists(db, CLOUDSYNC_TABLE_SETTINGS_NAME) == false) {
         DEBUG_SETTINGS("cloudsync_table_settings does not exist (creating a new one)");
         
-        char *sql = "CREATE TABLE IF NOT EXISTS cloudsync_table_settings (tbl_name TEXT NOT NULL COLLATE NOCASE, col_name TEXT NOT NULL COLLATE NOCASE, key TEXT, value TEXT, PRIMARY KEY(tbl_name,key));";
-        rc = database_exec(db, sql);
+        rc = database_exec(db, SQL_CREATE_TABLE_SETTINGS_TABLE);
         if (rc != DBRES_OK) return rc;
     }
     
@@ -453,8 +443,7 @@ int dbutils_settings_init (db_t *db, void *cloudsync_data) {
         DEBUG_SETTINGS("cloudsync_schema_versions does not exist (creating a new one)");
         
         // create table
-        char *sql = "CREATE TABLE IF NOT EXISTS cloudsync_schema_versions (hash INTEGER PRIMARY KEY, seq INTEGER NOT NULL)";
-        rc = database_exec(db, sql);
+        rc = database_exec(db, SQL_CREATE_SCHEMA_VERSIONS_TABLE);
         if (rc != DBRES_OK) return rc;
     }
     
@@ -473,6 +462,5 @@ int dbutils_settings_init (db_t *db, void *cloudsync_data) {
 }
 
 int dbutils_settings_cleanup (db_t *db) {
-    const char *sql = "DROP TABLE IF EXISTS cloudsync_settings; DROP TABLE IF EXISTS cloudsync_site_id; DROP TABLE IF EXISTS cloudsync_table_settings; DROP TABLE IF EXISTS cloudsync_schema_versions; ";
-    return database_exec(db, sql);
+    return database_exec(db, SQL_SETTINGS_CLEANUP_DROP_ALL);
 }

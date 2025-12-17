@@ -6293,7 +6293,7 @@ finalize:
     cloudsync_memory_finalize();
 
     sqlite3_int64 memory_used = sqlite3_memory_used();
-    result += test_report("Memory leak check:", memory_used == 0);
+    result += test_report("Memory Leaks Check:", memory_used == 0);
     if (memory_used > 0) {
         printf("\tleaked: %lld B\n", memory_used);
         result++;
