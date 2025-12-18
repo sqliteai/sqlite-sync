@@ -117,7 +117,8 @@ else ifeq ($(PLATFORM),android)
 	CC = $(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang
 	CURL_CONFIG = --host $(ARCH)-linux-$(ANDROID_ABI) --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(CC) CXX=$(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip CFLAGS="-fPIC"
 	TARGET := $(DIST_DIR)/cloudsync.so
-	LDFLAGS += -shared -lcrypto -lssl
+	CFLAGS += -fPIC
+	LDFLAGS += -shared -fPIC -lssl -lcrypto
 	STRIP = $(BIN)/llvm-strip --strip-unneeded $@
 else ifeq ($(PLATFORM),ios)
 	TARGET := $(DIST_DIR)/cloudsync.dylib
@@ -226,6 +227,7 @@ $(OPENSSL):
 	./Configure android-$(if $(filter aarch64,$(ARCH)),arm64,$(if $(filter armv7a,$(ARCH)),arm,$(ARCH))) \
 		--prefix=$(BIN)/../sysroot/usr \
 		no-shared no-unit-test \
+		-fPIC \
 		-D__ANDROID_API__=26 && \
 	$(MAKE) && $(MAKE) install_sw
 
