@@ -115,7 +115,7 @@ else ifeq ($(PLATFORM),android)
 
 	OPENSSL := $(BIN)/../sysroot/usr/include/openssl
 	CC = $(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang
-	CURL_CONFIG = --host $(ARCH)-linux-$(ANDROID_ABI) --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(CC) CXX=$(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
+	CURL_CONFIG = --host $(ARCH)-linux-$(ANDROID_ABI) --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(CC) CXX=$(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip CFLAGS="-fPIC"
 	TARGET := $(DIST_DIR)/cloudsync.so
 	LDFLAGS += -shared -lcrypto -lssl
 	STRIP = $(BIN)/llvm-strip --strip-unneeded $@
@@ -392,6 +392,10 @@ aar:
 	mv $(DIST_DIR)/cloudsync.so $(AAR_X86)
 	cd packages/android && ./gradlew clean assembleRelease
 	cp packages/android/build/outputs/aar/android-release.aar $(DIST_DIR)/cloudsync.aar
+
+clean-aar:
+	rm -rf packages/android/build $(AAR_ARM64) $(AAR_ARM) $(AAR_X86)
+	$(AAR_CLEAN)
 
 # Tools
 version:
