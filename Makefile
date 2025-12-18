@@ -8,6 +8,9 @@ SQLITE3 ?= sqlite3
 # set curl version to download and build
 CURL_VERSION ?= 8.12.1
 
+# set OpenSSL version to download and build
+OPENSSL_VERSION ?= openssl-3.6.0
+
 # Set default platform if not specified
 ifeq ($(OS),Windows_NT)
 	PLATFORM := windows
@@ -115,10 +118,9 @@ else ifeq ($(PLATFORM),android)
 
 	OPENSSL := $(BIN)/../sysroot/usr/include/openssl
 	CC = $(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang
-	CURL_CONFIG = --host $(ARCH)-linux-$(ANDROID_ABI) --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(CC) CXX=$(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip CFLAGS="-fPIC"
+	CURL_CONFIG = --host $(ARCH)-linux-$(ANDROID_ABI) --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(CC) CXX=$(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
 	TARGET := $(DIST_DIR)/cloudsync.so
-	CFLAGS += -fPIC
-	LDFLAGS += -shared -fPIC -lssl -lcrypto
+	LDFLAGS += -shared -lssl -lcrypto
 	STRIP = $(BIN)/llvm-strip --strip-unneeded $@
 else ifeq ($(PLATFORM),ios)
 	TARGET := $(DIST_DIR)/cloudsync.dylib
@@ -220,16 +222,23 @@ endif
 unittest: $(TARGET) $(DIST_DIR)/unit$(EXE)
 	@./$(DIST_DIR)/unit$(EXE)
 
-$(OPENSSL):
-	git clone https://github.com/openssl/openssl.git $(CURL_DIR)/src/openssl
+OPENSSL_TARBALL = $(CURL_DIR)/src/$(OPENSSL_VERSION).tar.gz
+OPENSSL_SRC = $(CURL_DIR)/src/$(OPENSSL_VERSION)
 
-	cd $(CURL_DIR)/src/openssl && \
+$(OPENSSL_TARBALL):
+	mkdir -p $(CURL_DIR)/src
+	curl -L -o $(OPENSSL_TARBALL) https://github.com/openssl/openssl/releases/download/$(OPENSSL_VERSION)/$(OPENSSL_VERSION).tar.gz
+
+$(OPENSSL): $(OPENSSL_TARBALL)
+	mkdir -p $(CURL_DIR)/src
+	tar -xzf $(OPENSSL_TARBALL) -C $(CURL_DIR)/src
+	cd $(OPENSSL_SRC) && \
 	./Configure android-$(if $(filter aarch64,$(ARCH)),arm64,$(if $(filter armv7a,$(ARCH)),arm,$(ARCH))) \
 		--prefix=$(BIN)/../sysroot/usr \
 		no-shared no-unit-test \
-		-fPIC \
 		-D__ANDROID_API__=26 && \
 	$(MAKE) && $(MAKE) install_sw
+	rm -rf $(OPENSSL_SRC)
 
 ifeq ($(PLATFORM),android)
 $(CURL_LIB): $(OPENSSL)
