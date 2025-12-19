@@ -5,6 +5,7 @@ dist/
 *.a
 *.sqlite
 /curl/src
+openssl/
 
 # Test artifacts
 /coverage

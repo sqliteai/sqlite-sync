@@ -36,7 +36,7 @@ CFLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(SRC_DIR)/sqlite -I
 T_CFLAGS = $(CFLAGS) -DSQLITE_CORE -DCLOUDSYNC_UNITTEST -DCLOUDSYNC_OMIT_NETWORK -DCLOUDSYNC_OMIT_PRINT_RESULT
 COVERAGE = false
 ifndef NATIVE_NETWORK
-	LDFLAGS = -L./$(CURL_DIR)/$(PLATFORM) -lcurl
+	LDFLAGS = -L./$(dir $(CURL_LIB)) -lcurl
 endif
 
 # Directories
@@ -50,10 +50,16 @@ VPATH = $(SRC_DIR):$(SQLITE_IMPL_DIR):$(POSTGRES_IMPL_DIR):$(SQLITE_DIR):$(TEST_
 BUILD_RELEASE = build/release
 BUILD_TEST = build/test
 BUILD_DIRS = $(BUILD_TEST) $(BUILD_RELEASE)
+OPENSSL_DIR = openssl
 CURL_DIR = curl
 CURL_SRC = $(CURL_DIR)/src/curl-$(CURL_VERSION)
 COV_DIR = coverage
 CUSTOM_CSS = $(TEST_DIR)/sqliteai.css
+
+# Android OpenSSL local installation directory
+ifeq ($(PLATFORM),android)
+	OPENSSL_INSTALL_DIR = $(OPENSSL_DIR)/$(PLATFORM)/$(ARCH)
+endif
 
 # Multi-platform source files (at src/ root) - exclude database_*.c as they're in subdirs
 CORE_SRC = $(filter-out $(SRC_DIR)/database_%.c, $(wildcard $(SRC_DIR)/*.c))
@@ -116,11 +122,13 @@ else ifeq ($(PLATFORM),android)
 		ANDROID_ABI := android26
 	endif
 
-	OPENSSL := $(BIN)/../sysroot/usr/include/openssl
+	OPENSSL := $(OPENSSL_INSTALL_DIR)/lib/libssl.a
 	CC = $(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang
-	CURL_CONFIG = --host $(ARCH)-linux-$(ANDROID_ABI) --with-openssl=$(BIN)/../sysroot/usr LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(CC) CXX=$(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
+	CURL_LIB = $(CURL_DIR)/$(PLATFORM)/$(ARCH)/libcurl.a
+	CURL_CONFIG = --host $(ARCH)-linux-$(ANDROID_ABI) --with-openssl=$(CURDIR)/$(OPENSSL_INSTALL_DIR) LDFLAGS="-L$(CURDIR)/$(OPENSSL_INSTALL_DIR)/lib" LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(CC) CXX=$(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
 	TARGET := $(DIST_DIR)/cloudsync.so
-	LDFLAGS += -shared -lssl -lcrypto
+	CFLAGS += -fPIC -I$(OPENSSL_INSTALL_DIR)/include
+	LDFLAGS += -shared -fPIC -L$(OPENSSL_INSTALL_DIR)/lib -lssl -lcrypto
 	STRIP = $(BIN)/llvm-strip --strip-unneeded $@
 else ifeq ($(PLATFORM),ios)
 	TARGET := $(DIST_DIR)/cloudsync.dylib
@@ -222,23 +230,23 @@ endif
 unittest: $(TARGET) $(DIST_DIR)/unit$(EXE)
 	@./$(DIST_DIR)/unit$(EXE)
 
-OPENSSL_TARBALL = $(CURL_DIR)/src/$(OPENSSL_VERSION).tar.gz
-OPENSSL_SRC = $(CURL_DIR)/src/$(OPENSSL_VERSION)
+OPENSSL_TARBALL = $(OPENSSL_DIR)/$(OPENSSL_VERSION).tar.gz
 
 $(OPENSSL_TARBALL):
-	mkdir -p $(CURL_DIR)/src
+	mkdir -p $(OPENSSL_DIR)
 	curl -L -o $(OPENSSL_TARBALL) https://github.com/openssl/openssl/releases/download/$(OPENSSL_VERSION)/$(OPENSSL_VERSION).tar.gz
 
 $(OPENSSL): $(OPENSSL_TARBALL)
-	mkdir -p $(CURL_DIR)/src
-	tar -xzf $(OPENSSL_TARBALL) -C $(CURL_DIR)/src
-	cd $(OPENSSL_SRC) && \
+	mkdir -p $(OPENSSL_DIR)
+	tar -xzf $(OPENSSL_TARBALL) -C $(OPENSSL_DIR)
+	cd $(OPENSSL_DIR)/$(OPENSSL_VERSION) && \
 	./Configure android-$(if $(filter aarch64,$(ARCH)),arm64,$(if $(filter armv7a,$(ARCH)),arm,$(ARCH))) \
-		--prefix=$(BIN)/../sysroot/usr \
+		--prefix=$(CURDIR)/$(OPENSSL_INSTALL_DIR) \
 		no-shared no-unit-test \
+		-fPIC \
 		-D__ANDROID_API__=26 && \
 	$(MAKE) && $(MAKE) install_sw
-	rm -rf $(OPENSSL_SRC)
+	rm -rf $(OPENSSL_DIR)/$(OPENSSL_VERSION)
 
 ifeq ($(PLATFORM),android)
 $(CURL_LIB): $(OPENSSL)
@@ -323,8 +331,8 @@ endif
 	
 	cd $(CURL_SRC) && $(MAKE)
 
-	mkdir -p $(CURL_DIR)/$(PLATFORM)
-	mv $(CURL_SRC)/lib/.libs/libcurl.a $(CURL_DIR)/$(PLATFORM)
+	mkdir -p $(dir $(CURL_LIB))
+	mv $(CURL_SRC)/lib/.libs/libcurl.a $(CURL_LIB)
 	rm -rf $(CURL_DIR)/src
 
 .NOTPARALLEL: %.dylib
@@ -388,25 +396,16 @@ xcframework: $(DIST_DIR)/CloudSync.xcframework
 AAR_ARM64 = packages/android/src/main/jniLibs/arm64-v8a/
 AAR_ARM = packages/android/src/main/jniLibs/armeabi-v7a/
 AAR_X86 = packages/android/src/main/jniLibs/x86_64/
-AAR_USR = $(ANDROID_NDK)/toolchains/llvm/prebuilt/$(HOST)-x86_64/sysroot/usr/
-AAR_CLEAN = rm -rf $(CURL_DIR)/android $(AAR_USR)bin/openssl $(AAR_USR)include/openssl $(AAR_USR)lib/libssl.a $(AAR_USR)lib/libcrypto.a $(AAR_USR)lib/ossl-modules
 aar:
 	mkdir -p $(AAR_ARM64) $(AAR_ARM) $(AAR_X86)
-	$(AAR_CLEAN)
 	$(MAKE) clean && $(MAKE) PLATFORM=android ARCH=arm64-v8a
 	mv $(DIST_DIR)/cloudsync.so $(AAR_ARM64)
-	$(AAR_CLEAN)
 	$(MAKE) clean && $(MAKE) PLATFORM=android ARCH=armeabi-v7a
 	mv $(DIST_DIR)/cloudsync.so $(AAR_ARM)
-	$(AAR_CLEAN)
 	$(MAKE) clean && $(MAKE) PLATFORM=android ARCH=x86_64
 	mv $(DIST_DIR)/cloudsync.so $(AAR_X86)
 	cd packages/android && ./gradlew clean assembleRelease
 	cp packages/android/build/outputs/aar/android-release.aar $(DIST_DIR)/cloudsync.aar
-
-clean-aar:
-	rm -rf packages/android/build $(AAR_ARM64) $(AAR_ARM) $(AAR_X86)
-	$(AAR_CLEAN)
 
 # Tools
 version:
