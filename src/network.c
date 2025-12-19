@@ -794,7 +794,7 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows) {
     // http://uuid.g5.sqlite.cloud/v1/cloudsync/{dbname}/{site_id}/{db_version}/{seq}/check
     // the data->check_endpoint stops after {site_id}, just need to append /{db_version}/{seq}/check
     char endpoint[2024];
-    snprintf(endpoint, sizeof(endpoint), "%s/%" PRId64 "/%d/%s", data->check_endpoint, db_version, seq, CLOUDSYNC_ENDPOINT_CHECK);
+    snprintf(endpoint, sizeof(endpoint), "%s/%" PRId64 "/%d/%s", data->check_endpoint, (int64_t)db_version, seq, CLOUDSYNC_ENDPOINT_CHECK);
     
     NETWORK_RESULT result = network_receive_buffer(data, endpoint, data->authentication, true, true, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
     int rc = SQLITE_OK;
