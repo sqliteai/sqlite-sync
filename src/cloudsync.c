@@ -125,7 +125,7 @@ struct cloudsync_context {
     // version the DB would have if the transaction committed now
     int64_t    pending_db_version;
     // used to set an order inside each transaction
-    int         seq;
+    int        seq;
     
     // augmented tables are stored in-memory so we do not need to retrieve information about
     // col_names and cid from the disk each time a write statement is performed

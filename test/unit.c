@@ -36,7 +36,7 @@ void dbvm_reset (dbvm_t *stmt);
 int dbvm_count (dbvm_t *stmt, const char *value, size_t len, int type);
 int dbvm_execute (dbvm_t *stmt, void *data);
 
-char *dbutils_settings_get_value (db_t *db, const char *key, char *buffer, size_t blen);;
+char *dbutils_settings_get_value (db_t *db, const char *key, char *buffer, size_t blen, int64_t *intvalue);
 int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values, char **names);
 int dbutils_settings_check_version (db_t *db, const char *version);
 bool dbutils_settings_migrate (db_t *db);
@@ -2010,8 +2010,8 @@ bool do_test_dbutils (void) {
     dbutils_settings_set_key_value(db, NULL, "key2", "test2");
     dbutils_settings_set_key_value(db, NULL, "key2", NULL);
     
-    char *value1 = dbutils_settings_get_value(db, "key1", NULL, 0);
-    char *value2 = dbutils_settings_get_value(db, "key2", NULL, 0);
+    char *value1 = dbutils_settings_get_value(db, "key1", NULL, 0, NULL);
+    char *value2 = dbutils_settings_get_value(db, "key2", NULL, 0, NULL);
     if (value1 == NULL) goto finalize;
     if (value2 != NULL) goto finalize;
     cloudsync_memory_free(value1);
@@ -2048,7 +2048,7 @@ bool do_test_dbutils (void) {
     cloudsync_memory_free(site_id_blob);
     
     // force out-of-memory test
-    value1 = dbutils_settings_get_value(db, "key1", OUT_OF_MEMORY_BUFFER, 0);
+    value1 = dbutils_settings_get_value(db, "key1", OUT_OF_MEMORY_BUFFER, 0, NULL);
     if (value1 != NULL) goto finalize;
     
     value1 = dbutils_table_settings_get_value(db, "foo", NULL, "key1", OUT_OF_MEMORY_BUFFER, 0);

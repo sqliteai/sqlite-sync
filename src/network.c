@@ -785,7 +785,7 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows) {
      
     sqlite3 *db = sqlite3_context_db_handle(context);
     
-    int db_version = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_CHECK_DBVERSION);
+    int64_t db_version = dbutils_settings_get_int64_value(db, CLOUDSYNC_KEY_CHECK_DBVERSION);
     if (db_version<0) {sqlite3_result_error(context, "Unable to retrieve db_version.", -1); return -1;}
 
     int seq = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_CHECK_SEQ);

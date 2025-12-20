@@ -102,11 +102,12 @@ int dbutils_binary_comparison (int x, int y) {
     return (x == y) ? 0 : (x > y ? 1 : -1);
 }
 
-char *dbutils_settings_get_value (db_t *db, const char *key, char *buffer, size_t blen) {
+char *dbutils_settings_get_value (db_t *db, const char *key, char *buffer, size_t blen, int64_t *intvalue) {
     DEBUG_SETTINGS("dbutils_settings_get_value key: %s", key);
     
     // check if heap allocation must be forced
     if (!buffer || blen == 0) blen = 0;
+    if (intvalue) *intvalue = 0;
     size_t size = 0;
     
     dbvm_t *vm = NULL;
@@ -126,21 +127,27 @@ char *dbutils_settings_get_value (db_t *db, const char *key, char *buffer, size_
         goto finalize_get_value;
     }
     
-    const char *value = database_column_text(vm, 0);
-    #if CLOUDSYNC_UNITTEST
-    size = (buffer == OUT_OF_MEMORY_BUFFER) ? (SQLITE_MAX_ALLOCATION_SIZE + 1) :(size_t)database_column_bytes(vm, 0);
-    #else
-    size = (size_t)database_column_bytes(vm, 0);
-    #endif
-    if (size + 1 > blen) {
-        buffer = cloudsync_memory_alloc((uint64_t)(size + 1));
-        if (!buffer) {
-            rc = DBRES_NOMEM;
-            goto finalize_get_value;
+    if (intvalue) {
+        // check if we are only interested in the intvalue
+        *intvalue = database_column_int(vm, 0);
+    } else {
+        // if intvalue is NULL then proceed with text case
+        const char *value = database_column_text(vm, 0);
+        #if CLOUDSYNC_UNITTEST
+        size = (buffer == OUT_OF_MEMORY_BUFFER) ? (SQLITE_MAX_ALLOCATION_SIZE + 1) :(size_t)database_column_bytes(vm, 0);
+        #else
+        size = (size_t)database_column_bytes(vm, 0);
+        #endif
+        if (size + 1 > blen) {
+            buffer = cloudsync_memory_alloc((uint64_t)(size + 1));
+            if (!buffer) {
+                rc = DBRES_NOMEM;
+                goto finalize_get_value;
+            }
         }
+        memcpy(buffer, value, size+1);
     }
     
-    memcpy(buffer, value, size+1);
     rc = DBRES_OK;
     
 finalize_get_value:
@@ -180,15 +187,25 @@ int dbutils_settings_set_key_value (db_t *db, cloudsync_context *data, const cha
 int dbutils_settings_get_int_value (db_t *db, const char *key) {
     DEBUG_SETTINGS("dbutils_settings_get_int_value key: %s", key);
     char buffer[256] = {0};
-    if (dbutils_settings_get_value(db, key, buffer, sizeof(buffer)) == NULL) return -1;
+    int64_t value = 0;
+    if (dbutils_settings_get_value(db, key, buffer, sizeof(buffer), &value) == NULL) return -1;
     
-    return (int)strtol(buffer, NULL, 0);
+    return (int)value;
+}
+
+int64_t dbutils_settings_get_int64_value (db_t *db, const char *key) {
+    DEBUG_SETTINGS("dbutils_settings_get_int_value key: %s", key);
+    char buffer[256] = {0};
+    int64_t value = 0;
+    if (dbutils_settings_get_value(db, key, buffer, sizeof(buffer), &value) == NULL) return -1;
+    
+    return value;
 }
 
 int dbutils_settings_check_version (db_t *db, const char *version) {
     DEBUG_SETTINGS("dbutils_settings_check_version");
     char buffer[256];
-    if (dbutils_settings_get_value(db, CLOUDSYNC_KEY_LIBVERSION, buffer, sizeof(buffer)) == NULL) return -666;
+    if (dbutils_settings_get_value(db, CLOUDSYNC_KEY_LIBVERSION, buffer, sizeof(buffer), NULL) == NULL) return -666;
     
     int major1, minor1, patch1;
     int major2, minor2, patch2;
