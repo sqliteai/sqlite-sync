@@ -43,7 +43,20 @@ const char * const SQL_SETTINGS_LOAD_TABLE =
     "SELECT lower(tbl_name), lower(col_name), key, value FROM cloudsync_table_settings ORDER BY tbl_name;";
 
 const char * const SQL_CREATE_SETTINGS_TABLE =
-    "CREATE TABLE IF NOT EXISTS cloudsync_settings (key TEXT PRIMARY KEY NOT NULL, value TEXT);";
+    "CREATE TABLE IF NOT EXISTS cloudsync_settings (key TEXT PRIMARY KEY NOT NULL, value TEXT);" 
+    "CREATE TABLE IF NOT EXISTS app_schema_version ("
+    "version BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY"
+    ");"
+    "CREATE OR REPLACE FUNCTION bump_app_schema_version() "
+    "RETURNS event_trigger AS $$ "
+    "BEGIN "
+    "INSERT INTO app_schema_version DEFAULT VALUES; "
+    "END;"
+    "$$ LANGUAGE plpgsql;"
+    "DROP EVENT TRIGGER IF EXISTS app_schema_change;"
+    "CREATE EVENT TRIGGER app_schema_change "
+    "ON ddl_command_end "
+    "EXECUTE FUNCTION bump_app_schema_version();";
 
 // format strings (snprintf) are also static SQL templates
 const char * const SQL_INSERT_SETTINGS_STR_FORMAT =
@@ -150,7 +163,7 @@ const char * const SQL_DATA_VERSION =
     "SELECT txid_snapshot_xmin(txid_current_snapshot());";  // was "PRAGMA data_version"
 
 const char * const SQL_SCHEMA_VERSION =
-    "SELECT 1;";  // TODO: PostgreSQL equivalent of sqlite "PRAGMA schema_version", "SELECT current_schema();" is not equivalent
+    "SELECT COALESCE(max(version), 0) FROM app_schema_version;";  // was "PRAGMA schema_version"
 
 const char * const SQL_SITEID_GETSET_ROWID_BY_SITEID =
     "INSERT INTO cloudsync_site_id (site_id) VALUES ($1) "
