@@ -45,6 +45,60 @@ char *sql_escape_name (const char *name, char *buffer, size_t bsize) {
     return sqlite3_snprintf((int)bsize, buffer, "%q", name);
 }
 
+char *sql_build_select_nonpk_by_pk (db_t *db, const char *table_name) {
+    char *sql = NULL;
+    
+    /*
+    This SQL statement dynamically generates a SELECT query for a specified table.
+    It uses Common Table Expressions (CTEs) to construct the column names and
+    primary key conditions based on the table schema, which is obtained through
+    the `pragma_table_info` function.
+
+    1. `col_names` CTE:
+       - Retrieves a comma-separated list of non-primary key column names from
+         the specified table's schema.
+
+    2. `pk_where` CTE:
+       - Retrieves a condition string representing the primary key columns in the
+         format: "column1=? AND column2=? AND ...", used to create the WHERE clause
+         for selecting rows based on primary key values.
+
+    3. Final SELECT:
+       - Constructs the complete SELECT statement as a string, combining:
+         - Column names from `col_names`.
+         - The target table name.
+         - The WHERE clause conditions from `pk_where`.
+
+    The resulting query can be used to select rows from the table based on primary
+    key values, and can be executed within the application to retrieve data dynamically.
+    */
+
+    // Unfortunately in SQLite column names (or table names) cannot be bound parameters in a SELECT statement
+    // otherwise we should have used something like SELECT 'SELECT ? FROM %w WHERE rowid=?';
+    char buffer[1024];
+    char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
+    
+    #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
+    if (table->rowid_only) {
+        sql = memory_mprintf(SQL_BUILD_SELECT_NONPK_COLS_BY_ROWID, table->name, table->name);
+        goto process_process;
+    }
+    #endif
+
+    sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_NONPK_COLS_BY_PK, table_name, table_name, singlequote_escaped_table_name);
+
+#if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
+process_process:
+#endif
+    if (!sql) return NULL;
+    
+    char *query = NULL;
+    int rc = database_select_text(db, sql, &query);
+    cloudsync_memory_free(sql);
+    
+    return (rc == DBRES_OK) ? query : NULL;
+}
+
 // MARK: - PRIVATE -
 
 int database_select1_value (db_t *db, const char *sql, char **ptr_value, int64_t *int_value, DBTYPE expected_type) {

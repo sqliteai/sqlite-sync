@@ -147,7 +147,7 @@ const char * const SQL_SITEID_SELECT_ROWID0 =
     "SELECT site_id FROM cloudsync_site_id WHERE id = 0;";
 
 const char * const SQL_DATA_VERSION =
-    "SELECT 1";  // TODO: PostgreSQL equivalent of sqlite "PRAGMA data_version", "SELECT txid_current();" is not equivalent
+    "SELECT SELECT txid_snapshot_xmin(txid_current_snapshot());";  // was "PRAGMA data_version"
 
 const char * const SQL_SCHEMA_VERSION =
     "SELECT 1;";  // TODO: PostgreSQL equivalent of sqlite "PRAGMA schema_version", "SELECT current_schema();" is not equivalent
@@ -165,27 +165,40 @@ const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_ROWID =
     "WHERE table_name = $1 AND constraint_name LIKE '%_pkey'"
     ");";  // TODO: build full SELECT ... WHERE ctid=? analog with ordered columns like SQLite
 
-const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_PK =
-    "WITH nonpk AS ("
-    "  SELECT string_agg(quote_ident(column_name), ',' ORDER BY ordinal_position) AS cols "
-    "  FROM information_schema.columns "
-    "  WHERE table_schema = current_schema() AND table_name = '%s' AND ordinal_position NOT IN ("
-    "    SELECT ordinal_position FROM information_schema.columns c "
-    "    WHERE table_schema = current_schema() AND table_name = '%s' AND column_name IN ("
-    "      SELECT column_name FROM information_schema.key_column_usage "
-    "      WHERE table_schema = current_schema() AND table_name = '%s' AND constraint_name LIKE '%%_pkey'"
-    "    )"
-    "  )"
-    "), pk_cols AS ("
-    "  SELECT column_name, row_number() OVER (ORDER BY position_in_unique_constraint) AS rn "
-    "  FROM information_schema.key_column_usage "
-    "  WHERE table_schema = current_schema() AND table_name = '%s' AND constraint_name LIKE '%%_pkey'"
-    "), pk AS ("
-    "  SELECT string_agg(quote_ident(column_name) || ' = $' || rn, ' AND ' ORDER BY rn) AS clause "
-    "  FROM pk_cols"
+const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_PK_PG =
+    "WITH tbl AS ("
+    "  SELECT to_regclass(%L) AS oid"
+    "), "
+    "pk AS ("
+    "  SELECT a.attname, k.ord "
+    "  FROM pg_index x "
+    "  JOIN tbl t ON t.oid = x.indrelid "
+    "  JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
+    "  JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = k.attnum "
+    "  WHERE x.indisprimary "
+    "  ORDER BY k.ord"
+    "), "
+    "nonpk AS ("
+    "  SELECT a.attname "
+    "  FROM pg_attribute a "
+    "  JOIN tbl t ON t.oid = a.attrelid "
+    "  WHERE a.attnum > 0 AND NOT a.attisdropped "
+    "    AND a.attnum NOT IN ("
+    "      SELECT k.attnum "
+    "      FROM pg_index x "
+    "      JOIN tbl t2 ON t2.oid = x.indrelid "
+    "      JOIN LATERAL unnest(x.indkey) AS k(attnum) ON true "
+    "      WHERE x.indisprimary"
+    "    ) "
+    "  ORDER BY a.attnum"
     ") "
-    "SELECT 'SELECT ' || COALESCE((SELECT cols FROM nonpk), '*') || ' FROM ' || quote_ident('%s') || ' WHERE ' || clause || ';' "
-    "FROM pk;";  // Generates full SELECT with ordered non-PK columns and PK WHERE clause for cloudsync_memory_mprintf
+    "SELECT "
+    "  'SELECT '"
+    "  || (SELECT string_agg(format('%%I', attname), ',') FROM nonpk)"
+    "  || ' FROM ' || (SELECT (oid::regclass)::text FROM tbl)"
+    "  || ' WHERE '"
+    "  || (SELECT string_agg(format('%%I=?', attname), ' AND ') FROM pk)"
+    "  || ';';";
 
 const char * const SQL_DELETE_ROW_BY_ROWID =
     "DELETE FROM %s WHERE ctid = $1;";  // TODO: consider using PK-based deletion; ctid is unstable

@@ -78,7 +78,7 @@ int database_count_nonpk (db_t *db, const char *table_name);
 int database_count_int_pk (db_t *db, const char *table_name);
 int database_count_notnull_without_default (db_t *db, const char *table_name);
 
-int64_t database_schema_version (db_t *db);
+int64_t  database_schema_version (db_t *db);
 uint64_t database_schema_hash (db_t *db);
 bool     database_check_schema_hash (db_t *db, uint64_t hash);
 int      database_update_schema_hash (db_t *db, uint64_t *hash);
@@ -145,6 +145,7 @@ uint64_t dbmem_size (void *ptr);
 // SQL
 char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta);
 char *sql_escape_name (const char *name, char *buffer, size_t bsize);
+char *sql_build_select_nonpk_by_pk (db_t *db, const char *table_name);
 
 // USED ONLY by SQLite Cloud to implement RLS
 typedef struct cloudsync_pk_decode_bind_context cloudsync_pk_decode_bind_context;
