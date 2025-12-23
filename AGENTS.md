@@ -552,4 +552,5 @@ For CRDT merge to work correctly:
 - SQL statements:
   - Parameterless SQL should live as global constants in `src/<database>/database_<engine>.c` (e.g., `const char *SQL_CREATE_SETTINGS = "CREATE TABLE ...";` in `src/sqlite/database_sqlite.c`) and be used via `extern const char *SQL_CREATE_SETTINGS;` so database backends can override as needed.
   - Parameterized SQL must be provided via functions in the database layer (as with `database_count_pk`) so each backend can build statements appropriately.
+  - Put backend-specific SQL templates in `src/<database>/sql_<engine>.c`; add a `database_<engine>.c` helper (exposed in `database.h`) whenever placeholder rules, quoting/escaping, or catalog-driven SQL generation differ between backends.
 - Preserve existing coding style and patterns (e.g., prepared statements with bind/step/reset, use `cloudsync_memory_*` macros, return SQLite error codes). Ask the user before significant structural changes or refactors.

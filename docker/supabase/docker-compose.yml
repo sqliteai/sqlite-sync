@@ -7,8 +7,6 @@
 # 2. Place this in supabase/docker/ as docker-compose.override.yml
 # 3. Run: cd supabase/docker && docker-compose up
 
-version: '3.8'
-
 services:
   # Override the db service to use CloudSync-enabled PostgreSQL
   db:
