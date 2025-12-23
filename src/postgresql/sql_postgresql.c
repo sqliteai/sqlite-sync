@@ -1,0 +1,328 @@
+//
+//  sql_postgresql.c
+//  cloudsync
+//
+//  PostgreSQL-specific SQL queries
+//  Created by Claude Code on 22/12/25.
+//
+
+#include "../sql.h"
+
+// MARK: Settings
+
+const char * const SQL_SETTINGS_GET_VALUE =
+    "SELECT value FROM cloudsync_settings WHERE key=$1;";
+
+const char * const SQL_SETTINGS_SET_KEY_VALUE_REPLACE =
+    "INSERT INTO cloudsync_settings (key, value) VALUES ($1, $2) "
+    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;";
+
+const char * const SQL_SETTINGS_SET_KEY_VALUE_DELETE =
+    "DELETE FROM cloudsync_settings WHERE key = $1;";
+
+const char * const SQL_TABLE_SETTINGS_GET_VALUE =
+    "SELECT value FROM cloudsync_table_settings WHERE (tbl_name=$1 AND col_name=$2 AND key=$3);";
+
+const char * const SQL_TABLE_SETTINGS_DELETE_ALL_FOR_TABLE =
+    "DELETE FROM cloudsync_table_settings WHERE tbl_name=$1;";
+
+const char * const SQL_TABLE_SETTINGS_REPLACE =
+    "INSERT INTO cloudsync_table_settings (tbl_name, col_name, key, value) VALUES ($1, $2, $3, $4) "
+    "ON CONFLICT (tbl_name, key) DO UPDATE SET col_name = EXCLUDED.col_name, value = EXCLUDED.value;";
+
+const char * const SQL_TABLE_SETTINGS_DELETE_ONE =
+    "DELETE FROM cloudsync_table_settings WHERE (tbl_name=$1 AND col_name=$2 AND key=$3);";
+
+const char * const SQL_TABLE_SETTINGS_COUNT_TABLES =
+    "SELECT count(*) FROM cloudsync_table_settings WHERE key='algo';";
+
+const char * const SQL_SETTINGS_LOAD_GLOBAL =
+    "SELECT key, value FROM cloudsync_settings;";
+
+const char * const SQL_SETTINGS_LOAD_TABLE =
+    "SELECT lower(tbl_name), lower(col_name), key, value FROM cloudsync_table_settings ORDER BY tbl_name;";
+
+const char * const SQL_CREATE_SETTINGS_TABLE =
+    "CREATE TABLE IF NOT EXISTS cloudsync_settings (key TEXT PRIMARY KEY NOT NULL, value TEXT);";
+
+// format strings (snprintf) are also static SQL templates
+const char * const SQL_INSERT_SETTINGS_STR_FORMAT =
+    "INSERT INTO cloudsync_settings (key, value) VALUES ('%s', '%s');";
+
+const char * const SQL_INSERT_SETTINGS_INT_FORMAT =
+    "INSERT INTO cloudsync_settings (key, value) VALUES ('%s', %lld);";
+
+const char * const SQL_CREATE_SITE_ID_TABLE =
+    "CREATE TABLE IF NOT EXISTS cloudsync_site_id ("
+    "id BIGSERIAL PRIMARY KEY, "
+    "site_id BYTEA UNIQUE NOT NULL"
+    ");";
+
+const char * const SQL_INSERT_SITE_ID_ROWID =
+    "INSERT INTO cloudsync_site_id (id, site_id) VALUES ($1, $2);";
+
+const char * const SQL_CREATE_TABLE_SETTINGS_TABLE =
+    "CREATE TABLE IF NOT EXISTS cloudsync_table_settings (tbl_name TEXT NOT NULL, col_name TEXT NOT NULL, key TEXT, value TEXT, PRIMARY KEY(tbl_name,key));";
+
+const char * const SQL_CREATE_SCHEMA_VERSIONS_TABLE =
+    "CREATE TABLE IF NOT EXISTS cloudsync_schema_versions (hash BIGINT PRIMARY KEY, seq INTEGER NOT NULL)";
+
+const char * const SQL_SETTINGS_CLEANUP_DROP_ALL =
+    "DROP TABLE IF EXISTS cloudsync_settings CASCADE; "
+    "DROP TABLE IF EXISTS cloudsync_site_id CASCADE; "
+    "DROP TABLE IF EXISTS cloudsync_table_settings CASCADE; "
+    "DROP TABLE IF EXISTS cloudsync_schema_versions CASCADE;";
+
+// MARK: CloudSync
+
+const char * const SQL_DBVERSION_BUILD_QUERY =
+    "WITH table_names AS ("
+    "SELECT quote_ident(tablename) as tbl_name "
+    "FROM pg_tables "
+    "WHERE schemaname = current_schema() "
+    "AND tablename LIKE '%_cloudsync'"
+    "), "
+    "query_parts AS ("
+    "SELECT tbl_name, "
+    "format('SELECT COALESCE(MAX(db_version), 0) FROM %s', tbl_name) as part "
+    "FROM table_names"
+    ") "
+    "SELECT string_agg(part, ' UNION ALL ') FROM query_parts;";
+
+const char * const SQL_DBVERSION_GET_QUERY =
+    "SELECT COALESCE(MAX(v), 0) FROM (%s) AS versions(v);";
+// TODO: include pre_alter_dbversion union and single composed query generation like SQLite
+
+const char * const SQL_INSERT_SITE_ID_FROM_STRING_FORMAT =
+    "INSERT INTO cloudsync_site_id (site_id) VALUES (decode('%s', 'hex'));";
+
+// Note: PostgreSQL doesn't have a direct equivalent to SQLite's %w formatter
+// We'll use quote_ident() function in the code instead
+const char * const SQL_METADATA_TABLE_FORMAT =
+    "CREATE TABLE IF NOT EXISTS %s ("
+    "pk TEXT PRIMARY KEY NOT NULL, "
+    "db_version BIGINT NOT NULL, "
+    "seq INTEGER NOT NULL DEFAULT 0, "
+    "site_id BYTEA NOT NULL, "
+    "last_op INTEGER NOT NULL DEFAULT 0"
+    ");";
+
+const char * const SQL_METADATA_TABLE_SITE_ID_INDEX_FORMAT =
+    "CREATE INDEX IF NOT EXISTS %s_idx ON %s(site_id);";
+
+const char * const SQL_METADATA_TABLE_DB_VERSION_INDEX_FORMAT =
+    "CREATE INDEX IF NOT EXISTS %s_idx ON %s(db_version);";
+
+const char * const SQL_METADATA_GET_PK_FORMAT =
+    "SELECT pk FROM %s WHERE site_id=$1 ORDER BY db_version DESC, seq DESC LIMIT 1;";
+
+const char * const SQL_METADATA_GET_DB_VERSION_BY_PK_FORMAT =
+    "SELECT db_version, seq FROM %s WHERE pk=$1;";
+
+const char * const SQL_METADATA_INSERT_FORMAT =
+    "INSERT INTO %s (pk, db_version, seq, site_id, last_op) VALUES ($1, $2, $3, $4, $5);";
+
+const char * const SQL_METADATA_UPDATE_FORMAT =
+    "UPDATE %s SET db_version=$1, seq=$2, site_id=$3, last_op=$4 WHERE pk=$5;";
+
+const char * const SQL_METADATA_DELETE_FORMAT =
+    "DELETE FROM %s WHERE pk=$1;";
+
+const char * const SQL_METADATA_GET_ALL_PKS_FORMAT =
+    "SELECT pk FROM %s ORDER BY db_version, seq;";
+
+const char * const SQL_METADATA_GET_ALL_FORMAT =
+    "SELECT pk, db_version, seq, site_id, last_op FROM %s ORDER BY db_version, seq;";
+
+const char * const SQL_METADATA_CLEANUP_DROP_FORMAT =
+    "DROP TABLE IF EXISTS %s CASCADE;";
+
+const char * const SQL_CHANGES_INSERT_ROW =
+    "INSERT INTO cloudsync_changes(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) "
+    "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9);";
+
+// MARK: Additional SQL constants for PostgreSQL
+
+const char * const SQL_SITEID_SELECT_ROWID0 =
+    "SELECT site_id FROM cloudsync_site_id WHERE id = 0;";
+
+const char * const SQL_DATA_VERSION =
+    "SELECT 1";  // TODO: PostgreSQL equivalent of sqlite "PRAGMA data_version", "SELECT txid_current();" is not equivalent
+
+const char * const SQL_SCHEMA_VERSION =
+    "SELECT 1;";  // TODO: PostgreSQL equivalent of sqlite "PRAGMA schema_version", "SELECT current_schema();" is not equivalent
+
+const char * const SQL_SITEID_GETSET_ROWID_BY_SITEID =
+    "INSERT INTO cloudsync_site_id (site_id) VALUES ($1) "
+    "ON CONFLICT(site_id) DO UPDATE SET site_id = EXCLUDED.site_id "
+    "RETURNING id;";
+
+const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_ROWID =
+    "SELECT string_agg(quote_ident(column_name), ',') "
+    "FROM information_schema.columns "
+    "WHERE table_name = $1 AND column_name NOT IN ("
+    "SELECT column_name FROM information_schema.key_column_usage "
+    "WHERE table_name = $1 AND constraint_name LIKE '%_pkey'"
+    ");";  // TODO: build full SELECT ... WHERE ctid=? analog with ordered columns like SQLite
+
+const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_PK =
+    "WITH nonpk AS ("
+    "  SELECT string_agg(quote_ident(column_name), ',' ORDER BY ordinal_position) AS cols "
+    "  FROM information_schema.columns "
+    "  WHERE table_schema = current_schema() AND table_name = '%s' AND ordinal_position NOT IN ("
+    "    SELECT ordinal_position FROM information_schema.columns c "
+    "    WHERE table_schema = current_schema() AND table_name = '%s' AND column_name IN ("
+    "      SELECT column_name FROM information_schema.key_column_usage "
+    "      WHERE table_schema = current_schema() AND table_name = '%s' AND constraint_name LIKE '%%_pkey'"
+    "    )"
+    "  )"
+    "), pk_cols AS ("
+    "  SELECT column_name, row_number() OVER (ORDER BY position_in_unique_constraint) AS rn "
+    "  FROM information_schema.key_column_usage "
+    "  WHERE table_schema = current_schema() AND table_name = '%s' AND constraint_name LIKE '%%_pkey'"
+    "), pk AS ("
+    "  SELECT string_agg(quote_ident(column_name) || ' = $' || rn, ' AND ' ORDER BY rn) AS clause "
+    "  FROM pk_cols"
+    ") "
+    "SELECT 'SELECT ' || COALESCE((SELECT cols FROM nonpk), '*') || ' FROM ' || quote_ident('%s') || ' WHERE ' || clause || ';' "
+    "FROM pk;";  // Generates full SELECT with ordered non-PK columns and PK WHERE clause for cloudsync_memory_mprintf
+
+const char * const SQL_DELETE_ROW_BY_ROWID =
+    "DELETE FROM %s WHERE ctid = $1;";  // TODO: consider using PK-based deletion; ctid is unstable
+
+const char * const SQL_BUILD_DELETE_ROW_BY_PK =
+    "DELETE FROM %s WHERE %s;";  // TODO: build full PK WHERE clause (ordered) like SQLite format
+
+const char * const SQL_INSERT_ROWID_IGNORE =
+    "INSERT INTO %s DEFAULT VALUES ON CONFLICT DO NOTHING;";  // TODO: adapt to explicit PK inserts (no rowid in PG)
+
+const char * const SQL_UPSERT_ROWID_AND_COL_BY_ROWID =
+    "INSERT INTO %s (ctid, %s) VALUES ($1, $2) "
+    "ON CONFLICT DO UPDATE SET %s = $2;";  // TODO: align with SQLite upsert by rowid; avoid ctid
+
+const char * const SQL_BUILD_INSERT_PK_IGNORE =
+    "INSERT INTO %s (%s) VALUES (%s) ON CONFLICT DO NOTHING;";  // TODO: construct PK columns/binds dynamically
+
+const char * const SQL_BUILD_UPSERT_PK_AND_COL =
+    "INSERT INTO %s (%s, %s) VALUES (%s, $1) "
+    "ON CONFLICT DO UPDATE SET %s = $1;";  // TODO: match SQLite's ON CONFLICT DO UPDATE with full PK bindings
+
+const char * const SQL_SELECT_COLS_BY_ROWID_FMT =
+    "SELECT %s%s%s FROM %s WHERE ctid = $1;";  // TODO: align with PK/rowid selection builder
+
+const char * const SQL_BUILD_SELECT_COLS_BY_PK_FMT =
+    "SELECT %s%s%s FROM %s WHERE %s;";  // TODO: generate full WHERE clause with ordered PK columns
+
+const char * const SQL_CLOUDSYNC_ROW_EXISTS_BY_PK =
+    "SELECT EXISTS(SELECT 1 FROM %s_cloudsync WHERE pk = $1 LIMIT 1);";
+
+const char * const SQL_CLOUDSYNC_UPDATE_COL_BUMP_VERSION =
+    "UPDATE %s_cloudsync "
+    "SET col_version = CASE col_version %% 2 WHEN 0 THEN col_version + 1 ELSE col_version + 2 END, "
+    "db_version = $1, seq = $2, site_id = 0 "
+    "WHERE pk = $3 AND col_name = '%s';";
+
+const char * const SQL_CLOUDSYNC_UPSERT_COL_INIT_OR_BUMP_VERSION =
+    "INSERT INTO %s_cloudsync (pk, col_name, col_version, db_version, seq, site_id) "
+    "VALUES ($1, '%s', 1, $2, $3, 0) "
+    "ON CONFLICT (pk, col_name) DO UPDATE SET "
+    "col_version = CASE EXCLUDED.col_version %% 2 WHEN 0 THEN EXCLUDED.col_version + 1 ELSE EXCLUDED.col_version + 2 END, "
+    "db_version = $2, seq = $3, site_id = 0;";  // TODO: mirror SQLite's bump rules and bind usage
+
+const char * const SQL_CLOUDSYNC_UPSERT_RAW_COLVERSION =
+    "INSERT INTO %s_cloudsync (pk, col_name, col_version, db_version, seq, site_id) "
+    "VALUES ($1, $2, $3, $4, $5, 0) "
+    "ON CONFLICT (pk, col_name) DO UPDATE SET "
+    "col_version = EXCLUDED.col_version + 1, db_version = $4, seq = $5, site_id = 0;";  // TODO: align with SQLite raw colversion behavior
+
+const char * const SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL =
+    "DELETE FROM %s_cloudsync WHERE pk = $1 AND col_name != '%s';";  // TODO: match SQLite delete semantics
+
+const char * const SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL =
+    "INSERT INTO %s_cloudsync (pk, col_name, col_version, db_version, seq, site_id) "
+    "SELECT $1, col_name, 1, $2, cloudsync_seq(), 0 "
+    "FROM %s_cloudsync WHERE pk = $3 AND col_name != '%s' "
+    "ON CONFLICT (pk, col_name) DO UPDATE SET "
+    "col_version = 1, db_version = $2, seq = cloudsync_seq(), site_id = 0;";  // TODO: ensure parity with SQLite reset/rekey logic
+
+const char * const SQL_CLOUDSYNC_GET_COL_VERSION_OR_ROW_EXISTS =
+    "SELECT COALESCE("
+    "(SELECT col_version FROM %s_cloudsync WHERE pk = $1 AND col_name = '%s'), "
+    "(SELECT 1 FROM %s_cloudsync WHERE pk = $1)"
+    ");";  // TODO: same behavior as SQLite helper
+
+const char * const SQL_CLOUDSYNC_INSERT_RETURN_CHANGE_ID =
+    "INSERT INTO %s_cloudsync "
+    "(pk, col_name, col_version, db_version, seq, site_id) "
+    "VALUES ($1, $2, $3, cloudsync_db_version_next($4), $5, $6) "
+    "ON CONFLICT (pk, col_name) DO UPDATE SET "
+    "col_version = EXCLUDED.col_version, "
+    "db_version = cloudsync_db_version_next($4), "
+    "seq = EXCLUDED.seq, "
+    "site_id = EXCLUDED.site_id "
+    "RETURNING ((db_version::bigint << 30) | seq);";  // TODO: align RETURNING and bump logic with SQLite (version increments on conflict)
+
+const char * const SQL_CLOUDSYNC_TOMBSTONE_PK_EXCEPT_COL =
+    "UPDATE %s_cloudsync "
+    "SET col_version = 0, db_version = cloudsync_db_version_next($1) "
+    "WHERE pk = $2 AND col_name != '%s';";  // TODO: confirm tombstone semantics match SQLite
+
+const char * const SQL_CLOUDSYNC_SELECT_COL_VERSION_BY_PK_COL =
+    "SELECT col_version FROM %s_cloudsync WHERE pk = $1 AND col_name = $2;";  // TODO: parity with SQLite helper
+
+const char * const SQL_CLOUDSYNC_SELECT_SITE_ID_BY_PK_COL =
+    "SELECT site_id FROM %s_cloudsync WHERE pk = $1 AND col_name = $2;";
+
+const char * const SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID =
+    "SELECT column_name, ordinal_position FROM information_schema.columns "
+    "WHERE table_name = $1 "
+    "ORDER BY ordinal_position;";
+
+const char * const SQL_DROP_CLOUDSYNC_TABLE =
+    "DROP TABLE IF EXISTS %s_cloudsync CASCADE;";
+
+const char * const SQL_CLOUDSYNC_DELETE_COLS_NOT_IN_SCHEMA_OR_PKCOL =
+    "DELETE FROM %s_cloudsync WHERE col_name NOT IN ("
+    "SELECT column_name FROM information_schema.columns WHERE table_name = $1 "
+    "UNION SELECT '%s'"
+    ");";
+
+const char * const SQL_PRAGMA_TABLEINFO_PK_QUALIFIED_COLLIST_FMT =
+    "SELECT string_agg(quote_ident(column_name), ',') "
+    "FROM information_schema.key_column_usage "
+    "WHERE table_name = '%s' AND constraint_name LIKE '%%_pkey' "
+    "ORDER BY ordinal_position;";
+
+const char * const SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK =
+    "DELETE FROM %s_cloudsync "
+    "WHERE (col_name != '%s' OR (col_name = '%s' AND col_version %% 2 != 0)) "
+    "AND NOT EXISTS ("
+    "SELECT 1 FROM %s "
+    "WHERE %s_cloudsync.pk = cloudsync_pk_encode(%s) LIMIT 1"
+    ");";
+
+const char * const SQL_PRAGMA_TABLEINFO_PK_COLLIST =
+    "SELECT string_agg(quote_ident(column_name), ',') "
+    "FROM information_schema.key_column_usage "
+    "WHERE table_name = $1 AND constraint_name LIKE '%%_pkey' "
+    "ORDER BY ordinal_position;";
+
+const char * const SQL_PRAGMA_TABLEINFO_PK_DECODE_SELECTLIST =
+    "SELECT string_agg("
+    "'cloudsync_pk_decode(pk, ' || ordinal_position || ') AS ' || quote_ident(column_name), ','"
+    ") "
+    "FROM information_schema.key_column_usage "
+    "WHERE table_name = $1 AND constraint_name LIKE '%%_pkey' "
+    "ORDER BY ordinal_position;";
+
+const char * const SQL_CLOUDSYNC_INSERT_MISSING_PKS_FROM_BASE_EXCEPT_SYNC =
+    "SELECT cloudsync_insert('%s', %s) "
+    "FROM (SELECT %s FROM %s EXCEPT SELECT %s FROM %s_cloudsync);";
+
+const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL =
+    "WITH _cstemp1 AS (SELECT cloudsync_pk_encode(%s) AS pk FROM %s) "
+    "SELECT _cstemp1.pk FROM _cstemp1 "
+    "WHERE NOT EXISTS ("
+    "SELECT 1 FROM %s_cloudsync _cstemp2 "
+    "WHERE _cstemp2.pk = _cstemp1.pk AND _cstemp2.col_name = $1"
+    ");";

@@ -1,0 +1,36 @@
+# CloudSync + Supabase Integration
+# This extends the official Supabase docker-compose.yml
+# See: https://supabase.com/docs/guides/self-hosting/docker
+
+# Usage:
+# 1. Clone Supabase: git clone --depth 1 https://github.com/supabase/supabase
+# 2. Place this in supabase/docker/ as docker-compose.override.yml
+# 3. Run: cd supabase/docker && docker-compose up
+
+version: '3.8'
+
+services:
+  # Override the db service to use CloudSync-enabled PostgreSQL
+  db:
+    # Build custom image with CloudSync extension
+    build:
+      context: ../../sqlite-sync
+      dockerfile: docker/postgresql/Dockerfile
+    image: sqliteai/sqlite-sync-pg:latest
+    volumes:
+      # Keep all original Supabase volumes
+      - ./volumes/db/realtime.sql:/docker-entrypoint-initdb.d/migrations/99-realtime.sql:Z
+      - ./volumes/db/webhooks.sql:/docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql:Z
+      - ./volumes/db/roles.sql:/docker-entrypoint-initdb.d/init-scripts/99-roles.sql:Z
+      - ./volumes/db/jwt.sql:/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql:Z
+      - ./volumes/db/data:/var/lib/postgresql/data:Z
+      - ./volumes/db/_supabase.sql:/docker-entrypoint-initdb.d/migrations/97-_supabase.sql:Z
+      - ./volumes/db/logs.sql:/docker-entrypoint-initdb.d/migrations/99-logs.sql:Z
+      - ./volumes/db/pooler.sql:/docker-entrypoint-initdb.d/migrations/99-pooler.sql:Z
+      - db-config:/etc/postgresql-custom
+      # Add CloudSync initialization (runs after Supabase init scripts)
+      - ../../sqlite-sync/docker/postgresql/init.sql:/docker-entrypoint-initdb.d/migrations/99-z-cloudsync.sql:ro
+
+# Note: All other Supabase services (auth, rest, realtime, storage, etc.)
+# are defined in the base Supabase docker-compose.yml
+# This file only overrides the 'db' service to add CloudSync support

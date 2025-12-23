@@ -1,0 +1,210 @@
+# PostgreSQL Extension Build Configuration
+# This file is included by the root Makefile
+
+# Detect pg_config
+PG_CONFIG ?= pg_config
+PGXS := $(shell $(PG_CONFIG) --pgxs 2>/dev/null)
+
+# PostgreSQL directories
+PG_SHAREDIR := $(shell $(PG_CONFIG) --sharedir 2>/dev/null)
+PG_PKGLIBDIR := $(shell $(PG_CONFIG) --pkglibdir 2>/dev/null)
+PG_INCLUDEDIR := $(shell $(PG_CONFIG) --includedir-server 2>/dev/null)
+
+# Extension metadata
+EXTENSION = cloudsync
+EXTVERSION = 1.0
+
+# Source files - core platform-agnostic code
+PG_CORE_SRC = \
+	src/cloudsync.c \
+	src/dbutils.c \
+	src/pk.c \
+	src/utils.c \
+	src/lz4.c
+
+# PostgreSQL-specific implementation
+PG_IMPL_SRC = \
+	src/postgresql/database_postgresql.c \
+	src/postgresql/cloudsync_postgresql.c \
+	src/postgresql/pgvalue.c \
+	src/postgresql/sql_postgresql.c
+
+# All source files
+PG_ALL_SRC = $(PG_CORE_SRC) $(PG_IMPL_SRC)
+PG_OBJS = $(PG_ALL_SRC:.c=.o)
+
+# Compiler flags
+# Define POSIX macros as compiler flags to ensure they're defined before any includes
+PG_CPPFLAGS = -I$(PG_INCLUDEDIR) -Isrc -Isrc/postgresql -DCLOUDSYNC_POSTGRESQL_BUILD -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE
+PG_CFLAGS = -fPIC -Wall -Wextra -std=c11 -O2
+PG_LDFLAGS = -shared
+
+# Output files
+PG_EXTENSION_SO = $(EXTENSION).so
+PG_EXTENSION_SQL = src/postgresql/$(EXTENSION)--$(EXTVERSION).sql
+PG_EXTENSION_CONTROL = docker/postgresql/$(EXTENSION).control
+
+# ============================================================================
+# PostgreSQL Build Targets
+# ============================================================================
+
+.PHONY: postgres-check postgres-build postgres-install postgres-clean postgres-test \
+        postgres-docker-build postgres-docker-run postgres-docker-stop postgres-docker-rebuild \
+        postgres-docker-shell postgres-dev-rebuild postgres-help unittest-pg
+
+# Check if PostgreSQL is available
+postgres-check:
+	@echo "Checking PostgreSQL installation..."
+	@which $(PG_CONFIG) > /dev/null || (echo "Error: pg_config not found. Install postgresql-server-dev." && exit 1)
+	@echo "PostgreSQL version: $$($(PG_CONFIG) --version)"
+	@echo "Extension directory: $(PG_PKGLIBDIR)"
+	@echo "Share directory: $(PG_SHAREDIR)"
+	@echo "Include directory: $(PG_INCLUDEDIR)"
+
+# Build PostgreSQL extension
+postgres-build: postgres-check
+	@echo "Building PostgreSQL extension..."
+	@echo "Compiling source files..."
+	@for src in $(PG_ALL_SRC); do \
+		echo "  CC $$src"; \
+		$(CC) $(PG_CPPFLAGS) $(PG_CFLAGS) -c $$src -o $${src%.c}.o || exit 1; \
+	done
+	@echo "Linking $(PG_EXTENSION_SO)..."
+	$(CC) $(PG_LDFLAGS) -o $(PG_EXTENSION_SO) $(PG_OBJS)
+	@echo "Build complete: $(PG_EXTENSION_SO)"
+
+# Install extension to PostgreSQL
+postgres-install: postgres-build
+	@echo "Installing CloudSync extension to PostgreSQL..."
+	@echo "Installing shared library to $(PG_PKGLIBDIR)/"
+	install -d $(PG_PKGLIBDIR)
+	install -m 755 $(PG_EXTENSION_SO) $(PG_PKGLIBDIR)/
+	@echo "Installing SQL script to $(PG_SHAREDIR)/extension/"
+	install -d $(PG_SHAREDIR)/extension
+	install -m 644 $(PG_EXTENSION_SQL) $(PG_SHAREDIR)/extension/
+	@echo "Installing control file to $(PG_SHAREDIR)/extension/"
+	install -m 644 $(PG_EXTENSION_CONTROL) $(PG_SHAREDIR)/extension/
+	@echo ""
+	@echo "Installation complete!"
+	@echo "To use the extension, run in psql:"
+	@echo "  CREATE EXTENSION $(EXTENSION);"
+
+# Clean PostgreSQL build artifacts
+postgres-clean:
+	@echo "Cleaning PostgreSQL build artifacts..."
+	rm -f $(PG_OBJS) $(PG_EXTENSION_SO)
+	@echo "Clean complete"
+
+# Test extension (requires running PostgreSQL)
+postgres-test: postgres-install
+	@echo "Testing CloudSync extension..."
+	@echo "Dropping existing extension (if any)..."
+	-psql -U postgres -d postgres -c "DROP EXTENSION IF EXISTS $(EXTENSION) CASCADE;" 2>/dev/null
+	@echo "Creating extension..."
+	psql -U postgres -d postgres -c "CREATE EXTENSION $(EXTENSION);"
+	@echo "Testing version function..."
+	psql -U postgres -d postgres -c "SELECT $(EXTENSION)_version();"
+	@echo "Listing extension functions..."
+	psql -U postgres -d postgres -c "\\df $(EXTENSION)_*"
+
+# ============================================================================
+# Docker Targets
+# ============================================================================
+
+DOCKER_IMAGE = sqliteai/sqlite-sync-pg
+DOCKER_TAG ?= latest
+DOCKER_BUILD_ARGS ?=
+
+# Build Docker image with pre-installed extension
+postgres-docker-build:
+	@echo "Building Docker image via docker-compose (rebuilt when sources change)..."
+	# To force plaintext BuildKit logs, run: make postgres-docker-build DOCKER_BUILD_ARGS="--progress=plain"
+	cd docker/postgresql && docker-compose build $(DOCKER_BUILD_ARGS)
+	@echo ""
+	@echo "Docker image built successfully!"
+
+# Run PostgreSQL container with CloudSync
+postgres-docker-run:
+	@echo "Starting PostgreSQL with CloudSync..."
+	cd docker/postgresql && docker-compose up -d --build
+	@echo ""
+	@echo "Container started successfully!"
+	@echo ""
+	@echo "Connect with psql:"
+	@echo "  docker exec -it cloudsync-postgres psql -U postgres -d cloudsync_test"
+	@echo ""
+	@echo "Or from host:"
+	@echo "  psql postgresql://postgres:postgres@localhost:5432/cloudsync_test"
+	@echo ""
+	@echo "Enable extension:"
+	@echo "  CREATE EXTENSION cloudsync;"
+	@echo "  SELECT cloudsync_version();"
+
+# Stop PostgreSQL container
+postgres-docker-stop:
+	@echo "Stopping PostgreSQL container..."
+	cd docker/postgresql && docker-compose down
+	@echo "Container stopped"
+
+# Rebuild and restart container
+postgres-docker-rebuild: postgres-docker-build
+	@echo "Rebuilding and restarting container..."
+	cd docker/postgresql && docker-compose down
+	cd docker/postgresql && docker-compose up -d --build
+	@echo "Container restarted with new image"
+
+# Interactive shell in container
+postgres-docker-shell:
+	@echo "Opening shell in PostgreSQL container..."
+	docker exec -it cloudsync-postgres bash
+
+# ============================================================================
+# Development Workflow Targets
+# ============================================================================
+
+# Quick rebuild inside running container
+postgres-dev-rebuild:
+	@echo "Rebuilding extension inside running container..."
+	@echo "This is faster than rebuilding the entire Docker image"
+	docker exec -it cloudsync-postgres bash -c "cd /tmp/cloudsync && make postgres-clean && make postgres-build && make postgres-install"
+	@echo ""
+	@echo "Extension rebuilt successfully!"
+	@echo ""
+	@echo "To reload the extension in psql, run:"
+	@echo "  DROP EXTENSION cloudsync CASCADE;"
+	@echo "  CREATE EXTENSION cloudsync;"
+
+# Help target
+postgres-help:
+	@echo "PostgreSQL Extension Build Targets"
+	@echo "==================================="
+	@echo ""
+	@echo "Build & Install:"
+	@echo "  postgres-check          - Verify PostgreSQL installation"
+	@echo "  postgres-build          - Build extension (.so file)"
+	@echo "  postgres-install        - Install extension to PostgreSQL"
+	@echo "  postgres-clean          - Clean build artifacts"
+	@echo "  postgres-test           - Test extension (requires running PostgreSQL)"
+	@echo ""
+	@echo "Docker Targets:"
+	@echo "  postgres-docker-build   - Build Docker image with pre-installed extension"
+	@echo "  postgres-docker-run     - Start PostgreSQL container"
+	@echo "  postgres-docker-stop    - Stop PostgreSQL container"
+	@echo "  postgres-docker-rebuild - Rebuild image and restart container"
+	@echo "  postgres-docker-shell   - Open bash shell in running container"
+	@echo ""
+	@echo "Development:"
+	@echo "  postgres-dev-rebuild    - Rebuild extension in running container (fast)"
+	@echo "  unittest-pg             - Rebuild container and run smoke test (create extension + version)"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make postgres-docker-build          # Build image"
+	@echo "  make postgres-docker-run            # Start container"
+	@echo "  make postgres-docker-shell          # Open shell"
+	@echo "  make postgres-dev-rebuild           # Rebuild after code changes"
+
+# Simple smoke test: rebuild image/container, create extension, and query version
+unittest-pg: postgres-docker-rebuild
+	@echo "Running PostgreSQL extension smoke test..."
+	cd docker/postgresql && docker-compose exec -T postgres psql -U postgres -d cloudsync_test -f /tmp/cloudsync/docker/postgresql/smoke_test.sql
+	@echo "Smoke test completed."

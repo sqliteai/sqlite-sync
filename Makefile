@@ -437,5 +437,11 @@ help:
 	@echo "  help	  				- Display this help message"
 	@echo "  xcframework			- Build the Apple XCFramework"
 	@echo "  aar					- Build the Android AAR package"
+	@echo ""
+	@echo "PostgreSQL Targets:"
+	@echo "  make postgres-help	- Show PostgreSQL-specific targets"
+
+# Include PostgreSQL extension targets
+include docker/Makefile.postgresql
 
 .PHONY: all clean test unittest extension help version xcframework aar

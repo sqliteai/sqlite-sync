@@ -38,49 +38,60 @@
 #define CLOUDSYNC_DEBUG_STMT                0
 #define CLOUDSYNC_DEBUG_MERGE               0
 
-#define DEBUG_RUNTIME(...)                  do {if (data->debug) printf(__VA_ARGS__ );} while (0)
-#define DEBUG_PRINTLN(...)                  do {printf(__VA_ARGS__ );printf("\n");} while (0)
-#define DEBUG_ALWAYS(...)                   do {printf(__VA_ARGS__ );printf("\n");} while (0)
-#define DEBUG_PRINT(...)                    do {printf(__VA_ARGS__ );} while (0)
+// Debug macros - platform-specific logging
+#ifdef CLOUDSYNC_POSTGRESQL_BUILD
+    // PostgreSQL build - use elog() for logging
+    #include "postgresql/postgresql_log.h"
+    #define DEBUG_RUNTIME(...)              do {if (data->debug) CLOUDSYNC_LOG_DEBUG(__VA_ARGS__ );} while (0)
+    #define DEBUG_PRINTLN(...)              CLOUDSYNC_LOG_DEBUG(__VA_ARGS__)
+    #define DEBUG_ALWAYS(...)               CLOUDSYNC_LOG_INFO(__VA_ARGS__)
+    #define DEBUG_PRINT(...)                CLOUDSYNC_LOG_DEBUG(__VA_ARGS__)
+#else
+    // SQLite and other platforms use printf()
+    #define DEBUG_RUNTIME(...)              do {if (data->debug) printf(__VA_ARGS__ );} while (0)
+    #define DEBUG_PRINTLN(...)              do {printf(__VA_ARGS__ );printf("\n");} while (0)
+    #define DEBUG_ALWAYS(...)               do {printf(__VA_ARGS__ );printf("\n");} while (0)
+    #define DEBUG_PRINT(...)                do {printf(__VA_ARGS__ );} while (0)
+#endif
 
 #if CLOUDSYNC_DEBUG_FUNCTIONS
-#define DEBUG_FUNCTION(...)                 do {printf(__VA_ARGS__ );printf("\n");} while (0)
+#define DEBUG_FUNCTION(...)                 DEBUG_PRINTLN(__VA_ARGS__)
 #else
 #define DEBUG_FUNCTION(...)
 #endif
 
 #if CLOUDSYNC_DEBUG_DBFUNCTION
-#define DEBUG_DBFUNCTION(...)               do {printf(__VA_ARGS__ );printf("\n");} while (0)
+#define DEBUG_DBFUNCTION(...)               DEBUG_PRINTLN(__VA_ARGS__)
 #else
 #define DEBUG_DBFUNCTION(...)
 #endif
 
 #if CLOUDSYNC_DEBUG_SETTINGS
-#define DEBUG_SETTINGS(...)                 do {printf(__VA_ARGS__ );printf("\n");} while (0)
+#define DEBUG_SETTINGS(...)                 DEBUG_PRINTLN(__VA_ARGS__)
 #else
 #define DEBUG_SETTINGS(...)
 #endif
 
 #if CLOUDSYNC_DEBUG_SQL
-#define DEBUG_SQL(...)                      do {printf(__VA_ARGS__ );printf("\n\n");} while (0)
+#define DEBUG_SQL(...)                      DEBUG_PRINTLN(__VA_ARGS__)
 #else
 #define DEBUG_SQL(...)
 #endif
 
 #if CLOUDSYNC_DEBUG_VTAB
-#define DEBUG_VTAB(...)                     do {printf(__VA_ARGS__ );printf("\n\n");} while (0)
+#define DEBUG_VTAB(...)                     DEBUG_PRINTLN(__VA_ARGS__)
 #else
 #define DEBUG_VTAB(...)
 #endif
 
 #if CLOUDSYNC_DEBUG_STMT
-#define DEBUG_STMT(...)                     do {printf(__VA_ARGS__ );printf("\n");} while (0)
+#define DEBUG_STMT(...)                     DEBUG_PRINTLN(__VA_ARGS__)
 #else
 #define DEBUG_STMT(...)
 #endif
 
 #if CLOUDSYNC_DEBUG_MERGE
-#define DEBUG_MERGE(...)                     do {printf(__VA_ARGS__ );printf("\n");} while (0)
+#define DEBUG_MERGE(...)                    DEBUG_PRINTLN(__VA_ARGS__)
 #else
 #define DEBUG_MERGE(...)
 #endif
