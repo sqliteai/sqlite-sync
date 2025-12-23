@@ -214,6 +214,7 @@ bool force_uncompressed_blob = false;
 
 // Internal prototypes
 int local_mark_insert_or_update_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, int64_t db_version, int seq);
+int cloudsync_set_error (cloudsync_context *data, const char *err_user, int err_code);
 int cloudsync_set_dberror (cloudsync_context *data);
 
 // MARK: - CRDT algos -
@@ -439,7 +440,7 @@ int cloudsync_load_siteid (db_t *db, cloudsync_context *data) {
     if (rc != DBRES_OK) return rc;
     if (!buffer || size != UUID_LEN) {
         if (buffer) cloudsync_memory_free(buffer);
-        return DBRES_MISUSE;
+        return cloudsync_set_error(data, "Unable to retrieve siteid", DBRES_MISUSE);
     }
     
     memcpy(data->site_id, buffer, UUID_LEN);
@@ -473,14 +474,14 @@ int cloudsync_add_dbvms (db_t *db, cloudsync_context *data) {
         int rc = database_prepare(db, SQL_DATA_VERSION, (void **)&data->data_version_stmt, DBFLAG_PERSISTENT);
         DEBUG_STMT("data_version_stmt %p", data->data_version_stmt);
         if (rc != DBRES_OK) return rc;
-        DEBUG_SQL("data_version_stmt: %s", sql);
+        DEBUG_SQL("data_version_stmt: %s", SQL_DATA_VERSION);
     }
     
     if (data->schema_version_stmt == NULL) {
         int rc = database_prepare(db, SQL_SCHEMA_VERSION, (void **)&data->schema_version_stmt, DBFLAG_PERSISTENT);
         DEBUG_STMT("schema_version_stmt %p", data->schema_version_stmt);
         if (rc != DBRES_OK) return rc;
-        DEBUG_SQL("schema_version_stmt: %s", sql);
+        DEBUG_SQL("schema_version_stmt: %s", SQL_SCHEMA_VERSION);
     }
     
     if (data->getset_siteid_stmt == NULL) {
@@ -490,7 +491,7 @@ int cloudsync_add_dbvms (db_t *db, cloudsync_context *data) {
         int rc = database_prepare(db, SQL_SITEID_GETSET_ROWID_BY_SITEID, (void **)&data->getset_siteid_stmt, DBFLAG_PERSISTENT);
         DEBUG_STMT("getset_siteid_stmt %p", data->getset_siteid_stmt);
         if (rc != DBRES_OK) return rc;
-        DEBUG_SQL("getset_siteid_stmt: %s", sql);
+        DEBUG_SQL("getset_siteid_stmt: %s", SQL_SITEID_GETSET_ROWID_BY_SITEID);
     }
     
     return cloudsync_dbversion_rebuild(db, data);
@@ -582,9 +583,9 @@ char *table_build_values_sql (db_t *db, cloudsync_table_context *table) {
         goto process_process;
     }
     #endif
-    
+
     sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_NONPK_COLS_BY_PK, table->name, table->name, singlequote_escaped_table_name);
-    
+
 #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
 process_process:
 #endif
@@ -865,7 +866,8 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // REAL TABLE statements
-    
+    DEBUG_SQL("REAL TABLE statements: %d", ncols);
+
     // precompile the get column value statement
     if (ncols > 0) {
         sql = table_build_values_sql(db, table);
@@ -877,6 +879,7 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
         if (rc != DBRES_OK) goto cleanup;
     }
     
+    DEBUG_SQL("real_merge_delete ...", sql);
     sql = table_build_mergedelete_sql(db, table);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("real_merge_delete: %s", sql);
@@ -894,7 +897,7 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
 cleanup:
-    if (rc != DBRES_OK) printf("table_add_stmts error: %s\n", database_errmsg(db));
+    if (rc != DBRES_OK) DEBUG_ALWAYS("table_add_stmts error: %d %s\n", rc, database_errmsg(db));
     return rc;
 }
 
@@ -1610,7 +1613,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     
     // init cloudsync_settings
     if (cloudsync_context_init(data, db) == NULL) {
-        return cloudsync_set_error(data, "Unable to initialize cloudsync context", DBRES_MISUSE);
+        return DBRES_MISUSE;
     }
     
     // lookup table
@@ -2622,8 +2625,7 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     
     // init cloudsync_settings
     if (cloudsync_context_init(data, db) == NULL) {
-        // TODO: check error message here
-        return DBRES_MISUSE;
+        return cloudsync_set_error(data, "Unable to initialize cloudsync context", DBRES_MISUSE);
     }
     
     // sanity check algo name (if exists)
