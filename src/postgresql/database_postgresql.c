@@ -5,10 +5,6 @@
 //  Created by Marco Bambini on 03/12/25.
 //
 
-// Define POSIX feature test macros before any includes
-#define _POSIX_C_SOURCE 200809L
-#define _GNU_SOURCE
-
 // PostgreSQL requires postgres.h to be included FIRST
 // It sets up the entire environment including platform compatibility
 #include "postgres.h"
@@ -121,13 +117,57 @@ char *sql_escape_name (const char *name, char *buffer, size_t bsize) {
 }
 
 char *sql_build_select_nonpk_by_pk (db_t *db, const char *table_name) {
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_NONPK_COLS_BY_PK_PG, table_name);
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_NONPK_COLS_BY_PK, table_name);
     if (!sql) return NULL;
     
     char *query = NULL;
     int rc = database_select_text(db, sql, &query);
     cloudsync_memory_free(sql);
     
+    return (rc == DBRES_OK) ? query : NULL;
+}
+
+char *sql_build_delete_by_pk (db_t *db, const char *table_name) {
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_DELETE_ROW_BY_PK, table_name);
+    if (!sql) return NULL;
+
+    char *query = NULL;
+    int rc = database_select_text(db, sql, &query);
+    cloudsync_memory_free(sql);
+
+    return (rc == DBRES_OK) ? query : NULL;
+}
+
+char *sql_build_insert_pk_ignore (db_t *db, const char *table_name) {
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_INSERT_PK_IGNORE, table_name);
+    if (!sql) return NULL;
+
+    char *query = NULL;
+    int rc = database_select_text(db, sql, &query);
+    cloudsync_memory_free(sql);
+
+    return (rc == DBRES_OK) ? query : NULL;
+}
+
+char *sql_build_upsert_pk_and_col (db_t *db, const char *table_name, const char *colname) {
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_UPSERT_PK_AND_COL, table_name, colname);
+    if (!sql) return NULL;
+
+    char *query = NULL;
+    int rc = database_select_text(db, sql, &query);
+    cloudsync_memory_free(sql);
+
+    return (rc == DBRES_OK) ? query : NULL;
+}
+
+char *sql_build_select_cols_by_pk (db_t *db, const char *table_name, const char *colname) {
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_COLS_BY_PK_FMT, table_name, colname);
+    if (!sql) return NULL;
+
+    char *query = NULL;
+    int rc = database_select_text(db, sql, &query);
+    cloudsync_memory_free(sql);
+
     return (rc == DBRES_OK) ? query : NULL;
 }
 

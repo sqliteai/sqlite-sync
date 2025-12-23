@@ -147,7 +147,7 @@ const char * const SQL_SITEID_SELECT_ROWID0 =
     "SELECT site_id FROM cloudsync_site_id WHERE id = 0;";
 
 const char * const SQL_DATA_VERSION =
-    "SELECT SELECT txid_snapshot_xmin(txid_current_snapshot());";  // was "PRAGMA data_version"
+    "SELECT txid_snapshot_xmin(txid_current_snapshot());";  // was "PRAGMA data_version"
 
 const char * const SQL_SCHEMA_VERSION =
     "SELECT 1;";  // TODO: PostgreSQL equivalent of sqlite "PRAGMA schema_version", "SELECT current_schema();" is not equivalent
@@ -165,9 +165,9 @@ const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_ROWID =
     "WHERE table_name = $1 AND constraint_name LIKE '%_pkey'"
     ");";  // TODO: build full SELECT ... WHERE ctid=? analog with ordered columns like SQLite
 
-const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_PK_PG =
+const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_PK =
     "WITH tbl AS ("
-    "  SELECT to_regclass(%L) AS oid"
+    "  SELECT to_regclass('%s') AS oid"
     "), "
     "pk AS ("
     "  SELECT a.attname, k.ord "
@@ -204,7 +204,23 @@ const char * const SQL_DELETE_ROW_BY_ROWID =
     "DELETE FROM %s WHERE ctid = $1;";  // TODO: consider using PK-based deletion; ctid is unstable
 
 const char * const SQL_BUILD_DELETE_ROW_BY_PK =
-    "DELETE FROM %s WHERE %s;";  // TODO: build full PK WHERE clause (ordered) like SQLite format
+    "WITH tbl AS ("
+    "  SELECT to_regclass('%s') AS oid"
+    "), "
+    "pk AS ("
+    "  SELECT a.attname, k.ord "
+    "  FROM pg_index x "
+    "  JOIN tbl t ON t.oid = x.indrelid "
+    "  JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
+    "  JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = k.attnum "
+    "  WHERE x.indisprimary "
+    "  ORDER BY k.ord"
+    ") "
+    "SELECT "
+    "  'DELETE FROM ' || (SELECT (oid::regclass)::text FROM tbl)"
+    "  || ' WHERE '"
+    "  || (SELECT string_agg(format('%%I=?', attname), ' AND ') FROM pk)"
+    "  || ';';";
 
 const char * const SQL_INSERT_ROWID_IGNORE =
     "INSERT INTO %s DEFAULT VALUES ON CONFLICT DO NOTHING;";  // TODO: adapt to explicit PK inserts (no rowid in PG)
@@ -214,17 +230,73 @@ const char * const SQL_UPSERT_ROWID_AND_COL_BY_ROWID =
     "ON CONFLICT DO UPDATE SET %s = $2;";  // TODO: align with SQLite upsert by rowid; avoid ctid
 
 const char * const SQL_BUILD_INSERT_PK_IGNORE =
-    "INSERT INTO %s (%s) VALUES (%s) ON CONFLICT DO NOTHING;";  // TODO: construct PK columns/binds dynamically
+    "WITH tbl AS ("
+    "  SELECT to_regclass('%s') AS oid"
+    "), "
+    "pk AS ("
+    "  SELECT a.attname, k.ord "
+    "  FROM pg_index x "
+    "  JOIN tbl t ON t.oid = x.indrelid "
+    "  JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
+    "  JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = k.attnum "
+    "  WHERE x.indisprimary "
+    "  ORDER BY k.ord"
+    ") "
+    "SELECT "
+    "  'INSERT INTO ' || (SELECT (oid::regclass)::text FROM tbl)"
+    "  || ' (' || (SELECT string_agg(format('%%I', attname), ',') FROM pk) || ')'"
+    "  || ' VALUES (' || (SELECT string_agg('?', ',') FROM pk) || ')'"
+    "  || ' ON CONFLICT DO NOTHING;';";
 
 const char * const SQL_BUILD_UPSERT_PK_AND_COL =
-    "INSERT INTO %s (%s, %s) VALUES (%s, $1) "
-    "ON CONFLICT DO UPDATE SET %s = $1;";  // TODO: match SQLite's ON CONFLICT DO UPDATE with full PK bindings
+    "WITH tbl AS ("
+    "  SELECT to_regclass('%s') AS oid"
+    "), "
+    "pk AS ("
+    "  SELECT a.attname, k.ord "
+    "  FROM pg_index x "
+    "  JOIN tbl t ON t.oid = x.indrelid "
+    "  JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
+    "  JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = k.attnum "
+    "  WHERE x.indisprimary "
+    "  ORDER BY k.ord"
+    "), "
+    "col AS ("
+    "  SELECT '%s'::text AS colname"
+    ") "
+    "SELECT "
+    "  'INSERT INTO ' || (SELECT (oid::regclass)::text FROM tbl)"
+    "  || ' (' || (SELECT string_agg(format('%%I', attname), ',') FROM pk)"
+    "  || ',' || (SELECT format('%%I', colname) FROM col) || ')'"
+    "  || ' VALUES (' || (SELECT string_agg('?', ',') FROM pk) || ',?)'"
+    "  || ' ON CONFLICT (' || (SELECT string_agg(format('%%I', attname), ',') FROM pk) || ')'"
+    "  || ' DO UPDATE SET ' || (SELECT format('%%I', colname) FROM col) || '=?;';";
 
 const char * const SQL_SELECT_COLS_BY_ROWID_FMT =
     "SELECT %s%s%s FROM %s WHERE ctid = $1;";  // TODO: align with PK/rowid selection builder
 
 const char * const SQL_BUILD_SELECT_COLS_BY_PK_FMT =
-    "SELECT %s%s%s FROM %s WHERE %s;";  // TODO: generate full WHERE clause with ordered PK columns
+    "WITH tbl AS ("
+    "  SELECT to_regclass('%s') AS oid"
+    "), "
+    "pk AS ("
+    "  SELECT a.attname, k.ord "
+    "  FROM pg_index x "
+    "  JOIN tbl t ON t.oid = x.indrelid "
+    "  JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
+    "  JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = k.attnum "
+    "  WHERE x.indisprimary "
+    "  ORDER BY k.ord"
+    "), "
+    "col AS ("
+    "  SELECT '%s'::text AS colname"
+    ") "
+    "SELECT "
+    "  'SELECT ' || (SELECT format('%%I', colname) FROM col)"
+    "  || ' FROM ' || (SELECT (oid::regclass)::text FROM tbl)"
+    "  || ' WHERE '"
+    "  || (SELECT string_agg(format('%%I=?', attname), ' AND ') FROM pk)"
+    "  || ';';";
 
 const char * const SQL_CLOUDSYNC_ROW_EXISTS_BY_PK =
     "SELECT EXISTS(SELECT 1 FROM %s_cloudsync WHERE pk = $1 LIMIT 1);";
@@ -317,7 +389,7 @@ const char * const SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK =
 const char * const SQL_PRAGMA_TABLEINFO_PK_COLLIST =
     "SELECT string_agg(quote_ident(column_name), ',') "
     "FROM information_schema.key_column_usage "
-    "WHERE table_name = $1 AND constraint_name LIKE '%%_pkey' "
+    "WHERE table_name = %s AND constraint_name LIKE '%%_pkey' "
     "ORDER BY ordinal_position;";
 
 const char * const SQL_PRAGMA_TABLEINFO_PK_DECODE_SELECTLIST =

@@ -99,6 +99,77 @@ process_process:
     return (rc == DBRES_OK) ? query : NULL;
 }
 
+char *sql_build_delete_by_pk (db_t *db, const char *table_name) {
+    char buffer[1024];
+    char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_DELETE_ROW_BY_PK, table_name, singlequote_escaped_table_name);
+    if (!sql) return NULL;
+
+    char *query = NULL;
+    int rc = database_select_text(db, sql, &query);
+    cloudsync_memory_free(sql);
+
+    return (rc == DBRES_OK) ? query : NULL;
+}
+
+char *sql_build_insert_pk_ignore (db_t *db, const char *table_name) {
+    char buffer[1024];
+    char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_INSERT_PK_IGNORE, table_name, table_name, singlequote_escaped_table_name);
+    if (!sql) return NULL;
+
+    char *query = NULL;
+    int rc = database_select_text(db, sql, &query);
+    cloudsync_memory_free(sql);
+
+    return (rc == DBRES_OK) ? query : NULL;
+}
+
+char *sql_build_upsert_pk_and_col (db_t *db, const char *table_name, const char *colname) {
+    char buffer[1024];
+    char buffer2[1024];
+    char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
+    char *singlequote_escaped_col_name = sql_escape_name(colname, buffer2, sizeof(buffer2));
+    char *sql = cloudsync_memory_mprintf(
+        SQL_BUILD_UPSERT_PK_AND_COL,
+        table_name,
+        table_name,
+        singlequote_escaped_table_name,
+        singlequote_escaped_col_name,
+        singlequote_escaped_col_name
+    );
+    if (!sql) return NULL;
+
+    char *query = NULL;
+    int rc = database_select_text(db, sql, &query);
+    cloudsync_memory_free(sql);
+
+    return (rc == DBRES_OK) ? query : NULL;
+}
+
+char *sql_build_select_cols_by_pk (db_t *db, const char *table_name, const char *colname) {
+    char *colnamequote = "\"";
+    char buffer[1024];
+    char buffer2[1024];
+    char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
+    char *singlequote_escaped_col_name = sql_escape_name(colname, buffer2, sizeof(buffer2));
+    char *sql = cloudsync_memory_mprintf(
+        SQL_BUILD_SELECT_COLS_BY_PK_FMT,
+        table_name,
+        colnamequote,
+        singlequote_escaped_col_name,
+        colnamequote,
+        singlequote_escaped_table_name
+    );
+    if (!sql) return NULL;
+
+    char *query = NULL;
+    int rc = database_select_text(db, sql, &query);
+    cloudsync_memory_free(sql);
+
+    return (rc == DBRES_OK) ? query : NULL;
+}
+
 // MARK: - PRIVATE -
 
 int database_select1_value (db_t *db, const char *sql, char **ptr_value, int64_t *int_value, DBTYPE expected_type) {

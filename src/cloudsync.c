@@ -551,17 +551,8 @@ char *table_build_mergedelete_sql (db_t *db, cloudsync_table_context *table) {
         return sql;
     }
     #endif
-    
-    char buffer[1024];
-    char *singlequote_escaped_table_name = sql_escape_name(table->name, buffer, sizeof(buffer));
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_DELETE_ROW_BY_PK, table->name, singlequote_escaped_table_name);
-    if (!sql) return NULL;
-    
-    char *query = NULL;
-    int rc = database_select_text(db, sql, &query);
-    cloudsync_memory_free(sql);
-    
-    return (rc == DBRES_OK) ? query : NULL;
+
+    return sql_build_delete_by_pk(db, table->name);
 }
 
 char *table_build_mergeinsert_sql (db_t *db, cloudsync_table_context *table, const char *colname) {
@@ -580,24 +571,13 @@ char *table_build_mergeinsert_sql (db_t *db, cloudsync_table_context *table, con
     }
     #endif
     
-    char buffer[1024];
-    char *singlequote_escaped_table_name = sql_escape_name(table->name, buffer, sizeof(buffer));
-    
     if (colname == NULL) {
         // is sentinel insert
-        sql = cloudsync_memory_mprintf(SQL_BUILD_INSERT_PK_IGNORE, table->name, table->name, singlequote_escaped_table_name);
+        sql = sql_build_insert_pk_ignore(db, table->name);
     } else {
-        char buffer2[1024];
-        char *singlequote_escaped_col_name = sql_escape_name(colname, buffer2, sizeof(buffer2));
-        sql = cloudsync_memory_mprintf(SQL_BUILD_UPSERT_PK_AND_COL, table->name, table->name, singlequote_escaped_table_name, singlequote_escaped_col_name, singlequote_escaped_col_name);
+        sql = sql_build_upsert_pk_and_col(db, table->name, colname);
     }
-    if (!sql) return NULL;
-    
-    char *query = NULL;
-    int rc = database_select_text(db, sql, &query);
-    cloudsync_memory_free(sql);
-    
-    return (rc == DBRES_OK) ? query : NULL;
+    return sql;
 }
 
 char *table_build_value_sql (db_t *db, cloudsync_table_context *table, const char *colname) {
@@ -611,18 +591,7 @@ char *table_build_value_sql (db_t *db, cloudsync_table_context *table, const cha
     #endif
         
     // SELECT age FROM customers WHERE first_name=? AND last_name=?;
-    char buffer[1024];
-    char buffer2[1024];
-    char *singlequote_escaped_table_name = sql_escape_name(table->name, buffer, sizeof(buffer));
-    char *singlequote_escaped_col_name = sql_escape_name(colname, buffer2, sizeof(buffer2));
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_COLS_BY_PK_FMT, table->name, colnamequote, singlequote_escaped_col_name, colnamequote, singlequote_escaped_table_name);
-    if (!sql) return NULL;
-    
-    char *query = NULL;
-    int rc = database_select_text(db, sql, &query);
-    cloudsync_memory_free(sql);
-    
-    return (rc == DBRES_OK) ? query : NULL;
+    return sql_build_select_cols_by_pk(db, table->name, colname);
 }
     
 cloudsync_table_context *table_create (cloudsync_context *data, const char *name, table_algo algo) {
@@ -812,7 +781,6 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // REAL TABLE statements
-    DEBUG_SQL("REAL TABLE statements: %d", ncols);
 
     // precompile the get column value statement
     if (ncols > 0) {
@@ -825,7 +793,6 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
         if (rc != DBRES_OK) goto cleanup;
     }
     
-    DEBUG_SQL("real_merge_delete ...", sql);
     sql = table_build_mergedelete_sql(db, table);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("real_merge_delete: %s", sql);
