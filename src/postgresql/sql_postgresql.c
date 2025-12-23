@@ -171,7 +171,7 @@ const char * const SQL_SITEID_GETSET_ROWID_BY_SITEID =
     "RETURNING id;";
 
 const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_ROWID =
-    "SELECT string_agg(quote_ident(column_name), ',') "
+    "SELECT string_agg(quote_ident(column_name), ',' ORDER BY ordinal_position) "
     "FROM information_schema.columns "
     "WHERE table_name = $1 AND column_name NOT IN ("
     "SELECT column_name FROM information_schema.key_column_usage "
@@ -381,15 +381,14 @@ const char * const SQL_DROP_CLOUDSYNC_TABLE =
 
 const char * const SQL_CLOUDSYNC_DELETE_COLS_NOT_IN_SCHEMA_OR_PKCOL =
     "DELETE FROM %s_cloudsync WHERE col_name NOT IN ("
-    "SELECT column_name FROM information_schema.columns WHERE table_name = $1 "
+    "SELECT column_name FROM information_schema.columns WHERE table_name = '%s' "
     "UNION SELECT '%s'"
     ");";
 
 const char * const SQL_PRAGMA_TABLEINFO_PK_QUALIFIED_COLLIST_FMT =
-    "SELECT string_agg(quote_ident(column_name), ',') "
+    "SELECT string_agg(quote_ident(column_name), ',' ORDER BY ordinal_position) "
     "FROM information_schema.key_column_usage "
-    "WHERE table_name = '%s' AND constraint_name LIKE '%%_pkey' "
-    "ORDER BY ordinal_position;";
+    "WHERE table_name = '%s' AND constraint_name LIKE '%%_pkey';";
 
 const char * const SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK =
     "DELETE FROM %s_cloudsync "
@@ -402,16 +401,14 @@ const char * const SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK =
 const char * const SQL_PRAGMA_TABLEINFO_PK_COLLIST =
     "SELECT string_agg(quote_ident(column_name), ',') "
     "FROM information_schema.key_column_usage "
-    "WHERE table_name = %s AND constraint_name LIKE '%%_pkey' "
-    "ORDER BY ordinal_position;";
+    "WHERE table_name = '%s' AND constraint_name LIKE '%%_pkey';";
 
 const char * const SQL_PRAGMA_TABLEINFO_PK_DECODE_SELECTLIST =
     "SELECT string_agg("
-    "'cloudsync_pk_decode(pk, ' || ordinal_position || ') AS ' || quote_ident(column_name), ','"
+    "'cloudsync_pk_decode(pk, ' || ordinal_position || ') AS ' || quote_ident(column_name), ',' ORDER BY ordinal_position"
     ") "
     "FROM information_schema.key_column_usage "
-    "WHERE table_name = $1 AND constraint_name LIKE '%%_pkey' "
-    "ORDER BY ordinal_position;";
+    "WHERE table_name = '%s' AND constraint_name LIKE '%%_pkey';";
 
 const char * const SQL_CLOUDSYNC_INSERT_MISSING_PKS_FROM_BASE_EXCEPT_SYNC =
     "SELECT cloudsync_insert('%s', %s) "
