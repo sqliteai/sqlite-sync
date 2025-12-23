@@ -164,7 +164,7 @@ int dbutils_settings_set_key_value (db_t *db, cloudsync_context *data, const cha
     DEBUG_SETTINGS("dbutils_settings_set_key_value key: %s value: %s", key, value);
     
     int rc = DBRES_OK;
-    if (db == NULL) db = cloudsync_db(data);
+    if (db == NULL && data != NULL) db = cloudsync_db(data);
     
     if (key && value) {
         const char *values[] = {key, value};
@@ -288,7 +288,7 @@ int dbutils_table_settings_set_key_value (db_t *db, cloudsync_context *data, con
     DEBUG_SETTINGS("dbutils_table_settings_set_key_value table: %s column: %s key: %s", table, column, key);
     
     int rc = DBRES_OK;
-    if (db == NULL) db = cloudsync_db(data);
+    if (db == NULL && data != NULL) db = cloudsync_db(data);
     
     // sanity check tbl_name
     if (table == NULL) {
