@@ -22,9 +22,6 @@ SELECT (length(cloudsync_uuid()) > 0) AS uuid_ok \gset
 -- Enable debug logs
 SET client_min_messages = debug1; SET log_min_messages = debug1;
 
--- Enable debug logs
--- SET client_min_messages = debug1; SET log_min_messages = debug1;
-
 -- Init on a simple table should succeed
 SELECT cloudsync_cleanup('smoke_tbl');
 DROP TABLE IF EXISTS smoke_tbl;
@@ -38,3 +35,8 @@ SELECT (length(encode(cloudsync_siteid()::bytea, 'hex')) > 0) AS sid_ok \gset
 \else
   \quit 1
 \endif
+
+-- test double init, should be a no-op
+SELECT cloudsync_init('smoke_tbl', 'CLS', true);
+
+SELECT cloudsync_cleanup('smoke_tbl');
