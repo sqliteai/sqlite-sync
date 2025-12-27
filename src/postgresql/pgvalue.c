@@ -8,10 +8,7 @@
 #include "catalog/pg_type.h"
 #include "utils/lsyscache.h"
 #include "utils/builtins.h"
-
-static MemoryContext pgvalue_mcxt(MemoryContext mcxt) {
-    return mcxt ? mcxt : CurrentMemoryContext;
-}
+#include "../utils.h"
 
 bool pgvalue_is_text_type(Oid typeid) {
     switch (typeid) {
@@ -32,15 +29,13 @@ static bool pgvalue_is_varlena(Oid typeid) {
     return (typeid == BYTEAOID) || pgvalue_is_text_type(typeid);
 }
 
-pgvalue_t *pgvalue_create(Datum datum, Oid typeid, int32 typmod, Oid collation, bool isnull, MemoryContext mcxt) {
-    MemoryContext old = MemoryContextSwitchTo(pgvalue_mcxt(mcxt));
-    pgvalue_t *v = palloc0(sizeof(pgvalue_t));
+pgvalue_t *pgvalue_create(Datum datum, Oid typeid, int32 typmod, Oid collation, bool isnull) {
+    pgvalue_t *v = cloudsync_memory_zeroalloc(sizeof(pgvalue_t));
     v->datum = datum;
     v->typeid = typeid;
     v->typmod = typmod;
     v->collation = collation;
     v->isnull = isnull;
-    MemoryContextSwitchTo(old);
     return v;
 }
 
@@ -77,18 +72,18 @@ int pgvalue_dbtype(pgvalue_t *v) {
     }
 }
 
-static void pgvalue_vec_push(pgvalue_t ***arr, int *count, int *cap, pgvalue_t *val, MemoryContext mcxt) {
+static void pgvalue_vec_push(pgvalue_t ***arr, int *count, int *cap, pgvalue_t *val) {
     if (*cap == 0) {
         *cap = 8;
-        *arr = (pgvalue_t **)MemoryContextAllocZero(mcxt, sizeof(pgvalue_t *) * (*cap));
+        *arr = (pgvalue_t **)cloudsync_memory_zeroalloc(sizeof(pgvalue_t *) * (*cap));
     } else if (*count >= *cap) {
         *cap *= 2;
-        *arr = (pgvalue_t **)repalloc(*arr, sizeof(pgvalue_t *) * (*cap));
+        *arr = (pgvalue_t **)cloudsync_memory_realloc(*arr, sizeof(pgvalue_t *) * (*cap));
     }
     (*arr)[(*count)++] = val;
 }
 
-pgvalue_t **pgvalues_from_array(ArrayType *array, int *out_count, MemoryContext mcxt) {
+pgvalue_t **pgvalues_from_array(ArrayType *array, int *out_count) {
     if (out_count) *out_count = 0;
     if (!array) return NULL;
 
@@ -102,24 +97,22 @@ pgvalue_t **pgvalues_from_array(ArrayType *array, int *out_count, MemoryContext 
     bool *nulls = NULL;
     int nelems = 0;
 
-    MemoryContext old = MemoryContextSwitchTo(pgvalue_mcxt(mcxt));
     deconstruct_array(array, elem_type, elmlen, elmbyval, elmalign, &elems, &nulls, &nelems);
-    MemoryContextSwitchTo(old);
 
     pgvalue_t **values = NULL;
     int count = 0;
     int cap = 0;
 
     for (int i = 0; i < nelems; i++) {
-        pgvalue_t *v = pgvalue_create(elems[i], elem_type, -1, InvalidOid, nulls ? nulls[i] : false, mcxt);
-        pgvalue_vec_push(&values, &count, &cap, v, mcxt);
+        pgvalue_t *v = pgvalue_create(elems[i], elem_type, -1, InvalidOid, nulls ? nulls[i] : false);
+        pgvalue_vec_push(&values, &count, &cap, v);
     }
 
     if (out_count) *out_count = count;
     return values;
 }
 
-pgvalue_t **pgvalues_from_args(FunctionCallInfo fcinfo, int start_arg, int *out_count, MemoryContext mcxt) {
+pgvalue_t **pgvalues_from_args(FunctionCallInfo fcinfo, int start_arg, int *out_count) {
     if (out_count) *out_count = 0;
     if (!fcinfo) return NULL;
 
@@ -140,17 +133,17 @@ pgvalue_t **pgvalues_from_args(FunctionCallInfo fcinfo, int start_arg, int *out_
         if (OidIsValid(elemtype) && !isnull) {
             ArrayType *array = PG_GETARG_ARRAYTYPE_P(i);
             int subcount = 0;
-            pgvalue_t **subvals = pgvalues_from_array(array, &subcount, mcxt);
+            pgvalue_t **subvals = pgvalues_from_array(array, &subcount);
             for (int j = 0; j < subcount; j++) {
-                pgvalue_vec_push(&values, &count, &cap, subvals[j], mcxt);
+                pgvalue_vec_push(&values, &count, &cap, subvals[j]);
             }
-            if (subvals) pfree(subvals);
+            if (subvals) cloudsync_memory_free(subvals);
             continue;
         }
 
         Datum datum = isnull ? (Datum)0 : PG_GETARG_DATUM(i);
-        pgvalue_t *v = pgvalue_create(datum, argtype, -1, fcinfo->fncollation, isnull, mcxt);
-        pgvalue_vec_push(&values, &count, &cap, v, mcxt);
+        pgvalue_t *v = pgvalue_create(datum, argtype, -1, fcinfo->fncollation, isnull);
+        pgvalue_vec_push(&values, &count, &cap, v);
     }
 
     if (out_count) *out_count = count;

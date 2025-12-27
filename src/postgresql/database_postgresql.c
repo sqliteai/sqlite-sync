@@ -187,7 +187,7 @@ static char* convert_placeholders(const char *sql) {
 
     // Allocate new string (worst case: $999 for each ? = 4 chars vs 1)
     size_t newlen = strlen(sql) + (count * 3) + 1;
-    char *newsql = palloc(newlen);
+    char *newsql = cloudsync_memory_alloc(newlen);
 
     // Convert
     char *dst = newsql;
@@ -283,11 +283,7 @@ int database_select1_value (db_t *db, const char *sql, char **ptr_value, int64_t
         text *txt = DatumGetTextP(datum);
         int len = VARSIZE(txt) - VARHDRSZ;
         if (len > 0) {
-            // CRITICAL: Allocate in TopMemoryContext to survive SPI cleanup
-            MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
             char *ptr = cloudsync_memory_alloc(len + 1);
-            MemoryContextSwitchTo(oldctx);
-
             if (!ptr) {
                 return set_last_error(DBRES_NOMEM, "Memory allocation failed");
             }
@@ -300,11 +296,7 @@ int database_select1_value (db_t *db, const char *sql, char **ptr_value, int64_t
         bytea *ba = DatumGetByteaP(datum);
         int len = VARSIZE(ba) - VARHDRSZ;
         if (len > 0) {
-            // CRITICAL: Allocate in TopMemoryContext to survive SPI cleanup
-            MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
             char *ptr = cloudsync_memory_alloc(len);
-            MemoryContextSwitchTo(oldctx);
-
             if (!ptr) {
                 return set_last_error(DBRES_NOMEM, "Memory allocation failed");
             }
@@ -342,12 +334,9 @@ int database_select3_values (db_t *db, const char *sql, char **value, int64_t *l
             bytea *ba = DatumGetByteaP(datum1);
             int blob_len = VARSIZE(ba) - VARHDRSZ;
             if (blob_len > 0) {
-                // Allocate in TopMemoryContext to survive SPI cleanup
-                MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
                 char *ptr = cloudsync_memory_alloc(blob_len);
-                MemoryContextSwitchTo(oldctx);
-
                 if (!ptr) return DBRES_NOMEM;
+                
                 memcpy(ptr, VARDATA(ba), blob_len);
                 *value = ptr;
                 *len = blob_len;
@@ -356,12 +345,9 @@ int database_select3_values (db_t *db, const char *sql, char **value, int64_t *l
             text *txt = DatumGetTextP(datum1);
             int text_len = VARSIZE(txt) - VARHDRSZ;
             if (text_len > 0) {
-                // Allocate in TopMemoryContext to survive SPI cleanup
-                MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
                 char *ptr = cloudsync_memory_alloc(text_len + 1);
-                MemoryContextSwitchTo(oldctx);
-
                 if (!ptr) return DBRES_NOMEM;
+                
                 memcpy(ptr, VARDATA(txt), text_len);
                 ptr[text_len] = '\0';
                 *value = ptr;
@@ -495,8 +481,8 @@ int database_exec_callback (db_t *db, const char *sql, int (*callback)(void *xda
         int ncols = tupdesc->natts;
 
         // Allocate arrays for column names and values
-        char **names = palloc(ncols * sizeof(char*));
-        char **values = palloc(ncols * sizeof(char*));
+        char **names = cloudsync_memory_alloc(ncols * sizeof(char*));
+        char **values = cloudsync_memory_alloc(ncols * sizeof(char*));
 
         // Get column names
         for (int i = 0; i < ncols; i++) {
@@ -530,16 +516,16 @@ int database_exec_callback (db_t *db, const char *sql, int (*callback)(void *xda
             int cb_rc = callback(xdata, ncols, values, names);
 
             if (cb_rc != 0) {
-                pfree(names);
-                pfree(values);
+                cloudsync_memory_free(names);
+                cloudsync_memory_free(values);
                 char errmsg[1024];
                 snprintf(errmsg, sizeof(errmsg), "database_exec_callback aborted %d", cb_rc);
                 return set_last_error(DBRES_ABORT, errmsg);
             }
         }
 
-        pfree(names);
-        pfree(values);
+        cloudsync_memory_free(names);
+        cloudsync_memory_free(values);
     }
 
     return DBRES_OK;
@@ -623,7 +609,7 @@ static int set_last_error(int errcode, const char *errmsg) {
     last_error_code = errcode;
 
     if (last_error_msg) {
-        pfree(last_error_msg);
+        cloudsync_memory_free(last_error_msg);
         last_error_msg = NULL;
     }
 
@@ -898,18 +884,14 @@ int database_prepare (db_t *db, const char *sql, dbvm_t **vm, int flags) {
         return set_last_error(DBRES_ERROR, "Invalid parameters to database_prepare");
     }
 
-    // Allocate wrapper/sql in a long-lived context (SPI contexts can be reset on SPI_finish).
-    MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
-
     // Convert ? placeholders to $1, $2, etc.
     char *pg_sql = convert_placeholders(sql);
     if (!pg_sql) {
-        MemoryContextSwitchTo(oldctx);
         return set_last_error(DBRES_ERROR, "Failed to convert SQL placeholders");
     }
 
     // Create wrapper - defer actual SPI_prepare until first step
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)palloc0(sizeof(pg_stmt_wrapper_t));
+    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)cloudsync_memory_zeroalloc(sizeof(pg_stmt_wrapper_t));
     wrapper->sql = pg_sql;
     wrapper->plan = NULL;
     wrapper->portal = NULL;
@@ -924,7 +906,6 @@ int database_prepare (db_t *db, const char *sql, dbvm_t **vm, int flags) {
     }
 
     *vm = (dbvm_t*)wrapper;
-    MemoryContextSwitchTo(oldctx);
     return set_last_error(DBRES_OK, NULL);
 }
 
@@ -1033,10 +1014,10 @@ void databasevm_finalize (dbvm_t *vm) {
     }
 
     if (wrapper->sql) {
-        pfree(wrapper->sql);
+        cloudsync_memory_free(wrapper->sql);
     }
 
-    pfree(wrapper);
+    cloudsync_memory_free(wrapper);
 }
 
 void databasevm_reset (dbvm_t *vm) {
@@ -1132,7 +1113,7 @@ int databasevm_bind_blob (dbvm_t *vm, int index, const void *value, uint64_t siz
     if (idx >= MAX_PARAMS) return DBRES_ERROR;
 
     // Convert binary data to PostgreSQL bytea
-    bytea *ba = (bytea*)palloc(size + VARHDRSZ);
+    bytea *ba = (bytea*)cloudsync_memory_alloc(size + VARHDRSZ);
     SET_VARSIZE(ba, size + VARHDRSZ);
     memcpy(VARDATA(ba), value, size);
 
@@ -1364,22 +1345,22 @@ void database_value_free (dbvalue_t *value) {
     if (!v) return;
 
     if (v->owned_detoast) {
-        pfree(v->owned_detoast);
+        cloudsync_memory_free(v->owned_detoast);
     }
     if (v->owns_cstring && v->cstring) {
-        pfree(v->cstring);
+        cloudsync_memory_free(v->cstring);
     }
-    pfree(v);
+    cloudsync_memory_free(v);
 }
 
 void *database_value_dup (dbvalue_t *value) {
     pgvalue_t *v = (pgvalue_t *)value;
     if (!v) return NULL;
 
-    pgvalue_t *copy = pgvalue_create(v->datum, v->typeid, v->typmod, v->collation, v->isnull, CurrentMemoryContext);
+    pgvalue_t *copy = pgvalue_create(v->datum, v->typeid, v->typmod, v->collation, v->isnull);
     if (v->detoasted && v->owned_detoast) {
         Size len = VARSIZE_ANY(v->owned_detoast);
-        copy->owned_detoast = palloc(len);
+        copy->owned_detoast = cloudsync_memory_alloc(len);
         memcpy(copy->owned_detoast, v->owned_detoast, len);
         copy->datum = PointerGetDatum(copy->owned_detoast);
         copy->detoasted = true;
@@ -1491,7 +1472,7 @@ dbvalue_t *database_column_value (dbvm_t *vm, int index) {
     int32 typmod = TupleDescAttr(SPI_tuptable->tupdesc, index + 1)->atttypmod;
     Oid collation = TupleDescAttr(SPI_tuptable->tupdesc, index + 1)->attcollation;
 
-    pgvalue_t *v = pgvalue_create(datum, typeid, typmod, collation, isnull, CurrentMemoryContext);
+    pgvalue_t *v = pgvalue_create(datum, typeid, typmod, collation, isnull);
     return (dbvalue_t*)v;
 }
 
@@ -1595,7 +1576,6 @@ int database_begin_savepoint (db_t *db, const char *savepoint_name) {
     PG_TRY();
     {
         BeginInternalSubTransaction(NULL);
-        MemoryContextSwitchTo(CurTransactionContext);
     }
     PG_CATCH();
     {
@@ -1614,7 +1594,6 @@ int database_commit_savepoint (db_t *db, const char *savepoint_name) {
     PG_TRY();
     {
         ReleaseCurrentSubTransaction();
-        MemoryContextSwitchTo(CurTransactionContext);
         CommandCounterIncrement();
 
         // Refresh snapshot
@@ -1637,7 +1616,6 @@ int database_rollback_savepoint (db_t *db, const char *savepoint_name) {
     PG_TRY();
     {
         RollbackAndReleaseCurrentSubTransaction();
-        MemoryContextSwitchTo(CurTransactionContext);
 
         // Refresh snapshot
         if (ActiveSnapshotSet()) {
@@ -1658,11 +1636,11 @@ int database_rollback_savepoint (db_t *db, const char *savepoint_name) {
 // MARK: - MEMORY -
 
 void *dbmem_alloc (uint64_t size) {
-    return palloc(size);
+    return malloc(size);
 }
 
 void *dbmem_zeroalloc (uint64_t size) {
-    void *ptr = palloc(size);
+    void *ptr = malloc(size);
     if (ptr) {
         memset(ptr, 0, (size_t)size);
     }
@@ -1670,7 +1648,7 @@ void *dbmem_zeroalloc (uint64_t size) {
 }
 
 void *dbmem_realloc (void *ptr, uint64_t new_size) {
-    return repalloc(ptr, new_size);
+    return realloc(ptr, new_size);
 }
 
 char *dbmem_mprintf(const char *format, ...) {
@@ -1691,7 +1669,7 @@ char *dbmem_mprintf(const char *format, ...) {
     }
 
     // Allocate buffer and format string
-    char *result = (char*)palloc(len + 1);
+    char *result = (char*)malloc(len + 1);
     vsnprintf(result, len + 1, format, args);
 
     va_end(args);
@@ -1710,7 +1688,7 @@ char *dbmem_vmprintf (const char *format, va_list list) {
     if (len < 0) return NULL;
 
     // Allocate buffer and format string
-    char *result = (char*)palloc(len + 1);
+    char *result = (char*)malloc(len + 1);
     vsnprintf(result, len + 1, format, list);
 
     return result;
@@ -1718,12 +1696,12 @@ char *dbmem_vmprintf (const char *format, va_list list) {
 
 void dbmem_free (void *ptr) {
     if (ptr) {
-        pfree(ptr);
+        free(ptr);
     }
 }
 
 uint64_t dbmem_size (void *ptr) {
-    // PostgreSQL palloc doesn't expose allocated size directly
+    // PostgreSQL memory alloc doesn't expose allocated size directly
     // Return 0 as a safe default
     return 0;
 }

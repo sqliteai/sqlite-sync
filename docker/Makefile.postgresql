@@ -36,7 +36,7 @@ PG_OBJS = $(PG_ALL_SRC:.c=.o)
 # Compiler flags
 # Define POSIX macros as compiler flags to ensure they're defined before any includes
 PG_CPPFLAGS = -I$(PG_INCLUDEDIR) -Isrc -Isrc/postgresql -DCLOUDSYNC_POSTGRESQL_BUILD -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE
-PG_CFLAGS = -fPIC -Wall -Wextra -std=c11 -O2
+PG_CFLAGS = -fPIC -Wall -Wextra -Wno-unused-parameter -std=c11 -O2
 PG_LDFLAGS = -shared
 
 # Output files

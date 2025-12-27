@@ -129,7 +129,7 @@ pg_cloudsync_siteid(PG_FUNCTION_ARGS)
     }
 
     // Return as bytea (binary UUID)
-    bytea *result = (bytea *)palloc(VARHDRSZ + UUID_LEN);
+    bytea *result = (bytea *)cloudsync_memory_alloc(VARHDRSZ + UUID_LEN);
     SET_VARSIZE(result, VARHDRSZ + UUID_LEN);
     memcpy(VARDATA(result), siteid, UUID_LEN);
 
@@ -147,7 +147,7 @@ cloudsync_uuid(PG_FUNCTION_ARGS)
     cloudsync_uuid_v7(uuid);
 
     // Return as bytea
-    bytea *result = (bytea *)palloc(VARHDRSZ + UUID_LEN);
+    bytea *result = (bytea *)cloudsync_memory_alloc(VARHDRSZ + UUID_LEN);
     SET_VARSIZE(result, VARHDRSZ + UUID_LEN);
     memcpy(VARDATA(result), uuid, UUID_LEN);
 
@@ -704,7 +704,7 @@ cloudsync_payload_encode_transfn(PG_FUNCTION_ARGS)
     // Get or allocate aggregate state
     if (PG_ARGISNULL(0)) {
         MemoryContext oldContext = MemoryContextSwitchTo(aggContext);
-        payload = (cloudsync_payload_context *)palloc(cloudsync_payload_context_size(NULL));
+        payload = (cloudsync_payload_context *)cloudsync_memory_alloc(cloudsync_payload_context_size(NULL));
         memset(payload, 0, cloudsync_payload_context_size(NULL));
         MemoryContextSwitchTo(oldContext);
     } else {
@@ -713,7 +713,7 @@ cloudsync_payload_encode_transfn(PG_FUNCTION_ARGS)
 
     cloudsync_context *ctx = get_cloudsync_context();
     int argc = 0;
-    pgvalue_t **argv = pgvalues_from_args(fcinfo, 1, &argc, aggContext);
+    pgvalue_t **argv = pgvalues_from_args(fcinfo, 1, &argc);
 
     // Wrap variadic args into pgvalue_t so pk/payload helpers can read types safely.
     if (argc > 0) {
@@ -729,7 +729,7 @@ cloudsync_payload_encode_transfn(PG_FUNCTION_ARGS)
     for (int i = 0; i < argc; i++) {
         database_value_free((dbvalue_t *)argv[i]);
     }
-    if (argv) pfree(argv);
+    if (argv) cloudsync_memory_free(argv);
 
     PG_RETURN_POINTER(payload);
 }
@@ -760,7 +760,7 @@ cloudsync_payload_encode_finalfn(PG_FUNCTION_ARGS)
         PG_RETURN_NULL();
     }
 
-    bytea *result = (bytea *)palloc(VARHDRSZ + blob_size);
+    bytea *result = (bytea *)cloudsync_memory_alloc(VARHDRSZ + blob_size);
     SET_VARSIZE(result, VARHDRSZ + blob_size);
     memcpy(VARDATA(result), blob, blob_size);
 
@@ -874,14 +874,13 @@ PG_FUNCTION_INFO_V1(cloudsync_pk_encode);
 Datum
 cloudsync_pk_encode(PG_FUNCTION_ARGS)
 {
-    MemoryContext mcxt = CurrentMemoryContext;
     int argc = 0;
     pgvalue_t **argv = NULL;
 
     // Signature is VARIADIC anyarray, so arg 0 is an array of PK values.
     if (!PG_ARGISNULL(0)) {
         ArrayType *array = PG_GETARG_ARRAYTYPE_P(0);
-        argv = pgvalues_from_array(array, &argc, mcxt);
+        argv = pgvalues_from_array(array, &argc);
     }
 
     size_t pklen = 0;
@@ -898,7 +897,7 @@ cloudsync_pk_encode(PG_FUNCTION_ARGS)
     for (int i = 0; i < argc; i++) {
         database_value_free((dbvalue_t *)argv[i]);
     }
-    if (argv) pfree(argv);
+    if (argv) cloudsync_memory_free(argv);
 
     PG_RETURN_TEXT_P(result);
 }
@@ -941,11 +940,10 @@ cloudsync_insert(PG_FUNCTION_ARGS)
     // Extract PK values from VARIADIC anyarray (arg 1)
     int argc = 0;
     pgvalue_t **argv = NULL;
-    MemoryContext mcxt = CurrentMemoryContext;
 
     if (!PG_ARGISNULL(1)) {
         ArrayType *pk_array = PG_GETARG_ARRAYTYPE_P(1);
-        argv = pgvalues_from_array(pk_array, &argc, mcxt);
+        argv = pgvalues_from_array(pk_array, &argc);
     }
 
     // Verify we have the correct number of PK columns
@@ -955,7 +953,7 @@ cloudsync_insert(PG_FUNCTION_ARGS)
         for (int i = 0; i < argc; i++) {
             database_value_free((dbvalue_t *)argv[i]);
         }
-        if (argv) pfree(argv);
+        if (argv) cloudsync_memory_free(argv);
 
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -969,7 +967,7 @@ cloudsync_insert(PG_FUNCTION_ARGS)
         for (int i = 0; i < argc; i++) {
             database_value_free((dbvalue_t *)argv[i]);
         }
-        if (argv) pfree(argv);
+        if (argv) cloudsync_memory_free(argv);
 
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
@@ -1022,7 +1020,7 @@ cloudsync_insert(PG_FUNCTION_ARGS)
         for (int i = 0; i < argc; i++) {
             database_value_free((dbvalue_t *)argv[i]);
         }
-        if (argv) pfree(argv);
+        if (argv) cloudsync_memory_free(argv);
 
         SPI_finish();
 
@@ -1040,7 +1038,7 @@ cloudsync_insert(PG_FUNCTION_ARGS)
         for (int i = 0; i < argc; i++) {
             database_value_free((dbvalue_t *)argv[i]);
         }
-        if (argv) pfree(argv);
+        if (argv) cloudsync_memory_free(argv);
 
         SPI_finish();
         PG_RE_THROW();

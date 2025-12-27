@@ -32,11 +32,11 @@ typedef struct pgvalue_t {
     bool owns_cstring;
 } pgvalue_t;
 
-pgvalue_t *pgvalue_create(Datum datum, Oid typeid, int32 typmod, Oid collation, bool isnull, MemoryContext mcxt);
+pgvalue_t *pgvalue_create(Datum datum, Oid typeid, int32 typmod, Oid collation, bool isnull);
 void pgvalue_ensure_detoast(pgvalue_t *v);
 bool pgvalue_is_text_type(Oid typeid);
 int pgvalue_dbtype(pgvalue_t *v);
-pgvalue_t **pgvalues_from_array(ArrayType *array, int *out_count, MemoryContext mcxt);
-pgvalue_t **pgvalues_from_args(FunctionCallInfo fcinfo, int start_arg, int *out_count, MemoryContext mcxt);
+pgvalue_t **pgvalues_from_array(ArrayType *array, int *out_count);
+pgvalue_t **pgvalues_from_args(FunctionCallInfo fcinfo, int start_arg, int *out_count);
 
 #endif // CLOUDSYNC_PGVALUE_H
