@@ -26,6 +26,7 @@ SET client_min_messages = debug1; SET log_min_messages = debug1;
 -- SET client_min_messages = debug1; SET log_min_messages = debug1;
 
 -- Init on a simple table should succeed
+SELECT cloudsync_cleanup('smoke_tbl');
 DROP TABLE IF EXISTS smoke_tbl;
 CREATE TABLE smoke_tbl (id TEXT PRIMARY KEY, val TEXT);
 SELECT cloudsync_init('smoke_tbl', 'CLS', true);

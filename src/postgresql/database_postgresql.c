@@ -228,8 +228,6 @@ static int map_spi_result(int rc) {
 static int set_last_error(int errcode, const char *errmsg);
 
 int database_select1_value (db_t *db, const char *sql, char **ptr_value, int64_t *int_value, DBTYPE expected_type) {
-    elog(DEBUG1, "database_select1_value: %s", sql);
-
     // init values and sanity check expected_type
     if (ptr_value) *ptr_value = NULL;
     *int_value = 0;
@@ -285,7 +283,11 @@ int database_select1_value (db_t *db, const char *sql, char **ptr_value, int64_t
         text *txt = DatumGetTextP(datum);
         int len = VARSIZE(txt) - VARHDRSZ;
         if (len > 0) {
+            // CRITICAL: Allocate in TopMemoryContext to survive SPI cleanup
+            MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
             char *ptr = cloudsync_memory_alloc(len + 1);
+            MemoryContextSwitchTo(oldctx);
+
             if (!ptr) {
                 return set_last_error(DBRES_NOMEM, "Memory allocation failed");
             }
@@ -298,7 +300,11 @@ int database_select1_value (db_t *db, const char *sql, char **ptr_value, int64_t
         bytea *ba = DatumGetByteaP(datum);
         int len = VARSIZE(ba) - VARHDRSZ;
         if (len > 0) {
+            // CRITICAL: Allocate in TopMemoryContext to survive SPI cleanup
+            MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
             char *ptr = cloudsync_memory_alloc(len);
+            MemoryContextSwitchTo(oldctx);
+
             if (!ptr) {
                 return set_last_error(DBRES_NOMEM, "Memory allocation failed");
             }
@@ -336,7 +342,11 @@ int database_select3_values (db_t *db, const char *sql, char **value, int64_t *l
             bytea *ba = DatumGetByteaP(datum1);
             int blob_len = VARSIZE(ba) - VARHDRSZ;
             if (blob_len > 0) {
+                // Allocate in TopMemoryContext to survive SPI cleanup
+                MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
                 char *ptr = cloudsync_memory_alloc(blob_len);
+                MemoryContextSwitchTo(oldctx);
+
                 if (!ptr) return DBRES_NOMEM;
                 memcpy(ptr, VARDATA(ba), blob_len);
                 *value = ptr;
@@ -346,7 +356,11 @@ int database_select3_values (db_t *db, const char *sql, char **value, int64_t *l
             text *txt = DatumGetTextP(datum1);
             int text_len = VARSIZE(txt) - VARHDRSZ;
             if (text_len > 0) {
+                // Allocate in TopMemoryContext to survive SPI cleanup
+                MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
                 char *ptr = cloudsync_memory_alloc(text_len + 1);
+                MemoryContextSwitchTo(oldctx);
+
                 if (!ptr) return DBRES_NOMEM;
                 memcpy(ptr, VARDATA(txt), text_len);
                 ptr[text_len] = '\0';
@@ -418,7 +432,6 @@ bool database_system_exists (db_t *db, const char *name, const char *type) {
 // MARK: - GENERAL -
 
 int database_exec (db_t *db, const char *sql) {
-    elog(DEBUG1, "database_exec %s", sql);
     if (!sql) return set_last_error(DBRES_ERROR, "SQL statement is NULL");
 
     int rc;
@@ -457,7 +470,6 @@ int database_exec (db_t *db, const char *sql) {
 }
 
 int database_exec_callback (db_t *db, const char *sql, int (*callback)(void *xdata, int argc, char **values, char **names), void *xdata) {
-    elog(DEBUG1, "database_exec_callback %s", sql);
     if (!sql) return set_last_error(DBRES_ERROR, "SQL statement is NULL");;
 
     int rc;
@@ -608,8 +620,6 @@ static char *last_error_msg = NULL;
 // Helper function to record errors and return the error code
 // This allows callers to write: return set_last_error(code, msg);
 static int set_last_error(int errcode, const char *errmsg) {
-    // elog(DEBUG1, "set_last_error: %d %s", errcode, errmsg ? errmsg : "(null)");
-
     last_error_code = errcode;
 
     if (last_error_msg) {
@@ -830,9 +840,13 @@ uint64_t database_schema_hash (db_t *db) {
         "FROM information_schema.columns WHERE table_schema = 'public'",
         &schema);
 
-    if (!schema) return 0;
+    if (!schema) {
+        elog(INFO, "database_schema_hash: schema is NULL");
+        return 0;
+    }
 
-    uint64_t hash = fnv1a_hash(schema, strlen(schema));
+    size_t schema_len = strlen(schema);
+    uint64_t hash = fnv1a_hash(schema, schema_len);
     cloudsync_memory_free(schema);
     return hash;
 }
@@ -855,7 +869,9 @@ int database_update_schema_hash (db_t *db, uint64_t *hash) {
 
     if (rc != DBRES_OK || !schema) return set_last_error(DBRES_ERROR, "database_update_schema_hash error 1");
 
-    uint64_t h = fnv1a_hash(schema, strlen(schema));
+    size_t schema_len = strlen(schema);
+    DEBUG_ALWAYS("database_update_schema_hash len %zu", schema_len);
+    uint64_t h = fnv1a_hash(schema, schema_len);
     cloudsync_memory_free(schema);
     if (hash && *hash == h) return set_last_error(DBRES_CONSTRAINT, "database_update_schema_hash constraint");
 
@@ -878,15 +894,17 @@ int database_update_schema_hash (db_t *db, uint64_t *hash) {
 // MARK: - VM -
 
 int database_prepare (db_t *db, const char *sql, dbvm_t **vm, int flags) {
-    elog(DEBUG1, "database_prepare: %s", sql);
-
     if (!sql || !vm) {
         return set_last_error(DBRES_ERROR, "Invalid parameters to database_prepare");
     }
 
+    // Allocate wrapper/sql in a long-lived context (SPI contexts can be reset on SPI_finish).
+    MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
+
     // Convert ? placeholders to $1, $2, etc.
     char *pg_sql = convert_placeholders(sql);
     if (!pg_sql) {
+        MemoryContextSwitchTo(oldctx);
         return set_last_error(DBRES_ERROR, "Failed to convert SQL placeholders");
     }
 
@@ -906,11 +924,11 @@ int database_prepare (db_t *db, const char *sql, dbvm_t **vm, int flags) {
     }
 
     *vm = (dbvm_t*)wrapper;
+    MemoryContextSwitchTo(oldctx);
     return set_last_error(DBRES_OK, NULL);
 }
 
 int databasevm_step (dbvm_t *vm) {
-    elog(DEBUG1, "databasevm_step: %s", databasevm_sql(vm));
     if (!vm) {
         return set_last_error(DBRES_ERROR, "NULL vm in databasevm_step");
     }
@@ -1002,7 +1020,6 @@ int databasevm_step (dbvm_t *vm) {
 }
 
 void databasevm_finalize (dbvm_t *vm) {
-    elog(DEBUG1, "databasevm_finalize: %s", databasevm_sql(vm));
     if (!vm) return;
 
     pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
@@ -1023,7 +1040,6 @@ void databasevm_finalize (dbvm_t *vm) {
 }
 
 void databasevm_reset (dbvm_t *vm) {
-    elog(DEBUG1, "databasevm_reset: %s", databasevm_sql(vm));
     if (!vm) return;
 
     pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
@@ -1038,7 +1054,6 @@ void databasevm_reset (dbvm_t *vm) {
 }
 
 void databasevm_clear_bindings (dbvm_t *vm) {
-    elog(DEBUG1, "databasevm_clear_bindings: %s", databasevm_sql(vm));
     if (!vm) return;
 
     pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
@@ -1577,8 +1592,6 @@ void database_result_value (dbcontext_t *context, dbvalue_t *value) {
 // MARK: - SAVEPOINTS -
 
 int database_begin_savepoint (db_t *db, const char *savepoint_name) {
-    elog(DEBUG1, "database_begin_savepoint: %s", savepoint_name);
-
     PG_TRY();
     {
         BeginInternalSubTransaction(NULL);
@@ -1598,8 +1611,6 @@ int database_begin_savepoint (db_t *db, const char *savepoint_name) {
 }
 
 int database_commit_savepoint (db_t *db, const char *savepoint_name) {
-    elog(DEBUG1, "database_commit_savepoint: %s", savepoint_name);
-
     PG_TRY();
     {
         ReleaseCurrentSubTransaction();
@@ -1623,8 +1634,6 @@ int database_commit_savepoint (db_t *db, const char *savepoint_name) {
 }
 
 int database_rollback_savepoint (db_t *db, const char *savepoint_name) {
-    elog(DEBUG1, "database_rollback_savepoint: %s", savepoint_name);
-
     PG_TRY();
     {
         RollbackAndReleaseCurrentSubTransaction();
