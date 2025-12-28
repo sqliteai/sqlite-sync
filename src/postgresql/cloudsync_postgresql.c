@@ -891,7 +891,7 @@ cloudsync_pk_encode(PG_FUNCTION_ARGS)
                  errmsg("cloudsync_pk_encode failed to encode primary key")));
     }
 
-    text *result = cstring_to_text_with_len(encoded, pklen);
+    text *result = cstring_to_text_with_len(encoded, (int)pklen);
     cloudsync_memory_free(encoded);
 
     for (int i = 0; i < argc; i++) {

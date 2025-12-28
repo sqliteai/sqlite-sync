@@ -486,7 +486,7 @@ int database_exec_callback (db_t *db, const char *sql, int (*callback)(void *xda
 
         // Get column names
         for (int i = 0; i < ncols; i++) {
-            names[i] = NameStr(tupdesc->attrs[i].attname);
+            names[i] = NameStr(TupleDescAttr(tupdesc, i)->attname);
         }
 
         // Process each row
@@ -711,7 +711,7 @@ int database_debug (db_t *db, bool print_result) {
     // PostgreSQL debug information
     if (print_result) {
         elog(DEBUG1, "PostgreSQL SPI debug info:");
-        elog(DEBUG1, "  SPI_processed: %lu", SPI_processed);
+        elog(DEBUG1, "  SPI_processed: %lu", (unsigned long)SPI_processed);
         elog(DEBUG1, "  In transaction: %d", IsTransactionState());
     }
     return DBRES_OK;
@@ -1080,7 +1080,7 @@ int database_pk_names (db_t *db, const char *table_name, char ***names, int *cou
         return DBRES_OK;
     }
 
-    int n = SPI_processed;
+    uint64_t n = SPI_processed;
     char **pk_names = cloudsync_memory_alloc(n * sizeof(char*));
     if (!pk_names) return DBRES_NOMEM;
 
@@ -1098,7 +1098,7 @@ int database_pk_names (db_t *db, const char *table_name, char ***names, int *cou
     }
 
     *names = pk_names;
-    *count = n;
+    *count = (int)n;
     return DBRES_OK;
 }
 
@@ -1508,7 +1508,7 @@ int database_column_type (dbvm_t *vm, int index) {
     if (index >= SPI_tuptable->tupdesc->natts) return DBTYPE_NULL;
 
     if (wrapper->current_row < 0 || wrapper->current_row >= (int)SPI_processed) {
-        elog(DEBUG1,  "databasevm_step no rows current_row=%d processed=%lu", wrapper->current_row, SPI_processed);
+        elog(DEBUG1,  "databasevm_step no rows current_row=%d processed=%lu", wrapper->current_row, (unsigned long)SPI_processed);
         return DBTYPE_NULL;
     }
 

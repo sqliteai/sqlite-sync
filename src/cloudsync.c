@@ -581,10 +581,9 @@ char *table_build_mergeinsert_sql (db_t *db, cloudsync_table_context *table, con
 }
 
 char *table_build_value_sql (db_t *db, cloudsync_table_context *table, const char *colname) {
-    char *colnamequote = "\"";
-
     #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
     if (table->rowid_only) {
+        char *colnamequote = "\"";
         char *sql = memory_mprintf(SQL_SELECT_COLS_BY_ROWID_FMT, colnamequote, colname, colnamequote, table->name);
         return sql;
     }
