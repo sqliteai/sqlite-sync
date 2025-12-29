@@ -601,7 +601,7 @@ cloudsync_table_context *table_create (cloudsync_context *data, const char *name
     
     table->context = data;
     table->algo = algo;
-    table->name = cloudsync_string_dup(name, true);
+    table->name = cloudsync_string_dup_lowercase(name);
     if (!table->name) {
         cloudsync_memory_free(table);
         return NULL;
@@ -869,7 +869,7 @@ int table_add_to_context_cb (void *xdata, int ncols, char **values, char **names
         int cid = (int)strtol(values[i+1], NULL, 0);
         
         table->col_id[index] = cid;
-        table->col_name[index] = cloudsync_string_dup(name, true);
+        table->col_name[index] = cloudsync_string_dup_lowercase(name);
         if (!table->col_name[index]) return 1;
         
         char *sql = table_build_mergeinsert_sql(db, table, name);

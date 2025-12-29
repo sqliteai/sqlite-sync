@@ -136,8 +136,11 @@ char *cloudsync_uuid_v7_stringify (uint8_t uuid[UUID_LEN], char value[UUID_STR_M
 uint64_t fnv1a_hash(const char *data, size_t len);
 
 char *cloudsync_string_replace_prefix(const char *input, char *prefix, char *replacement);
-char *cloudsync_string_ndup (const char *str, size_t len, bool lowercase);
-char *cloudsync_string_dup (const char *str, bool lowercase);
+char *cloudsync_string_dup (const char *str);
+char *cloudsync_string_dup_lowercase (const char *str);
+char *cloudsync_string_ndup (const char *str, size_t len);
+char *cloudsync_string_ndup_lowercase (const char *str, size_t len);
+
 int cloudsync_blob_compare(const char *blob1, size_t size1, const char *blob2, size_t size2);
 
 void cloudsync_rowid_decode (int64_t rowid, int64_t *db_version, int64_t *seq);

@@ -742,7 +742,7 @@ int database_pk_rowid (db_t *db, const char *table_name, char ***names, int *cou
     if (rc == SQLITE_OK) {
         char **r = (char**)cloudsync_memory_alloc(sizeof(char*));
         if (!r) return SQLITE_NOMEM;
-        r[0] = cloudsync_string_dup("rowid", false);
+        r[0] = cloudsync_string_dup("rowid");
         *names = r;
         *count = 1;
     } else {
@@ -789,7 +789,7 @@ int database_pk_names (db_t *db, const char *table_name, char ***names, int *cou
     while ((rc = sqlite3_step(vm)) == SQLITE_ROW) {
         const char *txt = (const char*)sqlite3_column_text(vm, 0);
         if (!txt) {rc = SQLITE_ERROR; goto cleanup;}
-        r[i] = cloudsync_string_dup(txt, false);
+        r[i] = cloudsync_string_dup(txt);
         if (!r[i]) { rc = SQLITE_NOMEM; goto cleanup;}
         i++;
     }

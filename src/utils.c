@@ -127,7 +127,7 @@ int cloudsync_uuid_v7_compare (uint8_t value1[UUID_LEN], uint8_t value2[UUID_LEN
 
 // MARK: - General -
 
-char *cloudsync_string_ndup (const char *str, size_t len, bool lowercase) {
+char *cloudsync_string_ndup_v2 (const char *str, size_t len, bool lowercase) {
     if (str == NULL) return NULL;
     
     char *s = (char *)cloudsync_memory_alloc((uint64_t)(len + 1));
@@ -148,11 +148,20 @@ char *cloudsync_string_ndup (const char *str, size_t len, bool lowercase) {
     return s;
 }
 
-char *cloudsync_string_dup (const char *str, bool lowercase) {
-    if (str == NULL) return NULL;
-    
-    size_t len = strlen(str);
-    return cloudsync_string_ndup(str, len, lowercase);
+char *cloudsync_string_ndup (const char *str, size_t len) {
+    return cloudsync_string_ndup_v2(str, len, false);
+}
+
+char *cloudsync_string_ndup_lowercase (const char *str, size_t len) {
+    return cloudsync_string_ndup_v2(str, len, true);
+}
+
+char *cloudsync_string_dup (const char *str) {
+    return cloudsync_string_ndup_v2(str, (str) ? strlen(str) : 0, false);
+}
+
+char *cloudsync_string_dup_lowercase (const char *str) {
+    return cloudsync_string_ndup_v2(str, (str) ? strlen(str) : 0, true);
 }
 
 int cloudsync_blob_compare(const char *blob1, size_t size1, const char *blob2, size_t size2) {

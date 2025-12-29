@@ -614,7 +614,7 @@ static int set_last_error(int errcode, const char *errmsg) {
     }
 
     if (errmsg) {
-        last_error_msg = pstrdup(errmsg);
+        last_error_msg = cloudsync_string_dup(errmsg);
     }
 
     return errcode;
@@ -1091,7 +1091,7 @@ int database_pk_names (db_t *db, const char *table_name, char ***names, int *cou
         if (!isnull) {
             text *txt = DatumGetTextP(datum);
             char *name = text_to_cstring(txt);
-            pk_names[i] = cloudsync_string_dup(name, false);
+            pk_names[i] = cloudsync_string_dup(name);
         } else {
             pk_names[i] = NULL;
         }
@@ -1366,7 +1366,7 @@ void *database_value_dup (dbvalue_t *value) {
         copy->detoasted = true;
     }
     if (v->cstring) {
-        copy->cstring = pstrdup(v->cstring);
+        copy->cstring = cloudsync_string_dup(v->cstring);
         copy->owns_cstring = true;
     }
     return (void*)copy;

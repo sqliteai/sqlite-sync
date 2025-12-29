@@ -178,7 +178,7 @@ DATABASE_RESULT dbutils_exec (sqlite3_context *context, sqlite3 *db, const char 
                 }
             } else {
                 const char *value = database_column_text(pstmt, i);
-                if (value) buffer = cloudsync_string_dup((const char *)value, false);
+                if (value) buffer = cloudsync_string_dup((const char *)value);
             }
             results[i].value.stringValue = buffer;
         }
@@ -508,7 +508,7 @@ bool unittest_payload_apply_rls_callback(void **xdata, cloudsync_pk_decode_bind_
                 (strlen(s->last_tbl) != (size_t)tbl_len) ||
                 strncmp(s->last_tbl, tbl, (size_t)tbl_len) != 0) {
                 if (s->last_tbl) cloudsync_memory_free(s->last_tbl);
-                if (tbl && tbl_len > 0) s->last_tbl = cloudsync_string_ndup(tbl, tbl_len, false);
+                if (tbl && tbl_len > 0) s->last_tbl = cloudsync_string_ndup(tbl, tbl_len);
                 else s->last_tbl = NULL;
             }
             
