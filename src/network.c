@@ -83,11 +83,11 @@ char *network_data_get_siteid (network_data *data) {
 bool network_data_set_endpoints (network_data *data, char *auth, char *check, char *upload, bool duplicate) {
     if (duplicate) {
         // auth is optional
-        char *s1 = (auth) ? cloudsync_string_dup(auth, false) : NULL;
+        char *s1 = (auth) ? cloudsync_string_dup(auth) : NULL;
         if (auth && !s1) return false;
-        char *s2 = cloudsync_string_dup(check, false);
+        char *s2 = cloudsync_string_dup(check);
         if (!s2) {if (auth && s1) sqlite3_free(s1); return false;}
-        char *s3 = cloudsync_string_dup(upload, false);
+        char *s3 = cloudsync_string_dup(upload);
         if (!s3) {if (auth && s1) sqlite3_free(s1); sqlite3_free(s2); return false;}
 
         auth = s1;
@@ -208,7 +208,7 @@ cleanup:
         result.blen = blen;
     } else {
         result.code = CLOUDSYNC_NETWORK_ERROR;
-        result.buffer = buffer ? buffer : (errbuf[0]) ? cloudsync_string_dup(errbuf, false) : NULL;
+        result.buffer = buffer ? buffer : (errbuf[0]) ? cloudsync_string_dup(errbuf) : NULL;
         result.blen = buffer ? blen : rc;
     }
     
