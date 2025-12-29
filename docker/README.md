@@ -73,6 +73,38 @@ Access pgAdmin at http://localhost:5050:
 - Email: `admin@cloudsync.local`
 - Password: `admin`
 
+### VS Code Dev Container Debugging (PostgreSQL)
+
+Use this when you want breakpoints in the extension code.
+The dev container uses `docker/postgresql/Dockerfile.debug` and `docker/postgresql/docker-compose.debug.yml`, which build the extension with debug symbols.
+Required VS Code extensions:
+- `ms-vscode-remote.remote-containers` (Dev Containers)
+- `ms-vscode.cpptools` (C/C++ debugging)
+
+1) Open the dev container  
+VS Code -> Command Palette -> `Dev Containers: Reopen in Container`
+
+2) Connect with `psql` (inside the dev container)
+```bash
+psql -U postgres -d cloudsync_test
+```
+
+3) Enable the extension if needed
+```sql
+CREATE EXTENSION IF NOT EXISTS cloudsync;
+```
+
+4) Get the backend PID (inside `psql`)
+```sql
+SELECT pg_backend_pid();
+```
+
+5) Attach the debugger (VS Code dev container window)  
+Run and Debug -> `Attach to Postgres (gdb)` -> pick the PID from step 4 -> Continue
+
+6) Trigger your breakpoint  
+Run the SQL that exercises the code path. If `psql` blocks, the backend is paused at a breakpoint; continue in the debugger.
+
 ## Option 2: Supabase Integration
 
 Use this for testing CloudSync with Supabase's full stack (auth, realtime, storage, etc.).
