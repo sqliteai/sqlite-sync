@@ -586,7 +586,7 @@ void cloudsync_network_init (sqlite3_context *context, int argc, sqlite3_value *
     
     // init context
     cloudsync_context *xdata = (cloudsync_context *)sqlite3_user_data(context);
-    uint8_t *site_id = (uint8_t *)cloudsync_context_init(xdata, cloudsync_db(xdata));
+    uint8_t *site_id = (uint8_t *)cloudsync_context_init(xdata);
     if (!site_id) goto abort_siteid;
     
     // save site_id string representation: 01957493c6c07e14803727e969f1d2cc

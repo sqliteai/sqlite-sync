@@ -68,29 +68,29 @@ int  database_select_text (db_t *db, const char *sql, char **value);
 int  database_select_blob (db_t *db, const char *sql, char **value, int64_t *value_len);
 int  database_select_blob_2int (db_t *db, const char *sql, char **value, int64_t *value_len, int64_t *value2, int64_t *value3);
 int  database_write (db_t *db, const char *sql, const char **values, DBTYPE types[], int lens[], int count);
-bool database_table_exists (db_t *db, const char *table_name);
-bool database_trigger_exists (db_t *db, const char *table_name);
-int  database_create_metatable (db_t *db, const char *table_name);
+bool database_table_exists (cloudsync_context *data, const char *table_name);
+bool database_trigger_exists (cloudsync_context *data, const char *table_name);
+int  database_create_metatable (cloudsync_context *data, const char *table_name);
 int  database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo);
-int  database_delete_triggers (db_t *db, const char *table_name);
+int  database_delete_triggers (cloudsync_context *data, const char *table_name);
 int  database_debug (db_t *db, bool print_result);
-int  database_pk_names (db_t *db, const char *table_name, char ***names, int *count);
+int  database_pk_names (cloudsync_context *data, const char *table_name, char ***names, int *count);
 
 int database_count_pk (db_t *db, const char *table_name, bool not_null);
 int database_count_nonpk (db_t *db, const char *table_name);
 int database_count_int_pk (db_t *db, const char *table_name);
 int database_count_notnull_without_default (db_t *db, const char *table_name);
 
-int64_t  database_schema_version (db_t *db);
-uint64_t database_schema_hash (db_t *db);
-bool     database_check_schema_hash (db_t *db, uint64_t hash);
-int      database_update_schema_hash (db_t *db, uint64_t *hash);
+int64_t  database_schema_version (cloudsync_context *data);
+uint64_t database_schema_hash (cloudsync_context *data);
+bool     database_check_schema_hash (cloudsync_context *data, uint64_t hash);
+int      database_update_schema_hash (cloudsync_context *data, uint64_t *hash);
 
 int database_begin_savepoint (db_t *db, const char *savepoint_name);
 int database_commit_savepoint (db_t *db, const char *savepoint_name);
 int database_rollback_savepoint (db_t *db, const char *savepoint_name);
 int database_errcode (db_t *db);
-bool database_in_transaction (db_t *db);
+bool database_in_transaction (cloudsync_context *data);
 const char *database_errmsg (db_t *db);
 
 // VM

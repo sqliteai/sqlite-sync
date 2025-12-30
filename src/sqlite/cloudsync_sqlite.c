@@ -1033,9 +1033,9 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     }
     
     // load config, if exists
-    if (cloudsync_config_exists(db)) {
-        if (cloudsync_context_init(ctx, db) == NULL) {
-            cloudsync_context_free(ctx);
+    if (cloudsync_config_exists(data)) {
+        if (cloudsync_context_init(data) == NULL) {
+            cloudsync_context_free(data);
             if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("An error occurred while trying to initialize context");
             return SQLITE_ERROR;
         }

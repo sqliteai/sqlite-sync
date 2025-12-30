@@ -299,9 +299,7 @@ int dbutils_table_settings_set_key_value (cloudsync_context *data, const char *t
     
     // sanity check tbl_name
     if (table_name == NULL) {
-        // TODO: fix me
-        //if (context) sqlite3_result_error(context, "cloudsync_set_table/set_column requires a non-null table parameter", -1);
-        return DBRES_ERROR;
+        return cloudsync_set_error(data, "cloudsync_set_table/set_column requires a non-null table parameter", DBRES_ERROR);
     }
     
     // sanity check column name
@@ -389,7 +387,7 @@ int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values,
     return 0;
 }
 
-bool dbutils_settings_migrate (db_t *db) {
+bool dbutils_settings_migrate (cloudsync_context *data) {
     // dbutils_settings_check_version comparison failed
     // so check for logic migration here (if necessary)
     return true;
@@ -421,7 +419,7 @@ int dbutils_settings_init (cloudsync_context *data) {
     // TODO: FIXME
     db_t *db = cloudsync_db(data);
     int rc = DBRES_OK;
-    bool settings_exists = database_table_exists(db, CLOUDSYNC_SETTINGS_NAME);
+    bool settings_exists = database_table_exists(data, CLOUDSYNC_SETTINGS_NAME);
     if (settings_exists == false) {
         DEBUG_SETTINGS("cloudsync_settings does not exist (creating a new one)");
         
@@ -436,12 +434,12 @@ int dbutils_settings_init (cloudsync_context *data) {
         if (rc != DBRES_OK) return rc;
         
         // schema version
-        snprintf(sql, sizeof(sql), SQL_INSERT_SETTINGS_INT_FORMAT, CLOUDSYNC_KEY_SCHEMAVERSION, (long long)database_schema_version(db));
+        snprintf(sql, sizeof(sql), SQL_INSERT_SETTINGS_INT_FORMAT, CLOUDSYNC_KEY_SCHEMAVERSION, (long long)database_schema_version(data));
         rc = database_exec(db, sql);
         if (rc != DBRES_OK) return rc;
     }
     
-    if (database_table_exists(db, CLOUDSYNC_SITEID_NAME) == false) {
+    if (database_table_exists(data, CLOUDSYNC_SITEID_NAME) == false) {
         DEBUG_SETTINGS("cloudsync_site_id does not exist (creating a new one)");
         
         // create table and fill-in initial data
@@ -463,7 +461,7 @@ int dbutils_settings_init (cloudsync_context *data) {
     }
     
     // check if cloudsync_table_settings table exists
-    if (database_table_exists(db, CLOUDSYNC_TABLE_SETTINGS_NAME) == false) {
+    if (database_table_exists(data, CLOUDSYNC_TABLE_SETTINGS_NAME) == false) {
         DEBUG_SETTINGS("cloudsync_table_settings does not exist (creating a new one)");
         
         rc = database_exec(db, SQL_CREATE_TABLE_SETTINGS_TABLE);
@@ -471,7 +469,7 @@ int dbutils_settings_init (cloudsync_context *data) {
     }
     
     // check if cloudsync_settings table exists
-    bool schema_versions_exists = database_table_exists(db, CLOUDSYNC_SCHEMA_VERSIONS_NAME);
+    bool schema_versions_exists = database_table_exists(data, CLOUDSYNC_SCHEMA_VERSIONS_NAME);
     if (schema_versions_exists == false) {
         DEBUG_SETTINGS("cloudsync_schema_versions does not exist (creating a new one)");
         
@@ -485,7 +483,7 @@ int dbutils_settings_init (cloudsync_context *data) {
     
     // check if some process changed schema outside of the lib
     /*
-    if ((settings_exists == true) && (data->schema_version != database_schema_version(db))) {
+    if ((settings_exists == true) && (data->schema_version != database_schema_version(data))) {
         // SOMEONE CHANGED SCHEMAs SO WE NEED TO RECHECK AUGMENTED TABLES and RELATED TRIGGERS
         assert(0);
     }

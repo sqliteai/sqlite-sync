@@ -37,7 +37,7 @@ void cloudsync_sync_key (cloudsync_context *data, const char *key, const char *v
 int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int *seq, int64_t *new_db_version, int64_t *new_seq);
 
 // used by core
-bool cloudsync_config_exists (db_t *db);
+bool cloudsync_config_exists (cloudsync_context *data);
 dbvm_t *cloudsync_colvalue_stmt (db_t *db, cloudsync_context *data, const char *tbl_name, bool *persistent);
 char *cloudsync_pk_context_tbl (cloudsync_pk_decode_bind_context *ctx, int64_t *tbl_len);
 void *cloudsync_pk_context_pk (cloudsync_pk_decode_bind_context *ctx, int64_t *pk_len);

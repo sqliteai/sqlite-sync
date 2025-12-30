@@ -36,17 +36,17 @@ void dbvm_reset (dbvm_t *stmt);
 int dbvm_count (dbvm_t *stmt, const char *value, size_t len, int type);
 int dbvm_execute (dbvm_t *stmt, void *data);
 
-char *dbutils_settings_get_value (db_t *db, const char *key, char *buffer, size_t blen, int64_t *intvalue);
+char *dbutils_settings_get_value (cloudsync_context *data, const char *key, char *buffer, size_t blen, int64_t *intvalue);
 int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values, char **names);
 int dbutils_settings_check_version (cloudsync_context *data, const char *version);
-bool dbutils_settings_migrate (db_t *db);
+bool dbutils_settings_migrate (cloudsync_context *data);
 const char *vtab_opname_from_value (int value);
 int vtab_colname_is_legal (const char *name);
 int dbutils_binary_comparison (int x, int y);
 sqlite3 *do_create_database (void);
 
 int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, bool skip_int_pk_check);
-bool database_system_exists (db_t *db, const char *name, const char *type);
+bool database_system_exists (cloudsync_context *data, const char *name, const char *type);
 
 static int stdout_backup = -1; // Backup file descriptor for stdout
 static int dev_null_fd = -1;   // File descriptor for /dev/null
@@ -1964,7 +1964,7 @@ bool do_test_dbutils (void) {
     //rc = dbutils_register_aggregate(db, NULL, NULL, NULL, 0, NULL, NULL, NULL);
     //if (rc == SQLITE_OK) goto finalize;
     
-    bool b = database_system_exists(db, "non_existing_table", "non_existing_type");
+    bool b = database_system_exists(data, "non_existing_table", "non_existing_type");
     if (b == true) goto finalize;
     
     // test cloudsync_table_sanity_check

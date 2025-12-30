@@ -29,7 +29,7 @@ typedef struct cloudsync_payload_context cloudsync_payload_context;
 typedef struct cloudsync_table_context cloudsync_table_context;
 
 cloudsync_context *cloudsync_context_create (void *db);
-const char *cloudsync_context_init (cloudsync_context *data, void *db);
+const char *cloudsync_context_init (cloudsync_context *data);
 void cloudsync_context_free (void *ctx);
 
 
@@ -55,6 +55,8 @@ void *cloudsync_db (cloudsync_context *data);
 const char *cloudsync_errmsg (cloudsync_context *data);
 void *cloudsync_auxdata (cloudsync_context *data);
 void cloudsync_set_auxdata (cloudsync_context *data, void *xdata);
+int cloudsync_set_error (cloudsync_context *data, const char *err_user, int err_code);
+int cloudsync_set_dberror (cloudsync_context *data);
 
 int cloudsync_commit_hook (void *ctx);
 void cloudsync_rollback_hook (void *ctx);

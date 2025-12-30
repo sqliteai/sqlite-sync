@@ -214,8 +214,6 @@ bool force_uncompressed_blob = false;
 
 // Internal prototypes
 int local_mark_insert_or_update_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, int64_t db_version, int seq);
-int cloudsync_set_error (cloudsync_context *data, const char *err_user, int err_code);
-int cloudsync_set_dberror (cloudsync_context *data);
 
 // MARK: - CRDT algos -
 
@@ -460,7 +458,7 @@ int cloudsync_bumpseq (cloudsync_context *data) {
 }
 
 void cloudsync_update_schema_hash (cloudsync_context *data) {
-    database_update_schema_hash(data->db, &data->schema_hash);
+    database_update_schema_hash(data, &data->schema_hash);
 }
 
 void *cloudsync_db (cloudsync_context *data) {
@@ -1424,8 +1422,8 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
 
 // MARK: - Private -
 
-bool cloudsync_config_exists (db_t *db) {
-    return database_table_exists(db, CLOUDSYNC_SITEID_NAME) == true;
+bool cloudsync_config_exists (cloudsync_context *data) {
+    return database_table_exists(data, CLOUDSYNC_SITEID_NAME) == true;
 }
 
 cloudsync_context *cloudsync_context_create (void *db) {
@@ -1460,20 +1458,21 @@ void cloudsync_context_free (void *ctx) {
     cloudsync_memory_free(data);
 }
 
-const char *cloudsync_context_init (cloudsync_context *data, void *db) {
+const char *cloudsync_context_init (cloudsync_context *data) {
     if (!data) return NULL;
     
     // perform init just the first time, if the site_id field is not set.
     // The data->site_id value could exists while settings tables don't exists if the
     // cloudsync_context_init was previously called in init transaction that was rolled back
     // because of an error during the init process.
-    if (data->site_id[0] == 0 || !database_table_exists(db, CLOUDSYNC_SITEID_NAME)) {
+    if (data->site_id[0] == 0 || !database_table_exists(data, CLOUDSYNC_SITEID_NAME)) {
+        // TODO: FIXME
+        db_t *db = (db_t *)cloudsync_db(data);
+        
         if (dbutils_settings_init(data) != DBRES_OK) return NULL;
         if (cloudsync_add_dbvms(db, data) != DBRES_OK) return NULL;
         if (cloudsync_load_siteid(db, data) != DBRES_OK) return NULL;
-        
-        data->db = db;
-        data->schema_hash = database_schema_hash(db);
+        data->schema_hash = database_schema_hash(data);
     }
     
     return (const char *)data->site_id;
@@ -1524,7 +1523,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     db_t *db = data->db;
     
     // init cloudsync_settings
-    if (cloudsync_context_init(data, db) == NULL) {
+    if (cloudsync_context_init(data) == NULL) {
         return DBRES_MISUSE;
     }
     
@@ -1545,7 +1544,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     // retrieve primary key(s)
     char **names = NULL;
     int nrows = 0;
-    rc = database_pk_names(db, table_name, &names, &nrows);
+    rc = database_pk_names(data, table_name, &names, &nrows);
     if (rc != DBRES_OK) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to get primary keys for table %s", table_name);
@@ -1562,7 +1561,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     }
     
     // drop original triggers
-    database_delete_triggers(db, table_name);
+    database_delete_triggers(data, table_name);
     if (rc != DBRES_OK) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to delete triggers for table %s in cloudsync_begin_alter.", table_name);
@@ -1592,7 +1591,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
     db_t *db = data->db;
     char **result = NULL;
     int nrows = 0;
-    int rc = database_pk_names (db, table->name, &result, &nrows);
+    int rc = database_pk_names (data, table->name, &result, &nrows);
     if (rc != DBRES_OK || nrows == 0) {
         if (nrows == 0) rc = DBRES_MISUSE;
         goto finalize;
@@ -1668,7 +1667,7 @@ int cloudsync_commit_alter (cloudsync_context *data, const char *table_name) {
     cloudsync_table_context *table = NULL;
     
     // init cloudsync_settings
-    if (cloudsync_context_init(data, db) == NULL) {
+    if (cloudsync_context_init(data) == NULL) {
         cloudsync_set_error(data, "Unable to initialize cloudsync context", DBRES_MISUSE);
         goto rollback_finalize_alter;
     }
@@ -2131,7 +2130,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     
     db_t *db = data->db;
     if (!data || header.schema_hash != data->schema_hash) {
-        if (!database_check_schema_hash(db, header.schema_hash)) {
+        if (!database_check_schema_hash(data, header.schema_hash)) {
             char buffer[1024];
             snprintf(buffer, sizeof(buffer), "Cannot apply the received payload because the schema hash is unknown %llu.", header.schema_hash);
             return cloudsync_set_error(data, buffer, DBRES_MISUSE);
@@ -2209,7 +2208,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         }
 
         // Start new savepoint if needed
-        bool in_transaction = database_in_transaction(db);
+        bool in_transaction = database_in_transaction(data);
         if (!in_transaction && db_version_changed) {
             rc = database_begin_savepoint(db, "cloudsync_payload_apply");
             if (rc != DBRES_OK) {
@@ -2378,7 +2377,7 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
     }
     
     // check if table exists
-    if (database_table_exists(db, name) == false) {
+    if (database_table_exists(data, name) == false) {
         snprintf(buffer, sizeof(buffer), "Table %s does not exist", name);
         return cloudsync_set_error(data, buffer, DBRES_ERROR);
     }
@@ -2435,7 +2434,7 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
 
 int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context *table) {
     db_t *db = data->db;
-    if (cloudsync_context_init(data, db) == NULL) return DBRES_MISUSE;
+    if (cloudsync_context_init(data) == NULL) return DBRES_MISUSE;
     
     // drop meta-table
     const char *table_name = table->name;
@@ -2449,7 +2448,7 @@ int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context
     }
     
     // drop original triggers
-    database_delete_triggers(db, table_name);
+    database_delete_triggers(data, table_name);
     if (rc != DBRES_OK) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to delete triggers for table %s", table_name);
@@ -2479,7 +2478,7 @@ int cloudsync_cleanup (cloudsync_context *data, const char *table_name) {
         cloudsync_reset_siteid(data);
         dbutils_settings_cleanup(data);
     } else {
-        if (database_table_exists(data->db, CLOUDSYNC_TABLE_SETTINGS_NAME) == true) {
+        if (database_table_exists(data, CLOUDSYNC_TABLE_SETTINGS_NAME) == true) {
             cloudsync_update_schema_hash(data);
         }
     }
@@ -2535,7 +2534,7 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     if (rc != DBRES_OK) return rc;
     
     // init cloudsync_settings
-    if (cloudsync_context_init(data, db) == NULL) {
+    if (cloudsync_context_init(data) == NULL) {
         return cloudsync_set_error(data, "Unable to initialize cloudsync context", DBRES_MISUSE);
     }
     
@@ -2582,7 +2581,7 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     if (rc != DBRES_OK) return cloudsync_set_error(data, "An error occurred while creating triggers", DBRES_MISUSE);
     
     // check meta-table
-    rc = database_create_metatable(db, table_name);
+    rc = database_create_metatable(data, table_name);
     if (rc != DBRES_OK) return cloudsync_set_error(data, "An error occurred while creating metatable", DBRES_MISUSE);
     
     // add prepared statements
