@@ -136,9 +136,8 @@ void dbsync_set (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // silently fails
     if (key == NULL) return;
     
-    sqlite3 *db = sqlite3_context_db_handle(context);
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    dbutils_settings_set_key_value(db, data, key, value);
+    dbutils_settings_set_key_value(data, key, value);
 }
 
 void dbsync_set_column (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -149,9 +148,8 @@ void dbsync_set_column (sqlite3_context *context, int argc, sqlite3_value **argv
     const char *key = (const char *)database_value_text(argv[2]);
     const char *value = (const char *)database_value_text(argv[3]);
     
-    sqlite3 *db = sqlite3_context_db_handle(context);
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    dbutils_table_settings_set_key_value(db, data, tbl, col, key, value);
+    dbutils_table_settings_set_key_value(data, tbl, col, key, value);
 }
 
 void dbsync_set_table (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -161,9 +159,8 @@ void dbsync_set_table (sqlite3_context *context, int argc, sqlite3_value **argv)
     const char *key = (const char *)database_value_text(argv[1]);
     const char *value = (const char *)database_value_text(argv[2]);
     
-    sqlite3 *db = sqlite3_context_db_handle(context);
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    dbutils_table_settings_set_key_value(db, data, tbl, "*", key, value);
+    dbutils_table_settings_set_key_value(data, tbl, "*", key, value);
 }
 
 void dbsync_is_sync (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -1044,7 +1041,7 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
         }
         
         // make sure to update internal version to current version
-        dbutils_settings_set_key_value(db, NULL, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
+        dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
     }
     
     return SQLITE_OK;

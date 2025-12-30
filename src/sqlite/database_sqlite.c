@@ -591,10 +591,13 @@ int database_create_delete_trigger (db_t *db, const char *table_name, const char
     return rc;
 }
 
-int database_create_triggers (db_t *db, const char *table_name, table_algo algo) {
+int database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo) {
     DEBUG_DBFUNCTION("dbutils_check_triggers %s", table);
     
-    if (dbutils_settings_check_version(db, "0.8.25") <= 0) {
+    // TODO: FIXME
+    db_t *db = cloudsync_db(data);
+    
+    if (dbutils_settings_check_version(data, "0.8.25") <= 0) {
         database_delete_triggers(db, table_name);
     }
     

@@ -683,6 +683,7 @@ void cloudsync_network_set_apikey (sqlite3_context *context, int argc, sqlite3_v
 
 void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, sqlite3_value **argv) {
     sqlite3 *db = sqlite3_context_db_handle(context);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     
     char *sql = "SELECT max(db_version) FROM cloudsync_changes WHERE site_id == (SELECT site_id FROM cloudsync_site_id WHERE rowid=0)";
     int64_t last_local_change = 0;
@@ -698,7 +699,7 @@ void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, s
         return;
     }
     
-    int sent_db_version = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_SEND_DBVERSION);
+    int sent_db_version = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_SEND_DBVERSION);
     sqlite3_result_int(context, (sent_db_version < last_local_change));
 }
 
@@ -761,11 +762,11 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     sqlite3 *db = sqlite3_context_db_handle(context);
     if (new_db_version != db_version) {
         snprintf(buf, sizeof(buf), "%" PRId64, new_db_version);
-        dbutils_settings_set_key_value(db, data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
+        dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
     }
     if (new_seq != seq) {
         snprintf(buf, sizeof(buf), "%" PRId64, new_seq);
-        dbutils_settings_set_key_value(db, data, CLOUDSYNC_KEY_SEND_SEQ, buf);
+        dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_SEQ, buf);
     }
     
     network_result_cleanup(&res);
@@ -779,24 +780,24 @@ void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3
 }
 
 int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows) {
-    cloudsync_context *xdata = (cloudsync_context *)sqlite3_user_data(context);
-    network_data *data = (network_data *)cloudsync_auxdata(xdata);
-    if (!data) {sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1); return -1;}
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    network_data *xdata = (network_data *)cloudsync_auxdata(data);
+    if (!xdata) {sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1); return -1;}
      
     sqlite3 *db = sqlite3_context_db_handle(context);
     
-    int64_t db_version = dbutils_settings_get_int64_value(db, CLOUDSYNC_KEY_CHECK_DBVERSION);
+    int64_t db_version = dbutils_settings_get_int64_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION);
     if (db_version<0) {sqlite3_result_error(context, "Unable to retrieve db_version.", -1); return -1;}
 
-    int seq = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_CHECK_SEQ);
+    int seq = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_SEQ);
     if (seq<0) {sqlite3_result_error(context, "Unable to retrieve seq.", -1); return -1;}
 
     // http://uuid.g5.sqlite.cloud/v1/cloudsync/{dbname}/{site_id}/{db_version}/{seq}/check
     // the data->check_endpoint stops after {site_id}, just need to append /{db_version}/{seq}/check
     char endpoint[2024];
-    snprintf(endpoint, sizeof(endpoint), "%s/%" PRId64 "/%d/%s", data->check_endpoint, db_version, seq, CLOUDSYNC_ENDPOINT_CHECK);
+    snprintf(endpoint, sizeof(endpoint), "%s/%" PRId64 "/%d/%s", xdata->check_endpoint, db_version, seq, CLOUDSYNC_ENDPOINT_CHECK);
     
-    NETWORK_RESULT result = network_receive_buffer(data, endpoint, data->authentication, true, true, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
+    NETWORK_RESULT result = network_receive_buffer(xdata, endpoint, xdata->authentication, true, true, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
     int rc = SQLITE_OK;
     if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
         rc = network_download_changes(context, result.buffer, pnrows);
@@ -854,13 +855,12 @@ void cloudsync_network_check_changes (sqlite3_context *context, int argc, sqlite
 void cloudsync_network_reset_sync_version (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_reset_sync_version");
     
-    sqlite3 *db = sqlite3_context_db_handle(context);
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     char *buf = "0";
-    dbutils_settings_set_key_value(db, data, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
-    dbutils_settings_set_key_value(db, data, CLOUDSYNC_KEY_CHECK_SEQ, buf);
-    dbutils_settings_set_key_value(db, data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
-    dbutils_settings_set_key_value(db, data, CLOUDSYNC_KEY_SEND_SEQ, buf);
+    dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
+    dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_SEQ, buf);
+    dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
+    dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_SEQ, buf);
 }
 
 /**

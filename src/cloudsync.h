@@ -25,7 +25,6 @@ table_algo cloudsync_algo_from_name (const char *algo_name);
 const char *cloudsync_algo_name (table_algo algo);
 
 // Opaque structures
-typedef struct cloudsync_context cloudsync_context;
 typedef struct cloudsync_payload_context cloudsync_payload_context;
 typedef struct cloudsync_table_context cloudsync_table_context;
 

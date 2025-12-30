@@ -38,7 +38,7 @@ int dbvm_execute (dbvm_t *stmt, void *data);
 
 char *dbutils_settings_get_value (db_t *db, const char *key, char *buffer, size_t blen, int64_t *intvalue);
 int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values, char **names);
-int dbutils_settings_check_version (db_t *db, const char *version);
+int dbutils_settings_check_version (cloudsync_context *data, const char *version);
 bool dbutils_settings_migrate (db_t *db);
 const char *vtab_opname_from_value (int value);
 int vtab_colname_is_legal (const char *name);
@@ -1764,7 +1764,7 @@ int do_test_compare_values (sqlite3 *db, char *sql1, char *sql2, int *result, bo
     
     // print result (force calling the pk_decode_print_callback for code coverage)
     if (print_result == false) suppress_printf_output();
-    dbutils_debug_values(2, (dbvalue_t **)values);
+    dbutils_debug_values((dbvalue_t **)values, 2);
     if (print_result == false) resume_printf_output();
     
     *result = dbutils_value_compare(value1, value2);
@@ -2006,9 +2006,9 @@ bool do_test_dbutils (void) {
     if (rc != SQLITE_OK) goto finalize;
     
     // test settings
-    dbutils_settings_set_key_value(db, NULL, "key1", "test1");
-    dbutils_settings_set_key_value(db, NULL, "key2", "test2");
-    dbutils_settings_set_key_value(db, NULL, "key2", NULL);
+    dbutils_settings_set_key_value(data, "key1", "test1");
+    dbutils_settings_set_key_value(data, "key2", "test2");
+    dbutils_settings_set_key_value(data, "key2", NULL);
     
     char *value1 = dbutils_settings_get_value(db, "key1", NULL, 0, NULL);
     char *value2 = dbutils_settings_get_value(db, "key2", NULL, 0, NULL);
@@ -2017,22 +2017,22 @@ bool do_test_dbutils (void) {
     cloudsync_memory_free(value1);
     
     // test table settings
-    rc = dbutils_table_settings_set_key_value(db, NULL, NULL, NULL, NULL, NULL);
+    rc = dbutils_table_settings_set_key_value(data, NULL, NULL, NULL, NULL);
     if (rc != SQLITE_ERROR) goto finalize;
     
-    rc = dbutils_table_settings_set_key_value(db, NULL, "foo", NULL, "key1", "value1");
+    rc = dbutils_table_settings_set_key_value(data, "foo", NULL, "key1", "value1");
     if (rc != SQLITE_OK) goto finalize;
     
-    rc = dbutils_table_settings_set_key_value(db, NULL, "foo", NULL, "key2", "value2");
+    rc = dbutils_table_settings_set_key_value(data, "foo", NULL, "key2", "value2");
     if (rc != SQLITE_OK) goto finalize;
     
-    rc = dbutils_table_settings_set_key_value(db, NULL, "foo", NULL, "key2", NULL);
+    rc = dbutils_table_settings_set_key_value(data, "foo", NULL, "key2", NULL);
     if (rc != SQLITE_OK) goto finalize;
     
     rc = SQLITE_ERROR;
     
-    value1 = dbutils_table_settings_get_value(db, "foo", NULL, "key1", NULL, 0);
-    value2 = dbutils_table_settings_get_value(db, "foo", NULL, "key2", NULL, 0);
+    value1 = dbutils_table_settings_get_value(data, "foo", NULL, "key1", NULL, 0);
+    value2 = dbutils_table_settings_get_value(data, "foo", NULL, "key2", NULL, 0);
     if (value1 == NULL) goto finalize;
     if (value2 != NULL) goto finalize;
     cloudsync_memory_free(value1);
@@ -2048,31 +2048,31 @@ bool do_test_dbutils (void) {
     cloudsync_memory_free(site_id_blob);
     
     // force out-of-memory test
-    value1 = dbutils_settings_get_value(db, "key1", OUT_OF_MEMORY_BUFFER, 0, NULL);
+    value1 = dbutils_settings_get_value(data, "key1", OUT_OF_MEMORY_BUFFER, 0, NULL);
     if (value1 != NULL) goto finalize;
     
-    value1 = dbutils_table_settings_get_value(db, "foo", NULL, "key1", OUT_OF_MEMORY_BUFFER, 0);
+    value1 = dbutils_table_settings_get_value(data, "foo", NULL, "key1", OUT_OF_MEMORY_BUFFER, 0);
     if (value1 != NULL) goto finalize;
 
     //char *p = NULL;
     //dbutils_select(db, "SELECT zeroblob(16);", NULL, NULL, NULL, 0, SQLITE_BLOB);
     //if (p != NULL) goto finalize;
     
-    dbutils_settings_set_key_value(db, NULL, CLOUDSYNC_KEY_LIBVERSION, "0.0.0");
-    int cmp = dbutils_settings_check_version(db, NULL);
+    dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_LIBVERSION, "0.0.0");
+    int cmp = dbutils_settings_check_version(data, NULL);
     if (cmp == 0) goto finalize;
     
-    dbutils_settings_set_key_value(db, NULL, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION); 
-    cmp = dbutils_settings_check_version(db, NULL);
+    dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
+    cmp = dbutils_settings_check_version(data, NULL);
     if (cmp != 0) goto finalize;
 
-    cmp = dbutils_settings_check_version(db, "0.8.25");
+    cmp = dbutils_settings_check_version(data, "0.8.25");
     if (cmp <= 0) goto finalize;
     
     //dbutils_settings_table_load_callback(NULL, 0, NULL, NULL);
     dbutils_settings_migrate(NULL);
     
-    dbutils_settings_cleanup(db);
+    dbutils_settings_cleanup(data);
     
     int n1 = 1;
     int n2 = 2;

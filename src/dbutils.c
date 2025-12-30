@@ -90,7 +90,7 @@ void dbutils_debug_value (dbvalue_t *value) {
     }
 }
 
-void dbutils_debug_values (int argc, dbvalue_t **argv) {
+void dbutils_debug_values (dbvalue_t **argv, int argc) {
     for (int i = 0; i < argc; i++) {
         dbutils_debug_value(argv[i]);
     }
@@ -102,7 +102,7 @@ int dbutils_binary_comparison (int x, int y) {
     return (x == y) ? 0 : (x > y ? 1 : -1);
 }
 
-char *dbutils_settings_get_value (db_t *db, const char *key, char *buffer, size_t blen, int64_t *intvalue) {
+char *dbutils_settings_get_value (cloudsync_context *data, const char *key, char *buffer, size_t blen, int64_t *intvalue) {
     DEBUG_SETTINGS("dbutils_settings_get_value key: %s", key);
     
     // check if heap allocation must be forced
@@ -110,6 +110,8 @@ char *dbutils_settings_get_value (db_t *db, const char *key, char *buffer, size_
     if (intvalue) *intvalue = 0;
     size_t size = 0;
     
+    // TODO: FIXME
+    db_t *db = cloudsync_db(data);
     dbvm_t *vm = NULL;
     int rc = database_prepare(db, SQL_SETTINGS_GET_VALUE, (void **)&vm, 0);
     if (rc != DBRES_OK) goto finalize_get_value;
@@ -160,11 +162,12 @@ finalize_get_value:
     return buffer;
 }
 
-int dbutils_settings_set_key_value (db_t *db, cloudsync_context *data, const char *key, const char *value) {
+int dbutils_settings_set_key_value (cloudsync_context *data, const char *key, const char *value) {
     DEBUG_SETTINGS("dbutils_settings_set_key_value key: %s value: %s", key, value);
     
+    // TODO: FIXME
+    db_t *db = cloudsync_db(data);
     int rc = DBRES_OK;
-    if (db == NULL && data != NULL) db = cloudsync_db(data);
     
     if (key && value) {
         const char *values[] = {key, value};
@@ -184,28 +187,28 @@ int dbutils_settings_set_key_value (db_t *db, cloudsync_context *data, const cha
     return rc;
 }
 
-int dbutils_settings_get_int_value (db_t *db, const char *key) {
+int dbutils_settings_get_int_value (cloudsync_context *data, const char *key) {
     DEBUG_SETTINGS("dbutils_settings_get_int_value key: %s", key);
     char buffer[256] = {0};
     int64_t value = 0;
-    if (dbutils_settings_get_value(db, key, buffer, sizeof(buffer), &value) == NULL) return -1;
+    if (dbutils_settings_get_value(data, key, buffer, sizeof(buffer), &value) == NULL) return -1;
     
     return (int)value;
 }
 
-int64_t dbutils_settings_get_int64_value (db_t *db, const char *key) {
+int64_t dbutils_settings_get_int64_value (cloudsync_context *data, const char *key) {
     DEBUG_SETTINGS("dbutils_settings_get_int_value key: %s", key);
     char buffer[256] = {0};
     int64_t value = 0;
-    if (dbutils_settings_get_value(db, key, buffer, sizeof(buffer), &value) == NULL) return -1;
+    if (dbutils_settings_get_value(data, key, buffer, sizeof(buffer), &value) == NULL) return -1;
     
     return value;
 }
 
-int dbutils_settings_check_version (db_t *db, const char *version) {
+int dbutils_settings_check_version (cloudsync_context *data, const char *version) {
     DEBUG_SETTINGS("dbutils_settings_check_version");
     char buffer[256];
-    if (dbutils_settings_get_value(db, CLOUDSYNC_KEY_LIBVERSION, buffer, sizeof(buffer), NULL) == NULL) return -666;
+    if (dbutils_settings_get_value(data, CLOUDSYNC_KEY_LIBVERSION, buffer, sizeof(buffer), NULL) == NULL) return -666;
     
     int major1, minor1, patch1;
     int major2, minor2, patch2;
@@ -225,8 +228,11 @@ int dbutils_settings_check_version (db_t *db, const char *version) {
     return res;
 }
 
-char *dbutils_table_settings_get_value (db_t *db, const char *table, const char *column, const char *key, char *buffer, size_t blen) {
+char *dbutils_table_settings_get_value (cloudsync_context *data, const char *table, const char *column, const char *key, char *buffer, size_t blen) {
     DEBUG_SETTINGS("dbutils_table_settings_get_value table: %s column: %s key: %s", table, column, key);
+    
+    // TODO: FIXME
+    db_t *db = cloudsync_db(data);
     
     // check if heap allocation must be forced
     if (!buffer || blen == 0) blen = 0;
@@ -284,11 +290,12 @@ finalize_get_value:
     return buffer;
 }
 
-int dbutils_table_settings_set_key_value (db_t *db, cloudsync_context *data, const char *table, const char *column, const char *key, const char *value) {
+int dbutils_table_settings_set_key_value (cloudsync_context *data, const char *table, const char *column, const char *key, const char *value) {
     DEBUG_SETTINGS("dbutils_table_settings_set_key_value table: %s column: %s key: %s", table, column, key);
     
+    // TODO: FIXME
+    db_t *db = cloudsync_db(data);
     int rc = DBRES_OK;
-    if (db == NULL && data != NULL) db = cloudsync_db(data);
     
     // sanity check tbl_name
     if (table == NULL) {
@@ -329,18 +336,22 @@ int dbutils_table_settings_set_key_value (db_t *db, cloudsync_context *data, con
     return rc;
 }
 
-int64_t dbutils_table_settings_count_tables (db_t *db) {
+int64_t dbutils_table_settings_count_tables (cloudsync_context *data) {
     DEBUG_SETTINGS("dbutils_table_settings_count_tables");
+    
+    // TODO: FIXME
+    db_t *db = cloudsync_db(data);
+    
     int64_t count = 0;
     int rc = database_select_int(db, SQL_TABLE_SETTINGS_COUNT_TABLES, &count);
     return (rc == DBRES_OK) ? count : 0;
 }
 
-table_algo dbutils_table_settings_get_algo (db_t *db, const char *table_name) {
+table_algo dbutils_table_settings_get_algo (cloudsync_context *data, const char *table_name) {
     DEBUG_SETTINGS("dbutils_table_settings_get_algo %s", table_name);
     
     char buffer[512];
-    char *value = dbutils_table_settings_get_value(db, table_name, "*", "algo", buffer, sizeof(buffer));
+    char *value = dbutils_table_settings_get_value(data, table_name, "*", "algo", buffer, sizeof(buffer));
     return (value) ? cloudsync_algo_from_name(value) : table_algo_none;
 }
 
@@ -369,7 +380,7 @@ int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values,
         if (strcmp(key, "algo")!=0) continue;
         
         table_algo algo = cloudsync_algo_from_name(value);
-        if (database_create_triggers(db, table_name, algo) != DBRES_OK) return DBRES_MISUSE;
+        if (database_create_triggers(data, table_name, algo) != DBRES_OK) return DBRES_MISUSE;
         if (table_add_to_context(db, data, algo, table_name) == false) return DBRES_MISUSE;
         
         DEBUG_SETTINGS("load tbl_name: %s value: %s", key, value);
@@ -384,8 +395,11 @@ bool dbutils_settings_migrate (db_t *db) {
     return true;
 }
 
-int dbutils_settings_load (db_t *db, cloudsync_context *data) {
+int dbutils_settings_load (cloudsync_context *data) {
     DEBUG_SETTINGS("dbutils_settings_load %p", data);
+    
+    // TODO: FIXME
+    db_t *db = cloudsync_db(data);
     
     // load global settings
     const char *sql = SQL_SETTINGS_LOAD_GLOBAL;
@@ -400,12 +414,12 @@ int dbutils_settings_load (db_t *db, cloudsync_context *data) {
     return DBRES_OK;
 }
 
-int dbutils_settings_init (db_t *db, void *cloudsync_data) {
-    DEBUG_SETTINGS("dbutils_settings_init %p", cloudsync_data);
-    
-    cloudsync_context *data = (cloudsync_context *)cloudsync_data;
-    
+int dbutils_settings_init (cloudsync_context *data) {
+    DEBUG_SETTINGS("dbutils_settings_init %p", data);
+        
     // check if cloudsync_settings table exists
+    // TODO: FIXME
+    db_t *db = cloudsync_db(data);
     int rc = DBRES_OK;
     bool settings_exists = database_table_exists(db, CLOUDSYNC_SETTINGS_NAME);
     if (settings_exists == false) {
@@ -467,7 +481,7 @@ int dbutils_settings_init (db_t *db, void *cloudsync_data) {
     }
     
     // cloudsync_settings table exists so load it
-    dbutils_settings_load(db, data);
+    dbutils_settings_load(data);
     
     // check if some process changed schema outside of the lib
     /*
@@ -480,6 +494,8 @@ int dbutils_settings_init (db_t *db, void *cloudsync_data) {
     return DBRES_OK;
 }
 
-int dbutils_settings_cleanup (db_t *db) {
+int dbutils_settings_cleanup (cloudsync_context *data) {
+    // TODO: FIXME
+    db_t *db = cloudsync_db(data);
     return database_exec(db, SQL_SETTINGS_CLEANUP_DROP_ALL);
 }

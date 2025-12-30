@@ -13,7 +13,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-typedef void db_t;
+typedef struct db_t db_t;
 typedef void dbvm_t;
 typedef void dbvalue_t;
 typedef void dbcontext_t;
@@ -55,6 +55,9 @@ typedef enum {
 #define UNUSED_PARAMETER(X) (void)(X)
 #endif
 
+// OPAQUE STRUCT
+typedef struct cloudsync_context cloudsync_context;
+
 // GENERAL
 typedef int (*database_exec_cb) (void *xdata, int argc, char **values, char **names);
 
@@ -68,7 +71,7 @@ int  database_write (db_t *db, const char *sql, const char **values, DBTYPE type
 bool database_table_exists (db_t *db, const char *table_name);
 bool database_trigger_exists (db_t *db, const char *table_name);
 int  database_create_metatable (db_t *db, const char *table_name);
-int  database_create_triggers (db_t *db, const char *table_name, table_algo algo);
+int  database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo);
 int  database_delete_triggers (db_t *db, const char *table_name);
 int  database_debug (db_t *db, bool print_result);
 int  database_pk_names (db_t *db, const char *table_name, char ***names, int *count);

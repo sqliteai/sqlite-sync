@@ -339,7 +339,7 @@ int cloudsync_dbversion_rebuild (db_t *db, cloudsync_context *data) {
         data->db_version_stmt = NULL;
     }
     
-    int64_t count = dbutils_table_settings_count_tables(db);
+    int64_t count = dbutils_table_settings_count_tables(data);
     if (count == 0) return DBRES_OK;
     else if (count == -1) return cloudsync_set_dberror(data);
     
@@ -1468,7 +1468,7 @@ const char *cloudsync_context_init (cloudsync_context *data, void *db) {
     // cloudsync_context_init was previously called in init transaction that was rolled back
     // because of an error during the init process.
     if (data->site_id[0] == 0 || !database_table_exists(db, CLOUDSYNC_SITEID_NAME)) {
-        if (dbutils_settings_init(db, data) != DBRES_OK) return NULL;
+        if (dbutils_settings_init(data) != DBRES_OK) return NULL;
         if (cloudsync_add_dbvms(db, data) != DBRES_OK) return NULL;
         if (cloudsync_load_siteid(db, data) != DBRES_OK) return NULL;
         
@@ -1655,7 +1655,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
     // update key to be later used in cloudsync_dbversion_rebuild
     char buf[256];
     snprintf(buf, sizeof(buf), "%" PRId64, data->db_version);
-    dbutils_settings_set_key_value(db, NULL, "pre_alter_dbversion", buf);
+    dbutils_settings_set_key_value(data, "pre_alter_dbversion", buf);
     
 finalize:
     table_pknames_free(result, nrows);
@@ -1691,8 +1691,8 @@ int cloudsync_commit_alter (cloudsync_context *data, const char *table_name) {
     table = NULL;
         
     // init again cloudsync for the table
-    table_algo algo_current = dbutils_table_settings_get_algo(db, table_name);
-    if (algo_current == table_algo_none) algo_current = dbutils_table_settings_get_algo(db, "*");
+    table_algo algo_current = dbutils_table_settings_get_algo(data, table_name);
+    if (algo_current == table_algo_none) algo_current = dbutils_table_settings_get_algo(data, "*");
     rc = cloudsync_init_table(data, table_name, cloudsync_algo_name(algo_current), true);
     if (rc != DBRES_OK) goto rollback_finalize_alter;
 
@@ -2173,8 +2173,8 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     uint32_t nrows = header.nrows;
     int64_t last_payload_db_version = -1;
     bool in_savepoint = false;
-    int dbversion = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_CHECK_DBVERSION);
-    int seq = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_CHECK_SEQ);
+    int dbversion = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION);
+    int seq = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_SEQ);
     cloudsync_pk_decode_bind_context decoded_context = {.vm = vm};
     void *payload_apply_xdata = NULL;
     cloudsync_payload_apply_callback_t payload_apply_callback = cloudsync_get_payload_apply_callback(db);
@@ -2257,11 +2257,11 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         char buf[256];
         if (decoded_context.db_version >= dbversion) {
             snprintf(buf, sizeof(buf), "%" PRId64, decoded_context.db_version);
-            dbutils_settings_set_key_value(db, NULL, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
+            dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
             
             if (decoded_context.seq != seq) {
                 snprintf(buf, sizeof(buf), "%" PRId64, decoded_context.seq);
-                dbutils_settings_set_key_value(db, NULL, CLOUDSYNC_KEY_CHECK_SEQ, buf);
+                dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_SEQ, buf);
             }
         }
     }
@@ -2286,10 +2286,10 @@ int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size,
     db_t *db = data->db;
     
     // retrieve current db_version and seq
-    *db_version = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_SEND_DBVERSION);
+    *db_version = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_SEND_DBVERSION);
     if (*db_version < 0) return DBRES_ERROR;
 
-    *seq = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_SEND_SEQ);
+    *seq = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_SEND_SEQ);
     if (*seq < 0) return DBRES_ERROR;
     
     // retrieve BLOB
@@ -2341,14 +2341,13 @@ int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, i
     // TODO: dbutils_settings_set_key_value remove context and return error here (in case of error)
     // update db_version and seq
     char buf[256];
-    db_t *db = data->db;
     if (new_db_version != db_version) {
         snprintf(buf, sizeof(buf), "%" PRId64, new_db_version);
-        dbutils_settings_set_key_value(db, NULL, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
+        dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
     }
     if (new_seq != seq) {
         snprintf(buf, sizeof(buf), "%" PRId64, new_seq);
-        dbutils_settings_set_key_value(db, NULL, CLOUDSYNC_KEY_SEND_SEQ, buf);
+        dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_SEQ, buf);
     }
     
     // returns blob size
@@ -2458,7 +2457,7 @@ int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context
     }
     
     // remove all table related settings
-    dbutils_table_settings_set_key_value(db, NULL, table_name, NULL, NULL, NULL);
+    dbutils_table_settings_set_key_value(data, table_name, NULL, NULL, NULL);
     return DBRES_OK;
 }
 
@@ -2478,7 +2477,7 @@ int cloudsync_cleanup (cloudsync_context *data, const char *table_name) {
     if (counter == 0) {
         // cleanup database on last table
         cloudsync_reset_siteid(data);
-        dbutils_settings_cleanup(data->db);
+        dbutils_settings_cleanup(data);
     } else {
         if (database_table_exists(data->db, CLOUDSYNC_TABLE_SETTINGS_NAME) == true) {
             cloudsync_update_schema_hash(data);
@@ -2498,7 +2497,7 @@ int cloudsync_cleanup_all (cloudsync_context *data) {
     
     // cleanup database
     cloudsync_reset_siteid(data);
-    dbutils_settings_cleanup(data->db);
+    dbutils_settings_cleanup(data);
     
     return DBRES_OK;
 }
@@ -2552,7 +2551,7 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     }
     
     // check if table name was already augmented
-    table_algo algo_current = dbutils_table_settings_get_algo(db, table_name);
+    table_algo algo_current = dbutils_table_settings_get_algo(data, table_name);
     
     // sanity check algorithm
     if ((algo_new == algo_current) && (algo_current != table_algo_none)) {
@@ -2565,8 +2564,7 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
         algo_new = algo_current;
     } else if ((algo_new != table_algo_none) && (algo_current == table_algo_none)) {
         // write table algo name in settings
-        // TODO: fix me
-        dbutils_table_settings_set_key_value(db, NULL, table_name, "*", "algo", algo_name);
+        dbutils_table_settings_set_key_value(data, table_name, "*", "algo", algo_name);
     } else {
         // error condition
         return cloudsync_set_error(data, "The function cloudsync_cleanup(table) must be called before changing a table algorithm", DBRES_MISUSE);
@@ -2580,7 +2578,7 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     // cloudsync_sync_table_key(data, table_name, "*", CLOUDSYNC_KEY_ALGO, crdt_algo_name(algo_new));
     
     // check triggers
-    rc = database_create_triggers(db, table_name, algo_new);
+    rc = database_create_triggers(data, table_name, algo_new);
     if (rc != DBRES_OK) return cloudsync_set_error(data, "An error occurred while creating triggers", DBRES_MISUSE);
     
     // check meta-table
