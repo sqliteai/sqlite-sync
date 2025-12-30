@@ -189,7 +189,7 @@ DATABASE_RESULT unit_exec (cloudsync_context *data, const char *sql, const char 
 unitexec_finalize:
     if (rc == SQLITE_DONE) rc = SQLITE_OK;
     if (rc != SQLITE_OK) {
-        if (count != -1) DEBUG_ALWAYS("Error executing %s in dbutils_exec (%s).", sql, database_errmsg(cloudsync_db(data)));
+        if (count != -1) DEBUG_ALWAYS("Error executing %s in dbutils_exec (%s).", sql, database_errmsg(data));
     }
     if (pstmt) databasevm_finalize(pstmt);
     

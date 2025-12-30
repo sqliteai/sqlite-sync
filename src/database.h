@@ -90,8 +90,8 @@ int database_begin_savepoint (cloudsync_context *data, const char *savepoint_nam
 int database_commit_savepoint (cloudsync_context *data, const char *savepoint_name);
 int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_name);
 bool database_in_transaction (cloudsync_context *data);
-int database_errcode (db_t *db);
-const char *database_errmsg (db_t *db);
+int database_errcode (cloudsync_context *data);
+const char *database_errmsg (cloudsync_context *data);
 
 // VM
 int  database_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, int flags);

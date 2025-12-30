@@ -357,12 +357,12 @@ int database_select_blob_2int (cloudsync_context *data, const char *sql, char **
     return database_select3_values(data, sql, value, len, value2, value3);
 }
 
-const char *database_errmsg (db_t *db) {
-    return sqlite3_errmsg((sqlite3 *)db);
+const char *database_errmsg (cloudsync_context *data) {
+    return sqlite3_errmsg((sqlite3 *)cloudsync_db(data));
 }
 
-int database_errcode (db_t *db) {
-    return sqlite3_errcode((sqlite3 *)db);
+int database_errcode (cloudsync_context *data) {
+    return sqlite3_errcode((sqlite3 *)cloudsync_db(data));
 }
 
 bool database_in_transaction (cloudsync_context *data) {

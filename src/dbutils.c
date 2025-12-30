@@ -110,8 +110,6 @@ char *dbutils_settings_get_value (cloudsync_context *data, const char *key, char
     if (intvalue) *intvalue = 0;
     size_t size = 0;
     
-    // TODO: FIXME
-    db_t *db = cloudsync_db(data);
     dbvm_t *vm = NULL;
     int rc = database_prepare(data, SQL_SETTINGS_GET_VALUE, (void **)&vm, 0);
     if (rc != DBRES_OK) goto finalize_get_value;
@@ -156,7 +154,7 @@ finalize_get_value:
     #if CLOUDSYNC_UNITTEST
     if ((rc == DBRES_NOMEM) && (size == SQLITE_MAX_ALLOCATION_SIZE + 1)) rc = DBRES_OK;
     #endif
-    if (rc != DBRES_OK) DEBUG_ALWAYS("dbutils_settings_get_value error %s", database_errmsg(db));
+    if (rc != DBRES_OK) DEBUG_ALWAYS("dbutils_settings_get_value error %s", database_errmsg(data));
     if (vm) databasevm_finalize(vm);
     
     return buffer;
@@ -228,9 +226,6 @@ int dbutils_settings_check_version (cloudsync_context *data, const char *version
 char *dbutils_table_settings_get_value (cloudsync_context *data, const char *table, const char *column_name, const char *key, char *buffer, size_t blen) {
     DEBUG_SETTINGS("dbutils_table_settings_get_value table: %s column: %s key: %s", table, column, key);
     
-    // TODO: FIXME
-    db_t *db = cloudsync_db(data);
-    
     // check if heap allocation must be forced
     if (!buffer || blen == 0) blen = 0;
     size_t size = 0;
@@ -280,7 +275,7 @@ finalize_get_value:
     if ((rc == DBRES_NOMEM) && (size == SQLITE_MAX_ALLOCATION_SIZE + 1)) rc = DBRES_OK;
     #endif
     if (rc != DBRES_OK) {
-        DEBUG_ALWAYS("cloudsync_table_settings error %s", database_errmsg(db));
+        DEBUG_ALWAYS("cloudsync_table_settings error %s", database_errmsg(data));
     }
     if (vm) databasevm_finalize(vm);
     
@@ -388,18 +383,15 @@ bool dbutils_settings_migrate (cloudsync_context *data) {
 int dbutils_settings_load (cloudsync_context *data) {
     DEBUG_SETTINGS("dbutils_settings_load %p", data);
     
-    // TODO: FIXME
-    db_t *db = cloudsync_db(data);
-    
     // load global settings
     const char *sql = SQL_SETTINGS_LOAD_GLOBAL;
     int rc = database_exec_callback(data, sql, dbutils_settings_load_callback, data);
-    if (rc != DBRES_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", database_errmsg(db));
+    if (rc != DBRES_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", database_errmsg(data));
     
     // load table-specific settings
     sql = SQL_SETTINGS_LOAD_TABLE;
     rc = database_exec_callback(data, sql, dbutils_settings_table_load_callback, data);
-    if (rc != DBRES_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", database_errmsg(db));
+    if (rc != DBRES_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", database_errmsg(data));
     
     return DBRES_OK;
 }

@@ -83,8 +83,7 @@ void dbsync_db_version (sqlite3_context *context, int argc, sqlite3_value **argv
     
     int rc = cloudsync_dbversion_check_uptodate(data);
     if (rc != SQLITE_OK) {
-        sqlite3 *db = sqlite3_context_db_handle(context);
-        dbsync_set_error(context, "Unable to retrieve db_version (%s).", database_errmsg(db));
+        dbsync_set_error(context, "Unable to retrieve db_version (%s).", database_errmsg(data));
         return;
     }
     
@@ -100,8 +99,7 @@ void dbsync_db_version_next (sqlite3_context *context, int argc, sqlite3_value *
     sqlite3_int64 merging_version = (argc == 1) ? database_value_int(argv[0]) : CLOUDSYNC_VALUE_NOTSET;
     sqlite3_int64 value = cloudsync_dbversion_next(data, merging_version);
     if (value == -1) {
-        sqlite3 *db = sqlite3_context_db_handle(context);
-        dbsync_set_error(context, "Unable to retrieve next_db_version (%s).", database_errmsg(db));
+        dbsync_set_error(context, "Unable to retrieve next_db_version (%s).", database_errmsg(data));
         return;
     }
     
@@ -226,8 +224,7 @@ void dbsync_col_value (sqlite3_context *context, int argc, sqlite3_value **argv)
     
 cleanup:
     if (rc != SQLITE_OK) {
-        sqlite3 *db = sqlite3_context_db_handle(context);
-        sqlite3_result_error(context, database_errmsg(db), -1);
+        sqlite3_result_error(context, database_errmsg(data), -1);
     }
     databasevm_reset(vm);
 }
@@ -303,7 +300,6 @@ void dbsync_insert (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // seq              -> sqlite_master
     
     // retrieve context
-    sqlite3 *db = sqlite3_context_db_handle(context);
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     
     // lookup table
@@ -349,7 +345,7 @@ void dbsync_insert (sqlite3_context *context, int argc, sqlite3_value **argv) {
     }
     
 cleanup:
-    if (rc != SQLITE_OK) sqlite3_result_error(context, database_errmsg(db), -1);
+    if (rc != SQLITE_OK) sqlite3_result_error(context, database_errmsg(data), -1);
     // free memory if the primary key was dynamically allocated
     if (pk != buffer) cloudsync_memory_free(pk);
 }
@@ -359,7 +355,6 @@ void dbsync_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // debug_values(argc-1, &argv[1]);
     
     // retrieve context
-    sqlite3 *db = sqlite3_context_db_handle(context);
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     
     // lookup table
@@ -392,7 +387,7 @@ void dbsync_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
     if (rc != SQLITE_OK) goto cleanup;
     
 cleanup:
-    if (rc != SQLITE_OK) sqlite3_result_error(context, database_errmsg(db), -1);
+    if (rc != SQLITE_OK) sqlite3_result_error(context, database_errmsg(data), -1);
     // free memory if the primary key was dynamically allocated
     if (pk != buffer) cloudsync_memory_free(pk);
 }
@@ -467,7 +462,6 @@ void dbsync_update_final (sqlite3_context *context) {
     if (!payload || payload->count == 0) return;
     
     // retrieve context
-    sqlite3 *db = sqlite3_context_db_handle(context);
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     
     // lookup table
@@ -549,7 +543,7 @@ void dbsync_update_final (sqlite3_context *context) {
     }
     
 cleanup:
-    if (rc != SQLITE_OK) sqlite3_result_error(context, database_errmsg(db), -1);
+    if (rc != SQLITE_OK) sqlite3_result_error(context, database_errmsg(data), -1);
     if (pk != buffer) cloudsync_memory_free(pk);
     if (oldpk && (oldpk != buffer2)) cloudsync_memory_free(oldpk);
     
@@ -618,11 +612,10 @@ void dbsync_terminate (sqlite3_context *context, int argc, sqlite3_value **argv)
 
 void dbsync_init (sqlite3_context *context, const char *table, const char *algo, bool skip_int_pk_check) {
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    sqlite3 *db = cloudsync_db(data);
     
     int rc = database_begin_savepoint(data, "cloudsync_init");
     if (rc != SQLITE_OK) {
-        dbsync_set_error(context, "Unable to create cloudsync_init savepoint. %s", database_errmsg(db));
+        dbsync_set_error(context, "Unable to create cloudsync_init savepoint. %s", database_errmsg(data));
         sqlite3_result_error_code(context, rc);
         return;
     }
@@ -631,7 +624,7 @@ void dbsync_init (sqlite3_context *context, const char *table, const char *algo,
     if (rc == SQLITE_OK) {
         rc = database_commit_savepoint(data, "cloudsync_init");
         if (rc != SQLITE_OK) {
-            dbsync_set_error(context, "Unable to release cloudsync_init savepoint. %s", database_errmsg(db));
+            dbsync_set_error(context, "Unable to release cloudsync_init savepoint. %s", database_errmsg(data));
             sqlite3_result_error_code(context, rc);
         }
     } else {
@@ -878,7 +871,7 @@ int dbsync_register (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_contex
     int rc = sqlite3_create_function_v2(db, name, nargs, DEFAULT_FLAGS, ctx, xfunc, xstep, xfinal, ctx_free);
     
     if (rc != SQLITE_OK) {
-        if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("Error creating function %s: %s", name, database_errmsg(db));
+        if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("Error creating function %s: %s", name, sqlite3_errmsg(db));
         return rc;
     }
     return SQLITE_OK;
@@ -1028,7 +1021,7 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     // register eponymous only changes virtual table
     rc = cloudsync_vtab_register_changes (db, data);
     if (rc != SQLITE_OK) {
-        if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("Error creating changes virtual table: %s", database_errmsg(db));
+        if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("Error creating changes virtual table: %s", sqlite3_errmsg(db));
         return rc;
     }
     

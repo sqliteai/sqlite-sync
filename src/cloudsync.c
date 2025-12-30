@@ -496,18 +496,16 @@ int cloudsync_add_dbvms (cloudsync_context *data) {
 }
 
 int cloudsync_set_error (cloudsync_context *data, const char *err_user, int err_code) {
-    db_t *db = data->db;
-    
     // force err_code to be something different than OK
-    if (err_code == DBRES_OK) err_code = database_errcode(db);
+    if (err_code == DBRES_OK) err_code = database_errcode(data);
     if (err_code == DBRES_OK) err_code = DBRES_ERROR;
     
     // compute a meaningful error message
     if (err_user == NULL) {
-        snprintf(data->errmsg, sizeof(data->errmsg), "%s", database_errmsg(db));
+        snprintf(data->errmsg, sizeof(data->errmsg), "%s", database_errmsg(data));
     } else {
-        const char *db_error = database_errmsg(db);
-        int rc = database_errcode(db);
+        const char *db_error = database_errmsg(data);
+        int rc = database_errcode(data);
         if (rc == DBRES_OK) {
             snprintf(data->errmsg, sizeof(data->errmsg), "%s", err_user);
         } else {
@@ -659,7 +657,7 @@ void table_free (cloudsync_table_context *table) {
     cloudsync_memory_free(table);
 }
 
-int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
+int table_add_stmts (cloudsync_table_context *table, int ncols) {
     int rc = DBRES_OK;
     char *sql = NULL;
     cloudsync_context *data = table->context;
@@ -808,7 +806,7 @@ int table_add_stmts (db_t *db, cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
 cleanup:
-    if (rc != DBRES_OK) DEBUG_ALWAYS("table_add_stmts error: %d %s\n", rc, database_errmsg(db));
+    if (rc != DBRES_OK) DEBUG_ALWAYS("table_add_stmts error: %d %s\n", rc, database_errmsg(data));
     return rc;
 }
 
@@ -934,7 +932,7 @@ bool table_add_to_context (db_t *db, cloudsync_context *data, table_algo algo, c
     
     int ncols = database_count_nonpk(data, table_name);
     if (count < 0) {cloudsync_set_dberror(data); goto abort_add_table;}
-    int rc = table_add_stmts(db, table, ncols);
+    int rc = table_add_stmts(table, ncols);
     if (rc != DBRES_OK) goto abort_add_table;
     
     // a table with only pk(s) is totally legal
@@ -1582,7 +1580,6 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
     // in the lookaside table with the source table's PKs.
     
     // retrieve primary keys (to check is they changed)
-    db_t *db = data->db;
     char **result = NULL;
     int nrows = 0;
     int rc = database_pk_names (data, table->name, &result, &nrows);
@@ -1608,7 +1605,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
         rc = database_exec(data, sql);
         cloudsync_memory_free(sql);
         if (rc != DBRES_OK) {
-            DEBUG_DBERROR(rc, "cloudsync_finalize_alter", db);
+            DEBUG_DBERROR(rc, "cloudsync_finalize_alter", data);
             goto finalize;
         }
     } else {
@@ -1618,7 +1615,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
         rc = database_exec(data, sql);
         cloudsync_memory_free(sql);
         if (rc != DBRES_OK) {
-            DEBUG_DBERROR(rc, "cloudsync_finalize_alter", db);
+            DEBUG_DBERROR(rc, "cloudsync_finalize_alter", data);
             goto finalize;
         }
         
@@ -1639,7 +1636,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
         if (pkclause) cloudsync_memory_free(pkclause);
         cloudsync_memory_free(sql);
         if (rc != DBRES_OK) {
-            DEBUG_DBERROR(rc, "cloudsync_finalize_alter", db);
+            DEBUG_DBERROR(rc, "cloudsync_finalize_alter", data);
             goto finalize;
         }
 
@@ -1708,7 +1705,6 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) return DBRES_ERROR;
     
-    db_t *db= data->db;
     dbvm_t *vm = NULL;
     int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
     char *pkdecode = NULL;
@@ -1766,7 +1762,7 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     }
     
 finalize:
-    if (rc != DBRES_OK) {DEBUG_ALWAYS("cloudsync_refill_metatable error: %s", database_errmsg(db));}
+    if (rc != DBRES_OK) {DEBUG_ALWAYS("cloudsync_refill_metatable error: %s", database_errmsg(data));}
     if (pkclause_identifiers) cloudsync_memory_free(pkclause_identifiers);
     if (pkdecode) cloudsync_memory_free(pkdecode);
     if (vm) databasevm_finalize(vm);
@@ -2217,7 +2213,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
             if (rc != DBRES_DONE) {
                 // don't "break;", the error can be due to a RLS policy.
                 // in case of error we try to apply the following changes
-                // printf("cloudsync_payload_apply error on db_version %PRId64/%PRId64: (%d) %s\n", decoded_context.db_version, decoded_context.seq, rc, database_errmsg(db));
+                // printf("cloudsync_payload_apply error on db_version %PRId64/%PRId64: (%d) %s\n", decoded_context.db_version, decoded_context.seq, rc, database_errmsg(data));
             }
         }
         
