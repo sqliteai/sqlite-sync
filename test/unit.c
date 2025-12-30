@@ -1935,20 +1935,20 @@ bool do_test_dbutils (void) {
     const char *values[] = {"Test1", "3.1415", NULL};
     DBTYPE type[] = {SQLITE_TEXT, SQLITE_FLOAT, SQLITE_NULL};
     int len[] = {5, 0, 0};
-    rc = database_write(db, sql, values, type, len, 3);
+    rc = database_write(data, sql, values, type, len, 3);
     if (rc != SQLITE_OK) goto finalize;
     
     sql = "INSERT INTO foo2 (name) VALUES ('Error');";
-    rc = database_write(db, sql, NULL, NULL, NULL, -1);
+    rc = database_write(data, sql, NULL, NULL, NULL, -1);
     if (rc == SQLITE_OK) goto finalize;
     
     // test dbutils_text_select
     sql = "INSERT INTO foo (name) VALUES ('Test2')";
-    rc = database_exec(db, sql);
+    rc = database_exec(data, sql);
     if (rc != SQLITE_OK) goto finalize;
     
     sql = "INSERT INTO \"quoted table name 🚀\" (\"pk quoted col 1\", \"pk quoted col 2\", \"non pk quoted col 1\", \"non pk quoted col 2\") VALUES ('pk1', 'pk2', 'nonpk1', 'nonpk2');";
-    rc = database_write(db, sql, NULL, NULL, NULL, -1);
+    rc = database_write(data, sql, NULL, NULL, NULL, -1);
     if (rc != SQLITE_OK) goto finalize;
     
     sql = "SELECT * FROM cloudsync_changes();";
@@ -2010,8 +2010,8 @@ bool do_test_dbutils (void) {
     dbutils_settings_set_key_value(data, "key2", "test2");
     dbutils_settings_set_key_value(data, "key2", NULL);
     
-    char *value1 = dbutils_settings_get_value(db, "key1", NULL, 0, NULL);
-    char *value2 = dbutils_settings_get_value(db, "key2", NULL, 0, NULL);
+    char *value1 = dbutils_settings_get_value(data, "key1", NULL, 0, NULL);
+    char *value2 = dbutils_settings_get_value(data, "key2", NULL, 0, NULL);
     if (value1 == NULL) goto finalize;
     if (value2 != NULL) goto finalize;
     cloudsync_memory_free(value1);
@@ -5675,6 +5675,8 @@ finalize:
 
 bool do_test_gos (int nclients, bool print_result, bool cleanup_databases) {
     sqlite3 *db[MAX_SIMULATED_CLIENTS] = {NULL};
+    cloudsync_context *data[MAX_SIMULATED_CLIENTS] = {NULL};
+    
     bool result = false;
     int rc = SQLITE_OK;
     
@@ -5693,6 +5695,9 @@ bool do_test_gos (int nclients, bool print_result, bool cleanup_databases) {
     for (int i=0; i<nclients; ++i) {
         db[i] = do_create_database_file(i, timestamp, test_counter++);
         if (db[i] == false) return false;
+        
+        data[i] = cloudsync_context_create(db[i]);
+        if (data[i] == false) return false;
         
         const char *sql = "CREATE TABLE log (id TEXT PRIMARY KEY NOT NULL, desc TEXT, counter INTEGER, stamp TEXT DEFAULT CURRENT_TIMESTAMP);";
         rc = sqlite3_exec(db[i], sql, NULL, NULL, NULL);
@@ -5722,7 +5727,7 @@ bool do_test_gos (int nclients, bool print_result, bool cleanup_databases) {
             DBTYPE types[] = {SQLITE_TEXT, SQLITE_TEXT, SQLITE_INTEGER};
             int len[] = {-1, -1, 0};
             
-            rc = database_write(db[i], sql, values, types, len, 3);
+            rc = database_write(data[i], sql, values, types, len, 3);
             if (rc != SQLITE_OK) goto finalize;
         }
     }
@@ -5749,6 +5754,8 @@ finalize:
     for (int i=0; i<nclients; ++i) {
         if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK)) printf("do_test_gos error: %s\n", sqlite3_errmsg(db[i]));
         if (db[i]) close_db(db[i]);
+        if (data[i]) cloudsync_context_free(data[i]);
+        
         if (cleanup_databases) {
             char buf[256];
             do_build_database_path(buf, i, timestamp, saved_counter++);

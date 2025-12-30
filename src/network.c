@@ -888,7 +888,8 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
     }
     
     // run everything in a savepoint
-    rc = database_begin_savepoint(db, "cloudsync_logout_savepoint;");
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    rc = database_begin_savepoint(data, "cloudsync_logout_savepoint;");
     if (rc != SQLITE_OK) {
         errmsg = cloudsync_memory_mprintf("Unable to create cloudsync_logout savepoint. %s", sqlite3_errmsg(db));
         return;
@@ -897,8 +898,7 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
     // TODO: is it right to use the tables in cloudsync_context?
     // What happen if another connection later augmented another table not originally loaded in this cloudsync_context?
     // disable cloudsync for all the previously enabled tables: cloudsync_cleanup('*')
-    cloudsync_context *xdata = (cloudsync_context *)sqlite3_user_data(context);
-    rc = cloudsync_cleanup_all(xdata);
+    rc = cloudsync_cleanup_all(data);
     if (rc != SQLITE_OK) {
         errmsg = cloudsync_memory_mprintf("Unable to cleanup current cloudsync configuration. %s", sqlite3_errmsg(db));
         goto finalize;
@@ -934,12 +934,12 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
         
 finalize:
     if (completed) {
-        database_commit_savepoint(db, "cloudsync_logout_savepoint");
+        database_commit_savepoint(data, "cloudsync_logout_savepoint");
     } else {
         // cleanup:
         // ROLLBACK TO command reverts the state of the database back to what it was just after the corresponding SAVEPOINT
         // then RELEASE to remove the SAVEPOINT from the transaction stack
-        database_rollback_savepoint(db, "cloudsync_logout_savepoint");
+        database_rollback_savepoint(data, "cloudsync_logout_savepoint");
         sqlite3_result_error(context, errmsg, -1);
         sqlite3_result_error_code(context, rc);
     }

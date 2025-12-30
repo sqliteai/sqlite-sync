@@ -290,15 +290,16 @@ finalize:
 
 // MARK: - GENERAL -
 
-int database_exec (db_t *db, const char *sql) {
-    return sqlite3_exec((sqlite3 *)db, sql, NULL, NULL, NULL);
+int database_exec (cloudsync_context *data, const char *sql) {
+    return sqlite3_exec((sqlite3 *)cloudsync_db(data), sql, NULL, NULL, NULL);
 }
 
-int database_exec_callback (db_t *db, const char *sql, int (*callback)(void *xdata, int argc, char **values, char **names), void *xdata) {
-    return sqlite3_exec((sqlite3 *)db, sql, callback, xdata, NULL);
+int database_exec_callback (cloudsync_context *data, const char *sql, int (*callback)(void *xdata, int argc, char **values, char **names), void *xdata) {
+    return sqlite3_exec((sqlite3 *)cloudsync_db(data), sql, callback, xdata, NULL);
 }
 
-int database_write (db_t *db, const char *sql, const char **bind_values, DBTYPE bind_types[], int bind_lens[], int bind_count) {
+int database_write (cloudsync_context *data, const char *sql, const char **bind_values, DBTYPE bind_types[], int bind_lens[], int bind_count) {
+    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
     sqlite3_stmt *vm = NULL;
     int rc = sqlite3_prepare_v2((sqlite3 *)db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup_write;
@@ -436,16 +437,13 @@ int database_debug (db_t *db, bool print_result) {
 int database_create_metatable (cloudsync_context *data, const char *table_name) {
     DEBUG_DBFUNCTION("database_create_metatable %s", table);
     
-    // TODO: FIXME
-    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
-    
     // table_name cannot be longer than 512 characters so static buffer size is computed accordling to that value
     char buffer[2048];
     
     // WITHOUT ROWID is available starting from SQLite version 3.8.2 (2013-12-06) and later
     char *sql = sqlite3_snprintf(sizeof(buffer), buffer, "CREATE TABLE IF NOT EXISTS \"%w_cloudsync\" (pk BLOB NOT NULL, col_name TEXT NOT NULL, col_version INTEGER, db_version INTEGER, site_id INTEGER DEFAULT 0, seq INTEGER, PRIMARY KEY (pk, col_name)) WITHOUT ROWID; CREATE INDEX IF NOT EXISTS \"%w_cloudsync_db_idx\" ON \"%w_cloudsync\" (db_version);", table_name, table_name, table_name);
     
-    int rc = database_exec(db, sql);
+    int rc = database_exec(data, sql);
     DEBUG_SQL("\n%s", sql);
     return rc;
 }
@@ -471,7 +469,7 @@ int database_create_insert_trigger (cloudsync_context *data, const char *table_n
     if (pkclause) cloudsync_memory_free(pkclause);
     if (!sql) return SQLITE_NOMEM;
     
-    rc = database_exec(db, sql);
+    rc = database_exec(data, sql);
     DEBUG_SQL("\n%s", sql);
     cloudsync_memory_free(sql);
     return rc;
@@ -483,10 +481,6 @@ int database_create_update_trigger_gos (cloudsync_context *data, const char *tab
     // A grow-only set is a type of CRDT (Conflict-free Replicated Data Type) where the only permissible operation is to add elements to the set,
     // without ever removing or modifying them.
     // Once an element is added to the set, it remains there permanently, which guarantees that the set only grows over time.
-    
-    // TODO: FIXME
-    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
-    
     char buffer[1024];
     char *trigger_name = sqlite3_snprintf(sizeof(buffer), buffer, "cloudsync_before_update_%s", table_name);
     if (database_trigger_exists(data, trigger_name)) return SQLITE_OK;
@@ -494,7 +488,7 @@ int database_create_update_trigger_gos (cloudsync_context *data, const char *tab
     char buffer2[2048+512];
     char *sql = sqlite3_snprintf(sizeof(buffer2), buffer2, "CREATE TRIGGER \"%w\" BEFORE UPDATE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%q') = 1 BEGIN SELECT RAISE(ABORT, 'Error: UPDATE operation is not allowed on table %w.'); END", trigger_name, table_name, table_name, table_name);
     
-    int rc = database_exec(db, sql);
+    int rc = database_exec(data, sql);
     DEBUG_SQL("\n%s", sql);
     return rc;
 }
@@ -558,7 +552,7 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
     cloudsync_memory_free(values_query);
     if (!sql) return SQLITE_NOMEM;
     
-    rc = database_exec(db, sql);
+    rc = database_exec(data, sql);
     DEBUG_SQL("\n%s", sql);
     cloudsync_memory_free(sql);
     return rc;
@@ -568,9 +562,6 @@ int database_create_delete_trigger_gos (cloudsync_context *data, const char *tab
     // Grow Only Set
     // In a grow-only set, the delete operation is not allowed.
     
-    // TODO: FIXME
-    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
-    
     char buffer[1024];
     char *trigger_name = sqlite3_snprintf(sizeof(buffer), buffer, "cloudsync_before_delete_%s", table_name);
     if (database_trigger_exists(data, trigger_name)) return SQLITE_OK;
@@ -578,7 +569,7 @@ int database_create_delete_trigger_gos (cloudsync_context *data, const char *tab
     char buffer2[2048+512];
     char *sql = sqlite3_snprintf(sizeof(buffer2), buffer2, "CREATE TRIGGER \"%w\" BEFORE DELETE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%q') = 1 BEGIN SELECT RAISE(ABORT, 'Error: DELETE operation is not allowed on table %w.'); END", trigger_name, table_name, table_name, table_name);
         
-    int rc = database_exec(db, sql);
+    int rc = database_exec(data, sql);
     DEBUG_SQL("\n%s", sql);
     return rc;
 }
@@ -605,7 +596,7 @@ int database_create_delete_trigger (cloudsync_context *data, const char *table_n
     if (pkclause) cloudsync_memory_free(pkclause);
     if (!sql) return SQLITE_NOMEM;
         
-    rc = database_exec(db, sql);
+    rc = database_exec(data, sql);
     DEBUG_SQL("\n%s", sql);
     cloudsync_memory_free(sql);
     return rc;
@@ -641,36 +632,33 @@ int database_create_triggers (cloudsync_context *data, const char *table_name, t
 int database_delete_triggers (cloudsync_context *data, const char *table) {
     DEBUG_DBFUNCTION("database_delete_triggers %s", table);
     
-    // TODO: FIXME
-    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
-    
     // from cloudsync_table_sanity_check we already know that 2048 is OK
     char buffer[2048];
     size_t blen = sizeof(buffer);
     int rc = SQLITE_ERROR;
     
     char *sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_before_update_%w\";", table);
-    rc = database_exec(db, sql);
+    rc = database_exec(data, sql);
     if (rc != SQLITE_OK) goto finalize;
     
     sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_before_delete_%w\";", table);
-    rc = database_exec(db, sql);
+    rc = database_exec(data, sql);
     if (rc != SQLITE_OK) goto finalize;
     
     sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_after_insert_%w\";", table);
-    rc = database_exec(db, sql);
+    rc = database_exec(data, sql);
     if (rc != SQLITE_OK) goto finalize;
     
     sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_after_update_%w\";", table);
-    rc = database_exec(db, sql);
+    rc = database_exec(data, sql);
     if (rc != SQLITE_OK) goto finalize;
     
     sql = sqlite3_snprintf((int)blen, buffer, "DROP TRIGGER IF EXISTS \"cloudsync_after_delete_%w\";", table);
-    rc = database_exec(db, sql);
+    rc = database_exec(data, sql);
     if (rc != SQLITE_OK) goto finalize;
     
 finalize:
-    if (rc != SQLITE_OK) DEBUG_ALWAYS("dbutils_delete_triggers error %s (%s)", database_errmsg(db), sql);
+    if (rc != SQLITE_OK) DEBUG_ALWAYS("dbutils_delete_triggers error %s (%s)", database_errmsg(cloudsync_db(data)), sql);
     return rc;
 }
 
@@ -734,7 +722,7 @@ int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
                                "VALUES (%" PRId64 ", COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
                                "ON CONFLICT(hash) DO UPDATE SET "
                                "seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);", h);
-    rc = database_exec(db, sql);
+    rc = database_exec(data, sql);
     if (rc == SQLITE_OK && hash) *hash = h;
     return rc;
 }
@@ -934,22 +922,22 @@ int database_column_type (dbvm_t *vm, int index) {
 
 // MARK: - SAVEPOINT -
 
-int database_begin_savepoint (db_t *db, const char *savepoint_name) {
+int database_begin_savepoint (cloudsync_context *data, const char *savepoint_name) {
     char sql[1024];
     snprintf(sql, sizeof(sql), "SAVEPOINT %s;", savepoint_name);
-    return database_exec(db, sql);
+    return database_exec(data, sql);
 }
 
-int database_commit_savepoint (db_t *db, const char *savepoint_name) {
+int database_commit_savepoint (cloudsync_context *data, const char *savepoint_name) {
     char sql[1024];
     snprintf(sql, sizeof(sql), "RELEASE %s;", savepoint_name);
-    return database_exec(db, sql);
+    return database_exec(data, sql);
 }
 
-int database_rollback_savepoint (db_t *db, const char *savepoint_name) {
+int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_name) {
     char sql[1024];
     snprintf(sql, sizeof(sql), "ROLLBACK TO %s; RELEASE %s;", savepoint_name, savepoint_name);
-    return database_exec(db, sql);
+    return database_exec(data, sql);
 }
 
 // MARK: - MEMORY -

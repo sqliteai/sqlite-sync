@@ -620,7 +620,7 @@ void dbsync_init (sqlite3_context *context, const char *table, const char *algo,
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     sqlite3 *db = cloudsync_db(data);
     
-    int rc = database_begin_savepoint(db, "cloudsync_init");
+    int rc = database_begin_savepoint(data, "cloudsync_init");
     if (rc != SQLITE_OK) {
         dbsync_set_error(context, "Unable to create cloudsync_init savepoint. %s", database_errmsg(db));
         sqlite3_result_error_code(context, rc);
@@ -629,7 +629,7 @@ void dbsync_init (sqlite3_context *context, const char *table, const char *algo,
     
     rc = cloudsync_init_table(data, table, algo, skip_int_pk_check);
     if (rc == SQLITE_OK) {
-        rc = database_commit_savepoint(db, "cloudsync_init");
+        rc = database_commit_savepoint(data, "cloudsync_init");
         if (rc != SQLITE_OK) {
             dbsync_set_error(context, "Unable to release cloudsync_init savepoint. %s", database_errmsg(db));
             sqlite3_result_error_code(context, rc);
@@ -638,7 +638,7 @@ void dbsync_init (sqlite3_context *context, const char *table, const char *algo,
         // in case of error, rollback transaction
         sqlite3_result_error(context, cloudsync_errmsg(data), -1);
         sqlite3_result_error_code(context, rc);
-        database_rollback_savepoint(db, "cloudsync_init");
+        database_rollback_savepoint(data, "cloudsync_init");
         return;
     }
     
@@ -900,7 +900,7 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     // there's no built-in way to verify if sqlite3_cloudsync_init has already been called
     // for this specific database connection, we use a workaround: we attempt to retrieve the
     // cloudsync_version and check for an error, an error indicates that initialization has not been performed
-    if (database_exec(db, "SELECT cloudsync_version();") == SQLITE_OK) return SQLITE_OK;
+    if (sqlite3_exec(db, "SELECT cloudsync_version();", NULL, NULL, NULL) == SQLITE_OK) return SQLITE_OK;
     
     // init memory debugger (NOOP in production)
     cloudsync_memory_init(1);

@@ -165,22 +165,19 @@ finalize_get_value:
 int dbutils_settings_set_key_value (cloudsync_context *data, const char *key, const char *value) {
     DEBUG_SETTINGS("dbutils_settings_set_key_value key: %s value: %s", key, value);
     
-    // TODO: FIXME
-    db_t *db = cloudsync_db(data);
     int rc = DBRES_OK;
-    
     if (key && value) {
         const char *values[] = {key, value};
         DBTYPE types[] = {DBTYPE_TEXT, DBTYPE_TEXT};
         int lens[] = {-1, -1};
-        rc = database_write(db, SQL_SETTINGS_SET_KEY_VALUE_REPLACE, values, types, lens, 2);
+        rc = database_write(data, SQL_SETTINGS_SET_KEY_VALUE_REPLACE, values, types, lens, 2);
     }
     
     if (value == NULL) {
         const char *values[] = {key};
         DBTYPE types[] = {DBTYPE_TEXT};
         int lens[] = {-1};
-        rc = database_write(db, SQL_SETTINGS_SET_KEY_VALUE_DELETE, values, types, lens, 1);
+        rc = database_write(data, SQL_SETTINGS_SET_KEY_VALUE_DELETE, values, types, lens, 1);
     }
     
     if (rc == DBRES_OK && data) cloudsync_sync_key(data, key, value);
@@ -293,8 +290,6 @@ finalize_get_value:
 int dbutils_table_settings_set_key_value (cloudsync_context *data, const char *table_name, const char *column_name, const char *key, const char *value) {
     DEBUG_SETTINGS("dbutils_table_settings_set_key_value table: %s column: %s key: %s", table, column_name, key);
     
-    // TODO: FIXME
-    db_t *db = cloudsync_db(data);
     int rc = DBRES_OK;
     
     // sanity check tbl_name
@@ -310,7 +305,7 @@ int dbutils_table_settings_set_key_value (cloudsync_context *data, const char *t
         const char *values[] = {table_name};
         DBTYPE types[] = {DBTYPE_TEXT};
         int lens[] = {-1};
-        rc = database_write(db, SQL_TABLE_SETTINGS_DELETE_ALL_FOR_TABLE, values, types, lens, 1);
+        rc = database_write(data, SQL_TABLE_SETTINGS_DELETE_ALL_FOR_TABLE, values, types, lens, 1);
         return rc;
     }
     
@@ -318,14 +313,14 @@ int dbutils_table_settings_set_key_value (cloudsync_context *data, const char *t
         const char *values[] = {table_name, column_name, key, value};
         DBTYPE types[] = {DBTYPE_TEXT, DBTYPE_TEXT, DBTYPE_TEXT, DBTYPE_TEXT};
         int lens[] = {-1, -1, -1, -1};
-        rc = database_write(db, SQL_TABLE_SETTINGS_REPLACE, values, types, lens, 4);
+        rc = database_write(data, SQL_TABLE_SETTINGS_REPLACE, values, types, lens, 4);
     }
     
     if (value == NULL) {
         const char *values[] = {table_name, column_name, key};
         DBTYPE types[] = {DBTYPE_TEXT, DBTYPE_TEXT, DBTYPE_TEXT};
         int lens[] = {-1, -1, -1};
-        rc = database_write(db, SQL_TABLE_SETTINGS_DELETE_ONE, values, types, lens, 3);
+        rc = database_write(data, SQL_TABLE_SETTINGS_DELETE_ONE, values, types, lens, 3);
     }
     
     // unused in this version
@@ -401,12 +396,12 @@ int dbutils_settings_load (cloudsync_context *data) {
     
     // load global settings
     const char *sql = SQL_SETTINGS_LOAD_GLOBAL;
-    int rc = database_exec_callback(db, sql, dbutils_settings_load_callback, data);
+    int rc = database_exec_callback(data, sql, dbutils_settings_load_callback, data);
     if (rc != DBRES_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", database_errmsg(db));
     
     // load table-specific settings
     sql = SQL_SETTINGS_LOAD_TABLE;
-    rc = database_exec_callback(db, sql, dbutils_settings_table_load_callback, data);
+    rc = database_exec_callback(data, sql, dbutils_settings_table_load_callback, data);
     if (rc != DBRES_OK) DEBUG_ALWAYS("cloudsync_load_settings error: %s", database_errmsg(db));
     
     return DBRES_OK;
@@ -416,26 +411,24 @@ int dbutils_settings_init (cloudsync_context *data) {
     DEBUG_SETTINGS("dbutils_settings_init %p", data);
         
     // check if cloudsync_settings table exists
-    // TODO: FIXME
-    db_t *db = cloudsync_db(data);
     int rc = DBRES_OK;
     bool settings_exists = database_table_exists(data, CLOUDSYNC_SETTINGS_NAME);
     if (settings_exists == false) {
         DEBUG_SETTINGS("cloudsync_settings does not exist (creating a new one)");
         
         // create table and fill-in initial data
-        rc = database_exec(db, SQL_CREATE_SETTINGS_TABLE);
+        rc = database_exec(data, SQL_CREATE_SETTINGS_TABLE);
         if (rc != DBRES_OK) return rc;
         
         // library version
         char sql[1024];
         snprintf(sql, sizeof(sql), SQL_INSERT_SETTINGS_STR_FORMAT, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
-        rc = database_exec(db, sql);
+        rc = database_exec(data, sql);
         if (rc != DBRES_OK) return rc;
         
         // schema version
         snprintf(sql, sizeof(sql), SQL_INSERT_SETTINGS_INT_FORMAT, CLOUDSYNC_KEY_SCHEMAVERSION, (long long)database_schema_version(data));
-        rc = database_exec(db, sql);
+        rc = database_exec(data, sql);
         if (rc != DBRES_OK) return rc;
     }
     
@@ -445,7 +438,7 @@ int dbutils_settings_init (cloudsync_context *data) {
         // create table and fill-in initial data
         // site_id is implicitly indexed
         // the rowid column is the primary key
-        rc = database_exec(db, SQL_CREATE_SITE_ID_TABLE);
+        rc = database_exec(data, SQL_CREATE_SITE_ID_TABLE);
         if (rc != DBRES_OK) return rc;
         
         // siteid (to uniquely identify this local copy of the database)
@@ -456,7 +449,7 @@ int dbutils_settings_init (cloudsync_context *data) {
         const char *values[] = {"0", (const char *)&site_id};
         DBTYPE types[] = {DBTYPE_INTEGER, DBTYPE_BLOB};
         int lens[] = {-1, UUID_LEN};
-        rc = database_write(db, SQL_INSERT_SITE_ID_ROWID, values, types, lens, 2);
+        rc = database_write(data, SQL_INSERT_SITE_ID_ROWID, values, types, lens, 2);
         if (rc != DBRES_OK) return rc;
     }
     
@@ -464,7 +457,7 @@ int dbutils_settings_init (cloudsync_context *data) {
     if (database_table_exists(data, CLOUDSYNC_TABLE_SETTINGS_NAME) == false) {
         DEBUG_SETTINGS("cloudsync_table_settings does not exist (creating a new one)");
         
-        rc = database_exec(db, SQL_CREATE_TABLE_SETTINGS_TABLE);
+        rc = database_exec(data, SQL_CREATE_TABLE_SETTINGS_TABLE);
         if (rc != DBRES_OK) return rc;
     }
     
@@ -474,7 +467,7 @@ int dbutils_settings_init (cloudsync_context *data) {
         DEBUG_SETTINGS("cloudsync_schema_versions does not exist (creating a new one)");
         
         // create table
-        rc = database_exec(db, SQL_CREATE_SCHEMA_VERSIONS_TABLE);
+        rc = database_exec(data, SQL_CREATE_SCHEMA_VERSIONS_TABLE);
         if (rc != DBRES_OK) return rc;
     }
     
@@ -493,7 +486,5 @@ int dbutils_settings_init (cloudsync_context *data) {
 }
 
 int dbutils_settings_cleanup (cloudsync_context *data) {
-    // TODO: FIXME
-    db_t *db = cloudsync_db(data);
-    return database_exec(db, SQL_SETTINGS_CLEANUP_DROP_ALL);
+    return database_exec(data, SQL_SETTINGS_CLEANUP_DROP_ALL);
 }

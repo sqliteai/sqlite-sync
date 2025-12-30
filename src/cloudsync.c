@@ -954,7 +954,7 @@ bool table_add_to_context (db_t *db, cloudsync_context *data, table_algo algo, c
         
         char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID, table_name);
         if (!sql) goto abort_add_table;
-        rc = database_exec_callback(db, sql, table_add_to_context_cb, (void *)table);
+        rc = database_exec_callback(data, sql, table_add_to_context_cb, (void *)table);
         cloudsync_memory_free(sql);
         if (rc == DBRES_ABORT) goto abort_add_table;
     }
@@ -1520,8 +1520,6 @@ void cloudsync_rollback_hook (void *ctx) {
 }
 
 int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
-    db_t *db = data->db;
-    
     // init cloudsync_settings
     if (cloudsync_context_init(data) == NULL) {
         return DBRES_MISUSE;
@@ -1536,7 +1534,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     }
     
     // create a savepoint to manage the alter operations as a transaction
-    int rc = database_begin_savepoint(db, "cloudsync_alter");
+    int rc = database_begin_savepoint(data, "cloudsync_alter");
     if (rc != DBRES_OK) {
         return cloudsync_set_error(data, "Unable to create cloudsync_begin_alter savepoint", DBRES_MISUSE);
     }
@@ -1573,7 +1571,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     return DBRES_OK;
     
 rollback_begin_alter:
-    database_rollback_savepoint(db, "cloudsync_alter");
+    database_rollback_savepoint(data, "cloudsync_alter");
     if (names) table_pknames_free(names, nrows);
     return rc;
 }
@@ -1611,7 +1609,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
     if (pk_diff) {
         // drop meta-table, it will be recreated
         char *sql = cloudsync_memory_mprintf(SQL_DROP_CLOUDSYNC_TABLE, table->name);
-        rc = database_exec(db, sql);
+        rc = database_exec(data, sql);
         cloudsync_memory_free(sql);
         if (rc != DBRES_OK) {
             DEBUG_DBERROR(rc, "cloudsync_finalize_alter", db);
@@ -1621,7 +1619,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
         // compact meta-table
         // delete entries for removed columns
         char *sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_DELETE_COLS_NOT_IN_SCHEMA_OR_PKCOL, table->name, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
-        rc = database_exec(db, sql);
+        rc = database_exec(data, sql);
         cloudsync_memory_free(sql);
         if (rc != DBRES_OK) {
             DEBUG_DBERROR(rc, "cloudsync_finalize_alter", db);
@@ -1641,7 +1639,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
         
         // delete entries related to rows that no longer exist in the original table, but preserve tombstone
         sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK, table->name, CLOUDSYNC_TOMBSTONE_VALUE, CLOUDSYNC_TOMBSTONE_VALUE, table->name, table->name, pkvalues);
-        rc = database_exec(db, sql);
+        rc = database_exec(data, sql);
         if (pkclause) cloudsync_memory_free(pkclause);
         cloudsync_memory_free(sql);
         if (rc != DBRES_OK) {
@@ -1662,7 +1660,6 @@ finalize:
 }
 
 int cloudsync_commit_alter (cloudsync_context *data, const char *table_name) {
-    db_t *db = data->db;
     int rc = DBRES_MISUSE;
     cloudsync_table_context *table = NULL;
     
@@ -1696,7 +1693,7 @@ int cloudsync_commit_alter (cloudsync_context *data, const char *table_name) {
     if (rc != DBRES_OK) goto rollback_finalize_alter;
 
     // release savepoint
-    rc = database_commit_savepoint(db, "cloudsync_alter");
+    rc = database_commit_savepoint(data, "cloudsync_alter");
     if (rc != DBRES_OK) {
         cloudsync_set_dberror(data);
         goto rollback_finalize_alter;
@@ -1706,7 +1703,7 @@ int cloudsync_commit_alter (cloudsync_context *data, const char *table_name) {
     return DBRES_OK;
     
 rollback_finalize_alter:
-    database_rollback_savepoint(db, "cloudsync_alter");
+    database_rollback_savepoint(data, "cloudsync_alter");
     if (table) table_set_pknames(table, NULL);
     return rc;
 }
@@ -1734,7 +1731,7 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     char *pkdecodeval = (pkdecode) ? pkdecode : "cloudsync_pk_decode(pk, 1) AS rowid";
      
     sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_INSERT_MISSING_PKS_FROM_BASE_EXCEPT_SYNC, table_name, pkvalues_identifiers, pkvalues_identifiers, table_name, pkdecodeval, table_name);
-    rc = database_exec(db, sql);
+    rc = database_exec(data, sql);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
     
@@ -2199,7 +2196,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
 
         // Release existing savepoint if db_version changed
         if (in_savepoint && db_version_changed) {
-            rc = database_commit_savepoint(db, "cloudsync_payload_apply");
+            rc = database_commit_savepoint(data, "cloudsync_payload_apply");
             if (rc != DBRES_OK) {
                 if (clone) cloudsync_memory_free(clone);
                 return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to release a savepoint", rc);
@@ -2210,7 +2207,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         // Start new savepoint if needed
         bool in_transaction = database_in_transaction(data);
         if (!in_transaction && db_version_changed) {
-            rc = database_begin_savepoint(db, "cloudsync_payload_apply");
+            rc = database_begin_savepoint(data, "cloudsync_payload_apply");
             if (rc != DBRES_OK) {
                 if (clone) cloudsync_memory_free(clone);
                 return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to start a transaction", rc);
@@ -2238,7 +2235,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     }
     
     if (in_savepoint) {
-        int rc1 = database_commit_savepoint(db, "cloudsync_payload_apply");
+        int rc1 = database_commit_savepoint(data, "cloudsync_payload_apply");
         if (rc1 != DBRES_OK) rc = rc1;
     }
 
@@ -2433,13 +2430,12 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
 }
 
 int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context *table) {
-    db_t *db = data->db;
     if (cloudsync_context_init(data) == NULL) return DBRES_MISUSE;
     
     // drop meta-table
     const char *table_name = table->name;
     char *sql = cloudsync_memory_mprintf(SQL_DROP_CLOUDSYNC_TABLE, table_name);
-    int rc = database_exec(db, sql);
+    int rc = database_exec(data, sql);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) {
         char buffer[1024];

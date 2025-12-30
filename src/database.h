@@ -61,13 +61,13 @@ typedef struct cloudsync_context cloudsync_context;
 // GENERAL
 typedef int (*database_exec_cb) (void *xdata, int argc, char **values, char **names);
 
-int  database_exec (db_t *db, const char *sql);
-int  database_exec_callback (db_t *db, const char *sql, database_exec_cb, void *xdata);
+int  database_exec (cloudsync_context *data, const char *sql);
+int  database_exec_callback (cloudsync_context *data, const char *sql, database_exec_cb, void *xdata);
 int  database_select_int (db_t *db, const char *sql, int64_t *value);
 int  database_select_text (db_t *db, const char *sql, char **value);
 int  database_select_blob (db_t *db, const char *sql, char **value, int64_t *value_len);
 int  database_select_blob_2int (db_t *db, const char *sql, char **value, int64_t *value_len, int64_t *value2, int64_t *value3);
-int  database_write (db_t *db, const char *sql, const char **values, DBTYPE types[], int lens[], int count);
+int  database_write (cloudsync_context *data, const char *sql, const char **values, DBTYPE types[], int lens[], int count);
 bool database_table_exists (cloudsync_context *data, const char *table_name);
 bool database_trigger_exists (cloudsync_context *data, const char *table_name);
 int  database_create_metatable (cloudsync_context *data, const char *table_name);
@@ -86,11 +86,11 @@ uint64_t database_schema_hash (cloudsync_context *data);
 bool     database_check_schema_hash (cloudsync_context *data, uint64_t hash);
 int      database_update_schema_hash (cloudsync_context *data, uint64_t *hash);
 
-int database_begin_savepoint (db_t *db, const char *savepoint_name);
-int database_commit_savepoint (db_t *db, const char *savepoint_name);
-int database_rollback_savepoint (db_t *db, const char *savepoint_name);
-int database_errcode (db_t *db);
+int database_begin_savepoint (cloudsync_context *data, const char *savepoint_name);
+int database_commit_savepoint (cloudsync_context *data, const char *savepoint_name);
+int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_name);
 bool database_in_transaction (cloudsync_context *data);
+int database_errcode (db_t *db);
 const char *database_errmsg (db_t *db);
 
 // VM
