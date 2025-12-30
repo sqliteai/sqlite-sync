@@ -1081,7 +1081,10 @@ finalize:
 bool do_test_functions (sqlite3 *db, bool print_results) {
     char *site_id = NULL;
     int64_t len = 0;
-    int rc = database_select_blob(db, "SELECT cloudsync_siteid();", &site_id, &len);
+    cloudsync_context *data = cloudsync_context_create(db);
+    if (!data) return false;
+    
+    int rc = database_select_blob(data, "SELECT cloudsync_siteid();", &site_id, &len);
     if (rc != DBRES_OK || site_id == NULL || len != 16) {
         if (site_id) cloudsync_memory_free(site_id);
         goto abort_test_functions;
@@ -1089,7 +1092,7 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     cloudsync_memory_free(site_id);
     
     char *site_id_str = NULL;
-    rc = database_select_text(db, "SELECT quote(cloudsync_siteid());", &site_id_str);
+    rc = database_select_text(data, "SELECT quote(cloudsync_siteid());", &site_id_str);
     if (rc != DBRES_OK || site_id_str == NULL) {
         if (site_id_str) cloudsync_memory_free(site_id_str);
         goto abort_test_functions;
@@ -1098,7 +1101,7 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     cloudsync_memory_free(site_id_str);
     
     char *version = NULL;
-    rc = database_select_text(db, "SELECT cloudsync_version();", &version);
+    rc = database_select_text(data, "SELECT cloudsync_version();", &version);
     if (rc != DBRES_OK || version == NULL) {
         if (version) cloudsync_memory_free(version);
         goto abort_test_functions;
@@ -1107,12 +1110,12 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     cloudsync_memory_free(version);
     
     int64_t db_version = 0;
-    rc = database_select_int(db, "SELECT cloudsync_db_version();", &db_version);
+    rc = database_select_int(data, "SELECT cloudsync_db_version();", &db_version);
     if (rc != DBRES_OK) goto abort_test_functions;
     if (print_results) printf("DB Version: %" PRId64 "\n", db_version);
     
     int64_t db_version_next = 0;
-    rc = database_select_int(db, "SELECT cloudsync_db_version_next();", &db_version);
+    rc = database_select_int(data, "SELECT cloudsync_db_version_next();", &db_version);
     if (rc != DBRES_OK) goto abort_test_functions;
     if (print_results) printf("DB Version Next: %" PRId64 "\n", db_version_next);
 
@@ -1135,7 +1138,7 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     if (rc != SQLITE_OK) goto abort_test_functions;
     
     int64_t value = 0;
-    rc = database_select_int(db, "SELECT cloudsync_is_enabled('tbl1');", &value);
+    rc = database_select_int(data, "SELECT cloudsync_is_enabled('tbl1');", &value);
     if (rc != DBRES_OK) goto abort_test_functions;
     int v1 = (int)value;
     if (v1 == 1) goto abort_test_functions;
@@ -1144,7 +1147,7 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     rc = sqlite3_exec(db, "SELECT cloudsync_disable('tbl2');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
-    rc = database_select_int(db, "SELECT cloudsync_is_enabled('tbl2');", &value);
+    rc = database_select_int(data, "SELECT cloudsync_is_enabled('tbl2');", &value);
     if (rc != DBRES_OK) goto abort_test_functions;
     int v2 = (int)value;
     if (v2 == 1) goto abort_test_functions;
@@ -1152,7 +1155,7 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     rc = sqlite3_exec(db, "SELECT cloudsync_enable('tbl1');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
-    rc = database_select_int(db, "SELECT cloudsync_is_enabled('tbl1');", &value);
+    rc = database_select_int(data, "SELECT cloudsync_is_enabled('tbl1');", &value);
     if (rc != DBRES_OK) goto abort_test_functions;
     int v3 = (int)value;
     if (v3 != 1) goto abort_test_functions;
@@ -1161,7 +1164,7 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     rc = sqlite3_exec(db, "SELECT cloudsync_enable('tbl2');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test_functions;
     
-    rc = database_select_int(db, "SELECT cloudsync_is_enabled('tbl2');", &value);
+    rc = database_select_int(data, "SELECT cloudsync_is_enabled('tbl2');", &value);
     if (rc != DBRES_OK) goto abort_test_functions;
     int v4 = (int)value;
     if (v4 != 1) goto abort_test_functions;
@@ -1182,17 +1185,19 @@ bool do_test_functions (sqlite3 *db, bool print_results) {
     if (rc != SQLITE_OK) goto abort_test_functions;
     
     char *uuid = NULL;
-    rc = database_select_text(db, "SELECT cloudsync_uuid();", &uuid);
+    rc = database_select_text(data, "SELECT cloudsync_uuid();", &uuid);
     if (rc != DBRES_OK || uuid == NULL) {
         if (uuid) cloudsync_memory_free(uuid);
         goto abort_test_functions;
     }
     if (print_results) printf("New uuid: %s\n", uuid);
     cloudsync_memory_free(uuid);
+    cloudsync_context_free(data);
     
     return true;
     
 abort_test_functions:
+    cloudsync_context_free(data);
     printf("Error in do_test_functions: %s\n", sqlite3_errmsg(db));
     return false;
 }
@@ -2038,7 +2043,7 @@ bool do_test_dbutils (void) {
     cloudsync_memory_free(value1);
     
     int64_t db_version = 0;
-    database_select_int(db, "SELECT cloudsync_db_version();", &db_version);
+    database_select_int(data, "SELECT cloudsync_db_version();", &db_version);
 
     char *site_id_blob;
     int64_t site_id_blob_size;
@@ -5769,6 +5774,8 @@ finalize:
 
 bool do_test_network_encode_decode (int nclients, bool print_result, bool cleanup_databases, bool force_uncompressed) {
     sqlite3 *db[MAX_SIMULATED_CLIENTS] = {NULL};
+    cloudsync_context *data[MAX_SIMULATED_CLIENTS] = {NULL};
+    
     bool result = false;
     int rc = SQLITE_OK;
     
@@ -5788,6 +5795,9 @@ bool do_test_network_encode_decode (int nclients, bool print_result, bool cleanu
     for (int i=0; i<nclients; ++i) {
         db[i] = do_create_database_file(i, timestamp, test_counter++);
         if (db[i] == false) return false;
+        
+        data[i] = cloudsync_context_create(db[i]);
+        if (data[i] == false) return false;
         
         if (do_create_tables(table_mask, db[i]) == false) {
             return false;
@@ -5818,7 +5828,7 @@ bool do_test_network_encode_decode (int nclients, bool print_result, bool cleanu
             
             char *blob = NULL;
             int64_t blob_size = 0;
-            rc = database_select_blob(db[target], src_sql, &blob, &blob_size);
+            rc = database_select_blob(data[target], src_sql, &blob, &blob_size);
             if ((rc != DBRES_OK) || (!blob)) goto finalize;
             
             const char *values[] = {blob};
@@ -5854,6 +5864,8 @@ finalize:
     for (int i=0; i<nclients; ++i) {
         if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK)) printf("do_test_merge error: %s\n", sqlite3_errmsg(db[i]));
         if (db[i]) close_db(db[i]);
+        if (data[i]) cloudsync_context_free(data[i]);
+        
         if (cleanup_databases) {
             char buf[256];
             do_build_database_path(buf, i, timestamp, saved_counter++);

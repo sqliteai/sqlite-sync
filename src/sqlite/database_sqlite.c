@@ -45,7 +45,7 @@ char *sql_escape_name (const char *name, char *buffer, size_t bsize) {
     return sqlite3_snprintf((int)bsize, buffer, "%q", name);
 }
 
-char *sql_build_select_nonpk_by_pk (db_t *db, const char *table_name) {
+char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_name) {
     char *sql = NULL;
     
     /*
@@ -93,39 +93,39 @@ process_process:
     if (!sql) return NULL;
     
     char *query = NULL;
-    int rc = database_select_text(db, sql, &query);
+    int rc = database_select_text(data, sql, &query);
     cloudsync_memory_free(sql);
     
     return (rc == DBRES_OK) ? query : NULL;
 }
 
-char *sql_build_delete_by_pk (db_t *db, const char *table_name) {
+char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name) {
     char buffer[1024];
     char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_DELETE_ROW_BY_PK, table_name, singlequote_escaped_table_name);
     if (!sql) return NULL;
 
     char *query = NULL;
-    int rc = database_select_text(db, sql, &query);
+    int rc = database_select_text(data, sql, &query);
     cloudsync_memory_free(sql);
 
     return (rc == DBRES_OK) ? query : NULL;
 }
 
-char *sql_build_insert_pk_ignore (db_t *db, const char *table_name) {
+char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_name) {
     char buffer[1024];
     char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_INSERT_PK_IGNORE, table_name, table_name, singlequote_escaped_table_name);
     if (!sql) return NULL;
 
     char *query = NULL;
-    int rc = database_select_text(db, sql, &query);
+    int rc = database_select_text(data, sql, &query);
     cloudsync_memory_free(sql);
 
     return (rc == DBRES_OK) ? query : NULL;
 }
 
-char *sql_build_upsert_pk_and_col (db_t *db, const char *table_name, const char *colname) {
+char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_name, const char *colname) {
     char buffer[1024];
     char buffer2[1024];
     char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
@@ -141,13 +141,13 @@ char *sql_build_upsert_pk_and_col (db_t *db, const char *table_name, const char 
     if (!sql) return NULL;
 
     char *query = NULL;
-    int rc = database_select_text(db, sql, &query);
+    int rc = database_select_text(data, sql, &query);
     cloudsync_memory_free(sql);
 
     return (rc == DBRES_OK) ? query : NULL;
 }
 
-char *sql_build_select_cols_by_pk (db_t *db, const char *table_name, const char *colname) {
+char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_name, const char *colname) {
     char *colnamequote = "\"";
     char buffer[1024];
     char buffer2[1024];
@@ -164,7 +164,7 @@ char *sql_build_select_cols_by_pk (db_t *db, const char *table_name, const char 
     if (!sql) return NULL;
 
     char *query = NULL;
-    int rc = database_select_text(db, sql, &query);
+    int rc = database_select_text(data, sql, &query);
     cloudsync_memory_free(sql);
 
     return (rc == DBRES_OK) ? query : NULL;
@@ -172,7 +172,9 @@ char *sql_build_select_cols_by_pk (db_t *db, const char *table_name, const char 
 
 // MARK: - PRIVATE -
 
-int database_select1_value (db_t *db, const char *sql, char **ptr_value, int64_t *int_value, DBTYPE expected_type) {
+static int database_select1_value (cloudsync_context *data, const char *sql, char **ptr_value, int64_t *int_value, DBTYPE expected_type) {
+    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
+    
     // init values and sanity check expected_type
     if (ptr_value) *ptr_value = NULL;
     *int_value = 0;
@@ -217,7 +219,7 @@ cleanup_select:
     return rc;
 }
 
-int database_select3_values (db_t *db, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
+static int database_select3_values (db_t *db, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
     // init values and sanity check expected_type
     *value = NULL;
     *value2 = 0;
@@ -336,17 +338,17 @@ cleanup_write:
     return rc;
 }
 
-int database_select_int (db_t *db, const char *sql, int64_t *value) {
-    return database_select1_value(db, sql, NULL, value, DBTYPE_INTEGER);
+int database_select_int (cloudsync_context *data, const char *sql, int64_t *value) {
+    return database_select1_value(data, sql, NULL, value, DBTYPE_INTEGER);
 }
 
-int database_select_text (db_t *db, const char *sql, char **value) {
+int database_select_text (cloudsync_context *data, const char *sql, char **value) {
     int64_t len = 0;
-    return database_select1_value(db, sql, value, &len, DBTYPE_TEXT);
+    return database_select1_value(data, sql, value, &len, DBTYPE_TEXT);
 }
 
-int database_select_blob (db_t *db, const char *sql, char **value, int64_t *len) {
-    return database_select1_value(db, sql, value, len, DBTYPE_BLOB);
+int database_select_blob (cloudsync_context *data, const char *sql, char **value, int64_t *len) {
+    return database_select1_value(data, sql, value, len, DBTYPE_BLOB);
 }
 
 int database_select_blob_2int (db_t *db, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
@@ -375,7 +377,7 @@ bool database_trigger_exists (cloudsync_context *data, const char *name) {
     return database_system_exists(data, name, "trigger");
 }
 
-int database_count_pk (db_t *db, const char *table_name, bool not_null) {
+int database_count_pk (cloudsync_context *data, const char *table_name, bool not_null) {
     char buffer[1024];
     char *sql = NULL;
     
@@ -386,38 +388,38 @@ int database_count_pk (db_t *db, const char *table_name, bool not_null) {
     }
     
     int64_t count = 0;
-    int rc = database_select_int(db, sql, &count);
+    int rc = database_select_int(data, sql, &count);
     if (rc != DBRES_OK) return -1;
     return (int)count;
 }
 
-int database_count_nonpk (db_t *db, const char *table_name) {
+int database_count_nonpk (cloudsync_context *data, const char *table_name) {
     char buffer[1024];
     char *sql = NULL;
     
     sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk=0;", table_name);
     int64_t count = 0;
-    int rc = database_select_int(db, sql, &count);
+    int rc = database_select_int(data, sql, &count);
     if (rc != DBRES_OK) return -1;
     return (int)count;
 }
 
-int database_count_int_pk (db_t *db, const char *table_name) {
+int database_count_int_pk (cloudsync_context *data, const char *table_name) {
     char buffer[1024];
     char *sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk=1 AND \"type\" LIKE '%%INT%%';", table_name);
     
     int64_t count = 0;
-    int rc = database_select_int(db, sql, &count);
+    int rc = database_select_int(data, sql, &count);
     if (rc != DBRES_OK) return -1;
     return (int)count;
 }
 
-int database_count_notnull_without_default (db_t *db, const char *table_name) {
+int database_count_notnull_without_default (cloudsync_context *data, const char *table_name) {
     char buffer[1024];
     char *sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk=0 AND \"notnull\"=1 AND \"dflt_value\" IS NULL;", table_name);
     
     int64_t count = 0;
-    int rc = database_select_int(db, sql, &count);
+    int rc = database_select_int(data, sql, &count);
     if (rc != DBRES_OK) return -1;
     return (int)count;
 }
@@ -449,9 +451,6 @@ int database_create_metatable (cloudsync_context *data, const char *table_name) 
 }
 
 int database_create_insert_trigger (cloudsync_context *data, const char *table_name, char *trigger_when) {
-    // TODO: FIXME
-    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
-    
     // NEW.prikey1, NEW.prikey2...
     char buffer[1024];
     char *trigger_name = sqlite3_snprintf(sizeof(buffer), buffer, "cloudsync_after_insert_%s", table_name);
@@ -461,7 +460,7 @@ int database_create_insert_trigger (cloudsync_context *data, const char *table_n
     char *sql2 = sqlite3_snprintf(sizeof(buffer2), buffer2, "SELECT group_concat('NEW.\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
     
     char *pkclause = NULL;
-    int rc = database_select_text(db, sql2, &pkclause);
+    int rc = database_select_text(data, sql2, &pkclause);
     if (rc != SQLITE_OK) return rc;
     char *pkvalues = (pkclause) ? pkclause : "NEW.rowid";
     
@@ -496,9 +495,6 @@ int database_create_update_trigger_gos (cloudsync_context *data, const char *tab
 int database_create_update_trigger (cloudsync_context *data, const char *table_name, const char *trigger_when) {
     // NEW.prikey1, NEW.prikey2, OLD.prikey1, OLD.prikey2, NEW.col1, OLD.col1, NEW.col2, OLD.col2...
     
-    // TODO: FIXME
-    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
-    
     char buffer[1024];
     char *trigger_name = sqlite3_snprintf(sizeof(buffer), buffer, "cloudsync_after_update_%s", table_name);
     if (database_trigger_exists(data, trigger_name)) return SQLITE_OK;
@@ -509,14 +505,14 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
     char *sql2 = sqlite3_snprintf(sizeof(buffer2), buffer2, "SELECT group_concat('('||quote('%q')||', NEW.\"' || format('%%w', name) || '\", OLD.\"' || format('%%w', name) || '\")', ', ') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name, table_name);
     
     char *pk_values_list = NULL;
-    int rc = database_select_text(db, sql2, &pk_values_list);
+    int rc = database_select_text(data, sql2, &pk_values_list);
     if (rc != SQLITE_OK) return rc;
     
     // then get all regular columns in order
     sql2 = sqlite3_snprintf(sizeof(buffer2), buffer2, "SELECT group_concat('('||quote('%q')||', NEW.\"' || format('%%w', name) || '\", OLD.\"' || format('%%w', name) || '\")', ', ') FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid;", table_name, table_name);
     
     char *col_values_list = NULL;
-    rc = database_select_text(db, sql2, &col_values_list);
+    rc = database_select_text(data, sql2, &col_values_list);
     if (rc != SQLITE_OK) {
         if (pk_values_list) cloudsync_memory_free(pk_values_list);
         return rc;
@@ -577,9 +573,6 @@ int database_create_delete_trigger_gos (cloudsync_context *data, const char *tab
 int database_create_delete_trigger (cloudsync_context *data, const char *table_name, const char *trigger_when) {
     // OLD.prikey1, OLD.prikey2...
     
-    // TODO: FIXME
-    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
-    
     char buffer[1024];
     char *trigger_name = sqlite3_snprintf(sizeof(buffer), buffer, "cloudsync_after_delete_%s", table_name);
     if (database_trigger_exists(data, trigger_name)) return SQLITE_OK;
@@ -588,7 +581,7 @@ int database_create_delete_trigger (cloudsync_context *data, const char *table_n
     char *sql2 = sqlite3_snprintf(sizeof(buffer2), buffer2, "SELECT group_concat('OLD.\"' || format('%%w', name) || '\"', ',') FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;", table_name);
         
     char *pkclause = NULL;
-    int rc = database_select_text(db, sql2, &pkclause);
+    int rc = database_select_text(data, sql2, &pkclause);
     if (rc != SQLITE_OK) return rc;
     char *pkvalues = (pkclause) ? pkclause : "OLD.rowid";
     
@@ -665,27 +658,18 @@ finalize:
 // MARK: - SCHEMA -
 
 int64_t database_schema_version (cloudsync_context *data) {
-    // TODO: FIXME
-    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
-    
     int64_t value = 0;
-    int rc = database_select_int(db, SQL_SCHEMA_VERSION, &value);
+    int rc = database_select_int(data, SQL_SCHEMA_VERSION, &value);
     return (rc == DBRES_OK) ? value : 0;
 }
 
 uint64_t database_schema_hash (cloudsync_context *data) {
-    // TODO: FIXME
-    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
-    
     int64_t value = 0;
-    int rc = database_select_int(db, "SELECT hash FROM cloudsync_schema_versions ORDER BY seq DESC limit 1;", &value);
+    int rc = database_select_int(data, "SELECT hash FROM cloudsync_schema_versions ORDER BY seq DESC limit 1;", &value);
     return (rc == DBRES_OK) ? (uint64_t)value : 0;
 }
 
 bool database_check_schema_hash (cloudsync_context *data, uint64_t hash) {
-    // TODO: FIXME
-    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
-    
     // a change from the current version of the schema or from previous known schema can be applied
     // a change from a newer schema version not yet applied to this peer cannot be applied
     // so a schema hash is valid if it exists in the cloudsync_schema_versions table
@@ -696,20 +680,17 @@ bool database_check_schema_hash (cloudsync_context *data, uint64_t hash) {
     snprintf(sql, sizeof(sql), "SELECT 1 FROM cloudsync_schema_versions WHERE hash = (%" PRId64 ")", hash);
     
     int64_t value = 0;
-    database_select_int(db, sql, &value);
+    database_select_int(data, sql, &value);
     return (value == 1);
 }
 
 int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
-    // TODO: FIXME
-    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
-    
     char *schemasql = "SELECT group_concat(LOWER(sql)) FROM sqlite_master "
             "WHERE type = 'table' AND name IN (SELECT tbl_name FROM cloudsync_table_settings ORDER BY tbl_name) "
             "ORDER BY name;";
     
     char *schema = NULL;
-    int rc = database_select_text(db, schemasql, &schema);
+    int rc = database_select_text(data, schemasql, &schema);
     if (rc != DBRES_OK) return rc;
     if (!schema) return DBRES_ERROR;
         

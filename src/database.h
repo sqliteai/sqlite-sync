@@ -63,9 +63,9 @@ typedef int (*database_exec_cb) (void *xdata, int argc, char **values, char **na
 
 int  database_exec (cloudsync_context *data, const char *sql);
 int  database_exec_callback (cloudsync_context *data, const char *sql, database_exec_cb, void *xdata);
-int  database_select_int (db_t *db, const char *sql, int64_t *value);
-int  database_select_text (db_t *db, const char *sql, char **value);
-int  database_select_blob (db_t *db, const char *sql, char **value, int64_t *value_len);
+int  database_select_int (cloudsync_context *data, const char *sql, int64_t *value);
+int  database_select_text (cloudsync_context *data, const char *sql, char **value);
+int  database_select_blob (cloudsync_context *data, const char *sql, char **value, int64_t *value_len);
 int  database_select_blob_2int (db_t *db, const char *sql, char **value, int64_t *value_len, int64_t *value2, int64_t *value3);
 int  database_write (cloudsync_context *data, const char *sql, const char **values, DBTYPE types[], int lens[], int count);
 bool database_table_exists (cloudsync_context *data, const char *table_name);
@@ -76,10 +76,10 @@ int  database_delete_triggers (cloudsync_context *data, const char *table_name);
 int  database_debug (db_t *db, bool print_result);
 int  database_pk_names (cloudsync_context *data, const char *table_name, char ***names, int *count);
 
-int database_count_pk (db_t *db, const char *table_name, bool not_null);
-int database_count_nonpk (db_t *db, const char *table_name);
-int database_count_int_pk (db_t *db, const char *table_name);
-int database_count_notnull_without_default (db_t *db, const char *table_name);
+int database_count_pk (cloudsync_context *data, const char *table_name, bool not_null);
+int database_count_nonpk (cloudsync_context *data, const char *table_name);
+int database_count_int_pk (cloudsync_context *data, const char *table_name);
+int database_count_notnull_without_default (cloudsync_context *data, const char *table_name);
 
 int64_t  database_schema_version (cloudsync_context *data);
 uint64_t database_schema_hash (cloudsync_context *data);
@@ -148,11 +148,11 @@ uint64_t dbmem_size (void *ptr);
 // SQL
 char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta);
 char *sql_escape_name (const char *name, char *buffer, size_t bsize);
-char *sql_build_select_nonpk_by_pk (db_t *db, const char *table_name);
-char *sql_build_delete_by_pk (db_t *db, const char *table_name);
-char *sql_build_insert_pk_ignore (db_t *db, const char *table_name);
-char *sql_build_upsert_pk_and_col (db_t *db, const char *table_name, const char *colname);
-char *sql_build_select_cols_by_pk (db_t *db, const char *table_name, const char *colname);
+char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_name);
+char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name);
+char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_name);
+char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_name, const char *colname);
+char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_name, const char *colname);
 
 // USED ONLY by SQLite Cloud to implement RLS
 typedef struct cloudsync_pk_decode_bind_context cloudsync_pk_decode_bind_context;

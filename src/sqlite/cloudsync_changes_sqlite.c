@@ -20,7 +20,7 @@ SQLITE_EXTENSION_INIT3
 typedef struct cloudsync_changes_vtab {
     sqlite3_vtab            base;       // base class, must be first
     sqlite3                 *db;
-    void                    *aux;
+    cloudsync_context       *data;
 } cloudsync_changes_vtab;
 
 typedef struct cloudsync_changes_cursor {
@@ -100,7 +100,7 @@ int vtab_colname_is_legal (const char *name) {
     return 0;
 }
 
-char *vtab_build_changes_sql (sqlite3 *db, const char *idxs) {
+char *vtab_build_changes_sql (cloudsync_context *data, const char *idxs) {
     DEBUG_VTAB("build_changes_sql");
     
     /*
@@ -191,7 +191,7 @@ char *vtab_build_changes_sql (sqlite3 *db, const char *idxs) {
     memcpy(sql + (query_len + idx_len), final_query, final_query_len+1);
     
     char *value = NULL;
-    int rc = database_select_text(db, sql, &value);
+    int rc = database_select_text(data, sql, &value);
     cloudsync_memory_free(sql);
     
     return (rc == DBRES_OK) ? value : NULL;
@@ -212,7 +212,7 @@ int cloudsync_changesvtab_connect (sqlite3 *db, void *aux, int argc, const char 
         
         memset(vnew, 0, sizeof(cloudsync_changes_vtab));
         vnew->db = db;
-        vnew->aux = aux;
+        vnew->data = aux;
         
         *vtab = (sqlite3_vtab *)vnew;
     }
@@ -398,8 +398,9 @@ int cloudsync_changesvtab_filter (sqlite3_vtab_cursor *cursor, int idxn, const c
     DEBUG_VTAB("cloudsync_changesvtab_filter");
     
     cloudsync_changes_cursor *c = (cloudsync_changes_cursor *)cursor;
+    cloudsync_context *data = c->vtab->data;
     sqlite3 *db = c->vtab->db;
-    char *sql = vtab_build_changes_sql(db, idxs);
+    char *sql = vtab_build_changes_sql(data, idxs);
     if (sql == NULL) return SQLITE_NOMEM;
     
     // the xFilter method may be called multiple times on the same sqlite3_vtab_cursor*
@@ -528,7 +529,7 @@ int cloudsync_changesvtab_insert (sqlite3_vtab *vtab, int argc, sqlite3_value **
     const char *insert_tbl = (const char *)sqlite3_value_text(argv[0]);
     
     // lookup table
-    cloudsync_context *data = (cloudsync_context *)(((cloudsync_changes_vtab *)vtab)->aux);
+    cloudsync_context *data = (cloudsync_context *)(((cloudsync_changes_vtab *)vtab)->data);
     cloudsync_table_context *table = table_lookup(data, insert_tbl);
     if (!table) return vtab_set_error(vtab, "Unable to find table %s,", insert_tbl);
     

@@ -332,11 +332,8 @@ int dbutils_table_settings_set_key_value (cloudsync_context *data, const char *t
 int64_t dbutils_table_settings_count_tables (cloudsync_context *data) {
     DEBUG_SETTINGS("dbutils_table_settings_count_tables");
     
-    // TODO: FIXME
-    db_t *db = cloudsync_db(data);
-    
     int64_t count = 0;
-    int rc = database_select_int(db, SQL_TABLE_SETTINGS_COUNT_TABLES, &count);
+    int rc = database_select_int(data, SQL_TABLE_SETTINGS_COUNT_TABLES, &count);
     return (rc == DBRES_OK) ? count : 0;
 }
 
