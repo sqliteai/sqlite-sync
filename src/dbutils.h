@@ -35,9 +35,9 @@ int dbutils_settings_get_int_value (cloudsync_context *data, const char *key);
 int64_t dbutils_settings_get_int64_value (cloudsync_context *data, const char *key);
 
 // table settings
-int        dbutils_table_settings_set_key_value (cloudsync_context *data, const char *table, const char *column, const char *key, const char *value);
+int        dbutils_table_settings_set_key_value (cloudsync_context *data, const char *table_name, const char *column_name, const char *key, const char *value);
 int64_t    dbutils_table_settings_count_tables (cloudsync_context *data);
-char      *dbutils_table_settings_get_value (cloudsync_context *data, const char *table_name, const char *column, const char *key, char *buffer, size_t blen);
+char      *dbutils_table_settings_get_value (cloudsync_context *data, const char *table_name, const char *column_name, const char *key, char *buffer, size_t blen);
 table_algo dbutils_table_settings_get_algo (cloudsync_context *data, const char *table_name);
 
 // others

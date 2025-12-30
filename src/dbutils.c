@@ -228,7 +228,7 @@ int dbutils_settings_check_version (cloudsync_context *data, const char *version
     return res;
 }
 
-char *dbutils_table_settings_get_value (cloudsync_context *data, const char *table, const char *column, const char *key, char *buffer, size_t blen) {
+char *dbutils_table_settings_get_value (cloudsync_context *data, const char *table, const char *column_name, const char *key, char *buffer, size_t blen) {
     DEBUG_SETTINGS("dbutils_table_settings_get_value table: %s column: %s key: %s", table, column, key);
     
     // TODO: FIXME
@@ -245,7 +245,7 @@ char *dbutils_table_settings_get_value (cloudsync_context *data, const char *tab
     rc = databasevm_bind_text(vm, 1, table, -1);
     if (rc != DBRES_OK) goto finalize_get_value;
     
-    rc = databasevm_bind_text(vm, 2, (column) ? column : "*", -1);
+    rc = databasevm_bind_text(vm, 2, (column_name) ? column_name : "*", -1);
     if (rc != DBRES_OK) goto finalize_get_value;
     
     rc = databasevm_bind_text(vm, 3, key, -1);
@@ -290,26 +290,26 @@ finalize_get_value:
     return buffer;
 }
 
-int dbutils_table_settings_set_key_value (cloudsync_context *data, const char *table, const char *column, const char *key, const char *value) {
-    DEBUG_SETTINGS("dbutils_table_settings_set_key_value table: %s column: %s key: %s", table, column, key);
+int dbutils_table_settings_set_key_value (cloudsync_context *data, const char *table_name, const char *column_name, const char *key, const char *value) {
+    DEBUG_SETTINGS("dbutils_table_settings_set_key_value table: %s column: %s key: %s", table, column_name, key);
     
     // TODO: FIXME
     db_t *db = cloudsync_db(data);
     int rc = DBRES_OK;
     
     // sanity check tbl_name
-    if (table == NULL) {
+    if (table_name == NULL) {
         // TODO: fix me
         //if (context) sqlite3_result_error(context, "cloudsync_set_table/set_column requires a non-null table parameter", -1);
         return DBRES_ERROR;
     }
     
     // sanity check column name
-    if (column == NULL) column = "*";
+    if (column_name == NULL) column_name = "*";
     
     // remove all table_name entries
     if (key == NULL) {
-        const char *values[] = {table};
+        const char *values[] = {table_name};
         DBTYPE types[] = {DBTYPE_TEXT};
         int lens[] = {-1};
         rc = database_write(db, SQL_TABLE_SETTINGS_DELETE_ALL_FOR_TABLE, values, types, lens, 1);
@@ -317,14 +317,14 @@ int dbutils_table_settings_set_key_value (cloudsync_context *data, const char *t
     }
     
     if (key && value) {
-        const char *values[] = {table, column, key, value};
+        const char *values[] = {table_name, column_name, key, value};
         DBTYPE types[] = {DBTYPE_TEXT, DBTYPE_TEXT, DBTYPE_TEXT, DBTYPE_TEXT};
         int lens[] = {-1, -1, -1, -1};
         rc = database_write(db, SQL_TABLE_SETTINGS_REPLACE, values, types, lens, 4);
     }
     
     if (value == NULL) {
-        const char *values[] = {table, column, key};
+        const char *values[] = {table_name, column_name, key};
         DBTYPE types[] = {DBTYPE_TEXT, DBTYPE_TEXT, DBTYPE_TEXT};
         int lens[] = {-1, -1, -1};
         rc = database_write(db, SQL_TABLE_SETTINGS_DELETE_ONE, values, types, lens, 3);
