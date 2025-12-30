@@ -219,7 +219,9 @@ cleanup_select:
     return rc;
 }
 
-static int database_select3_values (db_t *db, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
+static int database_select3_values (cloudsync_context *data, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
+    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
+    
     // init values and sanity check expected_type
     *value = NULL;
     *value2 = 0;
@@ -351,8 +353,8 @@ int database_select_blob (cloudsync_context *data, const char *sql, char **value
     return database_select1_value(data, sql, value, len, DBTYPE_BLOB);
 }
 
-int database_select_blob_2int (db_t *db, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
-    return database_select3_values(db, sql, value, len, value2, value3);
+int database_select_blob_2int (cloudsync_context *data, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
+    return database_select3_values(data, sql, value, len, value2, value3);
 }
 
 const char *database_errmsg (db_t *db) {
@@ -710,8 +712,8 @@ int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
 
 // MARK: - VM -
 
-int database_prepare (db_t *db, const char *sql, dbvm_t **vm, int flags) {
-    return sqlite3_prepare_v3((sqlite3 *)db, sql, -1, flags, (sqlite3_stmt **)vm, NULL);
+int database_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, int flags) {
+    return sqlite3_prepare_v3((sqlite3 *)cloudsync_db(data), sql, -1, flags, (sqlite3_stmt **)vm, NULL);
 }
 
 int databasevm_step (dbvm_t *vm) {

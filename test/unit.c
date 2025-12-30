@@ -104,16 +104,16 @@ typedef struct {
     } value;
 } DATABASE_RESULT;
 
-DATABASE_RESULT dbutils_exec (sqlite3_context *context, sqlite3 *db, const char *sql, const char **values, int types[], int lens[], int count, DATABASE_RESULT results[], int expected_types[], int result_count) {
-    DEBUG_DBFUNCTION("dbutils_exec %s", sql);
+DATABASE_RESULT unit_exec (cloudsync_context *data, const char *sql, const char **values, int types[], int lens[], int count, DATABASE_RESULT results[], int expected_types[], int result_count) {
+    DEBUG_DBFUNCTION("unit_exec %s", sql);
     
     sqlite3_stmt *pstmt = NULL;
     bool is_write = (result_count == 0);
     int type = 0;
     
     // compile sql
-    int rc = database_prepare(db, sql, (void **)&pstmt, 0);
-    if (rc != SQLITE_OK) goto dbutils_exec_finalize;
+    int rc = database_prepare(data, sql, (void **)&pstmt, 0);
+    if (rc != SQLITE_OK) goto unitexec_finalize;
     // check bindings
     for (int i=0; i<count; ++i) {
         switch (types[i]) {
@@ -135,15 +135,15 @@ DATABASE_RESULT dbutils_exec (sqlite3_context *context, sqlite3 *db, const char 
                 rc = databasevm_bind_double(pstmt, i+1, value);
             }   break;
         }
-        if (rc != SQLITE_OK) goto dbutils_exec_finalize;
+        if (rc != SQLITE_OK) goto unitexec_finalize;
     }
         
     // execute statement
     rc = databasevm_step(pstmt);
     
     // check return value based on pre-condition
-    if (rc != SQLITE_ROW) goto dbutils_exec_finalize;
-    if (is_write) goto dbutils_exec_finalize;
+    if (rc != SQLITE_ROW) goto unitexec_finalize;
+    if (is_write) goto unitexec_finalize;
     
     // process result (if any)
     for (int i=0; i<result_count; ++i) {
@@ -157,7 +157,7 @@ DATABASE_RESULT dbutils_exec (sqlite3_context *context, sqlite3 *db, const char 
         
         if (type != expected_types[i]) {
             rc = SQLITE_ERROR;
-            goto dbutils_exec_finalize;
+            goto unitexec_finalize;
         }
         
         // type == expected_type
@@ -173,7 +173,7 @@ DATABASE_RESULT dbutils_exec (sqlite3_context *context, sqlite3 *db, const char 
                 const void *bvalue = database_column_blob(pstmt, i);
                 if (bvalue) {
                     buffer = (char *)cloudsync_memory_alloc(len);
-                    if (!buffer) {rc = SQLITE_NOMEM; goto dbutils_exec_finalize;}
+                    if (!buffer) {rc = SQLITE_NOMEM; goto unitexec_finalize;}
                     memcpy(buffer, bvalue, len);
                 }
             } else {
@@ -185,11 +185,11 @@ DATABASE_RESULT dbutils_exec (sqlite3_context *context, sqlite3 *db, const char 
     }
     
     rc = SQLITE_OK;
-dbutils_exec_finalize:
+    
+unitexec_finalize:
     if (rc == SQLITE_DONE) rc = SQLITE_OK;
     if (rc != SQLITE_OK) {
-        if (count != -1) DEBUG_ALWAYS("Error executing %s in dbutils_exec (%s).", sql, database_errmsg(db));
-        if (context) sqlite3_result_error(context, database_errmsg(db), -1);
+        if (count != -1) DEBUG_ALWAYS("Error executing %s in dbutils_exec (%s).", sql, database_errmsg(cloudsync_db(data)));
     }
     if (pstmt) databasevm_finalize(pstmt);
     
@@ -203,11 +203,11 @@ dbutils_exec_finalize:
     return results[0];
 }
 
-sqlite3_int64 dbutils_select (sqlite3 *db, const char *sql, const char **values, int types[], int lens[], int count, int expected_type) {
+sqlite3_int64 unit_select (cloudsync_context *data, const char *sql, const char **values, int types[], int lens[], int count, int expected_type) {
     // used only in unit-test
     DATABASE_RESULT results[1] = {0};
     int expected_types[1] = {expected_type};
-    dbutils_exec(NULL, db, sql, values, types, lens, count, results, expected_types, 1);
+    unit_exec(data, sql, values, types, lens, count, results, expected_types, 1);
     return results[0].value.intValue;
 }
 
@@ -421,7 +421,7 @@ bool unittest_validate_changed_row(sqlite3 *db, cloudsync_context *data, char *t
     // verify row
     bool ret = false;
     bool vm_persistent;
-    sqlite3_stmt *vm = cloudsync_colvalue_stmt(db, data, tbl_name, &vm_persistent);
+    sqlite3_stmt *vm = cloudsync_colvalue_stmt(data, tbl_name, &vm_persistent);
     if (!vm) goto cleanup;
     
     // bind primary key values (the return code is the pk count)
@@ -2048,7 +2048,7 @@ bool do_test_dbutils (void) {
     char *site_id_blob;
     int64_t site_id_blob_size;
     int64_t dbver1, seq1;
-    rc = database_select_blob_2int(db, "SELECT cloudsync_siteid(),  cloudsync_db_version(),  cloudsync_seq();", &site_id_blob, &site_id_blob_size, &dbver1, &seq1);
+    rc = database_select_blob_2int(data, "SELECT cloudsync_siteid(),  cloudsync_db_version(),  cloudsync_seq();", &site_id_blob, &site_id_blob_size, &dbver1, &seq1);
     if (rc != SQLITE_OK || site_id_blob == NULL ||dbver1 != db_version) goto finalize;
     cloudsync_memory_free(site_id_blob);
     
@@ -2060,7 +2060,7 @@ bool do_test_dbutils (void) {
     if (value1 != NULL) goto finalize;
 
     //char *p = NULL;
-    //dbutils_select(db, "SELECT zeroblob(16);", NULL, NULL, NULL, 0, SQLITE_BLOB);
+    //dbutils_select(data, "SELECT zeroblob(16);", NULL, NULL, NULL, 0, SQLITE_BLOB);
     //if (p != NULL) goto finalize;
     
     dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_LIBVERSION, "0.0.0");
@@ -5835,7 +5835,7 @@ bool do_test_network_encode_decode (int nclients, bool print_result, bool cleanu
             int types[] = {SQLITE_BLOB};
             int len[] = {(int)blob_size};
 
-            dbutils_select(db[j], dest_sql, values, types, len, 1, SQLITE_INTEGER);
+            unit_select(data[j], dest_sql, values, types, len, 1, SQLITE_INTEGER);
             cloudsync_memory_free(blob);
         }
     }
