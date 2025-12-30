@@ -911,7 +911,7 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     // init context
     void *ctx = cloudsync_context_create(db);
     if (!ctx) {
-        if (pzErrMsg) *pzErrMsg = "Not enought memory to create a database context";
+        if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("Not enought memory to create a database context");
         return SQLITE_NOMEM;
     }
     
@@ -1030,12 +1030,16 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     
     // register eponymous only changes virtual table
     rc = cloudsync_vtab_register_changes (db, data);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) {
+        if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("Error creating changes virtual table: %s", database_errmsg(db));
+        return rc;
+    }
     
     // load config, if exists
     if (cloudsync_config_exists(db)) {
         if (cloudsync_context_init(ctx, db) == NULL) {
-            if (pzErrMsg) *pzErrMsg = "An error occurred while trying to initialize context";
+            cloudsync_context_free(ctx);
+            if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("An error occurred while trying to initialize context");
             return SQLITE_ERROR;
         }
         

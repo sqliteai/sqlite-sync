@@ -988,7 +988,7 @@ int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
     
 cleanup:
     if ((rc != SQLITE_OK) && (pzErrMsg)) {
-        *pzErrMsg = cloudsync_memory_mprintf("Error creating function in cloudsync_network_register: %s", database_errmsg(db));
+        *pzErrMsg = sqlite3_mprintf("Error creating function in cloudsync_network_register: %s", database_errmsg(db));
     }
     
     return rc;
