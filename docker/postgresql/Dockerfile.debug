@@ -1,13 +1,29 @@
 # PostgreSQL Docker image with CloudSync extension (debug build)
 FROM postgres:16
 
-# Install build dependencies
+# Install build dependencies and debug symbols
 RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    gnupg \
+    wget \
+    && . /etc/os-release \
+    && echo "deb http://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+    && echo "deb-src http://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg-src.list \
+    && wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg \
+    && echo "deb http://deb.debian.org/debian-debug ${VERSION_CODENAME}-debug main" > /etc/apt/sources.list.d/debian-debug.list \
+    && echo "deb-src http://deb.debian.org/debian ${VERSION_CODENAME} main" > /etc/apt/sources.list.d/debian-src.list \
+    && apt-get update && apt-get install -y \
     build-essential \
+    dpkg-dev \
     gdb \
     postgresql-server-dev-16 \
+    postgresql-16-dbgsym \
     git \
     make \
+    && apt-get source postgresql-16 \
+    && mkdir -p /usr/src/postgresql-16 \
+    && srcdir="$(find . -maxdepth 1 -type d -name 'postgresql-16*' | head -n 1)" \
+    && if [ -n "$srcdir" ]; then cp -a "$srcdir"/. /usr/src/postgresql-16/; fi \
     && rm -rf /var/lib/apt/lists/*
 
 # Create directory for extension source
