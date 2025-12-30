@@ -759,7 +759,6 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     
     // update db_version and seq
     char buf[256];
-    sqlite3 *db = sqlite3_context_db_handle(context);
     if (new_db_version != db_version) {
         snprintf(buf, sizeof(buf), "%" PRId64, new_db_version);
         dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
@@ -783,9 +782,7 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows) {
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     network_data *xdata = (network_data *)cloudsync_auxdata(data);
     if (!xdata) {sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1); return -1;}
-     
-    sqlite3 *db = sqlite3_context_db_handle(context);
-    
+
     int64_t db_version = dbutils_settings_get_int64_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION);
     if (db_version<0) {sqlite3_result_error(context, "Unable to retrieve db_version.", -1); return -1;}
 
@@ -873,6 +870,7 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
     bool completed = false;
     char *errmsg = NULL;
     sqlite3 *db = sqlite3_context_db_handle(context);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
 
     // if the network layer is enabled, remove the token or apikey
     sqlite3_exec(db, "SELECT cloudsync_network_set_token('');", NULL, NULL, NULL);
@@ -888,7 +886,6 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
     }
     
     // run everything in a savepoint
-    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     rc = database_begin_savepoint(data, "cloudsync_logout_savepoint;");
     if (rc != SQLITE_OK) {
         errmsg = cloudsync_memory_mprintf("Unable to create cloudsync_logout savepoint. %s", sqlite3_errmsg(db));
