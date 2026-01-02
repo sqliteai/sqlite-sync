@@ -57,7 +57,7 @@
 #define MAX(a, b)                               (((a)>(b))?(a):(b))
 #endif
 
-#define DEBUG_DBERROR(_rc, _fn, _db)   do {if (_rc != DBRES_OK) printf("Error in %s: %s\n", _fn, database_errmsg(_db));} while (0)
+#define DEBUG_DBERROR(_rc, _fn, _data)   do {if (_rc != DBRES_OK) printf("Error in %s: %s\n", _fn, database_errmsg(_data));} while (0)
 
 typedef enum {
     CLOUDSYNC_PK_INDEX_TBL          = 0,
@@ -245,7 +245,7 @@ const char *cloudsync_algo_name (table_algo algo) {
 DBVM_VALUE dbvm_execute (dbvm_t *stmt, cloudsync_context *data) {
     int rc = databasevm_step(stmt);
     if (rc != DBRES_ROW && rc != DBRES_DONE) {
-        if (data) DEBUG_DBERROR(rc, "stmt_execute", data->db);
+        if (data) DEBUG_DBERROR(rc, "stmt_execute", data);
         databasevm_reset(stmt);
         return DBVM_VALUE_ERROR;
     }
@@ -293,7 +293,6 @@ int dbvm_count (dbvm_t *stmt, const char *value, size_t len, int type) {
     }
     
 cleanup:
-    //DEBUG_DBERROR(rc, "stmt_count", sqlite3_db_handle(stmt));
     databasevm_reset(stmt);
     return result;
 }
@@ -1798,7 +1797,7 @@ int local_update_sentinel (cloudsync_table_context *table, const char *pk, size_
     if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
-    DEBUG_DBERROR(rc, "local_update_sentinel", table->context->db);
+    DEBUG_DBERROR(rc, "local_update_sentinel", table->context);
     databasevm_reset(vm);
     return rc;
 }
@@ -1826,7 +1825,7 @@ int local_mark_insert_sentinel_meta (cloudsync_table_context *table, const char 
     if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
-    DEBUG_DBERROR(rc, "local_insert_sentinel", table->context->db);
+    DEBUG_DBERROR(rc, "local_insert_sentinel", table->context);
     databasevm_reset(vm);
     return rc;
 }
@@ -1861,7 +1860,7 @@ int local_mark_insert_or_update_meta_impl (cloudsync_table_context *table, const
     if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
-    DEBUG_DBERROR(rc, "local_insert_or_update", table->context->db);
+    DEBUG_DBERROR(rc, "local_insert_or_update", table->context);
     databasevm_reset(vm);
     return rc;
 }
@@ -1885,7 +1884,7 @@ int local_drop_meta (cloudsync_table_context *table, const char *pk, size_t pkle
     if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
-    DEBUG_DBERROR(rc, "local_drop_meta", table->context->db);
+    DEBUG_DBERROR(rc, "local_drop_meta", table->context);
     databasevm_reset(vm);
     return rc;
 }
@@ -1930,7 +1929,7 @@ int local_update_move_meta (cloudsync_table_context *table, const char *pk, size
     if (rc == DBRES_DONE) rc = DBRES_OK;
     
 cleanup:
-    DEBUG_DBERROR(rc, "local_update_move_meta", table->context->db);
+    DEBUG_DBERROR(rc, "local_update_move_meta", table->context);
     databasevm_reset(vm);
     return rc;
 }
