@@ -17,7 +17,6 @@
 #include <math.h>
 
 #include "cloudsync.h"
-#include "cloudsync_private.h"
 #include "lz4.h"
 #include "pk.h"
 #include "sql.h"
@@ -903,7 +902,7 @@ bool table_ensure_capacity (cloudsync_context *data) {
     return true;
 }
 
-bool table_add_to_context (db_t *db, cloudsync_context *data, table_algo algo, const char *table_name) {
+bool table_add_to_context (cloudsync_context *data, table_algo algo, const char *table_name) {
     DEBUG_DBFUNCTION("cloudsync_context_add_table %s", table_name);
     
     // check if table is already in the global context and in that case just return
@@ -1472,7 +1471,7 @@ const char *cloudsync_context_init (cloudsync_context *data) {
     return (const char *)data->site_id;
 }
 
-void cloudsync_sync_key(cloudsync_context *data, const char *key, const char *value) {
+void cloudsync_sync_key (cloudsync_context *data, const char *key, const char *value) {
     DEBUG_SETTINGS("cloudsync_sync_key key: %s value: %s", key, value);
     
     // sync data
@@ -2117,7 +2116,6 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     header.nrows = ntohl(header.nrows);
     header.schema_hash = ntohll(header.schema_hash);
     
-    db_t *db = data->db;
     if (!data || header.schema_hash != data->schema_hash) {
         if (!database_check_schema_hash(data, header.schema_hash)) {
             char buffer[1024];
@@ -2165,6 +2163,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     int seq = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_SEQ);
     cloudsync_pk_decode_bind_context decoded_context = {.vm = vm};
     void *payload_apply_xdata = NULL;
+    void *db = data->db;
     cloudsync_payload_apply_callback_t payload_apply_callback = cloudsync_get_payload_apply_callback(db);
     
     for (uint32_t i=0; i<nrows; ++i) {
@@ -2511,8 +2510,6 @@ int cloudsync_terminate (cloudsync_context *data) {
 }
 
 int cloudsync_init_table (cloudsync_context *data, const char *table_name, const char *algo_name, bool skip_int_pk_check) {
-    db_t *db = data->db;
-    
     // sanity check table and its primary key(s)
     int rc = cloudsync_table_sanity_check(data, table_name, skip_int_pk_check);
     if (rc != DBRES_OK) return rc;
@@ -2574,7 +2571,7 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     }
     
     // add table to in-memory data context
-    if (table_add_to_context(db, data, algo_new, table_name) == false) {
+    if (table_add_to_context(data, algo_new, table_name) == false) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "An error occurred while adding %s table information to global context", table_name);
         return cloudsync_set_error(data, buffer, DBRES_MISUSE);

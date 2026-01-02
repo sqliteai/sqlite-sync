@@ -11,7 +11,6 @@
 #include "cloudsync_changes_sqlite.h"
 #include "../utils.h"
 #include "../dbutils.h"
-#include "../cloudsync_private.h"
 
 #ifndef SQLITE_CORE
 SQLITE_EXTENSION_INIT3

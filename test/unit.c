@@ -25,7 +25,6 @@
 #include "database.h"
 #include "cloudsync.h"
 #include "cloudsync_sqlite.h"
-#include "cloudsync_private.h"
 
 // declared only if macro CLOUDSYNC_UNITTEST is defined 
 extern char *OUT_OF_MEMORY_BUFFER;
@@ -211,6 +210,16 @@ sqlite3_int64 unit_select (cloudsync_context *data, const char *sql, const char 
     return results[0].value.intValue;
 }
 
+int unit_debug (sqlite3 *db, bool print_result) {
+    sqlite3_stmt *stmt = NULL;
+    int counter = 0;
+    while ((stmt = sqlite3_next_stmt(db, stmt))) {
+        ++counter;
+        if (print_result) printf("Unfinalized stmt statement: %p\n", stmt);
+    }
+    return counter;
+}
+
 // MARK: -
 
 int64_t random_int64_range (int64_t min, int64_t max) {
@@ -377,7 +386,7 @@ const char *build_huge_table (void) {
 sqlite3 *close_db (sqlite3 *db) {
     if (db) {
         sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
-        database_debug(db, true);
+        unit_debug(db, true);
         int rc = sqlite3_close(db);
         if (rc != SQLITE_OK) printf("Error while closing db (%d)\n", rc);
     }
@@ -388,7 +397,7 @@ int close_db_v2 (sqlite3 *db) {
     int counter = 0;
     if (db) {
         sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
-        counter = database_debug(db, true);
+        counter = unit_debug(db, true);
         sqlite3_close(db);
     }
     return counter;
@@ -459,7 +468,7 @@ int unittest_payload_apply_reset_transaction(sqlite3 *db, unittest_payload_apply
     return rc;
 }
 
-bool unittest_payload_apply_rls_callback(void **xdata, cloudsync_pk_decode_bind_context *d, db_t *_db, void *_data, int step, int rc) {
+bool unittest_payload_apply_rls_callback(void **xdata, cloudsync_pk_decode_bind_context *d, void *_db, void *_data, int step, int rc) {
     sqlite3 *db = (sqlite3 *)_db;
     cloudsync_context *data = (cloudsync_context *)_data;
     
@@ -1528,7 +1537,7 @@ finalize:
         exit(-666);
     }
     if (stmt) sqlite3_finalize(stmt);
-    database_debug(db, true);
+    unit_debug(db, true);
     
     return result;
 }
@@ -1585,7 +1594,7 @@ finalize:
         exit(-666);
     }
     if (stmt) sqlite3_finalize(stmt);
-    database_debug(db, true);
+    unit_debug(db, true);
     return result;
 }
 
@@ -1700,7 +1709,7 @@ finalize:
         exit(-666);
     }
     if (stmt) sqlite3_finalize(stmt);
-    database_debug(db, true);
+    unit_debug(db, true);
     return result;
 }
 
@@ -2101,7 +2110,7 @@ bool do_test_others (sqlite3 *db) {
     // test unfinalized statement just to increase code coverage
     sqlite3_stmt *stmt = NULL;
     sqlite3_prepare_v2(db, "SELECT 1;", -1, &stmt, NULL);
-    int count = database_debug(db, false);
+    int count = unit_debug(db, false);
     sqlite3_finalize(stmt);
     // to increase code coverage
     // dbutils_set_error(NULL, "Test is: %s", "Hello World");

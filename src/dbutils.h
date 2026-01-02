@@ -10,7 +10,6 @@
 
 #include <stdbool.h>
 #include "utils.h"
-#include "cloudsync_private.h"
 
 #define CLOUDSYNC_SETTINGS_NAME             "cloudsync_settings"
 #define CLOUDSYNC_SITEID_NAME               "cloudsync_site_id"

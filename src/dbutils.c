@@ -355,7 +355,6 @@ int dbutils_settings_load_callback (void *xdata, int ncols, char **values, char 
 
 int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values, char **names) {
     cloudsync_context *data = (cloudsync_context *)xdata;
-    db_t *db = cloudsync_db(data);
 
     for (int i=0; i<ncols; i+=4) {
         const char *table_name = values[i];
@@ -366,7 +365,7 @@ int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values,
         
         table_algo algo = cloudsync_algo_from_name(value);
         if (database_create_triggers(data, table_name, algo) != DBRES_OK) return DBRES_MISUSE;
-        if (table_add_to_context(db, data, algo, table_name) == false) return DBRES_MISUSE;
+        if (table_add_to_context(data, algo, table_name) == false) return DBRES_MISUSE;
         
         DEBUG_SETTINGS("load tbl_name: %s value: %s", key, value);
     }

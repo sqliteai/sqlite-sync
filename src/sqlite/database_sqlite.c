@@ -426,16 +426,6 @@ int database_count_notnull_without_default (cloudsync_context *data, const char 
     return (int)count;
 }
 
-int database_debug (db_t *db, bool print_result) {
-    sqlite3_stmt *stmt = NULL;
-    int counter = 0;
-    while ((stmt = sqlite3_next_stmt(db, stmt))) {
-        ++counter;
-        if (print_result) printf("Unfinalized stmt statement: %p\n", stmt);
-    }
-    return counter;
-}
-
 // MARK: - TRIGGERS and META -
 
 int database_create_metatable (cloudsync_context *data, const char *table_name) {
@@ -736,7 +726,7 @@ const char *databasevm_sql (dbvm_t *vm) {
     return sqlite3_expanded_sql((sqlite3_stmt *)vm);
 }
 
-int database_pk_rowid (db_t *db, const char *table_name, char ***names, int *count) {
+static int database_pk_rowid (sqlite3 *db, const char *table_name, char ***names, int *count) {
     char buffer[2048];
     char *sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT rowid FROM %Q LIMIT 0;", table_name);
     if (!sql) return SQLITE_NOMEM;
@@ -768,10 +758,9 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
     char *sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT name FROM pragma_table_info(%Q) WHERE pk > 0 ORDER BY pk;", table_name);
     if (!sql) return SQLITE_NOMEM;
     
-    // TODO: FIXME
     sqlite3 *db = (sqlite3 *)cloudsync_db(data);
-    
     sqlite3_stmt *vm = NULL;
+    
     int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
     
@@ -966,12 +955,12 @@ uint64_t dbmem_size (void *ptr) {
 
 // MARK: - Used to implement Server Side RLS -
 
-cloudsync_payload_apply_callback_t cloudsync_get_payload_apply_callback(db_t *db) {
-    return (sqlite3_libversion_number() >= 3044000) ? sqlite3_get_clientdata(db, CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY) : NULL;
+cloudsync_payload_apply_callback_t cloudsync_get_payload_apply_callback(void *db) {
+    return (sqlite3_libversion_number() >= 3044000) ? sqlite3_get_clientdata((sqlite3 *)db, CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY) : NULL;
 }
 
-void cloudsync_set_payload_apply_callback(db_t *db, cloudsync_payload_apply_callback_t callback) {
+void cloudsync_set_payload_apply_callback(void *db, cloudsync_payload_apply_callback_t callback) {
     if (sqlite3_libversion_number() >= 3044000) {
-        sqlite3_set_clientdata(db, CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY, (void*)callback, NULL);
+        sqlite3_set_clientdata((sqlite3 *)db, CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY, (void*)callback, NULL);
     }
 }

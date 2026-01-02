@@ -13,10 +13,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-typedef struct db_t db_t;
 typedef void dbvm_t;
 typedef void dbvalue_t;
-typedef void dbcontext_t;
 
 typedef enum {
     DBRES_OK         = 0,
@@ -58,7 +56,7 @@ typedef enum {
 // OPAQUE STRUCT
 typedef struct cloudsync_context cloudsync_context;
 
-// GENERAL
+// CALLBACK
 typedef int (*database_exec_cb) (void *xdata, int argc, char **values, char **names);
 
 int  database_exec (cloudsync_context *data, const char *sql);
@@ -73,7 +71,6 @@ bool database_trigger_exists (cloudsync_context *data, const char *table_name);
 int  database_create_metatable (cloudsync_context *data, const char *table_name);
 int  database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo);
 int  database_delete_triggers (cloudsync_context *data, const char *table_name);
-int  database_debug (db_t *db, bool print_result);
 int  database_pk_names (cloudsync_context *data, const char *table_name, char ***names, int *count);
 
 int database_count_pk (cloudsync_context *data, const char *table_name, bool not_null);
@@ -127,15 +124,7 @@ const char *database_column_text (dbvm_t *vm, int index);
 dbvalue_t *database_column_value (dbvm_t *vm, int index);
 int database_column_bytes (dbvm_t *vm, int index);
 int database_column_type (dbvm_t *vm, int index);
-
-// RESULT
-void database_result_blob (dbcontext_t *context, const void *value, uint64_t size, void(*)(void*));
-void database_result_double (dbcontext_t *context, double value);
-void database_result_int (dbcontext_t *context, int64_t value);
-void database_result_null (dbcontext_t *context);
-void database_result_text (dbcontext_t *context, const char *value, int size, void(*)(void*));
-void database_result_value (dbcontext_t *context, dbvalue_t *value);
-
+ 
 // MEMORY
 void *dbmem_alloc (uint64_t size);
 void *dbmem_zeroalloc (uint64_t size);
@@ -156,8 +145,8 @@ char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_na
 
 // USED ONLY by SQLite Cloud to implement RLS
 typedef struct cloudsync_pk_decode_bind_context cloudsync_pk_decode_bind_context;
-typedef bool (*cloudsync_payload_apply_callback_t)(void **xdata, cloudsync_pk_decode_bind_context *decoded_change, db_t *db, void *data, int step, int rc);
-void cloudsync_set_payload_apply_callback(db_t *db, cloudsync_payload_apply_callback_t callback);
-cloudsync_payload_apply_callback_t cloudsync_get_payload_apply_callback(db_t *db);
+typedef bool (*cloudsync_payload_apply_callback_t)(void **xdata, cloudsync_pk_decode_bind_context *decoded_change, void *db, void *data, int step, int rc);
+void cloudsync_set_payload_apply_callback(void *db, cloudsync_payload_apply_callback_t callback);
+cloudsync_payload_apply_callback_t cloudsync_get_payload_apply_callback(void *db);
 
 #endif
