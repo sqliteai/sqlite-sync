@@ -101,6 +101,7 @@ struct cloudsync_pk_decode_bind_context {
 struct cloudsync_context {
     void        *db;
     char        errmsg[1024];
+    int         errcode;
     
     char        *libversion;
     uint8_t     site_id[UUID_LEN];
@@ -512,6 +513,7 @@ int cloudsync_set_error (cloudsync_context *data, const char *err_user, int err_
         }
     }
     
+    data->errcode = err_code;
     return err_code;
 }
 
@@ -521,6 +523,15 @@ int cloudsync_set_dberror (cloudsync_context *data) {
 
 const char *cloudsync_errmsg (cloudsync_context *data) {
     return data->errmsg;
+}
+
+int cloudsync_errcode (cloudsync_context *data) {
+    return data->errcode;
+}
+
+void cloudsync_reset_error (cloudsync_context *data) {
+    data->errmsg[0] = 0;
+    data->errcode = DBRES_OK;
 }
 
 void *cloudsync_auxdata (cloudsync_context *data) {

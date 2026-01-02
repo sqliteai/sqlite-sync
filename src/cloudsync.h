@@ -68,11 +68,13 @@ int cloudsync_commit_alter (cloudsync_context *data, const char *table_name);
 
 // CloudSync getter/setter
 void *cloudsync_db (cloudsync_context *data);
-const char *cloudsync_errmsg (cloudsync_context *data);
 void *cloudsync_auxdata (cloudsync_context *data);
 void cloudsync_set_auxdata (cloudsync_context *data, void *xdata);
 int cloudsync_set_error (cloudsync_context *data, const char *err_user, int err_code);
 int cloudsync_set_dberror (cloudsync_context *data);
+const char *cloudsync_errmsg (cloudsync_context *data);
+int cloudsync_errcode (cloudsync_context *data);
+void cloudsync_reset_error (cloudsync_context *data);
 int cloudsync_commit_hook (void *ctx);
 void cloudsync_rollback_hook (void *ctx);
 

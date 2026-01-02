@@ -61,6 +61,7 @@ typedef struct {
     Oid param_types[MAX_PARAMS];
     char nulls[MAX_PARAMS];
     int param_count;
+    cloudsync_context *data;
 } pg_stmt_wrapper_t;
 
 // MARK: - SQL -
@@ -116,56 +117,56 @@ char *sql_escape_name (const char *name, char *buffer, size_t bsize) {
     return buffer;
 }
 
-char *sql_build_select_nonpk_by_pk (db_t *db, const char *table_name) {
+char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_name) {
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_NONPK_COLS_BY_PK, table_name);
     if (!sql) return NULL;
     
     char *query = NULL;
-    int rc = database_select_text(db, sql, &query);
+    int rc = database_select_text(data, sql, &query);
     cloudsync_memory_free(sql);
     
     return (rc == DBRES_OK) ? query : NULL;
 }
 
-char *sql_build_delete_by_pk (db_t *db, const char *table_name) {
+char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name) {
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_DELETE_ROW_BY_PK, table_name);
     if (!sql) return NULL;
 
     char *query = NULL;
-    int rc = database_select_text(db, sql, &query);
+    int rc = database_select_text(data, sql, &query);
     cloudsync_memory_free(sql);
 
     return (rc == DBRES_OK) ? query : NULL;
 }
 
-char *sql_build_insert_pk_ignore (db_t *db, const char *table_name) {
+char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_name) {
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_INSERT_PK_IGNORE, table_name);
     if (!sql) return NULL;
 
     char *query = NULL;
-    int rc = database_select_text(db, sql, &query);
+    int rc = database_select_text(data, sql, &query);
     cloudsync_memory_free(sql);
 
     return (rc == DBRES_OK) ? query : NULL;
 }
 
-char *sql_build_upsert_pk_and_col (db_t *db, const char *table_name, const char *colname) {
+char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_name, const char *colname) {
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_UPSERT_PK_AND_COL, table_name, colname);
     if (!sql) return NULL;
 
     char *query = NULL;
-    int rc = database_select_text(db, sql, &query);
+    int rc = database_select_text(data, sql, &query);
     cloudsync_memory_free(sql);
 
     return (rc == DBRES_OK) ? query : NULL;
 }
 
-char *sql_build_select_cols_by_pk (db_t *db, const char *table_name, const char *colname) {
+char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_name, const char *colname) {
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_COLS_BY_PK_FMT, table_name, colname);
     if (!sql) return NULL;
 
     char *query = NULL;
-    int rc = database_select_text(db, sql, &query);
+    int rc = database_select_text(data, sql, &query);
     cloudsync_memory_free(sql);
 
     return (rc == DBRES_OK) ? query : NULL;
@@ -224,33 +225,32 @@ static int map_spi_result(int rc) {
 
 // MARK: - PRIVATE -
 
-// Forward declaration
-static int set_last_error(int errcode, const char *errmsg);
-
-int database_select1_value (db_t *db, const char *sql, char **ptr_value, int64_t *int_value, DBTYPE expected_type) {
+int database_select1_value (cloudsync_context *data, const char *sql, char **ptr_value, int64_t *int_value, DBTYPE expected_type) {
+    cloudsync_reset_error(data);
+    
     // init values and sanity check expected_type
     if (ptr_value) *ptr_value = NULL;
     *int_value = 0;
     if (expected_type != DBTYPE_INTEGER && expected_type != DBTYPE_TEXT && expected_type != DBTYPE_BLOB) {
-        return set_last_error(DBRES_MISUSE, "Invalid expected_type");
+        return cloudsync_set_error(data, "Invalid expected_type", DBRES_MISUSE);
     }
 
     int rc = SPI_execute(sql, true, 0);
     if (rc < 0) {
-        return set_last_error(DBRES_ERROR, "SPI_execute failed in database_select1_value");
+        return cloudsync_set_error(data, "SPI_execute failed in database_select1_value", DBRES_ERROR);
     }
 
     // ensure at least one column
     if (!SPI_tuptable || !SPI_tuptable->tupdesc) {
-        return set_last_error(DBRES_ERROR, "No result table");
+        return cloudsync_set_error(data, "No result table", DBRES_ERROR);
     }
     if (SPI_tuptable->tupdesc->natts < 1) {
-        return set_last_error(DBRES_ERROR, "No columns in result");
+        return cloudsync_set_error(data, "No columns in result", DBRES_ERROR);
     }
 
     // no rows OK
     if (SPI_processed == 0) {
-        return set_last_error(DBRES_OK, NULL);
+        return DBRES_OK;
     }
 
     HeapTuple tuple = SPI_tuptable->vals[0];
@@ -259,7 +259,7 @@ int database_select1_value (db_t *db, const char *sql, char **ptr_value, int64_t
 
     // NULL value is OK
     if (isnull) {
-        return set_last_error(DBRES_OK, NULL);
+        return DBRES_OK;
     }
 
     // Get type info
@@ -277,7 +277,7 @@ int database_select1_value (db_t *db, const char *sql, char **ptr_value, int64_t
                 *int_value = DatumGetInt64(datum);
                 break;
             default:
-                return set_last_error(DBRES_ERROR, "Type mismatch: expected integer");
+                return cloudsync_set_error(data, "Type mismatch: expected integer", DBRES_ERROR);
         }
     } else if (expected_type == DBTYPE_TEXT) {
         text *txt = DatumGetTextP(datum);
@@ -285,7 +285,7 @@ int database_select1_value (db_t *db, const char *sql, char **ptr_value, int64_t
         if (len > 0) {
             char *ptr = cloudsync_memory_alloc(len + 1);
             if (!ptr) {
-                return set_last_error(DBRES_NOMEM, "Memory allocation failed");
+                return cloudsync_set_error(data, "Memory allocation failed", DBRES_NOMEM);
             }
             memcpy(ptr, VARDATA(txt), len);
             ptr[len] = '\0';
@@ -298,7 +298,7 @@ int database_select1_value (db_t *db, const char *sql, char **ptr_value, int64_t
         if (len > 0) {
             char *ptr = cloudsync_memory_alloc(len);
             if (!ptr) {
-                return set_last_error(DBRES_NOMEM, "Memory allocation failed");
+                return cloudsync_set_error(data, "Memory allocation failed", DBRES_NOMEM);
             }
             memcpy(ptr, VARDATA(ba), len);
             *ptr_value = ptr;
@@ -306,10 +306,12 @@ int database_select1_value (db_t *db, const char *sql, char **ptr_value, int64_t
         }
     }
 
-    return set_last_error(DBRES_OK, NULL);
+    return DBRES_OK;
 }
 
-int database_select3_values (db_t *db, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
+int database_select3_values (cloudsync_context *data, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
+    cloudsync_reset_error(data);
+    
     // init values
     *value = NULL;
     *value2 = 0;
@@ -381,8 +383,9 @@ int database_select3_values (db_t *db, const char *sql, char **value, int64_t *l
     return DBRES_OK;
 }
 
-bool database_system_exists (db_t *db, const char *name, const char *type) {
+bool database_system_exists (cloudsync_context *data, const char *name, const char *type) {
     if (!name || !type) return false;
+    cloudsync_reset_error(data);
  
     char query[512];
     bool exists = false;
@@ -406,6 +409,9 @@ bool database_system_exists (db_t *db, const char *name, const char *type) {
     }
     PG_CATCH();
     {
+        ErrorData *edata = CopyErrorData();
+        cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        FreeErrorData(edata);
         FlushErrorState();
         exists = false;
     }
@@ -417,9 +423,10 @@ bool database_system_exists (db_t *db, const char *name, const char *type) {
 
 // MARK: - GENERAL -
 
-int database_exec (db_t *db, const char *sql) {
-    if (!sql) return set_last_error(DBRES_ERROR, "SQL statement is NULL");
-
+int database_exec (cloudsync_context *data, const char *sql) {
+    if (!sql) return cloudsync_set_error(data, "SQL statement is NULL", DBRES_ERROR);
+    cloudsync_reset_error(data);
+    
     int rc;
     PG_TRY();
     {
@@ -428,9 +435,9 @@ int database_exec (db_t *db, const char *sql) {
     PG_CATCH();
     {
         ErrorData *edata = CopyErrorData();
-        int err = set_last_error(DBRES_ERROR, edata->message);
-        FlushErrorState();
+        int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
         FreeErrorData(edata);
+        FlushErrorState();
         return err;
     }
     PG_END_TRY();
@@ -447,17 +454,17 @@ int database_exec (db_t *db, const char *sql) {
 
         // Clear error on success
         elog(DEBUG1, "database_exec %s: OK", sql);
-        set_last_error(DBRES_OK, NULL);
         return map_spi_result(rc);
     }
 
     elog(DEBUG1, "database_exec %s: ERROR", sql);
-    return set_last_error(DBRES_ERROR, "SPI_execute failed");
+    return cloudsync_set_error(data, "SPI_execute failed", DBRES_ERROR);
 }
 
-int database_exec_callback (db_t *db, const char *sql, int (*callback)(void *xdata, int argc, char **values, char **names), void *xdata) {
-    if (!sql) return set_last_error(DBRES_ERROR, "SQL statement is NULL");;
-
+int database_exec_callback (cloudsync_context *data, const char *sql, int (*callback)(void *xdata, int argc, char **values, char **names), void *xdata) {
+    if (!sql) return cloudsync_set_error(data, "SQL statement is NULL", DBRES_ERROR);
+    cloudsync_reset_error(data);
+    
     int rc;
     PG_TRY();
     { 
@@ -466,14 +473,14 @@ int database_exec_callback (db_t *db, const char *sql, int (*callback)(void *xda
     PG_CATCH();
     {
         ErrorData *edata = CopyErrorData();
-        int err = set_last_error(DBRES_ERROR, edata->message);
-        FlushErrorState();
+        int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
         FreeErrorData(edata);
+        FlushErrorState();
         return err;
     }
     PG_END_TRY();
 
-    if (rc < 0) return set_last_error(DBRES_ERROR, "SPI_execute failed");;
+    if (rc < 0) return cloudsync_set_error(data, "SPI_execute failed", DBRES_ERROR);
 
     // Call callback for each row if provided
     if (callback && SPI_tuptable) {
@@ -520,7 +527,7 @@ int database_exec_callback (db_t *db, const char *sql, int (*callback)(void *xda
                 cloudsync_memory_free(values);
                 char errmsg[1024];
                 snprintf(errmsg, sizeof(errmsg), "database_exec_callback aborted %d", cb_rc);
-                return set_last_error(DBRES_ABORT, errmsg);
+                return cloudsync_set_error(data, errmsg, DBRES_ABORT);
             }
         }
 
@@ -531,12 +538,13 @@ int database_exec_callback (db_t *db, const char *sql, int (*callback)(void *xda
     return DBRES_OK;
 }
 
-int database_write (db_t *db, const char *sql, const char **bind_values, DBTYPE bind_types[], int bind_lens[], int bind_count) {
-    if (!sql) return set_last_error(DBRES_ERROR, "Invalid parameters to database_write");
-
+int database_write (cloudsync_context *data, const char *sql, const char **bind_values, DBTYPE bind_types[], int bind_lens[], int bind_count) {
+    if (!sql) return cloudsync_set_error(data, "Invalid parameters to database_write", DBRES_ERROR);
+    cloudsync_reset_error(data);
+    
     // Prepare statement
     dbvm_t *stmt;
-    int rc = database_prepare(db, sql, &stmt, 0);
+    int rc = database_prepare(data, sql, &stmt, 0);
     if (rc != DBRES_OK) return rc;
 
     // Bind parameters
@@ -581,69 +589,48 @@ int database_write (db_t *db, const char *sql, const char **bind_values, DBTYPE 
     return (rc == DBRES_DONE) ? DBRES_OK : rc;
 }
 
-int database_select_int (db_t *db, const char *sql, int64_t *value) {
-    return database_select1_value(db, sql, NULL, value, DBTYPE_INTEGER);
+int database_select_int (cloudsync_context *data, const char *sql, int64_t *value) {
+    return database_select1_value(data, sql, NULL, value, DBTYPE_INTEGER);
 }
 
-int database_select_text (db_t *db, const char *sql, char **value) {
+int database_select_text (cloudsync_context *data, const char *sql, char **value) {
     int64_t len = 0;
-    return database_select1_value(db, sql, value, &len, DBTYPE_TEXT);
+    return database_select1_value(data, sql, value, &len, DBTYPE_TEXT);
 }
 
-int database_select_blob (db_t *db, const char *sql, char **value, int64_t *len) {
-    return database_select1_value(db, sql, value, len, DBTYPE_BLOB);
+int database_select_blob (cloudsync_context *data, const char *sql, char **value, int64_t *len) {
+    return database_select1_value(data, sql, value, len, DBTYPE_BLOB);
 }
 
-int database_select_blob_2int (db_t *db, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
-    return database_select3_values(db, sql, value, len, value2, value3);
+int database_select_blob_2int (cloudsync_context *data, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
+    return database_select3_values(data, sql, value, len, value2, value3);
 }
 
 // MARK: - STATUS -
-
-static int last_error_code = DBRES_OK;
-static char *last_error_msg = NULL;
-
-// Helper function to record errors and return the error code
-// This allows callers to write: return set_last_error(code, msg);
-static int set_last_error(int errcode, const char *errmsg) {
-    last_error_code = errcode;
-
-    if (last_error_msg) {
-        cloudsync_memory_free(last_error_msg);
-        last_error_msg = NULL;
-    }
-
-    if (errmsg) {
-        last_error_msg = cloudsync_string_dup(errmsg);
-    }
-
-    return errcode;
+int database_errcode (cloudsync_context *data) {
+    return cloudsync_errcode(data);
 }
 
-int database_errcode (db_t *db) {
-    return last_error_code;
+const char *database_errmsg (cloudsync_context *data) {
+    return cloudsync_errmsg(data);
 }
 
-const char *database_errmsg (db_t *db) {
-    return last_error_msg ? last_error_msg : "not an error";
-}
-
-bool database_in_transaction (db_t *db) {
+bool database_in_transaction (cloudsync_context *data) {
     // In SPI context, we're always in a transaction
     return IsTransactionState();
 }
 
-bool database_table_exists (db_t *db, const char *name) {
-    return database_system_exists(db, name, "table");
+bool database_table_exists (cloudsync_context *data, const char *name) {
+    return database_system_exists(data, name, "table");
 }
 
-bool database_trigger_exists (db_t *db, const char *name) {
-    return database_system_exists(db, name, "trigger");
+bool database_trigger_exists (cloudsync_context *data, const char *name) {
+    return database_system_exists(data, name, "trigger");
 }
 
 // MARK: - SCHEMA INFO -
 
-int database_count_pk (db_t *db, const char *table_name, bool not_null) {
+int database_count_pk (cloudsync_context *data, const char *table_name, bool not_null) {
     char sql[1024];
     snprintf(sql, sizeof(sql),
              "SELECT COUNT(*) FROM information_schema.table_constraints tc "
@@ -652,11 +639,11 @@ int database_count_pk (db_t *db, const char *table_name, bool not_null) {
              table_name);
 
     int64_t count = 0;
-    database_select_int(db, sql, &count);
+    database_select_int(data, sql, &count);
     return (int)count;
 }
 
-int database_count_nonpk (db_t *db, const char *table_name) {
+int database_count_nonpk (cloudsync_context *data, const char *table_name) {
     char sql[1024];
     snprintf(sql, sizeof(sql),
              "SELECT COUNT(*) FROM information_schema.columns c "
@@ -669,11 +656,11 @@ int database_count_nonpk (db_t *db, const char *table_name) {
              table_name, table_name);
 
     int64_t count = 0;
-    database_select_int(db, sql, &count);
+    database_select_int(data, sql, &count);
     return (int)count;
 }
 
-int database_count_int_pk (db_t *db, const char *table_name) {
+int database_count_int_pk (cloudsync_context *data, const char *table_name) {
     char sql[1024];
     snprintf(sql, sizeof(sql),
              "SELECT COUNT(*) FROM information_schema.columns c "
@@ -684,11 +671,11 @@ int database_count_int_pk (db_t *db, const char *table_name) {
              table_name);
 
     int64_t count = 0;
-    database_select_int(db, sql, &count);
+    database_select_int(data, sql, &count);
     return (int)count;
 }
 
-int database_count_notnull_without_default (db_t *db, const char *table_name) {
+int database_count_notnull_without_default (cloudsync_context *data, const char *table_name) {
     char sql[1024];
     snprintf(sql, sizeof(sql),
              "SELECT COUNT(*) FROM information_schema.columns c "
@@ -703,10 +690,11 @@ int database_count_notnull_without_default (db_t *db, const char *table_name) {
              table_name, table_name);
 
     int64_t count = 0;
-    database_select_int(db, sql, &count);
+    database_select_int(data, sql, &count);
     return (int)count;
 }
 
+/*
 int database_debug (db_t *db, bool print_result) {
     // PostgreSQL debug information
     if (print_result) {
@@ -716,10 +704,11 @@ int database_debug (db_t *db, bool print_result) {
     }
     return DBRES_OK;
 }
+ */
 
 // MARK: - METADATA TABLES -
 
-int database_create_metatable (db_t *db, const char *table_name) {
+int database_create_metatable (cloudsync_context *data, const char *table_name) {
     char sql[2048];
     int rc;
 
@@ -736,7 +725,7 @@ int database_create_metatable (db_t *db, const char *table_name) {
              ");",
              table_name);
 
-    rc = database_exec(db, sql);
+    rc = database_exec(data, sql);
     if (rc != DBRES_OK) return rc;
 
     // Create indices for performance
@@ -745,14 +734,14 @@ int database_create_metatable (db_t *db, const char *table_name) {
              "ON \"%s_cloudsync\" (db_version);",
              table_name, table_name);
 
-    rc = database_exec(db, sql);
+    rc = database_exec(data, sql);
     return rc;
 }
 
 // MARK: - TRIGGERS -
 
 // TODO
-int database_create_insert_trigger (db_t *db, const char *table_name, char *trigger_when) {
+int database_create_insert_trigger (cloudsync_context *data, const char *table_name, char *trigger_when) {
     // PostgreSQL triggers are more complex - placeholder implementation
     // Full implementation would create trigger functions and triggers
     elog(WARNING, "database_create_insert_trigger not yet implemented for PostgreSQL");
@@ -760,68 +749,68 @@ int database_create_insert_trigger (db_t *db, const char *table_name, char *trig
 }
 
 // TODO
-int database_create_update_trigger_gos (db_t *db, const char *table_name) {
+int database_create_update_trigger_gos (cloudsync_context *data, const char *table_name) {
     elog(WARNING, "database_create_update_trigger_gos not yet implemented for PostgreSQL");
     return DBRES_OK;
 }
 
 // TODO
-int database_create_update_trigger (db_t *db, const char *table_name, const char *trigger_when) {
+int database_create_update_trigger (cloudsync_context *data, const char *table_name, const char *trigger_when) {
     elog(WARNING, "database_create_update_trigger not yet implemented for PostgreSQL");
     return DBRES_OK;
 }
 
 // TODO
-int database_create_delete_trigger_gos (db_t *db, const char *table_name) {
+int database_create_delete_trigger_gos (cloudsync_context *data, const char *table_name) {
     elog(WARNING, "database_create_delete_trigger_gos not yet implemented for PostgreSQL");
     return DBRES_OK;
 }
 
 // TODO
-int database_create_delete_trigger (db_t *db, const char *table_name, const char *trigger_when) {
+int database_create_delete_trigger (cloudsync_context *data, const char *table_name, const char *trigger_when) {
     elog(WARNING, "database_create_delete_trigger not yet implemented for PostgreSQL");
     return DBRES_OK;
 }
 
 // TODO
-int database_create_triggers (db_t *db, const char *table_name, table_algo algo) {
+int database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo) {
     // Placeholder - triggers need to be implemented with PostgreSQL PL/pgSQL
     elog(WARNING, "database_create_triggers not yet implemented for PostgreSQL");
     return DBRES_OK;
 }
 
-int database_delete_triggers (db_t *db, const char *table) {
+int database_delete_triggers (cloudsync_context *data, const char *table) {
     char sql[1024];
 
     snprintf(sql, sizeof(sql),
              "DROP TRIGGER IF EXISTS \"%s_insert_trigger\" ON \"%s\";",
              table, table);
-    database_exec(db, sql);
+    database_exec(data, sql);
 
     snprintf(sql, sizeof(sql),
              "DROP TRIGGER IF EXISTS \"%s_update_trigger\" ON \"%s\";",
              table, table);
-    database_exec(db, sql);
+    database_exec(data, sql);
 
     snprintf(sql, sizeof(sql),
              "DROP TRIGGER IF EXISTS \"%s_delete_trigger\" ON \"%s\";",
              table, table);
-    database_exec(db, sql);
+    database_exec(data, sql);
 
     return DBRES_OK;
 }
 
 // MARK: - SCHEMA VERSIONING -
 
-int64_t database_schema_version (db_t *db) {
+int64_t database_schema_version (cloudsync_context *data) {
     int64_t value = 0;
-    int rc = database_select_int(db, SQL_SCHEMA_VERSION, &value);
+    int rc = database_select_int(data, SQL_SCHEMA_VERSION, &value);
     return (rc == DBRES_OK) ? value : 0;
 }
 
-uint64_t database_schema_hash (db_t *db) {
+uint64_t database_schema_hash (cloudsync_context *data) {
     char *schema = NULL;
-    database_select_text(db,
+    database_select_text(data,
         "SELECT string_agg(LOWER(table_name || column_name || data_type), '' ORDER BY table_name, column_name) "
         "FROM information_schema.columns WHERE table_schema = 'public'",
         &schema);
@@ -837,29 +826,29 @@ uint64_t database_schema_hash (db_t *db) {
     return hash;
 }
 
-bool database_check_schema_hash (db_t *db, uint64_t hash) {
+bool database_check_schema_hash (cloudsync_context *data, uint64_t hash) {
     char sql[1024];
-    snprintf(sql, sizeof(sql), "SELECT 1 FROM cloudsync_schema_versions WHERE hash = %" PRId64, hash);
+    snprintf(sql, sizeof(sql), "SELECT 1 FROM cloudsync_schema_versions WHERE hash = %" PRIu64, hash);
 
     int64_t value = 0;
-    database_select_int(db, sql, &value);
+    database_select_int(data, sql, &value);
     return (value == 1);
 }
 
-int database_update_schema_hash (db_t *db, uint64_t *hash) {
+int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
     char *schema = NULL;
-    int rc = database_select_text(db,
+    int rc = database_select_text(data,
         "SELECT string_agg(LOWER(table_name || column_name || data_type), '' ORDER BY table_name, column_name) "
         "FROM information_schema.columns WHERE table_schema = 'public'",
         &schema);
 
-    if (rc != DBRES_OK || !schema) return set_last_error(DBRES_ERROR, "database_update_schema_hash error 1");
+    if (rc != DBRES_OK || !schema) return cloudsync_set_error(data, "database_update_schema_hash error 1", DBRES_ERROR);
 
     size_t schema_len = strlen(schema);
     DEBUG_ALWAYS("database_update_schema_hash len %zu", schema_len);
     uint64_t h = fnv1a_hash(schema, schema_len);
     cloudsync_memory_free(schema);
-    if (hash && *hash == h) return set_last_error(DBRES_CONSTRAINT, "database_update_schema_hash constraint");
+    if (hash && *hash == h) return cloudsync_set_error(data, "database_update_schema_hash constraint", DBRES_CONSTRAINT);
 
     char sql[1024];
     snprintf(sql, sizeof(sql),
@@ -868,26 +857,27 @@ int database_update_schema_hash (db_t *db, uint64_t *hash) {
              "ON CONFLICT(hash) DO UPDATE SET "
              "seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);",
              h);
-    rc = database_exec(db, sql);
+    rc = database_exec(data, sql);
     if (rc == DBRES_OK && hash) {
         *hash = h;
         return rc;
     } 
 
-    return set_last_error(DBRES_ERROR, "database_update_schema_hash error 2");
+    return cloudsync_set_error(data, "database_update_schema_hash error 2", DBRES_ERROR);
 }
 
 // MARK: - VM -
 
-int database_prepare (db_t *db, const char *sql, dbvm_t **vm, int flags) {
+int database_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, int flags) {
     if (!sql || !vm) {
-        return set_last_error(DBRES_ERROR, "Invalid parameters to database_prepare");
+        return cloudsync_set_error(data, "Invalid parameters to database_prepare", DBRES_ERROR);
     }
+    cloudsync_reset_error(data);
 
     // Convert ? placeholders to $1, $2, etc.
     char *pg_sql = convert_placeholders(sql);
     if (!pg_sql) {
-        return set_last_error(DBRES_ERROR, "Failed to convert SQL placeholders");
+        return cloudsync_set_error(data, "Failed to convert SQL placeholders", DBRES_ERROR);
     }
 
     // Create wrapper - defer actual SPI_prepare until first step
@@ -899,6 +889,7 @@ int database_prepare (db_t *db, const char *sql, dbvm_t **vm, int flags) {
     wrapper->prepared = false;
     wrapper->executed = false;
     wrapper->param_count = 0;
+    wrapper->data = data;
 
     // Initialize nulls array (not null by default)
     for (int i = 0; i < MAX_PARAMS; i++) {
@@ -906,16 +897,16 @@ int database_prepare (db_t *db, const char *sql, dbvm_t **vm, int flags) {
     }
 
     *vm = (dbvm_t*)wrapper;
-    return set_last_error(DBRES_OK, NULL);
+    return DBRES_OK;
 }
 
 int databasevm_step (dbvm_t *vm) {
-    if (!vm) {
-        return set_last_error(DBRES_ERROR, "NULL vm in databasevm_step");
-    }
+    if (!vm) return DBRES_MISUSE;
 
     pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
-
+    cloudsync_context *data = wrapper->data;
+    cloudsync_reset_error(data);
+    
     // First call - prepare and execute
     if (!wrapper->executed) {
         // Deferred prepare: Now that we have all bindings, we can prepare the plan
@@ -924,16 +915,16 @@ int databasevm_step (dbvm_t *vm) {
             {
                 wrapper->plan = SPI_prepare(wrapper->sql, wrapper->param_count, wrapper->param_types);
                 if (!wrapper->plan) {
-                    return set_last_error(DBRES_ERROR, "SPI_prepare returned NULL");
+                    return cloudsync_set_error(data, "SPI_prepare returned NULL", DBRES_ERROR);
                 }
                 wrapper->prepared = true;
             }
             PG_CATCH();
             {
                 ErrorData *edata = CopyErrorData();
-                int err = set_last_error(DBRES_ERROR, edata->message);
-                FlushErrorState();
+                int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
                 FreeErrorData(edata);
+                FlushErrorState();
                 return err;
             }
             PG_END_TRY();
@@ -948,9 +939,9 @@ int databasevm_step (dbvm_t *vm) {
         PG_CATCH();
         {
             ErrorData *edata = CopyErrorData();
-            int err = set_last_error(DBRES_ERROR, edata->message);
-            FlushErrorState();
+            int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
             FreeErrorData(edata);
+            FlushErrorState();
             wrapper->executed = true;
             return err;
         }
@@ -959,7 +950,7 @@ int databasevm_step (dbvm_t *vm) {
         wrapper->executed = true;
 
         if (rc < 0) {
-            return set_last_error(DBRES_ERROR, "SPI_execute_plan returned error code");
+            return cloudsync_set_error(data, "SPI_execute_plan returned error code", DBRES_ERROR);
         }
 
         wrapper->current_row = 0;
@@ -975,29 +966,26 @@ int databasevm_step (dbvm_t *vm) {
             }
             PushActiveSnapshot(GetTransactionSnapshot());
 
-            return set_last_error(DBRES_DONE, NULL);
+            return DBRES_DONE;
         }
 
         // For SELECT, return DBRES_ROW if we have results, DBRES_DONE if empty
         if (rc == SPI_OK_SELECT || rc == SPI_OK_SELINTO) {
-            if (SPI_processed > 0) {
-                return set_last_error(DBRES_ROW, NULL);
-            }
-            return set_last_error(DBRES_DONE, NULL);
+            return (SPI_processed > 0) ? DBRES_ROW : DBRES_DONE;
         }
 
         // For other successful operations, return DBRES_DONE
-        return set_last_error(DBRES_DONE, NULL);
+        return DBRES_DONE;
     }
 
     // Subsequent calls - fetch next row
     wrapper->current_row++;
 
     if (wrapper->current_row < (int)SPI_processed) {
-        return set_last_error(DBRES_ROW, NULL);
+        return DBRES_ROW;
     }
 
-    return set_last_error(DBRES_DONE, NULL);
+    return DBRES_DONE;
 }
 
 void databasevm_finalize (dbvm_t *vm) {
@@ -1056,13 +1044,13 @@ const char *databasevm_sql (dbvm_t *vm) {
 
 // MARK: - PRIMARY KEY -
 
-int database_pk_rowid (db_t *db, const char *table_name, char ***names, int *count) {
+int database_pk_rowid (cloudsync_context *data, const char *table_name, char ***names, int *count) {
     // PostgreSQL doesn't have rowid concept like SQLite
     // Use OID or primary key columns instead
-    return database_pk_names(db, table_name, names, count);
+    return database_pk_names(data, table_name, names, count);
 }
 
-int database_pk_names (db_t *db, const char *table_name, char ***names, int *count) {
+int database_pk_names (cloudsync_context *data, const char *table_name, char ***names, int *count) {
     if (!table_name || !names || !count) return DBRES_MISUSE;
 
     char sql[1024];
@@ -1542,37 +1530,10 @@ int database_column_type (dbvm_t *vm, int index) {
     }
 }
 
-// MARK: - RESULT -
-
-void database_result_blob (dbcontext_t *context, const void *value, uint64_t size, void(*destructor)(void*)) {
-    // For PostgreSQL extension functions
-    // This would need proper implementation in the extension context
-    elog(WARNING, "database_result_blob not implemented");
-}
-
-void database_result_double (dbcontext_t *context, double value) {
-    elog(WARNING, "database_result_double not implemented");
-}
-
-void database_result_int (dbcontext_t *context, int64_t value) {
-    elog(WARNING, "database_result_int not implemented");
-}
-
-void database_result_null (dbcontext_t *context) {
-    elog(WARNING, "database_result_null not implemented");
-}
-
-void database_result_text (dbcontext_t *context, const char *value, int size, void(*destructor)(void*)) {
-    elog(WARNING, "database_result_text not implemented");
-}
-
-void database_result_value (dbcontext_t *context, dbvalue_t *value) {
-    elog(WARNING, "database_result_value not implemented");
-}
-
 // MARK: - SAVEPOINTS -
 
-int database_begin_savepoint (db_t *db, const char *savepoint_name) {
+int database_begin_savepoint (cloudsync_context *data, const char *savepoint_name) {
+    cloudsync_reset_error(data);
     PG_TRY();
     {
         BeginInternalSubTransaction(NULL);
@@ -1580,17 +1541,18 @@ int database_begin_savepoint (db_t *db, const char *savepoint_name) {
     PG_CATCH();
     {
         ErrorData *edata = CopyErrorData();
-        int err = set_last_error(DBRES_ERROR, edata ? edata->message : "Failed to begin savepoint");
+        int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        FreeErrorData(edata);
         FlushErrorState();
-        if (edata) FreeErrorData(edata);
         return err;
     }
     PG_END_TRY();
 
-    return set_last_error(DBRES_OK, NULL);
+    return DBRES_OK;
 }
 
-int database_commit_savepoint (db_t *db, const char *savepoint_name) {
+int database_commit_savepoint (cloudsync_context *data, const char *savepoint_name) {
+    cloudsync_reset_error(data);
     PG_TRY();
     {
         ReleaseCurrentSubTransaction();
@@ -1612,7 +1574,8 @@ int database_commit_savepoint (db_t *db, const char *savepoint_name) {
     return DBRES_OK;
 }
 
-int database_rollback_savepoint (db_t *db, const char *savepoint_name) {
+int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_name) {
+    cloudsync_reset_error(data);
     PG_TRY();
     {
         RollbackAndReleaseCurrentSubTransaction();
@@ -1710,10 +1673,10 @@ uint64_t dbmem_size (void *ptr) {
 
 static cloudsync_payload_apply_callback_t payload_apply_callback = NULL;
 
-void cloudsync_set_payload_apply_callback(db_t *db, cloudsync_payload_apply_callback_t callback) {
+void cloudsync_set_payload_apply_callback(void *db, cloudsync_payload_apply_callback_t callback) {
     payload_apply_callback = callback;
 }
 
-cloudsync_payload_apply_callback_t cloudsync_get_payload_apply_callback(db_t *db) {
+cloudsync_payload_apply_callback_t cloudsync_get_payload_apply_callback(void *db) {
     return payload_apply_callback;
 }

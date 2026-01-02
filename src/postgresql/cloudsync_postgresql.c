@@ -24,7 +24,6 @@
 
 // CloudSync headers (after PostgreSQL headers)
 #include "../cloudsync.h"
-#include "../cloudsync_private.h"
 #include "../database.h"
 #include "../dbutils.h"
 #include "../pk.h"
@@ -80,7 +79,7 @@ void _PG_init(void) {
     // load config, if exists
     cloudsync_context *ctx = get_cloudsync_context();
     if (cloudsync_config_exists(NULL)) {
-        if (cloudsync_context_init(ctx, NULL) == NULL) {
+        if (cloudsync_context_init(ctx) == NULL) {
             ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("An error occurred while trying to initialize context")));
@@ -88,7 +87,7 @@ void _PG_init(void) {
         }
         
         // make sure to update internal version to current version
-        dbutils_settings_set_key_value(NULL, ctx, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
+        dbutils_settings_set_key_value(ctx, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
     }
 }
 
@@ -499,7 +498,7 @@ cloudsync_set(PG_FUNCTION_ARGS)
 
     PG_TRY();
     {
-        dbutils_settings_set_key_value(NULL, ctx, key, value);
+        dbutils_settings_set_key_value(ctx, key, value);
         SPI_finish();
         PG_RETURN_BOOL(true);
     }
@@ -541,7 +540,7 @@ cloudsync_set_table(PG_FUNCTION_ARGS)
 
     PG_TRY();
     {
-        dbutils_table_settings_set_key_value(NULL, ctx, tbl, "*", key, value);
+        dbutils_table_settings_set_key_value(ctx, tbl, "*", key, value);
         SPI_finish();
         PG_RETURN_BOOL(true);
     }
@@ -587,7 +586,7 @@ cloudsync_set_column(PG_FUNCTION_ARGS)
 
     PG_TRY();
     {
-        dbutils_table_settings_set_key_value(NULL, ctx, tbl, col, key, value);
+        dbutils_table_settings_set_key_value(ctx, tbl, col, key, value);
         SPI_finish();
         PG_RETURN_BOOL(true);
     }
