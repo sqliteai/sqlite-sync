@@ -72,23 +72,40 @@ void _PG_init(void) {
     // Extension initialization
     // SPI will be connected per-function call
     elog(DEBUG1, "CloudSync extension loading");
-
+    
     // Initialize memory debugger (NOOP in production)
     cloudsync_memory_init(1);
-
+    
     // load config, if exists
     cloudsync_context *ctx = get_cloudsync_context();
-    if (cloudsync_config_exists(NULL)) {
-        if (cloudsync_context_init(ctx) == NULL) {
-            ereport(ERROR,
+    
+    int spi_rc = SPI_connect();
+    if (spi_rc != SPI_OK_CONNECT) {
+        ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("An error occurred while trying to initialize context")));
-
-        }
-        
-        // make sure to update internal version to current version
-        dbutils_settings_set_key_value(ctx, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
+                 errmsg("SPI_connect failed: %d", spi_rc)));
     }
+    
+    PG_TRY();
+    {
+        if (cloudsync_config_exists(ctx)) {
+            if (cloudsync_context_init(ctx) == NULL) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_INTERNAL_ERROR),
+                         errmsg("An error occurred while trying to initialize context")));
+            }
+            
+            // make sure to update internal version to current version
+            dbutils_settings_set_key_value(ctx, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
+        }
+        SPI_finish();
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
 }
 
 void _PG_fini(void) {
