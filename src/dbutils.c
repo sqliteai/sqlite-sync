@@ -224,7 +224,7 @@ int dbutils_settings_check_version (cloudsync_context *data, const char *version
 }
 
 char *dbutils_table_settings_get_value (cloudsync_context *data, const char *table, const char *column_name, const char *key, char *buffer, size_t blen) {
-    DEBUG_SETTINGS("dbutils_table_settings_get_value table: %s column: %s key: %s", table, column, key);
+    DEBUG_SETTINGS("dbutils_table_settings_get_value table: %s column: %s key: %s", table, column_name, key);
     
     // check if heap allocation must be forced
     if (!buffer || blen == 0) blen = 0;
@@ -283,7 +283,7 @@ finalize_get_value:
 }
 
 int dbutils_table_settings_set_key_value (cloudsync_context *data, const char *table_name, const char *column_name, const char *key, const char *value) {
-    DEBUG_SETTINGS("dbutils_table_settings_set_key_value table: %s column: %s key: %s", table, column_name, key);
+    DEBUG_SETTINGS("dbutils_table_settings_set_key_value table: %s column: %s key: %s", table_name, column_name, key);
     
     int rc = DBRES_OK;
     
