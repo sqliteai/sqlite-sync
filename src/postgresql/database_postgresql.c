@@ -986,7 +986,8 @@ int databasevm_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, i
     int rc = DBRES_OK;
     PG_TRY();
     {
-        stmt->stmt_mcxt = AllocSetContextCreate(CurrentMemoryContext, "cloudsync stmt", ALLOCSET_DEFAULT_SIZES);
+        MemoryContext parent = (flags & DBFLAG_PERSISTENT) ? TopMemoryContext : CurrentMemoryContext;
+        stmt->stmt_mcxt = AllocSetContextCreate(parent, "cloudsync stmt", ALLOCSET_DEFAULT_SIZES);
         stmt->bind_mcxt = AllocSetContextCreate(stmt->stmt_mcxt, "cloudsync binds", ALLOCSET_DEFAULT_SIZES);
         stmt->row_mcxt  = AllocSetContextCreate(stmt->stmt_mcxt, "cloudsync row", ALLOCSET_DEFAULT_SIZES);
         
