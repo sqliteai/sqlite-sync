@@ -111,7 +111,7 @@ DATABASE_RESULT unit_exec (cloudsync_context *data, const char *sql, const char 
     int type = 0;
     
     // compile sql
-    int rc = database_prepare(data, sql, (void **)&pstmt, 0);
+    int rc = databasevm_prepare(data, sql, (void **)&pstmt, 0);
     if (rc != SQLITE_OK) goto unitexec_finalize;
     // check bindings
     for (int i=0; i<count; ++i) {

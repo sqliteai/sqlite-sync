@@ -111,7 +111,7 @@ char *dbutils_settings_get_value (cloudsync_context *data, const char *key, char
     size_t size = 0;
     
     dbvm_t *vm = NULL;
-    int rc = database_prepare(data, SQL_SETTINGS_GET_VALUE, (void **)&vm, 0);
+    int rc = databasevm_prepare(data, SQL_SETTINGS_GET_VALUE, (void **)&vm, 0);
     if (rc != DBRES_OK) goto finalize_get_value;
     
     rc = databasevm_bind_text(vm, 1, key, -1);
@@ -231,7 +231,7 @@ char *dbutils_table_settings_get_value (cloudsync_context *data, const char *tab
     size_t size = 0;
     
     dbvm_t *vm = NULL;
-    int rc = database_prepare(data, SQL_TABLE_SETTINGS_GET_VALUE, (void **)&vm, 0);
+    int rc = databasevm_prepare(data, SQL_TABLE_SETTINGS_GET_VALUE, (void **)&vm, 0);
     if (rc != DBRES_OK) goto finalize_get_value;
     
     rc = databasevm_bind_text(vm, 1, table, -1);

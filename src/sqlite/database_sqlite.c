@@ -702,7 +702,7 @@ int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
 
 // MARK: - VM -
 
-int database_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, int flags) {
+int databasevm_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, int flags) {
     return sqlite3_prepare_v3((sqlite3 *)cloudsync_db(data), sql, -1, flags, (sqlite3_stmt **)vm, NULL);
 }
 

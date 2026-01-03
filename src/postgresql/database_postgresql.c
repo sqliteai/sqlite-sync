@@ -29,6 +29,7 @@
 #include "funcapi.h"
 #include "utils/array.h"
 #include "utils/lsyscache.h"
+#include "utils/datum.h"
 
 #include "pgvalue.h"
 
@@ -49,20 +50,37 @@
 // PostgreSQL SPI handles require knowing parameter count and types upfront.
 // Solution: Defer actual SPI_prepare until first step(), after all bindings are set.
 #define MAX_PARAMS 32
-
+ 
 typedef struct {
-    char *sql;              // Original SQL (converted to $1 style)
-    SPIPlanPtr plan;        // NULL until first step (deferred prepare)
-    Portal portal;
-    int current_row;
-    bool prepared;          // True after actual SPI_prepare is called
-    bool executed;          // True after first execution
-    Datum params[MAX_PARAMS];
-    Oid param_types[MAX_PARAMS];
-    char nulls[MAX_PARAMS];
-    int param_count;
+    // Prepared plan
+    SPIPlanPtr      plan;
+    bool            plan_is_prepared;
+    
+    // Cursor execution
+    Portal          portal;             // owned by statement
+    bool            portal_open;
+    
+    // Current fetched batch (we fetch 1 row at a time, but SPI still returns a tuptable)
+    SPITupleTable  *last_tuptable;      // must SPI_freetuptable() before next fetch
+    HeapTuple       current_tuple;
+    TupleDesc       current_tupdesc;
+    
+    // Params
+    int             nparams;
+    Oid             types[MAX_PARAMS];
+    Datum           values[MAX_PARAMS];
+    char            nulls[MAX_PARAMS];
+    bool            executed_nonselect; // non-select executed already
+    
+    // Memory
+    MemoryContext   stmt_mcxt;          // lifetime = pg_stmt_t
+    MemoryContext   bind_mcxt;          // resettable region for parameters (cleared on clear_bindings/reset)
+    MemoryContext   row_mcxt;           // per-row scratch (cleared each step after consumer copies)
+    
+    // Context
+    const char        *sql;
     cloudsync_context *data;
-} pg_stmt_wrapper_t;
+} pg_stmt_t;
 
 // MARK: - SQL -
 
@@ -174,7 +192,9 @@ char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_na
 
 // MARK: - HELPER FUNCTIONS -
 
+// TODO: is this really necessary? We now control the SQL statements and so we can use the Postgres style when needed
 // Convert SQLite-style ? placeholders to PostgreSQL-style $1, $2, etc.
+/*
 static char* convert_placeholders(const char *sql) {
     if (!sql) {
         return NULL;
@@ -204,9 +224,10 @@ static char* convert_placeholders(const char *sql) {
 
     return newsql;
 }
+ */
 
 // Map SPI result codes to DBRES
-static int map_spi_result(int rc) {
+static int map_spi_result (int rc) {
     switch (rc) {
         case SPI_OK_SELECT:
         case SPI_OK_INSERT:
@@ -221,6 +242,36 @@ static int map_spi_result(int rc) {
         default:
             return DBRES_ERROR;
     }
+}
+
+static void clear_fetch_batch(pg_stmt_t *stmt) {
+    if (!stmt) return;
+    if (stmt->last_tuptable) {
+        SPI_freetuptable(stmt->last_tuptable);
+        stmt->last_tuptable = NULL;
+    }
+    stmt->current_tuple = NULL;
+    stmt->current_tupdesc = NULL;
+    if (stmt->row_mcxt) MemoryContextReset(stmt->row_mcxt);
+}
+
+static void close_portal(pg_stmt_t *stmt) {
+    if (!stmt) return;
+    if (stmt->portal) {
+        SPI_cursor_close(stmt->portal);
+        stmt->portal = NULL;
+    }
+    stmt->portal_open = false;
+}
+
+static inline Datum get_datum (pg_stmt_t *stmt, int col /* 0-based */, bool *isnull, Oid *type) {
+    if (!stmt || !stmt->current_tuple || !stmt->current_tupdesc) {
+        if (isnull) *isnull = true;
+        if (type) *type = 0;
+        return (Datum) 0;
+    }
+    if (type) *type = SPI_gettypeid(stmt->current_tupdesc, col + 1);
+    return SPI_getbinval(stmt->current_tuple, stmt->current_tupdesc, col + 1, isnull);
 }
 
 // MARK: - PRIVATE -
@@ -544,7 +595,7 @@ int database_write (cloudsync_context *data, const char *sql, const char **bind_
     
     // Prepare statement
     dbvm_t *stmt;
-    int rc = database_prepare(data, sql, &stmt, 0);
+    int rc = databasevm_prepare(data, sql, &stmt, 0);
     if (rc != DBRES_OK) return rc;
 
     // Bind parameters
@@ -866,182 +917,6 @@ int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
     return cloudsync_set_error(data, "database_update_schema_hash error 2", DBRES_ERROR);
 }
 
-// MARK: - VM -
-
-int database_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, int flags) {
-    if (!sql || !vm) {
-        return cloudsync_set_error(data, "Invalid parameters to database_prepare", DBRES_ERROR);
-    }
-    cloudsync_reset_error(data);
-
-    // Convert ? placeholders to $1, $2, etc.
-    char *pg_sql = convert_placeholders(sql);
-    if (!pg_sql) {
-        return cloudsync_set_error(data, "Failed to convert SQL placeholders", DBRES_ERROR);
-    }
-
-    // Create wrapper - defer actual SPI_prepare until first step
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)cloudsync_memory_zeroalloc(sizeof(pg_stmt_wrapper_t));
-    wrapper->sql = pg_sql;
-    wrapper->plan = NULL;
-    wrapper->portal = NULL;
-    wrapper->current_row = 0;
-    wrapper->prepared = false;
-    wrapper->executed = false;
-    wrapper->param_count = 0;
-    wrapper->data = data;
-
-    // Initialize nulls array (not null by default)
-    for (int i = 0; i < MAX_PARAMS; i++) {
-        wrapper->nulls[i] = ' ';
-    }
-
-    *vm = (dbvm_t*)wrapper;
-    return DBRES_OK;
-}
-
-int databasevm_step (dbvm_t *vm) {
-    if (!vm) return DBRES_MISUSE;
-
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
-    cloudsync_context *data = wrapper->data;
-    cloudsync_reset_error(data);
-    
-    // First call - prepare and execute
-    if (!wrapper->executed) {
-        // Deferred prepare: Now that we have all bindings, we can prepare the plan
-        if (!wrapper->prepared) {
-            PG_TRY();
-            {
-                wrapper->plan = SPI_prepare(wrapper->sql, wrapper->param_count, wrapper->param_types);
-                if (!wrapper->plan) {
-                    return cloudsync_set_error(data, "SPI_prepare returned NULL", DBRES_ERROR);
-                }
-                wrapper->prepared = true;
-            }
-            PG_CATCH();
-            {
-                ErrorData *edata = CopyErrorData();
-                int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
-                FreeErrorData(edata);
-                FlushErrorState();
-                return err;
-            }
-            PG_END_TRY();
-        }
-
-        // Execute plan with buffered parameters
-        int rc;
-        PG_TRY();
-        {
-            rc = SPI_execute_plan(wrapper->plan, wrapper->params, wrapper->nulls, false, 0);
-        }
-        PG_CATCH();
-        {
-            ErrorData *edata = CopyErrorData();
-            int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
-            FreeErrorData(edata);
-            FlushErrorState();
-            wrapper->executed = true;
-            return err;
-        }
-        PG_END_TRY();
-
-        wrapper->executed = true;
-
-        if (rc < 0) {
-            return cloudsync_set_error(data, "SPI_execute_plan returned error code", DBRES_ERROR);
-        }
-
-        wrapper->current_row = 0;
-
-        // For INSERT/UPDATE/DELETE, return DBRES_DONE regardless of rows affected
-        if (rc == SPI_OK_INSERT || rc == SPI_OK_DELETE || rc == SPI_OK_UPDATE) {
-            // Increment command counter to make changes visible
-            CommandCounterIncrement();
-
-            // Refresh snapshot
-            if (ActiveSnapshotSet()) {
-                PopActiveSnapshot();
-            }
-            PushActiveSnapshot(GetTransactionSnapshot());
-
-            return DBRES_DONE;
-        }
-
-        // For SELECT, return DBRES_ROW if we have results, DBRES_DONE if empty
-        if (rc == SPI_OK_SELECT || rc == SPI_OK_SELINTO) {
-            return (SPI_processed > 0) ? DBRES_ROW : DBRES_DONE;
-        }
-
-        // For other successful operations, return DBRES_DONE
-        return DBRES_DONE;
-    }
-
-    // Subsequent calls - fetch next row
-    wrapper->current_row++;
-
-    if (wrapper->current_row < (int)SPI_processed) {
-        return DBRES_ROW;
-    }
-
-    return DBRES_DONE;
-}
-
-void databasevm_finalize (dbvm_t *vm) {
-    if (!vm) return;
-
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
-
-    if (wrapper->portal) {
-        SPI_cursor_close(wrapper->portal);
-    }
-
-    if (wrapper->plan) {
-        SPI_freeplan(wrapper->plan);
-    }
-
-    if (wrapper->sql) {
-        cloudsync_memory_free(wrapper->sql);
-    }
-
-    cloudsync_memory_free(wrapper);
-}
-
-void databasevm_reset (dbvm_t *vm) {
-    if (!vm) return;
-
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
-
-    if (wrapper->portal) {
-        SPI_cursor_close(wrapper->portal);
-        wrapper->portal = NULL;
-    }
-
-    wrapper->current_row = 0;
-    wrapper->executed = false;
-}
-
-void databasevm_clear_bindings (dbvm_t *vm) {
-    if (!vm) return;
-
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
-
-    // Reset all bindings
-    for (int i = 0; i < MAX_PARAMS; i++) {
-        wrapper->params[i] = (Datum)0;
-        wrapper->nulls[i] = ' ';
-    }
-    wrapper->param_count = 0;
-}
-
-const char *databasevm_sql (dbvm_t *vm) {
-    if (!vm) return NULL;
-
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
-    return wrapper->sql;
-}
-
 // MARK: - PRIMARY KEY -
 
 int database_pk_rowid (cloudsync_context *data, const char *table_name, char ***names, int *count) {
@@ -1090,133 +965,542 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
     return DBRES_OK;
 }
 
+// MARK: - VM -
+
+int databasevm_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, int flags) {
+    if (!sql || !vm) {
+        return cloudsync_set_error(data, "Invalid parameters to databasevm_prepare", DBRES_ERROR);
+    }
+    *vm = NULL;
+    cloudsync_reset_error(data);
+    
+    // sanity check number of parameters
+    // int counter = count_params(sql);
+    // if (counter > MAX_PARAMS) return cloudsync_set_error(data, "Maximum number of parameters reached", DBRES_MISUSE);
+    
+    // create PostgreSQL VM statement
+    pg_stmt_t *stmt = (pg_stmt_t *)cloudsync_memory_zeroalloc(sizeof(pg_stmt_t));
+    if (!stmt) return cloudsync_set_error(data, "Not enough memory to allocate a dbvm_t struct", DBRES_NOMEM);
+    stmt->data = data;
+    
+    int rc = DBRES_OK;
+    PG_TRY();
+    {
+        stmt->stmt_mcxt = AllocSetContextCreate(CurrentMemoryContext, "cloudsync stmt", ALLOCSET_DEFAULT_SIZES);
+        stmt->bind_mcxt = AllocSetContextCreate(stmt->stmt_mcxt, "cloudsync binds", ALLOCSET_DEFAULT_SIZES);
+        stmt->row_mcxt  = AllocSetContextCreate(stmt->stmt_mcxt, "cloudsync row", ALLOCSET_DEFAULT_SIZES);
+        
+        MemoryContext old = MemoryContextSwitchTo(stmt->stmt_mcxt);
+        stmt->sql = pstrdup(sql);
+        MemoryContextSwitchTo(old);
+    }
+    PG_CATCH();
+    {
+        if (stmt->stmt_mcxt) MemoryContextDelete(stmt->stmt_mcxt);
+        cloudsync_memory_free(stmt);
+        FlushErrorState();
+        rc = DBRES_NOMEM;
+        stmt = NULL;
+    }
+    PG_END_TRY();
+    
+    if (stmt) databasevm_clear_bindings((dbvm_t*)stmt);
+    *vm = (dbvm_t*)stmt;
+    
+    return rc;
+}
+
+int databasevm_step0 (pg_stmt_t *stmt) {
+    cloudsync_context *data = stmt->data;
+    int rc = DBRES_OK;
+    
+    // prepare plan
+    PG_TRY();
+    {
+        stmt->plan = SPI_prepare(stmt->sql, stmt->nparams, stmt->types);
+        if (stmt->plan == NULL) {
+            int err = cloudsync_set_error(data, "Unable to prepare SQL statement", DBRES_ERROR);
+            return err;
+        }
+        SPI_keepplan(stmt->plan);
+        stmt->plan_is_prepared = true;
+    }
+    PG_CATCH();
+    {
+        ErrorData *edata = CopyErrorData();
+        int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        FreeErrorData(edata);
+        FlushErrorState();
+        rc = err;
+    }
+    PG_END_TRY();
+    
+    return rc;
+}
+
+int databasevm_step (dbvm_t *vm) {
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    if (!stmt) return DBRES_MISUSE;
+    
+    cloudsync_context *data = stmt->data;
+    cloudsync_reset_error(data);
+    
+    if (!stmt->plan_is_prepared) {
+        int rc = databasevm_step0(stmt);
+        if (rc != DBRES_OK) return rc;
+    }
+    if (!stmt->plan_is_prepared || !stmt->plan) return DBRES_ERROR;
+    
+    PG_TRY();
+    {
+        // if portal is open, we fetch one row
+        if (stmt->portal_open) {
+            // free prior fetched row batch
+            clear_fetch_batch(stmt);
+            
+            SPI_cursor_fetch(stmt->portal, true /* forward */, 1);
+            
+            if (SPI_processed == 0) {
+                // done
+                clear_fetch_batch(stmt);
+                close_portal(stmt);
+                return DBRES_DONE;
+            }
+            
+            MemoryContextReset(stmt->row_mcxt);
+            
+            stmt->last_tuptable = SPI_tuptable;
+            stmt->current_tupdesc = stmt->last_tuptable->tupdesc;
+            stmt->current_tuple = stmt->last_tuptable->vals[0];
+            return DBRES_ROW;
+        }
+        
+        // First step: decide whether to use portal.
+        // Even for INSERT/UPDATE/DELETE ... RETURNING you WANT a portal.
+        // Strategy:
+        // - Try to open a cursor. If that succeeds, treat as row-returning.
+        // - If it fails with "not a SELECT" kind of condition, execute once.
+        if (!stmt->executed_nonselect) {
+            // try cursor open
+            stmt->portal = NULL;
+            if (stmt->nparams == 0) stmt->portal = SPI_cursor_open(NULL, stmt->plan, NULL, NULL, false);
+            else stmt->portal = SPI_cursor_open(NULL, stmt->plan, stmt->values, stmt->nulls, false);
+
+            if (stmt->portal != NULL) {
+                stmt->portal_open = true;
+                
+                // fetch first row
+                clear_fetch_batch(stmt);
+                SPI_cursor_fetch(stmt->portal, true, 1);
+                
+                if (SPI_processed == 0) {
+                    clear_fetch_batch(stmt);
+                    close_portal(stmt);
+                    return DBRES_DONE;
+                }
+                
+                MemoryContextReset(stmt->row_mcxt);
+                
+                stmt->last_tuptable = SPI_tuptable;
+                stmt->current_tupdesc = stmt->last_tuptable->tupdesc;
+                stmt->current_tuple = stmt->last_tuptable->vals[0];
+                return DBRES_ROW;
+            }
+
+            // Cursor open failed -> execute once (non-row-returning or other failure).
+            // If it failed for reasons other than "not a cursorable statement", SPI_result may help,
+            // but easiest is: attempt execute and let it throw if bad.
+            if (stmt->nparams == 0) SPI_execute_plan(stmt->plan, NULL, NULL, false, 0);
+            else SPI_execute_plan(stmt->plan, stmt->values, stmt->nulls, false, 0);
+
+            stmt->executed_nonselect = true;
+            return DBRES_DONE;
+        }
+        
+        return DBRES_DONE;
+    }
+    PG_CATCH();
+    {
+        ErrorData *edata = CopyErrorData();
+        int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        FreeErrorData(edata);
+        FlushErrorState();
+        
+        // free resources
+        clear_fetch_batch(stmt);
+        close_portal(stmt);
+        
+        return err;
+    }
+    PG_END_TRY();
+    return DBRES_DONE;
+}
+
+void databasevm_finalize (dbvm_t *vm) {
+    if (!vm) return;
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    
+    PG_TRY();
+    {
+        clear_fetch_batch(stmt);
+        close_portal(stmt);
+        
+        if (stmt->plan_is_prepared && stmt->plan) {
+            SPI_freeplan(stmt->plan);
+            stmt->plan = NULL;
+            stmt->plan_is_prepared = false;
+        }
+    }
+    PG_CATCH();
+    {
+        /* don't throw from finalize; just swallow */
+        FlushErrorState();
+    }
+    PG_END_TRY();
+
+    if (stmt->stmt_mcxt) MemoryContextDelete(stmt->stmt_mcxt);
+    cloudsync_memory_free(stmt);
+}
+
+void databasevm_reset (dbvm_t *vm) {
+    if (!vm) return;
+    databasevm_clear_bindings(vm);
+}
+
+void databasevm_clear_bindings (dbvm_t *vm) {
+    if (!vm) return;
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    
+    clear_fetch_batch(stmt);
+    close_portal(stmt);
+    
+    if (stmt->plan_is_prepared && stmt->plan) {
+        SPI_freeplan(stmt->plan);
+        stmt->plan = NULL;
+        stmt->plan_is_prepared = false;
+    }
+    
+    if (stmt->bind_mcxt) MemoryContextReset(stmt->bind_mcxt);
+    stmt->nparams = 0;
+    stmt->executed_nonselect = false;
+    
+    // initialize static array of params
+    for (int i = 0; i < MAX_PARAMS; i++) {
+        stmt->types[i] = UNKNOWNOID;
+        stmt->values[i] = (Datum) 0;
+        stmt->nulls[i] = 'n';   // default NULL
+    }
+}
+
+const char *databasevm_sql (dbvm_t *vm) {
+    if (!vm) return NULL;
+
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    return stmt->sql;
+}
+
 // MARK: - BINDING -
 
 int databasevm_bind_blob (dbvm_t *vm, int index, const void *value, uint64_t size) {
-    if (!vm || index < 1 || !value) return DBRES_ERROR;
-
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
+    if (!vm || index < 1) return DBRES_ERROR;
+    if (!value) return databasevm_bind_null(vm, index);
+    
+    // validate size fits Size and won't overflow
+    if (size > (uint64) (MaxAllocSize - VARHDRSZ)) return DBRES_NOMEM;
+    
     int idx = index - 1;
-
     if (idx >= MAX_PARAMS) return DBRES_ERROR;
-
+    
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    MemoryContext old = MemoryContextSwitchTo(stmt->bind_mcxt);
+    
     // Convert binary data to PostgreSQL bytea
-    bytea *ba = (bytea*)cloudsync_memory_alloc(size + VARHDRSZ);
+    bytea *ba = (bytea*)palloc(size + VARHDRSZ);
     SET_VARSIZE(ba, size + VARHDRSZ);
     memcpy(VARDATA(ba), value, size);
-
-    wrapper->params[idx] = PointerGetDatum(ba);
-    wrapper->param_types[idx] = BYTEAOID;
-    wrapper->nulls[idx] = ' ';
-
-    if (index > wrapper->param_count) {
-        wrapper->param_count = index;
-    }
-
+    
+    stmt->values[idx] = PointerGetDatum(ba);
+    stmt->types[idx] = BYTEAOID;
+    stmt->nulls[idx] = ' ';
+    
+    MemoryContextSwitchTo(old);
+    
+    if (stmt->nparams < idx + 1) stmt->nparams = idx + 1;
     return DBRES_OK;
 }
 
 int databasevm_bind_double (dbvm_t *vm, int index, double value) {
     if (!vm || index < 1) return DBRES_ERROR;
 
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
     int idx = index - 1;
-
     if (idx >= MAX_PARAMS) return DBRES_ERROR;
-
-    wrapper->params[idx] = Float8GetDatum(value);
-    wrapper->param_types[idx] = FLOAT8OID;
-    wrapper->nulls[idx] = ' ';
-
-    if (index > wrapper->param_count) {
-        wrapper->param_count = index;
-    }
-
+    
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    stmt->values[idx] = Float8GetDatum(value);
+    stmt->types[idx] = FLOAT8OID;
+    stmt->nulls[idx] = ' ';
+    
+    if (stmt->nparams < idx + 1) stmt->nparams = idx + 1;
     return DBRES_OK;
 }
 
 int databasevm_bind_int (dbvm_t *vm, int index, int64_t value) {
     if (!vm || index < 1) return DBRES_ERROR;
 
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
     int idx = index - 1;
-
     if (idx >= MAX_PARAMS) return DBRES_ERROR;
-
-    wrapper->params[idx] = Int64GetDatum(value);
-    wrapper->param_types[idx] = INT8OID;
-    wrapper->nulls[idx] = ' ';
-
-    if (index > wrapper->param_count) {
-        wrapper->param_count = index;
-    }
-
+    
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    stmt->values[idx] = Int64GetDatum(value);
+    stmt->types[idx] = INT8OID;
+    stmt->nulls[idx] = ' ';
+    
+    if (stmt->nparams < idx + 1) stmt->nparams = idx + 1;
     return DBRES_OK;
 }
 
 int databasevm_bind_null (dbvm_t *vm, int index) {
     if (!vm || index < 1) return DBRES_ERROR;
 
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
     int idx = index - 1;
-
     if (idx >= MAX_PARAMS) return DBRES_ERROR;
-
-    wrapper->params[idx] = (Datum)0;
-    wrapper->param_types[idx] = TEXTOID;  // Default type for NULL
-    wrapper->nulls[idx] = 'n';  // Mark as NULL
-
-    if (index > wrapper->param_count) {
-        wrapper->param_count = index;
-    }
-
+    
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    stmt->values[idx] = (Datum)0;
+    stmt->types[idx] = UNKNOWNOID;
+    stmt->nulls[idx] = 'n';
+    
+    if (stmt->nparams < idx + 1) stmt->nparams = idx + 1;
     return DBRES_OK;
 }
 
 int databasevm_bind_text (dbvm_t *vm, int index, const char *value, int size) {
-    if (!vm || index < 1 || !value) return DBRES_ERROR;
-
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
+    if (!vm || index < 1) return DBRES_ERROR;
+    if (!value) return databasevm_bind_null(vm, index);
+    
+    // validate size fits Size and won't overflow
+    if (size < 0) return DBRES_MISUSE;
+    if (size > (uint64) (MaxAllocSize - VARHDRSZ)) return DBRES_NOMEM;
+    
     int idx = index - 1;
-
     if (idx >= MAX_PARAMS) return DBRES_ERROR;
-
-    // Convert C string to PostgreSQL text
-    wrapper->params[idx] = CStringGetTextDatum(value);
-    wrapper->param_types[idx] = TEXTOID;
-    wrapper->nulls[idx] = ' ';
-
-    if (index > wrapper->param_count) {
-        wrapper->param_count = index;
-    }
-
+    
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    MemoryContext old = MemoryContextSwitchTo(stmt->bind_mcxt);
+    
+    text *t = cstring_to_text_with_len(value, size);
+    stmt->values[idx] = PointerGetDatum(t);
+    stmt->types[idx] = TEXTOID;
+    stmt->nulls[idx] = ' ';
+    
+    MemoryContextSwitchTo(old);
+    
+    if (stmt->nparams < idx + 1) stmt->nparams = idx + 1;
     return DBRES_OK;
 }
 
 int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value) {
     if (!vm) return DBRES_ERROR;
+    if (!value) return databasevm_bind_null(vm, index);
 
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
     int idx = index - 1;
-
     if (idx >= MAX_PARAMS) return DBRES_ERROR;
-
+    
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
     pgvalue_t *v = (pgvalue_t *)value;
     if (!v) {
-        wrapper->params[idx] = (Datum)0;
-        wrapper->param_types[idx] = TEXTOID;
-        wrapper->nulls[idx] = 'n';
+        stmt->values[idx] = (Datum)0;
+        stmt->types[idx] = TEXTOID;
+        stmt->nulls[idx] = 'n';
     } else {
-        wrapper->params[idx] = v->isnull ? (Datum)0 : v->datum;
-        wrapper->param_types[idx] = OidIsValid(v->typeid) ? v->typeid : TEXTOID;
-        wrapper->nulls[idx] = v->isnull ? 'n' : ' ';
+        int16 typlen;
+        bool typbyval;
+        MemoryContext old = MemoryContextSwitchTo(stmt->bind_mcxt);
+        get_typlenbyval(v->typeid, &typlen, &typbyval);
+        Datum dcopy = typbyval ? v->datum : datumCopy(v->datum, typbyval, typlen);
+        stmt->values[idx] = v->isnull ? (Datum)0 : dcopy;
+        MemoryContextSwitchTo(old);
+        stmt->types[idx] = OidIsValid(v->typeid) ? v->typeid : TEXTOID;
+        stmt->nulls[idx] = v->isnull ? 'n' : ' ';
     }
-
-    if (index > wrapper->param_count) {
-        wrapper->param_count = index;
-    }
-
+    
+    if (stmt->nparams < idx + 1) stmt->nparams = idx + 1;
     return DBRES_OK;
+}
+
+// MARK: - COLUMN -
+
+const void *database_column_blob (dbvm_t *vm, int index) {
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    if (!vm || index >= MAX_PARAMS) return NULL;
+    if (!stmt->last_tuptable || !stmt->current_tupdesc) return NULL;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return NULL;
+
+    bool isnull = true;
+    Datum d = get_datum(stmt, index, &isnull, NULL);
+    if (isnull) return NULL;
+    
+    MemoryContext old = MemoryContextSwitchTo(stmt->row_mcxt);
+    bytea *ba = DatumGetByteaP(d);
+    int len = VARSIZE(ba) - VARHDRSZ;
+    void *out = palloc(len);
+    memcpy(out, VARDATA(ba), len);
+    MemoryContextSwitchTo(old);
+    
+    return out;
+}
+
+double database_column_double (dbvm_t *vm, int index) {
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    if (!vm || index >= MAX_PARAMS) return 0.0;
+    if (!stmt->last_tuptable || !stmt->current_tupdesc) return 0.0;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return 0.0;
+
+    bool isnull = true;
+    Oid type = 0;
+    Datum d = get_datum(stmt, index, &isnull, &type);
+    if (isnull) return 0.0;
+    
+    switch (type) {
+        case FLOAT4OID: return (double)DatumGetFloat4(d);
+        case FLOAT8OID: return (double)DatumGetFloat8(d);
+        case INT2OID: return (double)DatumGetInt16(d);
+        case INT4OID: return (double)DatumGetInt32(d);
+        case INT8OID: return (double)DatumGetInt64(d);
+        case BOOLOID: return (double)DatumGetBool(d);
+    }
+    
+    return 0.0;
+}
+
+int64_t database_column_int (dbvm_t *vm, int index) {
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    if (!vm || index >= MAX_PARAMS) return 0;
+    if (!stmt->last_tuptable || !stmt->current_tupdesc) return 0;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return 0;
+
+    bool isnull = true;
+    Oid type = 0;
+    Datum d = get_datum(stmt, index, &isnull, &type);
+    if (isnull) return 0;
+    
+    switch (type) {
+        case FLOAT4OID: return (int64_t)DatumGetFloat4(d);
+        case FLOAT8OID: return (int64_t)DatumGetFloat8(d);
+        case INT2OID: return (int64_t)DatumGetInt16(d);
+        case INT4OID: return (int64_t)DatumGetInt32(d);
+        case INT8OID: return (int64_t)DatumGetInt64(d);
+        case BOOLOID: return (int64_t)DatumGetBool(d);
+    }
+    
+    return 0;
+}
+
+const char *database_column_text (dbvm_t *vm, int index) {
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    if (!vm || index >= MAX_PARAMS) return NULL;
+    if (!stmt->last_tuptable || !stmt->current_tupdesc) return NULL;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return NULL;
+
+    bool isnull = true;
+    Oid type = 0;
+    Datum d = get_datum(stmt, index, &isnull, &type);
+    if (isnull) return NULL;
+    
+    if (type != TEXTOID && type != VARCHAROID && type != BPCHAROID)
+        return NULL; // or convert via output function if you want
+
+    MemoryContext old = MemoryContextSwitchTo(stmt->row_mcxt);
+    text *t = DatumGetTextP(d);
+    int len = VARSIZE(t) - VARHDRSZ;
+    char *out = palloc(len + 1);
+    memcpy(out, VARDATA(t), len);
+    out[len] = 0;
+    MemoryContextSwitchTo(old);
+    
+    return out;
+}
+
+dbvalue_t *database_column_value (dbvm_t *vm, int index) {
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    if (!vm || index >= MAX_PARAMS) return NULL;
+    if (!stmt->last_tuptable || !stmt->current_tupdesc) return NULL;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return NULL;
+    
+    bool isnull = true;
+    Oid type = 0;
+    Datum d = get_datum(stmt, index, &isnull, &type);
+    int32 typmod = TupleDescAttr(stmt->current_tupdesc, index)->atttypmod;
+    Oid collation = TupleDescAttr(stmt->current_tupdesc, index)->attcollation;
+    
+    pgvalue_t *v = pgvalue_create(d, type, typmod, collation, isnull);
+    if (v) pgvalue_ensure_detoast(v);
+    return (dbvalue_t*)v;
+}
+
+int database_column_bytes (dbvm_t *vm, int index) {
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    if (!vm || index >= MAX_PARAMS) return 0;
+    if (!stmt->last_tuptable || !stmt->current_tupdesc) return 0;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return 0;
+
+    bool isnull = true;
+    Oid type = 0;
+    Datum d = get_datum(stmt, index, &isnull, &type);
+    if (isnull) return 0;
+    
+    MemoryContext old = MemoryContextSwitchTo(stmt->row_mcxt);
+    
+    int bytes = 0;
+    if (type == BYTEAOID) {
+        // BLOB case
+        bytea *ba = DatumGetByteaP(d);
+        bytes = (int)(VARSIZE(ba) - VARHDRSZ);
+    } else if (type != TEXTOID && type != VARCHAROID && type != BPCHAROID) {
+        // any non-TEXT case should be discarded
+        bytes = 0;
+    } else {
+        // for text, return string length
+        text *txt = DatumGetTextP(d);
+        bytes = (int)(VARSIZE(txt) - VARHDRSZ);
+    }
+    MemoryContextSwitchTo(old);
+    
+    return bytes;
+}
+
+int database_column_type (dbvm_t *vm, int index) {
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    if (!vm || index >= MAX_PARAMS) return DBTYPE_NULL;
+    if (!stmt->last_tuptable || !stmt->current_tupdesc) return DBTYPE_NULL;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return DBTYPE_NULL;
+    
+    bool isnull = true;
+    Oid type = 0;
+    get_datum(stmt, index, &isnull, &type);
+    if (isnull) return DBTYPE_NULL;
+    
+    switch (type) {
+        case INT2OID:
+        case INT4OID:
+        case INT8OID:
+            return DBTYPE_INTEGER;
+            
+        case FLOAT4OID:
+        case FLOAT8OID:
+        case NUMERICOID:
+            return DBTYPE_FLOAT;
+            
+        case TEXTOID:
+        case VARCHAROID:
+        case BPCHAROID:
+            return DBTYPE_TEXT;
+            
+        case BYTEAOID:
+            return DBTYPE_BLOB;
+    }
+    
+    return DBTYPE_TEXT;
 }
 
 // MARK: - VALUE -
@@ -1358,176 +1642,6 @@ void *database_value_dup (dbvalue_t *value) {
         copy->owns_cstring = true;
     }
     return (void*)copy;
-}
-
-// MARK: - COLUMN -
-
-const void *database_column_blob (dbvm_t *vm, int index) {
-    if (!vm) return NULL;
-
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
-
-    if (!SPI_tuptable || wrapper->current_row >= SPI_processed) return NULL;
-
-    HeapTuple tuple = SPI_tuptable->vals[wrapper->current_row];
-    bool isnull;
-    Datum datum = SPI_getbinval(tuple, SPI_tuptable->tupdesc, index + 1, &isnull);
-
-    if (isnull) return NULL;
-
-    bytea *ba = DatumGetByteaP(datum);
-    return VARDATA(ba);
-}
-
-double database_column_double (dbvm_t *vm, int index) {
-    if (!vm) return 0.0;
-
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
-
-    if (!SPI_tuptable || wrapper->current_row >= SPI_processed) return 0.0;
-
-    HeapTuple tuple = SPI_tuptable->vals[wrapper->current_row];
-    bool isnull;
-    Datum datum = SPI_getbinval(tuple, SPI_tuptable->tupdesc, index + 1, &isnull);
-
-    if (isnull) return 0.0;
-
-    Oid typeid = SPI_gettypeid(SPI_tuptable->tupdesc, index + 1);
-    switch (typeid) {
-        case FLOAT4OID:
-            return (double)DatumGetFloat4(datum);
-        case FLOAT8OID:
-            return DatumGetFloat8(datum);
-        default:
-            return 0.0;
-    }
-}
-
-int64_t database_column_int (dbvm_t *vm, int index) {
-    if (!vm) return 0;
-
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
-
-    if (!SPI_tuptable || wrapper->current_row >= SPI_processed) return 0;
-
-    HeapTuple tuple = SPI_tuptable->vals[wrapper->current_row];
-    bool isnull;
-    Datum datum = SPI_getbinval(tuple, SPI_tuptable->tupdesc, index + 1, &isnull);
-
-    if (isnull) return 0;
-
-    Oid typeid = SPI_gettypeid(SPI_tuptable->tupdesc, index + 1);
-    switch (typeid) {
-        case INT2OID:
-            return (int64_t)DatumGetInt16(datum);
-        case INT4OID:
-            return (int64_t)DatumGetInt32(datum);
-        case INT8OID:
-            return DatumGetInt64(datum);
-        default:
-            return 0;
-    }
-}
-
-const char *database_column_text (dbvm_t *vm, int index) {
-    if (!vm) return "";
-
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
-
-    if (!SPI_tuptable || wrapper->current_row >= SPI_processed) return "";
-
-    HeapTuple tuple = SPI_tuptable->vals[wrapper->current_row];
-    bool isnull;
-    Datum datum = SPI_getbinval(tuple, SPI_tuptable->tupdesc, index + 1, &isnull);
-
-    if (isnull) return "";
-
-    text *txt = DatumGetTextP(datum);
-    return text_to_cstring(txt);
-}
-
-dbvalue_t *database_column_value (dbvm_t *vm, int index) {
-    if (!vm) return NULL;
-
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
-
-    if (!SPI_tuptable || wrapper->current_row >= SPI_processed) return NULL;
-
-    HeapTuple tuple = SPI_tuptable->vals[wrapper->current_row];
-    bool isnull;
-    Datum datum = SPI_getbinval(tuple, SPI_tuptable->tupdesc, index + 1, &isnull);
-    Oid typeid = SPI_gettypeid(SPI_tuptable->tupdesc, index + 1);
-    int32 typmod = TupleDescAttr(SPI_tuptable->tupdesc, index + 1)->atttypmod;
-    Oid collation = TupleDescAttr(SPI_tuptable->tupdesc, index + 1)->attcollation;
-
-    pgvalue_t *v = pgvalue_create(datum, typeid, typmod, collation, isnull);
-    return (dbvalue_t*)v;
-}
-
-int database_column_bytes (dbvm_t *vm, int index) {
-    if (!vm) return 0;
-
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
-
-    if (!SPI_tuptable || wrapper->current_row >= SPI_processed) return 0;
-
-    HeapTuple tuple = SPI_tuptable->vals[wrapper->current_row];
-    bool isnull;
-    Datum datum = SPI_getbinval(tuple, SPI_tuptable->tupdesc, index + 1, &isnull);
-
-    if (isnull) return 0;
-
-    Oid typeid = SPI_gettypeid(SPI_tuptable->tupdesc, index + 1);
-    if (typeid == BYTEAOID) {
-        bytea *ba = DatumGetByteaP(datum);
-        return VARSIZE(ba) - VARHDRSZ;
-    }
-
-    // For text, return string length
-    text *txt = DatumGetTextP(datum);
-    return VARSIZE(txt) - VARHDRSZ;
-}
-
-int database_column_type (dbvm_t *vm, int index) {
-    if (!vm || !SPI_tuptable || !SPI_tuptable->tupdesc) return DBTYPE_NULL;
-
-    pg_stmt_wrapper_t *wrapper = (pg_stmt_wrapper_t*)vm;
-
-    if (index >= SPI_tuptable->tupdesc->natts) return DBTYPE_NULL;
-
-    if (wrapper->current_row < 0 || wrapper->current_row >= (int)SPI_processed) {
-        elog(DEBUG1,  "databasevm_step no rows current_row=%d processed=%lu", wrapper->current_row, (unsigned long)SPI_processed);
-        return DBTYPE_NULL;
-    }
-
-    // Check if the value is NULL
-    bool isnull;
-    HeapTuple tuple = SPI_tuptable->vals[wrapper->current_row];
-    SPI_getbinval(tuple, SPI_tuptable->tupdesc, index + 1, &isnull);
-
-    if (isnull) return DBTYPE_NULL;
-
-    // Value is not NULL, return type based on column definition
-    Oid typeid = SPI_gettypeid(SPI_tuptable->tupdesc, index + 1);
-
-    switch (typeid) {
-        case INT2OID:
-        case INT4OID:
-        case INT8OID:
-            return DBTYPE_INTEGER;
-        case FLOAT4OID:
-        case FLOAT8OID:
-        case NUMERICOID:
-            return DBTYPE_FLOAT;
-        case TEXTOID:
-        case VARCHAROID:
-        case BPCHAROID:
-            return DBTYPE_TEXT;
-        case BYTEAOID:
-            return DBTYPE_BLOB;
-        default:
-            return DBTYPE_TEXT;  // Default to text
-    }
 }
 
 // MARK: - SAVEPOINTS -

@@ -344,7 +344,7 @@ int cloudsync_dbversion_rebuild (cloudsync_context *data) {
     if (!sql) return DBRES_NOMEM;
     DEBUG_SQL("db_version_stmt: %s", sql);
     
-    int rc = database_prepare(data, sql, (void **)&data->db_version_stmt, DBFLAG_PERSISTENT);
+    int rc = databasevm_prepare(data, sql, (void **)&data->db_version_stmt, DBFLAG_PERSISTENT);
     DEBUG_STMT("db_version_stmt %p", data->db_version_stmt);
     cloudsync_memory_free(sql);
     return rc;
@@ -468,14 +468,14 @@ int cloudsync_add_dbvms (cloudsync_context *data) {
     DEBUG_DBFUNCTION("cloudsync_add_stmts");
     
     if (data->data_version_stmt == NULL) {
-        int rc = database_prepare(data, SQL_DATA_VERSION, (void **)&data->data_version_stmt, DBFLAG_PERSISTENT);
+        int rc = databasevm_prepare(data, SQL_DATA_VERSION, (void **)&data->data_version_stmt, DBFLAG_PERSISTENT);
         DEBUG_STMT("data_version_stmt %p", data->data_version_stmt);
         if (rc != DBRES_OK) return rc;
         DEBUG_SQL("data_version_stmt: %s", SQL_DATA_VERSION);
     }
     
     if (data->schema_version_stmt == NULL) {
-        int rc = database_prepare(data, SQL_SCHEMA_VERSION, (void **)&data->schema_version_stmt, DBFLAG_PERSISTENT);
+        int rc = databasevm_prepare(data, SQL_SCHEMA_VERSION, (void **)&data->schema_version_stmt, DBFLAG_PERSISTENT);
         DEBUG_STMT("schema_version_stmt %p", data->schema_version_stmt);
         if (rc != DBRES_OK) return rc;
         DEBUG_SQL("schema_version_stmt: %s", SQL_SCHEMA_VERSION);
@@ -485,7 +485,7 @@ int cloudsync_add_dbvms (cloudsync_context *data) {
         // get and set index of the site_id
         // in SQLite, we can’t directly combine an INSERT and a SELECT to both insert a row and return an identifier (rowid) in a single statement,
         // however, we can use a workaround by leveraging the INSERT statement with ON CONFLICT DO UPDATE and then combining it with RETURNING rowid
-        int rc = database_prepare(data, SQL_SITEID_GETSET_ROWID_BY_SITEID, (void **)&data->getset_siteid_stmt, DBFLAG_PERSISTENT);
+        int rc = databasevm_prepare(data, SQL_SITEID_GETSET_ROWID_BY_SITEID, (void **)&data->getset_siteid_stmt, DBFLAG_PERSISTENT);
         DEBUG_STMT("getset_siteid_stmt %p", data->getset_siteid_stmt);
         if (rc != DBRES_OK) return rc;
         DEBUG_SQL("getset_siteid_stmt: %s", SQL_SITEID_GETSET_ROWID_BY_SITEID);
@@ -682,7 +682,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_pkexists_stmt: %s", sql);
     
-    rc = database_prepare(data, sql, (void **)&table->meta_pkexists_stmt, DBFLAG_PERSISTENT);
+    rc = databasevm_prepare(data, sql, (void **)&table->meta_pkexists_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
@@ -691,7 +691,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_sentinel_update_stmt: %s", sql);
     
-    rc = database_prepare(data, sql, (void **)&table->meta_sentinel_update_stmt, DBFLAG_PERSISTENT);
+    rc = databasevm_prepare(data, sql, (void **)&table->meta_sentinel_update_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
@@ -700,7 +700,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_sentinel_insert_stmt: %s", sql);
     
-    rc = database_prepare(data, sql, (void **)&table->meta_sentinel_insert_stmt, DBFLAG_PERSISTENT);
+    rc = databasevm_prepare(data, sql, (void **)&table->meta_sentinel_insert_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
 
@@ -709,7 +709,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_row_insert_update_stmt: %s", sql);
     
-    rc = database_prepare(data, sql, (void **)&table->meta_row_insert_update_stmt, DBFLAG_PERSISTENT);
+    rc = databasevm_prepare(data, sql, (void **)&table->meta_row_insert_update_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
@@ -718,7 +718,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_row_drop_stmt: %s", sql);
     
-    rc = database_prepare(data, sql, (void **)&table->meta_row_drop_stmt, DBFLAG_PERSISTENT);
+    rc = databasevm_prepare(data, sql, (void **)&table->meta_row_drop_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
@@ -728,7 +728,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_update_move_stmt: %s", sql);
     
-    rc = database_prepare(data, sql, (void **)&table->meta_update_move_stmt, DBFLAG_PERSISTENT);
+    rc = databasevm_prepare(data, sql, (void **)&table->meta_update_move_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
@@ -737,7 +737,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_local_cl_stmt: %s", sql);
     
-    rc = database_prepare(data, sql, (void **)&table->meta_local_cl_stmt, DBFLAG_PERSISTENT);
+    rc = databasevm_prepare(data, sql, (void **)&table->meta_local_cl_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
@@ -746,7 +746,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_winner_clock_stmt: %s", sql);
     
-    rc = database_prepare(data, sql, (void **)&table->meta_winner_clock_stmt, DBFLAG_PERSISTENT);
+    rc = databasevm_prepare(data, sql, (void **)&table->meta_winner_clock_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
@@ -754,7 +754,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_merge_delete_drop: %s", sql);
     
-    rc = database_prepare(data, sql, (void **)&table->meta_merge_delete_drop, DBFLAG_PERSISTENT);
+    rc = databasevm_prepare(data, sql, (void **)&table->meta_merge_delete_drop, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
@@ -763,7 +763,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_zero_clock_stmt: %s", sql);
     
-    rc = database_prepare(data, sql, (void **)&table->meta_zero_clock_stmt, DBFLAG_PERSISTENT);
+    rc = databasevm_prepare(data, sql, (void **)&table->meta_zero_clock_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
@@ -772,7 +772,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_col_version_stmt: %s", sql);
     
-    rc = database_prepare(data, sql, (void **)&table->meta_col_version_stmt, DBFLAG_PERSISTENT);
+    rc = databasevm_prepare(data, sql, (void **)&table->meta_col_version_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
@@ -781,7 +781,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_site_id_stmt: %s", sql);
     
-    rc = database_prepare(data, sql, (void **)&table->meta_site_id_stmt, DBFLAG_PERSISTENT);
+    rc = databasevm_prepare(data, sql, (void **)&table->meta_site_id_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
@@ -793,7 +793,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
         if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
         DEBUG_SQL("real_col_values_stmt: %s", sql);
         
-        rc = database_prepare(data, sql, (void **)&table->real_col_values_stmt, DBFLAG_PERSISTENT);
+        rc = databasevm_prepare(data, sql, (void **)&table->real_col_values_stmt, DBFLAG_PERSISTENT);
         cloudsync_memory_free(sql);
         if (rc != DBRES_OK) goto cleanup;
     }
@@ -802,7 +802,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("real_merge_delete: %s", sql);
     
-    rc = database_prepare(data, sql, (void **)&table->real_merge_delete_stmt, DBFLAG_PERSISTENT);
+    rc = databasevm_prepare(data, sql, (void **)&table->real_merge_delete_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
@@ -810,7 +810,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("real_merge_sentinel: %s", sql);
     
-    rc = database_prepare(data, sql, (void **)&table->real_merge_sentinel_stmt, DBFLAG_PERSISTENT);
+    rc = databasevm_prepare(data, sql, (void **)&table->real_merge_sentinel_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
@@ -880,7 +880,7 @@ int table_add_to_context_cb (void *xdata, int ncols, char **values, char **names
         if (!sql) return DBRES_NOMEM;
         DEBUG_SQL("col_merge_stmt[%d]: %s", index, sql);
         
-        int rc = database_prepare(data, sql, (void **)&table->col_merge_stmt[index], DBFLAG_PERSISTENT);
+        int rc = databasevm_prepare(data, sql, (void **)&table->col_merge_stmt[index], DBFLAG_PERSISTENT);
         cloudsync_memory_free(sql);
         if (rc != DBRES_OK) return rc;
         if (!table->col_merge_stmt[index]) return DBRES_MISUSE;
@@ -889,7 +889,7 @@ int table_add_to_context_cb (void *xdata, int ncols, char **values, char **names
         if (!sql) return DBRES_NOMEM;
         DEBUG_SQL("col_value_stmt[%d]: %s", index, sql);
         
-        rc = database_prepare(data, sql, (void **)&table->col_value_stmt[index], DBFLAG_PERSISTENT);
+        rc = databasevm_prepare(data, sql, (void **)&table->col_value_stmt[index], DBFLAG_PERSISTENT);
         cloudsync_memory_free(sql);
         if (rc != DBRES_OK) return rc;
         if (!table->col_value_stmt[index]) return DBRES_MISUSE;
@@ -987,7 +987,7 @@ dbvm_t *cloudsync_colvalue_stmt (cloudsync_context *data, const char *tbl_name, 
             *persistent = true;
         } else {
             char *sql = table_build_value_sql(table, "*");
-            database_prepare(data, sql, (void **)&vm, 0);
+            databasevm_prepare(data, sql, (void **)&vm, 0);
             cloudsync_memory_free(sql);
             *persistent = false;
         }
@@ -1742,7 +1742,7 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     // The old plan does many decodes per candidate and can’t use an index to rule out matches quickly—so it burns CPU and I/O.
     
     sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL, pkvalues_identifiers, table_name, table_name);
-    rc = database_prepare(data, sql, (void **)&vm, DBFLAG_PERSISTENT);
+    rc = databasevm_prepare(data, sql, (void **)&vm, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
      
@@ -2158,7 +2158,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     
     // precompile the insert statement
     dbvm_t *vm = NULL;
-    int rc = database_prepare(data, SQL_CHANGES_INSERT_ROW, &vm, 0);
+    int rc = databasevm_prepare(data, SQL_CHANGES_INSERT_ROW, &vm, 0);
     if (rc != DBRES_OK) {
         if (clone) cloudsync_memory_free(clone);
         return cloudsync_set_error(data, "Error on cloudsync_payload_apply: error while compiling SQL statement", rc);

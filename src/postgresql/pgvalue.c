@@ -31,6 +31,8 @@ static bool pgvalue_is_varlena(Oid typeid) {
 
 pgvalue_t *pgvalue_create(Datum datum, Oid typeid, int32 typmod, Oid collation, bool isnull) {
     pgvalue_t *v = cloudsync_memory_zeroalloc(sizeof(pgvalue_t));
+    if (!v) return NULL;
+    
     v->datum = datum;
     v->typeid = typeid;
     v->typmod = typmod;

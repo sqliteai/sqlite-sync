@@ -91,7 +91,7 @@ int database_errcode (cloudsync_context *data);
 const char *database_errmsg (cloudsync_context *data);
 
 // VM
-int  database_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, int flags);
+int  databasevm_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, int flags);
 int  databasevm_step (dbvm_t *vm);
 void databasevm_finalize (dbvm_t *vm);
 void databasevm_reset (dbvm_t *vm);
