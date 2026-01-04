@@ -1079,38 +1079,38 @@ int databasevm_step (dbvm_t *vm) {
         // First step: decide whether to use portal.
         // Even for INSERT/UPDATE/DELETE ... RETURNING you WANT a portal.
         // Strategy:
-        // - Try to open a cursor. If that succeeds, treat as row-returning.
-        // - If it fails with "not a SELECT" kind of condition, execute once.
+        // - Only open a cursor if the plan supports it (avoid "cannot open INSERT query as cursor").
+        // - Otherwise execute once as a non-row-returning statement.
         if (!stmt->executed_nonselect) {
-            // try cursor open
-            stmt->portal = NULL;
-            if (stmt->nparams == 0) stmt->portal = SPI_cursor_open(NULL, stmt->plan, NULL, NULL, false);
-            else stmt->portal = SPI_cursor_open(NULL, stmt->plan, stmt->values, stmt->nulls, false);
+            if (SPI_is_cursor_plan(stmt->plan)) {
+                // try cursor open
+                stmt->portal = NULL;
+                if (stmt->nparams == 0) stmt->portal = SPI_cursor_open(NULL, stmt->plan, NULL, NULL, false);
+                else stmt->portal = SPI_cursor_open(NULL, stmt->plan, stmt->values, stmt->nulls, false);
 
-            if (stmt->portal != NULL) {
-                stmt->portal_open = true;
-                
-                // fetch first row
-                clear_fetch_batch(stmt);
-                SPI_cursor_fetch(stmt->portal, true, 1);
-                
-                if (SPI_processed == 0) {
+                if (stmt->portal != NULL) {
+                    stmt->portal_open = true;
+                    
+                    // fetch first row
                     clear_fetch_batch(stmt);
-                    close_portal(stmt);
-                    return DBRES_DONE;
+                    SPI_cursor_fetch(stmt->portal, true, 1);
+                    
+                    if (SPI_processed == 0) {
+                        clear_fetch_batch(stmt);
+                        close_portal(stmt);
+                        return DBRES_DONE;
+                    }
+                    
+                    MemoryContextReset(stmt->row_mcxt);
+                    
+                    stmt->last_tuptable = SPI_tuptable;
+                    stmt->current_tupdesc = stmt->last_tuptable->tupdesc;
+                    stmt->current_tuple = stmt->last_tuptable->vals[0];
+                    return DBRES_ROW;
                 }
-                
-                MemoryContextReset(stmt->row_mcxt);
-                
-                stmt->last_tuptable = SPI_tuptable;
-                stmt->current_tupdesc = stmt->last_tuptable->tupdesc;
-                stmt->current_tuple = stmt->last_tuptable->vals[0];
-                return DBRES_ROW;
             }
 
-            // Cursor open failed -> execute once (non-row-returning or other failure).
-            // If it failed for reasons other than "not a cursorable statement", SPI_result may help,
-            // but easiest is: attempt execute and let it throw if bad.
+            // Execute once (non-row-returning or cursor open failed).
             if (stmt->nparams == 0) SPI_execute_plan(stmt->plan, NULL, NULL, false, 0);
             else SPI_execute_plan(stmt->plan, stmt->values, stmt->nulls, false, 0);
 
