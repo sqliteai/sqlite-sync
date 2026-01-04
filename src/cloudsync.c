@@ -504,10 +504,15 @@ int cloudsync_set_error (cloudsync_context *data, const char *err_user, int err_
         snprintf(data->errmsg, sizeof(data->errmsg), "%s", database_errmsg(data));
     } else {
         const char *db_error = database_errmsg(data);
+        char db_error_copy[sizeof(data->errmsg)];
         int rc = database_errcode(data);
         if (rc == DBRES_OK) {
             snprintf(data->errmsg, sizeof(data->errmsg), "%s", err_user);
         } else {
+            if (db_error == data->errmsg) {
+                snprintf(db_error_copy, sizeof(db_error_copy), "%s", db_error);
+                db_error = db_error_copy;
+            }
             snprintf(data->errmsg, sizeof(data->errmsg), "%s (%s)", err_user, db_error);
         }
     }
