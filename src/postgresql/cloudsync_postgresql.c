@@ -255,8 +255,10 @@ static text *cloudsync_init_internal(cloudsync_context *data, const char *table,
             }
         } else {
             // In case of error, rollback transaction
+            char err[1024];
+            snprintf(err, sizeof(err), "%s", cloudsync_errmsg(data));
             database_rollback_savepoint(data, "cloudsync_init");
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", err)));
         }
 
         cloudsync_update_schema_hash(data);
