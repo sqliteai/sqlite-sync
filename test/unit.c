@@ -215,7 +215,7 @@ int unit_debug (sqlite3 *db, bool print_result) {
     int counter = 0;
     while ((stmt = sqlite3_next_stmt(db, stmt))) {
         ++counter;
-        if (print_result) printf("Unfinalized stmt statement: %p\n", stmt);
+        if (print_result) printf("Unfinalized stmt statement: %p (%s)\n", stmt, sqlite3_sql(stmt));
     }
     return counter;
 }
@@ -383,17 +383,7 @@ const char *build_huge_table (void) {
     return sql;
 }
 
-sqlite3 *close_db (sqlite3 *db) {
-    if (db) {
-        sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
-        unit_debug(db, true);
-        int rc = sqlite3_close(db);
-        if (rc != SQLITE_OK) printf("Error while closing db (%d)\n", rc);
-    }
-    return NULL;
-}
-
-int close_db_v2 (sqlite3 *db) {
+int close_db (sqlite3 *db) {
     int counter = 0;
     if (db) {
         sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
@@ -1013,7 +1003,8 @@ bool do_test_vtab2 (void) {
     
 finalize:
     if (rc != SQLITE_OK) printf("do_test_vtab2 error: %s\n", sqlite3_errmsg(db));
-    db = close_db(db);
+    close_db(db);
+    db = NULL;
     return result;
 }
 
@@ -1598,6 +1589,37 @@ finalize:
     return result;
 }
 
+bool do_test_single_pk (bool print_result) {
+    bool result = false;
+    
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    // manually load extension
+    sqlite3_cloudsync_init(db, NULL, NULL);
+    
+    rc = sqlite3_exec(db, "CREATE TABLE single_pk_test (col1 INTEGER PRIMARY KEY NOT NULL);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    // the following function should fail
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('single_pk_test');", NULL, NULL, NULL);
+    if (rc == SQLITE_OK) return false;
+    
+    // the following function should succedd
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('single_pk_test', 'cls', 1);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return false;
+    result = true;
+    
+    // cleanup newly created table
+    sqlite3_exec(db, "SELECT cloudsync_cleanup('single_pk_test');", NULL, NULL, NULL);
+    
+cleanup:
+    if (rc != SQLITE_OK && print_result) printf("do_test_single_pk error: %s\n", sqlite3_errmsg(db));
+    close_db(db);
+    return result;
+}
+
 bool do_test_pk (sqlite3 *db, int ntest, bool print_result) {
     int rc = SQLITE_OK;
     sqlite3_stmt *stmt = NULL;
@@ -2101,7 +2123,8 @@ bool do_test_dbutils (void) {
 
 finalize:
     if (rc != SQLITE_OK) printf("%s\n", sqlite3_errmsg(db));
-    db = close_db(db);
+    close_db(db);
+    db = NULL;
     if (data) cloudsync_context_free(data);
     return (rc == SQLITE_OK);
 }
@@ -2580,7 +2603,7 @@ finalize:
                 printf("do_test_merge error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge error: db %d has %d unterminated statements\n", i, counter);
@@ -2712,7 +2735,7 @@ finalize:
                 printf("do_test_merge error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge error: db %d has %d unterminated statements\n", i, counter);
@@ -3462,7 +3485,7 @@ finalize:
                 printf("do_test_merge_two_tables error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_two_tables error: db %d has %d unterminated statements\n", i, counter);
@@ -3561,7 +3584,7 @@ finalize:
                 printf("do_test_merge_conflicting_pkeys error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_conflicting_pkeys error: db %d has %d unterminated statements\n", i, counter);
@@ -3655,7 +3678,7 @@ finalize:
                 printf("do_test_merge_large_dataset error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_large_dataset error: db %d has %d unterminated statements\n", i, counter);
@@ -3774,7 +3797,7 @@ finalize:
                 printf("do_test_merge_nested_transactions error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_nested_transactions error: db %d has %d unterminated statements\n", i, counter);
@@ -3866,7 +3889,7 @@ finalize:
                 printf("do_test_merge_three_way error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_three_way error: db %d has %d unterminated statements\n", i, counter);
@@ -3960,7 +3983,7 @@ finalize:
                 printf("do_test_merge_null_values error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_null_values error: db %d has %d unterminated statements\n", i, counter);
@@ -4048,7 +4071,7 @@ finalize:
                 printf("do_test_merge_blob_data error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_blob_data error: db %d has %d unterminated statements\n", i, counter);
@@ -4176,7 +4199,7 @@ finalize:
                 printf("do_test_merge_mixed_operations error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_mixed_operations error: db %d has %d unterminated statements\n", i, counter);
@@ -4271,7 +4294,7 @@ finalize:
                 printf("do_test_merge_hub_spoke error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_hub_spoke error: db %d has %d unterminated statements\n", i, counter);
@@ -4363,7 +4386,7 @@ finalize:
                 printf("do_test_merge_timestamp_precision error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_timestamp_precision error: db %d has %d unterminated statements\n", i, counter);
@@ -4454,7 +4477,7 @@ finalize:
                 printf("do_test_merge_partial_failure error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_partial_failure error: db %d has %d unterminated statements\n", i, counter);
@@ -4563,7 +4586,7 @@ finalize:
                 printf("do_test_merge_rollback_scenarios error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_rollback_scenarios error: db %d has %d unterminated statements\n", i, counter);
@@ -4658,7 +4681,7 @@ finalize:
                 printf("do_test_merge_circular error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_circular error: db %d has %d unterminated statements\n", i, counter);
@@ -4785,7 +4808,7 @@ finalize:
                 printf("do_test_merge_foreign_keys error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_foreign_keys error: db %d has %d unterminated statements\n", i, counter);
@@ -4895,7 +4918,7 @@ finalize:
                 printf("do_test_merge_triggers error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_triggers error: db %d has %d unterminated statements\n", i, counter);
@@ -5031,7 +5054,7 @@ finalize:
                 printf("do_test_merge_index_consistency error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_index_consistency error: db %d has %d unterminated statements\n", i, counter);
@@ -5141,7 +5164,7 @@ finalize:
                 printf("do_test_merge_json_columns error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_json_columns error: db %d has %d unterminated statements\n", i, counter);
@@ -5260,7 +5283,7 @@ finalize:
                 printf("do_test_merge_concurrent_attempts error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_concurrent_attempts error: db %d has %d unterminated statements\n", i, counter);
@@ -5541,7 +5564,7 @@ finalize:
                 printf("do_test_merge_composite_pk_10_clients error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge_composite_pk_10_clients error: db %d has %d unterminated statements\n", i, counter);
@@ -5974,7 +5997,7 @@ finalize:
                 printf("do_test_merge error: db %d is in transaction\n", i);
             }
             
-            int counter = close_db_v2(db[i]);
+            int counter = close_db(db[i]);
             if (counter > 0) {
                 result = false;
                 printf("do_test_merge error: db %d has %d unterminated statements\n", i, counter);
@@ -6210,7 +6233,8 @@ cleanup:
         fprintf(stderr, "do_test_android_initial_payload error: %s\n", errmsg);
         sqlite3_free(errmsg);
     }
-    if (db) db = close_db(db);
+    if (db) close_db(db);
+    db = NULL;
 
     return success;
 }
@@ -6245,7 +6269,8 @@ int main (int argc, const char * argv[]) {
     result += test_report("DBUtils Test:", do_test_dbutils());
     result += test_report("Minor Test:", do_test_others(db));
     result += test_report("Test Error Cases:", do_test_error_cases(db));
-
+    result += test_report("Test Single PK:", do_test_single_pk(print_result));
+    
     int test_mask = TEST_INSERT | TEST_UPDATE | TEST_DELETE;
     int table_mask = TEST_PRIKEYS | TEST_NOCOLS;
     #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
@@ -6265,7 +6290,8 @@ int main (int argc, const char * argv[]) {
     result += test_report("Payload Buffer Test (10MB):", do_test_payload_buffer(10 * 1024 * 1024));
 
     // close local database
-    db = close_db(db);
+    close_db(db);
+    db = NULL;
     
     // simulate remote merge
     result += test_report("Merge Test:", do_test_merge(3, print_result, cleanup_databases));
@@ -6314,7 +6340,8 @@ int main (int argc, const char * argv[]) {
     
 finalize:
     if (rc != SQLITE_OK) printf("%s (%d)\n", (db) ? sqlite3_errmsg(db) : "N/A", rc);
-    db = close_db(db);
+    close_db(db);
+    db = NULL;
     
     cloudsync_memory_finalize();
 

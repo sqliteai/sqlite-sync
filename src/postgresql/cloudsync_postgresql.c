@@ -32,14 +32,6 @@
 
 PG_MODULE_MAGIC;
 
-// ============================================================================
-// Function Declarations
-// ============================================================================
-
-// Extension entry points
-void _PG_init(void);
-void _PG_fini(void);
-
 // Note: PG_FUNCTION_INFO_V1 macros are declared before each function implementation below
 // They should NOT be duplicated here to avoid redefinition errors
 
@@ -67,7 +59,7 @@ static cloudsync_context *get_cloudsync_context(void) {
 
 // MARK: - Extension Entry Points -
 
-void _PG_init(void) {
+void _PG_init (void) {
     // Extension initialization
     // SPI will be connected per-function call
     elog(DEBUG1, "CloudSync extension loading");
@@ -103,7 +95,7 @@ void _PG_init(void) {
     PG_END_TRY();
 }
 
-void _PG_fini(void) {
+void _PG_fini (void) {
     // Extension cleanup
     elog(DEBUG1, "CloudSync extension unloading");
 
@@ -194,7 +186,7 @@ Datum cloudsync_db_version (PG_FUNCTION_ARGS) {
 
 // cloudsync_db_version_next([merging_version]) - Get next database version
 PG_FUNCTION_INFO_V1(cloudsync_db_version_next);
-Datum cloudsync_db_version_next(PG_FUNCTION_ARGS) {
+Datum cloudsync_db_version_next (PG_FUNCTION_ARGS) {
     cloudsync_context *data = get_cloudsync_context();
 
     int64_t merging_version = CLOUDSYNC_VALUE_NOTSET;
@@ -227,7 +219,7 @@ Datum cloudsync_db_version_next(PG_FUNCTION_ARGS) {
 
 // Internal helper for cloudsync_init - replicates dbsync_init logic from SQLite
 // Returns site_id as text on success, raises error on failure
-static text *cloudsync_init_internal(cloudsync_context *data, const char *table, const char *algo, bool skip_int_pk_check) {
+static text *cloudsync_init_internal (cloudsync_context *data, const char *table, const char *algo, bool skip_int_pk_check) {
     text *result = NULL;
 
     // Connect SPI for database operations
@@ -336,7 +328,7 @@ Datum cloudsync_enable (PG_FUNCTION_ARGS) {
 
 // cloudsync_disable - Disable sync for a table
 PG_FUNCTION_INFO_V1(cloudsync_disable);
-Datum cloudsync_disable(PG_FUNCTION_ARGS) {
+Datum cloudsync_disable (PG_FUNCTION_ARGS) {
     if (PG_ARGISNULL(0)) {
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name cannot be NULL")));
     }
@@ -348,7 +340,7 @@ Datum cloudsync_disable(PG_FUNCTION_ARGS) {
 
 // cloudsync_is_enabled - Check if table is sync-enabled
 PG_FUNCTION_INFO_V1(cloudsync_is_enabled);
-Datum cloudsync_is_enabled(PG_FUNCTION_ARGS) {
+Datum cloudsync_is_enabled (PG_FUNCTION_ARGS) {
     if (PG_ARGISNULL(0)) {
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name cannot be NULL")));
     }
@@ -365,7 +357,7 @@ Datum cloudsync_is_enabled(PG_FUNCTION_ARGS) {
 
 // cloudsync_cleanup - Cleanup orphaned metadata for a table
 PG_FUNCTION_INFO_V1(pg_cloudsync_cleanup);
-Datum pg_cloudsync_cleanup(PG_FUNCTION_ARGS) {
+Datum pg_cloudsync_cleanup (PG_FUNCTION_ARGS) {
     if (PG_ARGISNULL(0)) {
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name cannot be NULL")));
     }
@@ -399,7 +391,7 @@ Datum pg_cloudsync_cleanup(PG_FUNCTION_ARGS) {
 
 // cloudsync_terminate - Terminate CloudSync
 PG_FUNCTION_INFO_V1(pg_cloudsync_terminate);
-Datum pg_cloudsync_terminate(PG_FUNCTION_ARGS) {
+Datum pg_cloudsync_terminate (PG_FUNCTION_ARGS) {
     UNUSED_PARAMETER(fcinfo);
 
     cloudsync_context *data = get_cloudsync_context();
@@ -427,7 +419,7 @@ Datum pg_cloudsync_terminate(PG_FUNCTION_ARGS) {
 
 // cloudsync_set - Set global configuration
 PG_FUNCTION_INFO_V1(cloudsync_set);
-Datum cloudsync_set(PG_FUNCTION_ARGS) {
+Datum cloudsync_set (PG_FUNCTION_ARGS) {
     const char *key = NULL;
     const char *value = NULL;
 
@@ -468,7 +460,7 @@ Datum cloudsync_set(PG_FUNCTION_ARGS) {
 
 // cloudsync_set_table - Set table-level configuration
 PG_FUNCTION_INFO_V1(cloudsync_set_table);
-Datum cloudsync_set_table(PG_FUNCTION_ARGS) {
+Datum cloudsync_set_table (PG_FUNCTION_ARGS) {
     const char *tbl = NULL;
     const char *key = NULL;
     const char *value = NULL;
@@ -506,7 +498,7 @@ Datum cloudsync_set_table(PG_FUNCTION_ARGS) {
 
 // cloudsync_set_column - Set column-level configuration
 PG_FUNCTION_INFO_V1(cloudsync_set_column);
-Datum cloudsync_set_column(PG_FUNCTION_ARGS) {
+Datum cloudsync_set_column (PG_FUNCTION_ARGS) {
     const char *tbl = NULL;
     const char *col = NULL;
     const char *key = NULL;
@@ -552,7 +544,7 @@ Datum cloudsync_set_column(PG_FUNCTION_ARGS) {
 
 // cloudsync_begin_alter - Begin schema alteration
 PG_FUNCTION_INFO_V1(pg_cloudsync_begin_alter);
-Datum pg_cloudsync_begin_alter(PG_FUNCTION_ARGS) {
+Datum pg_cloudsync_begin_alter (PG_FUNCTION_ARGS) {
     if (PG_ARGISNULL(0)) {
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name cannot be NULL")));
     }
@@ -588,7 +580,7 @@ Datum pg_cloudsync_begin_alter(PG_FUNCTION_ARGS) {
 
 // cloudsync_commit_alter - Commit schema alteration
 PG_FUNCTION_INFO_V1(pg_cloudsync_commit_alter);
-Datum pg_cloudsync_commit_alter(PG_FUNCTION_ARGS) {
+Datum pg_cloudsync_commit_alter (PG_FUNCTION_ARGS) {
     if (PG_ARGISNULL(0)) {
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name cannot be NULL")));
     }
@@ -624,7 +616,7 @@ Datum pg_cloudsync_commit_alter(PG_FUNCTION_ARGS) {
 
 // Aggregate function: cloudsync_payload_encode transition function
 PG_FUNCTION_INFO_V1(cloudsync_payload_encode_transfn);
-Datum cloudsync_payload_encode_transfn(PG_FUNCTION_ARGS) {
+Datum cloudsync_payload_encode_transfn (PG_FUNCTION_ARGS) {
     MemoryContext aggContext;
     cloudsync_payload_context *payload = NULL;
 
@@ -665,7 +657,7 @@ Datum cloudsync_payload_encode_transfn(PG_FUNCTION_ARGS) {
 
 // Aggregate function: cloudsync_payload_encode finalize function
 PG_FUNCTION_INFO_V1(cloudsync_payload_encode_finalfn);
-Datum cloudsync_payload_encode_finalfn(PG_FUNCTION_ARGS) {
+Datum cloudsync_payload_encode_finalfn (PG_FUNCTION_ARGS) {
     if (PG_ARGISNULL(0)) {
         PG_RETURN_NULL();
     }
@@ -696,7 +688,7 @@ Datum cloudsync_payload_encode_finalfn(PG_FUNCTION_ARGS) {
 
 // Payload decode - Apply changes from payload
 PG_FUNCTION_INFO_V1(cloudsync_payload_decode);
-Datum cloudsync_payload_decode(PG_FUNCTION_ARGS) {
+Datum cloudsync_payload_decode (PG_FUNCTION_ARGS) {
     if (PG_ARGISNULL(0)) {
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("payload cannot be NULL")));
     }
@@ -741,7 +733,7 @@ Datum cloudsync_payload_decode(PG_FUNCTION_ARGS) {
 
 // Alias for payload_decode
 PG_FUNCTION_INFO_V1(pg_cloudsync_payload_apply);
-Datum pg_cloudsync_payload_apply(PG_FUNCTION_ARGS) {
+Datum pg_cloudsync_payload_apply (PG_FUNCTION_ARGS) {
     return cloudsync_payload_decode(fcinfo);
 }
 
@@ -749,7 +741,7 @@ Datum pg_cloudsync_payload_apply(PG_FUNCTION_ARGS) {
 
 // cloudsync_is_sync - Check if table has sync metadata
 PG_FUNCTION_INFO_V1(cloudsync_is_sync);
-Datum cloudsync_is_sync(PG_FUNCTION_ARGS) {
+Datum cloudsync_is_sync (PG_FUNCTION_ARGS) {
     cloudsync_context *data = get_cloudsync_context();
 
     if (cloudsync_insync(data)) {
@@ -769,7 +761,7 @@ Datum cloudsync_is_sync(PG_FUNCTION_ARGS) {
 
 // cloudsync_seq - Get sequence number
 PG_FUNCTION_INFO_V1(cloudsync_seq);
-Datum cloudsync_seq(PG_FUNCTION_ARGS) {
+Datum cloudsync_seq (PG_FUNCTION_ARGS) {
     UNUSED_PARAMETER(fcinfo);
 
     cloudsync_context *data = get_cloudsync_context();
@@ -780,7 +772,7 @@ Datum cloudsync_seq(PG_FUNCTION_ARGS) {
 
 // cloudsync_pk_encode - Encode primary key from variadic arguments
 PG_FUNCTION_INFO_V1(cloudsync_pk_encode);
-Datum cloudsync_pk_encode(PG_FUNCTION_ARGS) {
+Datum cloudsync_pk_encode (PG_FUNCTION_ARGS) {
     int argc = 0;
     pgvalue_t **argv = NULL;
 
@@ -809,7 +801,7 @@ Datum cloudsync_pk_encode(PG_FUNCTION_ARGS) {
 
 // cloudsync_pk_decode - Decode primary key component at given index
 PG_FUNCTION_INFO_V1(cloudsync_pk_decode);
-Datum cloudsync_pk_decode(PG_FUNCTION_ARGS) {
+Datum cloudsync_pk_decode (PG_FUNCTION_ARGS) {
     // TODO: Implement pk_decode with callback pattern
     ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_pk_decode not yet implemented - requires callback implementation")));
     PG_RETURN_NULL();
@@ -818,7 +810,7 @@ Datum cloudsync_pk_decode(PG_FUNCTION_ARGS) {
 // cloudsync_insert - Internal insert handler
 // Signature: cloudsync_insert(table_name text, VARIADIC pk_values anyarray)
 PG_FUNCTION_INFO_V1(cloudsync_insert);
-Datum cloudsync_insert(PG_FUNCTION_ARGS) {
+Datum cloudsync_insert (PG_FUNCTION_ARGS) {
     if (PG_ARGISNULL(0)) {
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name cannot be NULL")));
     }
@@ -934,20 +926,20 @@ Datum cloudsync_insert(PG_FUNCTION_ARGS) {
 
 // Aggregate function: cloudsync_update (not implemented - complex)
 PG_FUNCTION_INFO_V1(cloudsync_update);
-Datum cloudsync_update(PG_FUNCTION_ARGS) {
+Datum cloudsync_update (PG_FUNCTION_ARGS) {
     ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_update not yet implemented - aggregate function")));
     PG_RETURN_NULL();
 }
 
 PG_FUNCTION_INFO_V1(cloudsync_update_transfn);
-Datum cloudsync_update_transfn(PG_FUNCTION_ARGS) {
+Datum cloudsync_update_transfn (PG_FUNCTION_ARGS) {
     // TODO: Implement update aggregate transition function
     ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_update_transfn not yet implemented")));
     PG_RETURN_NULL();
 }
 
 PG_FUNCTION_INFO_V1(cloudsync_update_finalfn);
-Datum cloudsync_update_finalfn(PG_FUNCTION_ARGS) {
+Datum cloudsync_update_finalfn (PG_FUNCTION_ARGS) {
     // TODO: Implement update aggregate finalize function
     ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_update_finalfn not yet implemented")));
     PG_RETURN_NULL();
@@ -955,8 +947,7 @@ Datum cloudsync_update_finalfn(PG_FUNCTION_ARGS) {
 
 // Placeholder - not implemented yet
 PG_FUNCTION_INFO_V1(cloudsync_payload_encode);
-Datum
-cloudsync_payload_encode(PG_FUNCTION_ARGS) {
+Datum cloudsync_payload_encode (PG_FUNCTION_ARGS) {
     ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_payload_encode should not be called directly - use aggregate version")));
     PG_RETURN_NULL();
 }

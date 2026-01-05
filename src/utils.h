@@ -60,7 +60,7 @@
 #define DEBUG_FUNCTION(...)
 #endif
 
-#if CLOUDSYNC_DEBUG_DBFUNCTION
+#if CLOUDSYNC_DEBUG_DBFUNCTIONS
 #define DEBUG_DBFUNCTION(...)               DEBUG_PRINTLN(__VA_ARGS__)
 #else
 #define DEBUG_DBFUNCTION(...)

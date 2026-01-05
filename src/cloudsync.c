@@ -423,7 +423,7 @@ void *cloudsync_siteid (cloudsync_context *data) {
 }
 
 void cloudsync_reset_siteid (cloudsync_context *data) {
-    data->site_id[0] = 0;
+    memset(data->site_id, 0, sizeof(uint8_t) * UUID_LEN);
 }
 
 int cloudsync_load_siteid (cloudsync_context *data) {
@@ -2367,7 +2367,7 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
         return cloudsync_set_error(data, "cloudsync_init requires a non-null table parameter", DBRES_ERROR);
     }
     
-    // avoid allocating heap memory for SQL statements by setting a maximum length of 1900 characters
+    // avoid allocating heap memory for SQL statements by setting a maximum length of 512 characters
     // for table names. This limit is reasonable and helps prevent memory management issues.
     const size_t maxlen = CLOUDSYNC_MAX_TABLENAME_LEN;
     if (strlen(name) > maxlen) {
@@ -2402,7 +2402,7 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
             int npri_keys_int = database_count_int_pk(data, name);
             if (npri_keys_int < 0) return cloudsync_set_dberror(data);
             if (npri_keys == npri_keys_int) {
-                snprintf(buffer, sizeof(buffer), "Table %s uses an single-column INTEGER primary key. For CRDT replication, primary keys must be globally unique. Consider using a TEXT primary key with UUIDs or ULID to avoid conflicts across nodes. If you understand the risk and still want to use this INTEGER primary key, set the third argument of the cloudsync_init function to 1 to skip this check.", name);
+                snprintf(buffer, sizeof(buffer), "Table %s uses a single-column INTEGER primary key. For CRDT replication, primary keys must be globally unique. Consider using a TEXT primary key with UUIDs or ULID to avoid conflicts across nodes. If you understand the risk and still want to use this INTEGER primary key, set the third argument of the cloudsync_init function to 1 to skip this check.", name);
                 return cloudsync_set_error(data, buffer, DBRES_ERROR);
             }
             
@@ -2462,8 +2462,7 @@ int cloudsync_cleanup (cloudsync_context *data, const char *table_name) {
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) return DBRES_OK;
     
-    // TODO: check what happen if cloudsync_cleanup_internal failes (not eveything dropped)
-    // and the table is still in memory?
+    // TODO: check what happen if cloudsync_cleanup_internal failes (not eveything dropped) and the table is still in memory?
     
     int rc = cloudsync_cleanup_internal(data, table);
     if (rc != DBRES_OK) return rc;
