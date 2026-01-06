@@ -244,16 +244,18 @@ static int map_spi_result (int rc) {
     }
 }
 
-static void clear_fetch_batch (pg_stmt_t *stmt) {
+static void clear_fetch_batch(pg_stmt_t *stmt) {
     if (!stmt) return;
-    if (stmt->row_mcxt) MemoryContextReset(stmt->row_mcxt);
-    
+    if (stmt->last_tuptable) {
+        SPI_freetuptable(stmt->last_tuptable);
+        stmt->last_tuptable = NULL;
+    }
     stmt->current_tuple = NULL;
     stmt->current_tupdesc = NULL;
-    stmt->last_tuptable = NULL;
+    if (stmt->row_mcxt) MemoryContextReset(stmt->row_mcxt);
 }
 
-static void close_portal (pg_stmt_t *stmt) {
+static void close_portal(pg_stmt_t *stmt) {
     if (!stmt) return;
     if (stmt->portal) {
         SPI_cursor_close(stmt->portal);
