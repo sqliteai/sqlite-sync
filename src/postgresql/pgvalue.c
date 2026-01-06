@@ -74,15 +74,18 @@ int pgvalue_dbtype(pgvalue_t *v) {
     }
 }
 
-static void pgvalue_vec_push(pgvalue_t ***arr, int *count, int *cap, pgvalue_t *val) {
+static bool pgvalue_vec_push(pgvalue_t ***arr, int *count, int *cap, pgvalue_t *val) {
     if (*cap == 0) {
         *cap = 8;
         *arr = (pgvalue_t **)cloudsync_memory_zeroalloc(sizeof(pgvalue_t *) * (*cap));
+        if (*arr) return false;
     } else if (*count >= *cap) {
         *cap *= 2;
         *arr = (pgvalue_t **)cloudsync_memory_realloc(*arr, sizeof(pgvalue_t *) * (*cap));
+        if (*arr) return false;
     }
     (*arr)[(*count)++] = val;
+    return true;
 }
 
 pgvalue_t **pgvalues_from_array(ArrayType *array, int *out_count) {
