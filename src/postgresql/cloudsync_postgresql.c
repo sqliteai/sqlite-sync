@@ -48,7 +48,9 @@ static cloudsync_context *pg_cloudsync_context = NULL;
 static cloudsync_context *get_cloudsync_context(void) {
     if (pg_cloudsync_context == NULL) {
         // Create context - db_t is not used in PostgreSQL mode
+        MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
         pg_cloudsync_context = cloudsync_context_create(NULL);
+        MemoryContextSwitchTo(old);
         if (!pg_cloudsync_context) {
             ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Not enough memory to create a database context")));
         }
