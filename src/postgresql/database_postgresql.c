@@ -244,7 +244,7 @@ static int map_spi_result (int rc) {
     }
 }
 
-static void clear_fetch_batch(pg_stmt_t *stmt) {
+static void clear_fetch_batch (pg_stmt_t *stmt) {
     if (!stmt) return;
     if (stmt->last_tuptable) {
         SPI_freetuptable(stmt->last_tuptable);
@@ -255,7 +255,7 @@ static void clear_fetch_batch(pg_stmt_t *stmt) {
     if (stmt->row_mcxt) MemoryContextReset(stmt->row_mcxt);
 }
 
-static void close_portal(pg_stmt_t *stmt) {
+static void close_portal (pg_stmt_t *stmt) {
     if (!stmt) return;
     if (stmt->portal) {
         SPI_cursor_close(stmt->portal);
@@ -442,13 +442,9 @@ bool database_system_exists (cloudsync_context *data, const char *name, const ch
     bool exists = false;
 
     if (strcmp(type, "table") == 0) {
-        snprintf(query, sizeof(query),
-                 "SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = '%s'",
-                 name);
+        snprintf(query, sizeof(query), "SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = '%s'", name);
     } else if (strcmp(type, "trigger") == 0) {
-        snprintf(query, sizeof(query),
-                 "SELECT 1 FROM pg_trigger WHERE tgname = '%s'",
-                 name);
+        snprintf(query, sizeof(query), "SELECT 1 FROM pg_trigger WHERE tgname = '%s'", name);
     } else {
         return false;
     }
@@ -540,7 +536,9 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
 
         // Allocate arrays for column names and values
         char **names = cloudsync_memory_alloc(ncols * sizeof(char*));
+        if (!names) return DBRES_NOMEM;
         char **values = cloudsync_memory_alloc(ncols * sizeof(char*));
+        if (!values) {cloudsync_memory_free(names); return DBRES_NOMEM;}
 
         // Get column names
         for (int i = 0; i < ncols; i++) {
@@ -949,8 +947,11 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
         Datum datum = SPI_getbinval(tuple, SPI_tuptable->tupdesc, 1, &isnull);
         if (!isnull) {
             text *txt = DatumGetTextP(datum);
+            MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
             char *name = text_to_cstring(txt);
-            pk_names[i] = cloudsync_string_dup(name);
+            MemoryContextSwitchTo(old);
+            pk_names[i] = (name) ? cloudsync_string_dup(name) : NULL;
+            if (name) pfree(name);
         } else {
             pk_names[i] = NULL;
         }
@@ -1305,20 +1306,21 @@ int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value) {
     
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
     pgvalue_t *v = (pgvalue_t *)value;
-    if (!v) {
+    if (!v || v->isnull) {
         stmt->values[idx] = (Datum)0;
         stmt->types[idx] = TEXTOID;
         stmt->nulls[idx] = 'n';
     } else {
         int16 typlen;
         bool typbyval;
-        MemoryContext old = MemoryContextSwitchTo(stmt->bind_mcxt);
+        
         get_typlenbyval(v->typeid, &typlen, &typbyval);
+        MemoryContext old = MemoryContextSwitchTo(stmt->bind_mcxt);
         Datum dcopy = typbyval ? v->datum : datumCopy(v->datum, typbyval, typlen);
-        stmt->values[idx] = v->isnull ? (Datum)0 : dcopy;
+        stmt->values[idx] = dcopy;
         MemoryContextSwitchTo(old);
         stmt->types[idx] = OidIsValid(v->typeid) ? v->typeid : TEXTOID;
-        stmt->nulls[idx] = v->isnull ? 'n' : ' ';
+        stmt->nulls[idx] = ' ';
     }
     
     if (stmt->nparams < idx + 1) stmt->nparams = idx + 1;
