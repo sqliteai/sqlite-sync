@@ -130,7 +130,7 @@ Datum pg_cloudsync_siteid (PG_FUNCTION_ARGS) {
     }
 
     // Return as bytea (binary UUID)
-    bytea *result = (bytea *)cloudsync_memory_alloc(VARHDRSZ + UUID_LEN);
+    bytea *result = (bytea *)palloc(VARHDRSZ + UUID_LEN);
     SET_VARSIZE(result, VARHDRSZ + UUID_LEN);
     memcpy(VARDATA(result), siteid, UUID_LEN);
 
@@ -146,7 +146,7 @@ Datum cloudsync_uuid (PG_FUNCTION_ARGS) {
     cloudsync_uuid_v7(uuid);
 
     // Return as bytea
-    bytea *result = (bytea *)cloudsync_memory_alloc(VARHDRSZ + UUID_LEN);
+    bytea *result = (bytea *)palloc(VARHDRSZ + UUID_LEN);
     SET_VARSIZE(result, VARHDRSZ + UUID_LEN);
     memcpy(VARDATA(result), uuid, UUID_LEN);
 
@@ -679,7 +679,7 @@ Datum cloudsync_payload_encode_finalfn (PG_FUNCTION_ARGS) {
         PG_RETURN_NULL();
     }
 
-    bytea *result = (bytea *)cloudsync_memory_alloc(VARHDRSZ + blob_size);
+    bytea *result = (bytea *)palloc(VARHDRSZ + blob_size);
     SET_VARSIZE(result, VARHDRSZ + blob_size);
     memcpy(VARDATA(result), blob, blob_size);
 
