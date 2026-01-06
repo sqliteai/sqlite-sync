@@ -540,7 +540,9 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
 
         // Allocate arrays for column names and values
         char **names = cloudsync_memory_alloc(ncols * sizeof(char*));
+        if (!names) return DBRES_NOMEM;
         char **values = cloudsync_memory_alloc(ncols * sizeof(char*));
+        if (!values) {cloudsync_memory_free(names); return DBRES_NOMEM;}
 
         // Get column names
         for (int i = 0; i < ncols; i++) {
@@ -949,8 +951,7 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
         Datum datum = SPI_getbinval(tuple, SPI_tuptable->tupdesc, 1, &isnull);
         if (!isnull) {
             text *txt = DatumGetTextP(datum);
-            char *name = text_to_cstring(txt);
-            pk_names[i] = cloudsync_string_dup(name);
+            pk_names[i] = text_to_cstring(txt);
         } else {
             pk_names[i] = NULL;
         }
@@ -1710,11 +1711,11 @@ int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_
 // MARK: - MEMORY -
 
 void *dbmem_alloc (uint64_t size) {
-    return malloc(size);
+    return palloc(size);
 }
 
 void *dbmem_zeroalloc (uint64_t size) {
-    void *ptr = malloc(size);
+    void *ptr = palloc(size);
     if (ptr) {
         memset(ptr, 0, (size_t)size);
     }
@@ -1722,7 +1723,7 @@ void *dbmem_zeroalloc (uint64_t size) {
 }
 
 void *dbmem_realloc (void *ptr, uint64_t new_size) {
-    return realloc(ptr, new_size);
+    return repalloc(ptr, new_size);
 }
 
 char *dbmem_mprintf(const char *format, ...) {
@@ -1743,7 +1744,7 @@ char *dbmem_mprintf(const char *format, ...) {
     }
 
     // Allocate buffer and format string
-    char *result = (char*)malloc(len + 1);
+    char *result = (char*)palloc(len + 1);
     vsnprintf(result, len + 1, format, args);
 
     va_end(args);
@@ -1762,16 +1763,14 @@ char *dbmem_vmprintf (const char *format, va_list list) {
     if (len < 0) return NULL;
 
     // Allocate buffer and format string
-    char *result = (char*)malloc(len + 1);
+    char *result = (char*)palloc(len + 1);
     vsnprintf(result, len + 1, format, list);
 
     return result;
 }
 
 void dbmem_free (void *ptr) {
-    if (ptr) {
-        free(ptr);
-    }
+    if (ptr) pfree(ptr);
 }
 
 uint64_t dbmem_size (void *ptr) {
