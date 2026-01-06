@@ -48,6 +48,7 @@ void pgvalue_ensure_detoast(pgvalue_t *v) {
     v->owned_detoast = (void *)PG_DETOAST_DATUM_COPY(v->datum);
     v->datum = PointerGetDatum(v->owned_detoast);
     v->detoasted = true;
+    v->owns_detoast_palloc = true;
 }
 
 int pgvalue_dbtype(pgvalue_t *v) {
