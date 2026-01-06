@@ -373,7 +373,7 @@ const char * const SQL_CLOUDSYNC_SELECT_SITE_ID_BY_PK_COL =
 
 const char * const SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID =
     "SELECT column_name, ordinal_position FROM information_schema.columns "
-    "WHERE table_name = $1 "
+    "WHERE table_name = '%s' "
     "ORDER BY ordinal_position;";
 
 const char * const SQL_DROP_CLOUDSYNC_TABLE =
