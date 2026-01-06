@@ -442,13 +442,9 @@ bool database_system_exists (cloudsync_context *data, const char *name, const ch
     bool exists = false;
 
     if (strcmp(type, "table") == 0) {
-        snprintf(query, sizeof(query),
-                 "SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = '%s'",
-                 name);
+        snprintf(query, sizeof(query), "SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = '%s'", name);
     } else if (strcmp(type, "trigger") == 0) {
-        snprintf(query, sizeof(query),
-                 "SELECT 1 FROM pg_trigger WHERE tgname = '%s'",
-                 name);
+        snprintf(query, sizeof(query), "SELECT 1 FROM pg_trigger WHERE tgname = '%s'", name);
     } else {
         return false;
     }
@@ -951,7 +947,9 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
         Datum datum = SPI_getbinval(tuple, SPI_tuptable->tupdesc, 1, &isnull);
         if (!isnull) {
             text *txt = DatumGetTextP(datum);
+            MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
             pk_names[i] = text_to_cstring(txt);
+            MemoryContextSwitchTo(old);
         } else {
             pk_names[i] = NULL;
         }
@@ -1306,20 +1304,21 @@ int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value) {
     
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
     pgvalue_t *v = (pgvalue_t *)value;
-    if (!v) {
+    if (!v || v->isnull) {
         stmt->values[idx] = (Datum)0;
         stmt->types[idx] = TEXTOID;
         stmt->nulls[idx] = 'n';
     } else {
         int16 typlen;
         bool typbyval;
-        MemoryContext old = MemoryContextSwitchTo(stmt->bind_mcxt);
+        
         get_typlenbyval(v->typeid, &typlen, &typbyval);
+        MemoryContext old = MemoryContextSwitchTo(stmt->bind_mcxt);
         Datum dcopy = typbyval ? v->datum : datumCopy(v->datum, typbyval, typlen);
-        stmt->values[idx] = v->isnull ? (Datum)0 : dcopy;
+        stmt->values[idx] = dcopy;
         MemoryContextSwitchTo(old);
         stmt->types[idx] = OidIsValid(v->typeid) ? v->typeid : TEXTOID;
-        stmt->nulls[idx] = v->isnull ? 'n' : ' ';
+        stmt->nulls[idx] = ' ';
     }
     
     if (stmt->nparams < idx + 1) stmt->nparams = idx + 1;
@@ -1715,11 +1714,7 @@ void *dbmem_alloc (uint64_t size) {
 }
 
 void *dbmem_zeroalloc (uint64_t size) {
-    void *ptr = palloc(size);
-    if (ptr) {
-        memset(ptr, 0, (size_t)size);
-    }
-    return ptr;
+    return palloc0(size);
 }
 
 void *dbmem_realloc (void *ptr, uint64_t new_size) {
