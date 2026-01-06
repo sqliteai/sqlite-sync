@@ -1718,7 +1718,7 @@ void *dbmem_zeroalloc (uint64_t size) {
 }
 
 void *dbmem_realloc (void *ptr, uint64_t new_size) {
-    return repalloc(ptr, new_size);
+    return (ptr) ? repalloc(ptr, new_size) : palloc(new_size);
 }
 
 char *dbmem_mprintf(const char *format, ...) {
