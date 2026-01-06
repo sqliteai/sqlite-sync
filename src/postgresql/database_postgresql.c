@@ -475,6 +475,7 @@ int database_exec (cloudsync_context *data, const char *sql) {
     cloudsync_reset_error(data);
     
     int rc;
+    bool is_error = false;
     PG_TRY();
     {
         rc = SPI_execute(sql, false, 0);
@@ -482,12 +483,14 @@ int database_exec (cloudsync_context *data, const char *sql) {
     PG_CATCH();
     {
         ErrorData *edata = CopyErrorData();
-        int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        rc = cloudsync_set_error(data, edata->message, DBRES_ERROR);
         FreeErrorData(edata);
         FlushErrorState();
-        return err;
+        is_error = true;
     }
     PG_END_TRY();
+
+    if (is_error) return rc;
 
     // Increment command counter to make changes visible
     if (rc >= 0) {
@@ -513,6 +516,7 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
     cloudsync_reset_error(data);
     
     int rc;
+    bool is_error = false;
     PG_TRY();
     { 
         rc = SPI_execute(sql, true, 0);
@@ -520,13 +524,15 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
     PG_CATCH();
     {
         ErrorData *edata = CopyErrorData();
-        int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        rc = cloudsync_set_error(data, edata->message, DBRES_ERROR);
         FreeErrorData(edata);
         FlushErrorState();
-        return err;
+        is_error = true;
+
     }
     PG_END_TRY();
 
+    if (is_error) return rc;
     if (rc < 0) return cloudsync_set_error(data, "SPI_execute failed", DBRES_ERROR);
 
     // Call callback for each row if provided
@@ -1049,73 +1055,81 @@ int databasevm_step (dbvm_t *vm) {
     }
     if (!stmt->plan_is_prepared || !stmt->plan) return DBRES_ERROR;
     
+    int rc = DBRES_DONE;
     PG_TRY();
     {
-        // if portal is open, we fetch one row
-        if (stmt->portal_open) {
-            // free prior fetched row batch
-            clear_fetch_batch(stmt);
-            
-            SPI_cursor_fetch(stmt->portal, true /* forward */, 1);
-            
-            if (SPI_processed == 0) {
-                // done
+        do {
+            // if portal is open, we fetch one row
+            if (stmt->portal_open) {
+                // free prior fetched row batch
                 clear_fetch_batch(stmt);
-                close_portal(stmt);
-                return DBRES_DONE;
-            }
-            
-            MemoryContextReset(stmt->row_mcxt);
-            
-            stmt->last_tuptable = SPI_tuptable;
-            stmt->current_tupdesc = stmt->last_tuptable->tupdesc;
-            stmt->current_tuple = stmt->last_tuptable->vals[0];
-            return DBRES_ROW;
-        }
-        
-        // First step: decide whether to use portal.
-        // Even for INSERT/UPDATE/DELETE ... RETURNING you WANT a portal.
-        // Strategy:
-        // - Only open a cursor if the plan supports it (avoid "cannot open INSERT query as cursor").
-        // - Otherwise execute once as a non-row-returning statement.
-        if (!stmt->executed_nonselect) {
-            if (SPI_is_cursor_plan(stmt->plan)) {
-                // try cursor open
-                stmt->portal = NULL;
-                if (stmt->nparams == 0) stmt->portal = SPI_cursor_open(NULL, stmt->plan, NULL, NULL, false);
-                else stmt->portal = SPI_cursor_open(NULL, stmt->plan, stmt->values, stmt->nulls, false);
-
-                if (stmt->portal != NULL) {
-                    stmt->portal_open = true;
-                    
-                    // fetch first row
+                
+                SPI_cursor_fetch(stmt->portal, true /* forward */, 1);
+                
+                if (SPI_processed == 0) {
+                    // done
                     clear_fetch_batch(stmt);
-                    SPI_cursor_fetch(stmt->portal, true, 1);
-                    
-                    if (SPI_processed == 0) {
-                        clear_fetch_batch(stmt);
-                        close_portal(stmt);
-                        return DBRES_DONE;
-                    }
-                    
-                    MemoryContextReset(stmt->row_mcxt);
-                    
-                    stmt->last_tuptable = SPI_tuptable;
-                    stmt->current_tupdesc = stmt->last_tuptable->tupdesc;
-                    stmt->current_tuple = stmt->last_tuptable->vals[0];
-                    return DBRES_ROW;
+                    close_portal(stmt);
+                    rc = DBRES_DONE;
+                    break;
                 }
+                
+                MemoryContextReset(stmt->row_mcxt);
+                
+                stmt->last_tuptable = SPI_tuptable;
+                stmt->current_tupdesc = stmt->last_tuptable->tupdesc;
+                stmt->current_tuple = stmt->last_tuptable->vals[0];
+                rc = DBRES_ROW;
+                break;
             }
+            
+            // First step: decide whether to use portal.
+            // Even for INSERT/UPDATE/DELETE ... RETURNING you WANT a portal.
+            // Strategy:
+            // - Only open a cursor if the plan supports it (avoid "cannot open INSERT query as cursor").
+            // - Otherwise execute once as a non-row-returning statement.
+            if (!stmt->executed_nonselect) {
+                if (SPI_is_cursor_plan(stmt->plan)) {
+                    // try cursor open
+                    stmt->portal = NULL;
+                    if (stmt->nparams == 0) stmt->portal = SPI_cursor_open(NULL, stmt->plan, NULL, NULL, false);
+                    else stmt->portal = SPI_cursor_open(NULL, stmt->plan, stmt->values, stmt->nulls, false);
 
-            // Execute once (non-row-returning or cursor open failed).
-            if (stmt->nparams == 0) SPI_execute_plan(stmt->plan, NULL, NULL, false, 0);
-            else SPI_execute_plan(stmt->plan, stmt->values, stmt->nulls, false, 0);
+                    if (stmt->portal != NULL) {
+                        stmt->portal_open = true;
+                        
+                        // fetch first row
+                        clear_fetch_batch(stmt);
+                        SPI_cursor_fetch(stmt->portal, true, 1);
+                        
+                        if (SPI_processed == 0) {
+                            clear_fetch_batch(stmt);
+                            close_portal(stmt);
+                            rc = DBRES_DONE;
+                            break;
+                        }
+                        
+                        MemoryContextReset(stmt->row_mcxt);
+                        
+                        stmt->last_tuptable = SPI_tuptable;
+                        stmt->current_tupdesc = stmt->last_tuptable->tupdesc;
+                        stmt->current_tuple = stmt->last_tuptable->vals[0];
+                        rc = DBRES_ROW;
+                        break;
+                    }
+                }
 
-            stmt->executed_nonselect = true;
-            return DBRES_DONE;
-        }
-        
-        return DBRES_DONE;
+                // Execute once (non-row-returning or cursor open failed).
+                if (stmt->nparams == 0) SPI_execute_plan(stmt->plan, NULL, NULL, false, 0);
+                else SPI_execute_plan(stmt->plan, stmt->values, stmt->nulls, false, 0);
+
+                stmt->executed_nonselect = true;
+                rc = DBRES_DONE;
+                break;
+            }
+            
+            rc = DBRES_DONE;
+        } while (0);
     }
     PG_CATCH();
     {
@@ -1128,10 +1142,10 @@ int databasevm_step (dbvm_t *vm) {
         clear_fetch_batch(stmt);
         close_portal(stmt);
         
-        return err;
+        rc = err;
     }
     PG_END_TRY();
-    return DBRES_DONE;
+    return rc;
 }
 
 void databasevm_finalize (dbvm_t *vm) {
@@ -1650,6 +1664,8 @@ void *database_value_dup (dbvalue_t *value) {
 
 int database_begin_savepoint (cloudsync_context *data, const char *savepoint_name) {
     cloudsync_reset_error(data);
+    int rc = DBRES_OK;
+
     PG_TRY();
     {
         BeginInternalSubTransaction(NULL);
@@ -1657,18 +1673,19 @@ int database_begin_savepoint (cloudsync_context *data, const char *savepoint_nam
     PG_CATCH();
     {
         ErrorData *edata = CopyErrorData();
-        int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        rc = cloudsync_set_error(data, edata->message, DBRES_ERROR);
         FreeErrorData(edata);
         FlushErrorState();
-        return err;
     }
     PG_END_TRY();
 
-    return DBRES_OK;
+    return rc;
 }
 
 int database_commit_savepoint (cloudsync_context *data, const char *savepoint_name) {
     cloudsync_reset_error(data);
+    int rc = DBRES_OK;
+
     PG_TRY();
     {
         ReleaseCurrentSubTransaction();
@@ -1683,15 +1700,17 @@ int database_commit_savepoint (cloudsync_context *data, const char *savepoint_na
     PG_CATCH();
     {
         FlushErrorState();
-        return DBRES_ERROR;
+        rc = DBRES_ERROR;
     }
     PG_END_TRY();
 
-    return DBRES_OK;
+    return rc;
 }
 
 int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_name) {
     cloudsync_reset_error(data);
+    int rc = DBRES_OK;
+
     PG_TRY();
     {
         RollbackAndReleaseCurrentSubTransaction();
@@ -1705,11 +1724,11 @@ int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_
     PG_CATCH();
     {
         FlushErrorState();
-        return DBRES_ERROR;
+        rc = DBRES_ERROR;
     }
     PG_END_TRY();
 
-    return DBRES_OK;
+    return rc;
 }
 
 // MARK: - MEMORY -
