@@ -554,25 +554,21 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
             // Get values for this row
             for (int i = 0; i < ncols; i++) {
                 bool isnull;
-                Datum datum = SPI_getbinval(tuple, tupdesc, i + 1, &isnull);
-                if (isnull) {
-                    values[i] = NULL;
-                } else {
-                    // Convert to text
-                    Oid typeid = SPI_gettypeid(tupdesc, i + 1);
-                    if (typeid == TEXTOID || typeid == VARCHAROID) {
-                        text *txt = DatumGetTextP(datum);
-                        values[i] = text_to_cstring(txt);
-                    } else {
-                        // For non-text types, convert to string representation
-                        values[i] = DatumGetCString(DirectFunctionCall1(textout, datum));
-                    }
-                }
+                SPI_getbinval(tuple, tupdesc, i + 1, &isnull);
+                values[i] = (isnull) ? NULL : SPI_getvalue(tuple, tupdesc, i + 1);
             }
 
             // Call user callback
             int cb_rc = callback(xdata, ncols, values, names);
 
+            // Cleanup values
+            for (int i = 0; i < ncols; i++) {
+                if (values[i]) {
+                    pfree(values[i]);
+                    values[i] = NULL;
+                }
+            }
+            
             if (cb_rc != 0) {
                 cloudsync_memory_free(names);
                 cloudsync_memory_free(values);
