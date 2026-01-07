@@ -102,13 +102,19 @@ int dbutils_binary_comparison (int x, int y) {
     return (x == y) ? 0 : (x > y ? 1 : -1);
 }
 
-char *dbutils_settings_get_value (cloudsync_context *data, const char *key, char *buffer, size_t blen, int64_t *intvalue) {
+int dbutils_settings_get_value (cloudsync_context *data, const char *key, char *buffer, size_t *blen, int64_t *intvalue) {
     DEBUG_SETTINGS("dbutils_settings_get_value key: %s", key);
     
-    // check if heap allocation must be forced
-    if (!buffer || blen == 0) blen = 0;
-    if (intvalue) *intvalue = 0;
-    size_t size = 0;
+    // if intvalue requested: buffer/blen optional
+    size_t buffer_len = 0;
+    if (intvalue) {
+        *intvalue = 0;
+    } else {
+        if (!buffer || !blen || *blen == 0) return DBRES_MISUSE;
+        buffer[0] = 0;
+        buffer_len = *blen;
+        *blen = 0;
+    }
     
     dbvm_t *vm = NULL;
     int rc = databasevm_prepare(data, SQL_SETTINGS_GET_VALUE, (void **)&vm, 0);
@@ -122,46 +128,40 @@ char *dbutils_settings_get_value (cloudsync_context *data, const char *key, char
     else if (rc != DBRES_ROW) goto finalize_get_value;
     
     // SQLITE_ROW case
-    if (database_column_type(vm, 0) == DBTYPE_NULL) {
-        buffer = NULL;
+    if (rc == DBRES_ROW) {
         rc = DBRES_OK;
-        goto finalize_get_value;
-    }
-    
-    if (intvalue) {
-        // check if we are only interested in the intvalue
-        *intvalue = database_column_int(vm, 0);
-    } else {
-        // if intvalue is NULL then proceed with text case
-        const char *value = database_column_text(vm, 0);
-        #if CLOUDSYNC_UNITTEST
-        size = (buffer == OUT_OF_MEMORY_BUFFER) ? (SQLITE_MAX_ALLOCATION_SIZE + 1) :(size_t)database_column_bytes(vm, 0);
-        #else
-        size = (size_t)database_column_bytes(vm, 0);
-        #endif
-        if (size + 1 > blen) {
-            buffer = cloudsync_memory_alloc((uint64_t)(size + 1));
-            if (!buffer) {
-                rc = DBRES_NOMEM;
-                goto finalize_get_value;
-            }
+        
+        // NULL case
+        if (database_column_type(vm, 0) == DBTYPE_NULL) {
+            goto finalize_get_value;
         }
-        memcpy(buffer, value, size+1);
+        
+        // INT case
+        if (intvalue) {
+            *intvalue = database_column_int(vm, 0);
+            goto finalize_get_value;
+        }
+        
+        // buffer case
+        const char *value = database_column_text(vm, 0);
+        size_t size = (size_t)database_column_bytes(vm, 0);
+        if (!value || size == 0) goto finalize_get_value;
+        if (size + 1 > buffer_len) {
+            rc = DBRES_NOMEM;
+        } else {
+            memcpy(buffer, value, size);
+            buffer[size] = '\0';
+            *blen = size;
+        }
     }
-    
-    rc = DBRES_OK;
     
 finalize_get_value:
-    #if CLOUDSYNC_UNITTEST
-    if ((rc == DBRES_NOMEM) && (size == SQLITE_MAX_ALLOCATION_SIZE + 1)) rc = DBRES_OK;
-    #endif
-    if (rc != DBRES_OK) { 
-        buffer = NULL;
+    if (rc != DBRES_OK) {
         DEBUG_ALWAYS("dbutils_settings_get_value error %s", database_errmsg(data));
     }
-    if (vm) databasevm_finalize(vm);
     
-    return buffer;
+    if (vm) databasevm_finalize(vm);
+    return rc;
 }
 
 int dbutils_settings_set_key_value (cloudsync_context *data, const char *key, const char *value) {
@@ -188,18 +188,16 @@ int dbutils_settings_set_key_value (cloudsync_context *data, const char *key, co
 
 int dbutils_settings_get_int_value (cloudsync_context *data, const char *key) {
     DEBUG_SETTINGS("dbutils_settings_get_int_value key: %s", key);
-    char buffer[256] = {0};
     int64_t value = 0;
-    if (dbutils_settings_get_value(data, key, buffer, sizeof(buffer), &value) == NULL) return -1;
+    if (dbutils_settings_get_value(data, key, NULL, NULL, &value) != DBRES_OK) return -1;
     
     return (int)value;
 }
 
 int64_t dbutils_settings_get_int64_value (cloudsync_context *data, const char *key) {
     DEBUG_SETTINGS("dbutils_settings_get_int_value key: %s", key);
-    char buffer[256] = {0};
     int64_t value = 0;
-    if (dbutils_settings_get_value(data, key, buffer, sizeof(buffer), &value) == NULL) return -1;
+    if (dbutils_settings_get_value(data, key, NULL, NULL, &value) != DBRES_OK) return -1;
     
     return value;
 }
@@ -207,7 +205,8 @@ int64_t dbutils_settings_get_int64_value (cloudsync_context *data, const char *k
 int dbutils_settings_check_version (cloudsync_context *data, const char *version) {
     DEBUG_SETTINGS("dbutils_settings_check_version");
     char buffer[256];
-    if (dbutils_settings_get_value(data, CLOUDSYNC_KEY_LIBVERSION, buffer, sizeof(buffer), NULL) == NULL) return -666;
+    size_t len = sizeof(buffer);
+    if (dbutils_settings_get_value(data, CLOUDSYNC_KEY_LIBVERSION, buffer, &len, NULL) != DBRES_OK) return -666;
     
     int major1, minor1, patch1;
     int major2, minor2, patch2;

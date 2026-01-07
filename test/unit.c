@@ -35,7 +35,7 @@ void dbvm_reset (dbvm_t *stmt);
 int dbvm_count (dbvm_t *stmt, const char *value, size_t len, int type);
 int dbvm_execute (dbvm_t *stmt, void *data);
 
-char *dbutils_settings_get_value (cloudsync_context *data, const char *key, char *buffer, size_t blen, int64_t *intvalue);
+int dbutils_settings_get_value (cloudsync_context *data, const char *key, char *buffer, size_t *blen, int64_t *intvalue);
 int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values, char **names);
 int dbutils_settings_check_version (cloudsync_context *data, const char *version);
 bool dbutils_settings_migrate (cloudsync_context *data);
@@ -2001,41 +2001,41 @@ bool do_test_dbutils (void) {
     //if (rc == SQLITE_OK) goto finalize;
     
     bool b = database_system_exists(data, "non_existing_table", "non_existing_type");
-    if (b == true) goto finalize;
+    if (b == true) {rc = SQLITE_ERROR; goto finalize;}
     
     // test cloudsync_table_sanity_check
-    b = cloudsync_table_sanity_check(data, NULL, false);
-    if (b == true) goto finalize;
-    b = cloudsync_table_sanity_check(data, "rowid_table", false);
-    if (b == true) goto finalize;
-    b = cloudsync_table_sanity_check(data, "foo2", false);
-    if (b == true) goto finalize;
-    b = cloudsync_table_sanity_check(data, build_long_tablename(), false);
-    if (b == true) goto finalize;
-    b = cloudsync_table_sanity_check(data, "nonnull_prikey_table", false);
-    if (b == true) goto finalize;
-    b = cloudsync_table_sanity_check(data, "nonnull_nodefault_table", false);
-    if (b == true) goto finalize;
-    b = cloudsync_table_sanity_check(data, "nonnull_default_table", false);
-    if (b == false) goto finalize;
-    b = cloudsync_table_sanity_check(data, "integer_pk", false);
-    if (b == true) goto finalize;
-    b = cloudsync_table_sanity_check(data, "integer_pk", true);
-    if (b == false) goto finalize;
-    b = cloudsync_table_sanity_check(data, "int_pk", false);
-    if (b == true) goto finalize;
-    b = cloudsync_table_sanity_check(data, "int_pk", true);
-    if (b == false) goto finalize;
-    b = cloudsync_table_sanity_check(data, "quoted table name 🚀", true);
-    if (b == false) goto finalize;
+    rc = cloudsync_table_sanity_check(data, NULL, false);
+    if (rc == DBRES_OK) goto finalize;
+    rc = cloudsync_table_sanity_check(data, "rowid_table", false);
+    if (rc == DBRES_OK) goto finalize;
+    rc = cloudsync_table_sanity_check(data, "foo2", false);
+    if (rc == DBRES_OK) goto finalize;
+    rc = cloudsync_table_sanity_check(data, build_long_tablename(), false);
+    if (rc == DBRES_OK) goto finalize;
+    rc = cloudsync_table_sanity_check(data, "nonnull_prikey_table", false);
+    if (rc == DBRES_OK) goto finalize;
+    rc = cloudsync_table_sanity_check(data, "nonnull_nodefault_table", false);
+    if (rc == DBRES_OK) goto finalize;
+    rc = cloudsync_table_sanity_check(data, "nonnull_default_table", false);
+    if (rc != DBRES_OK) goto finalize;
+    rc = cloudsync_table_sanity_check(data, "integer_pk", false);
+    if (rc == DBRES_OK) goto finalize;
+    rc = cloudsync_table_sanity_check(data, "integer_pk", true);
+    if (rc != DBRES_OK) goto finalize;
+    rc = cloudsync_table_sanity_check(data, "int_pk", false);
+    if (rc == DBRES_OK) goto finalize;
+    rc = cloudsync_table_sanity_check(data, "int_pk", true);
+    if (rc != DBRES_OK) goto finalize;
+    rc = cloudsync_table_sanity_check(data, "quoted table name 🚀", true);
+    if (rc != DBRES_OK) goto finalize;
     
     // create huge dummy_table table
     rc = sqlite3_exec(db, build_huge_table(), NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
     
     // sanity check the huge dummy_table table
-    b = cloudsync_table_sanity_check(data, "dummy_table", false);
-    if (b == true) goto finalize;
+    rc = cloudsync_table_sanity_check(data, "dummy_table", false);
+    if (rc == SQLITE_OK) goto finalize;
     
     // de-augment bar with cloudsync
     rc = sqlite3_exec(db, "SELECT cloudsync_cleanup('bar');", NULL, NULL, NULL);
@@ -2046,11 +2046,16 @@ bool do_test_dbutils (void) {
     dbutils_settings_set_key_value(data, "key2", "test2");
     dbutils_settings_set_key_value(data, "key2", NULL);
     
-    char *value1 = dbutils_settings_get_value(data, "key1", NULL, 0, NULL);
-    char *value2 = dbutils_settings_get_value(data, "key2", NULL, 0, NULL);
-    if (value1 == NULL) goto finalize;
-    if (value2 != NULL) goto finalize;
-    cloudsync_memory_free(value1);
+    char buffer[256];
+    size_t blen = sizeof(buffer);
+    rc = dbutils_settings_get_value(data, "key1", buffer, &blen, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    if (strcmp(buffer, "test1") != 0) goto finalize;
+    
+    blen = sizeof(buffer);
+    rc = dbutils_settings_get_value(data, "key2", buffer, &blen, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    if (buffer[0] != 0) goto finalize;
     
     // test table settings
     rc = dbutils_table_settings_set_key_value(data, NULL, NULL, NULL, NULL);
@@ -2067,8 +2072,8 @@ bool do_test_dbutils (void) {
     
     rc = SQLITE_ERROR;
     
-    value1 = dbutils_table_settings_get_value(data, "foo", NULL, "key1", NULL, 0);
-    value2 = dbutils_table_settings_get_value(data, "foo", NULL, "key2", NULL, 0);
+    char *value1 = dbutils_table_settings_get_value(data, "foo", NULL, "key1", NULL, 0);
+    char *value2 = dbutils_table_settings_get_value(data, "foo", NULL, "key2", NULL, 0);
     if (value1 == NULL) goto finalize;
     if (value2 != NULL) goto finalize;
     cloudsync_memory_free(value1);
@@ -2084,8 +2089,8 @@ bool do_test_dbutils (void) {
     cloudsync_memory_free(site_id_blob);
     
     // force out-of-memory test
-    value1 = dbutils_settings_get_value(data, "key1", OUT_OF_MEMORY_BUFFER, 0, NULL);
-    if (value1 != NULL) goto finalize;
+    rc = dbutils_settings_get_value(data, "key1", NULL, 0, NULL);
+    if (rc != SQLITE_MISUSE) goto finalize;
     
     value1 = dbutils_table_settings_get_value(data, "foo", NULL, "key1", OUT_OF_MEMORY_BUFFER, 0);
     if (value1 != NULL) goto finalize;
