@@ -2029,6 +2029,14 @@ int cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsyn
         return DBRES_OK;
     }
     
+    if (payload->nrows > UINT32_MAX) {
+        if (payload->buffer) cloudsync_memory_free(payload->buffer);
+        payload->buffer = NULL;
+        payload->bsize = 0;
+        cloudsync_set_error(data, "Maximum number of payload rows reached", DBRES_ERROR);
+        return DBRES_ERROR;
+    }
+    
     // try to allocate buffer used for compressed data
     int header_size = (int)sizeof(cloudsync_payload_header);
     int real_buffer_size = (int)(payload->bused - header_size);
