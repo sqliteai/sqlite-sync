@@ -123,6 +123,7 @@ char *dbutils_settings_get_value (cloudsync_context *data, const char *key, char
     
     // SQLITE_ROW case
     if (database_column_type(vm, 0) == DBTYPE_NULL) {
+        buffer = NULL;
         rc = DBRES_OK;
         goto finalize_get_value;
     }
@@ -154,7 +155,10 @@ finalize_get_value:
     #if CLOUDSYNC_UNITTEST
     if ((rc == DBRES_NOMEM) && (size == SQLITE_MAX_ALLOCATION_SIZE + 1)) rc = DBRES_OK;
     #endif
-    if (rc != DBRES_OK) DEBUG_ALWAYS("dbutils_settings_get_value error %s", database_errmsg(data));
+    if (rc != DBRES_OK) { 
+        buffer = NULL;
+        DEBUG_ALWAYS("dbutils_settings_get_value error %s", database_errmsg(data));
+    }
     if (vm) databasevm_finalize(vm);
     
     return buffer;
@@ -249,6 +253,7 @@ char *dbutils_table_settings_get_value (cloudsync_context *data, const char *tab
     
     // SQLITE_ROW case
     if (database_column_type(vm, 0) == DBTYPE_NULL) {
+        buffer = NULL;
         rc = DBRES_OK;
         goto finalize_get_value;
     }
@@ -275,6 +280,7 @@ finalize_get_value:
     if ((rc == DBRES_NOMEM) && (size == SQLITE_MAX_ALLOCATION_SIZE + 1)) rc = DBRES_OK;
     #endif
     if (rc != DBRES_OK) {
+        buffer = NULL;
         DEBUG_ALWAYS("cloudsync_table_settings error %s", database_errmsg(data));
     }
     if (vm) databasevm_finalize(vm);
