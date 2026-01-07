@@ -48,7 +48,6 @@ void pgvalue_ensure_detoast(pgvalue_t *v) {
     v->owned_detoast = (void *)PG_DETOAST_DATUM_COPY(v->datum);
     v->datum = PointerGetDatum(v->owned_detoast);
     v->detoasted = true;
-    v->owns_detoast_palloc = true;
 }
 
 int pgvalue_dbtype(pgvalue_t *v) {
@@ -79,11 +78,11 @@ static bool pgvalue_vec_push(pgvalue_t ***arr, int *count, int *cap, pgvalue_t *
     if (*cap == 0) {
         *cap = 8;
         *arr = (pgvalue_t **)cloudsync_memory_zeroalloc(sizeof(pgvalue_t *) * (*cap));
-        if (*arr) return false;
+        if (*arr == NULL) return false;
     } else if (*count >= *cap) {
         *cap *= 2;
         *arr = (pgvalue_t **)cloudsync_memory_realloc(*arr, sizeof(pgvalue_t *) * (*cap));
-        if (*arr) return false;
+        if (*arr == NULL) return false;
     }
     (*arr)[(*count)++] = val;
     return true;

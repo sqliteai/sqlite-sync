@@ -30,8 +30,6 @@ typedef struct pgvalue_t {
     void *owned_detoast;
     char *cstring;
     bool owns_cstring;
-    bool owns_cstring_palloc;
-    bool owns_detoast_palloc;
 } pgvalue_t;
 
 pgvalue_t *pgvalue_create(Datum datum, Oid typeid, int32 typmod, Oid collation, bool isnull);

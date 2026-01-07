@@ -1594,7 +1594,6 @@ const char *database_value_text (dbvalue_t *value) {
             v->cstring = OidOutputFunctionCall(outfunc, v->datum);
         }
         v->owns_cstring = true;
-        v->owns_cstring_palloc = true;
     }
 
     return v->cstring;
@@ -1629,10 +1628,10 @@ void database_value_free (dbvalue_t *value) {
     if (!v) return;
 
     if (v->owned_detoast) {
-        (v->owns_detoast_palloc) ? pfree(v->owned_detoast) : cloudsync_memory_free(v->owned_detoast);
+        pfree(v->owned_detoast);
     }
     if (v->owns_cstring && v->cstring) {
-        (v->owns_cstring_palloc) ? pfree(v->cstring) : cloudsync_memory_free(v->cstring);
+        pfree(v->cstring);
     }
     cloudsync_memory_free(v);
 }
@@ -1644,16 +1643,14 @@ void *database_value_dup (dbvalue_t *value) {
     pgvalue_t *copy = pgvalue_create(v->datum, v->typeid, v->typmod, v->collation, v->isnull);
     if (v->detoasted && v->owned_detoast) {
         Size len = VARSIZE_ANY(v->owned_detoast);
-        copy->owned_detoast = (v->owns_detoast_palloc) ? palloc(len) : cloudsync_memory_alloc(len);
+        copy->owned_detoast = palloc(len);
         memcpy(copy->owned_detoast, v->owned_detoast, len);
         copy->datum = PointerGetDatum(copy->owned_detoast);
         copy->detoasted = true;
-        copy->owns_detoast_palloc = v->owns_detoast_palloc;
     }
     if (v->cstring) {
-        copy->cstring = (v->owns_cstring_palloc) ? pstrdup(v->cstring) : cloudsync_string_dup(v->cstring);
+        copy->cstring = copy->cstring ? pstrdup(v->cstring) : NULL;
         copy->owns_cstring = true;
-        copy->owns_cstring_palloc = v->owns_cstring_palloc;
     }
     return (void*)copy;
 }
