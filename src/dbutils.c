@@ -226,12 +226,11 @@ int dbutils_settings_check_version (cloudsync_context *data, const char *version
     return res;
 }
 
-char *dbutils_table_settings_get_value (cloudsync_context *data, const char *table, const char *column_name, const char *key, char *buffer, size_t blen) {
+int dbutils_table_settings_get_value (cloudsync_context *data, const char *table, const char *column_name, const char *key, char *buffer, size_t blen) {
     DEBUG_SETTINGS("dbutils_table_settings_get_value table: %s column: %s key: %s", table, column_name, key);
-    
-    // check if heap allocation must be forced
-    if (!buffer || blen == 0) blen = 0;
-    size_t size = 0;
+        
+    if (!buffer || blen == 0) return DBRES_MISUSE;
+    buffer[0] = 0;
     
     dbvm_t *vm = NULL;
     int rc = databasevm_prepare(data, SQL_TABLE_SETTINGS_GET_VALUE, (void **)&vm, 0);
@@ -251,40 +250,30 @@ char *dbutils_table_settings_get_value (cloudsync_context *data, const char *tab
     else if (rc != DBRES_ROW) goto finalize_get_value;
     
     // SQLITE_ROW case
-    if (database_column_type(vm, 0) == DBTYPE_NULL) {
-        buffer = NULL;
+    if (rc == DBRES_ROW) {
         rc = DBRES_OK;
-        goto finalize_get_value;
-    }
-    
-    const char *value = database_column_text(vm, 0);
-    #if CLOUDSYNC_UNITTEST
-    size = (buffer == OUT_OF_MEMORY_BUFFER) ? (SQLITE_MAX_ALLOCATION_SIZE + 1) :(size_t)database_column_bytes(vm, 0);
-    #else
-    size = (size_t)database_column_bytes(vm, 0);
-    #endif
-    if (size + 1 > blen) {
-        buffer = cloudsync_memory_alloc((uint64_t)(size + 1));
-        if (!buffer) {
-            rc = DBRES_NOMEM;
+
+        // NULL case
+        if (database_column_type(vm, 0) == DBTYPE_NULL) {
             goto finalize_get_value;
+        }
+    
+        const char *value = database_column_text(vm, 0);
+        size_t size = (size_t)database_column_bytes(vm, 0);
+        if (size + 1 > blen) {
+            rc = DBRES_NOMEM;
+        } else {
+            memcpy(buffer, value, size);
+            buffer[size] = '\0';
         }
     }
     
-    memcpy(buffer, value, size+1);
-    rc = DBRES_OK;
-    
-finalize_get_value:
-    #if CLOUDSYNC_UNITTEST
-    if ((rc == DBRES_NOMEM) && (size == SQLITE_MAX_ALLOCATION_SIZE + 1)) rc = DBRES_OK;
-    #endif
+finalize_get_value:   
     if (rc != DBRES_OK) {
-        buffer = NULL;
         DEBUG_ALWAYS("cloudsync_table_settings error %s", database_errmsg(data));
     }
-    if (vm) databasevm_finalize(vm);
-    
-    return buffer;
+    if (vm) databasevm_finalize(vm); 
+    return rc;
 }
 
 int dbutils_table_settings_set_key_value (cloudsync_context *data, const char *table_name, const char *column_name, const char *key, const char *value) {
@@ -341,8 +330,8 @@ table_algo dbutils_table_settings_get_algo (cloudsync_context *data, const char 
     DEBUG_SETTINGS("dbutils_table_settings_get_algo %s", table_name);
     
     char buffer[512];
-    char *value = dbutils_table_settings_get_value(data, table_name, "*", "algo", buffer, sizeof(buffer));
-    return (value) ? cloudsync_algo_from_name(value) : table_algo_none;
+    int rc = dbutils_table_settings_get_value(data, table_name, "*", "algo", buffer, sizeof(buffer));
+    return (rc == DBRES_OK) ? cloudsync_algo_from_name(buffer) : table_algo_none;
 }
 
 int dbutils_settings_load_callback (void *xdata, int ncols, char **values, char **names) {

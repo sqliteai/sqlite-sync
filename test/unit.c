@@ -2072,11 +2072,10 @@ bool do_test_dbutils (void) {
     
     rc = SQLITE_ERROR;
     
-    char *value1 = dbutils_table_settings_get_value(data, "foo", NULL, "key1", NULL, 0);
-    char *value2 = dbutils_table_settings_get_value(data, "foo", NULL, "key2", NULL, 0);
-    if (value1 == NULL) goto finalize;
-    if (value2 != NULL) goto finalize;
-    cloudsync_memory_free(value1);
+    rc = dbutils_table_settings_get_value(data, "foo", NULL, "key1", buffer, sizeof(buffer));
+    if (rc != DBRES_OK || strcmp(buffer, "value1") != 0) goto finalize;
+    rc = dbutils_table_settings_get_value(data, "foo", NULL, "key2", buffer, sizeof(buffer));
+    if (rc != DBRES_OK || strlen(buffer) > 0) goto finalize;
     
     int64_t db_version = 0;
     database_select_int(data, "SELECT cloudsync_db_version();", &db_version);
@@ -2092,8 +2091,8 @@ bool do_test_dbutils (void) {
     rc = dbutils_settings_get_value(data, "key1", NULL, 0, NULL);
     if (rc != SQLITE_MISUSE) goto finalize;
     
-    value1 = dbutils_table_settings_get_value(data, "foo", NULL, "key1", OUT_OF_MEMORY_BUFFER, 0);
-    if (value1 != NULL) goto finalize;
+    rc = dbutils_table_settings_get_value(data, "foo", NULL, "key1", NULL, 0);
+    if (rc != DBRES_MISUSE) goto finalize;
 
     //char *p = NULL;
     //dbutils_select(data, "SELECT zeroblob(16);", NULL, NULL, NULL, 0, SQLITE_BLOB);
