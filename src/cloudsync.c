@@ -1941,7 +1941,7 @@ cleanup:
 
 // MARK: - Payload Encode / Decode -
 
-bool cloudsync_datapayload_check (cloudsync_payload_context *payload, size_t needed) {
+static bool cloudsync_payload_encode_check (cloudsync_payload_context *payload, size_t needed) {
     if (payload->nrows == 0) needed += sizeof(cloudsync_payload_header);
     
     // alloc/resize buffer
@@ -1995,7 +1995,7 @@ int cloudsync_payload_encode_step (cloudsync_payload_context *payload, cloudsync
     if (payload->nrows == 0) payload->ncols = (uint16_t)argc;
     
     size_t breq = pk_encode_size((dbvalue_t **)argv, argc, 0);
-    if (cloudsync_datapayload_check(payload, breq) == false) {
+    if (cloudsync_payload_encode_check(payload, breq) == false) {
         return cloudsync_set_error(data, "Not enough memory to resize payload internal buffer", DBRES_NOMEM);
     }
     
@@ -2067,7 +2067,7 @@ int cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsyn
     return DBRES_OK;
 }
 
-int cloudsync_pk_decode_bind_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
+static int cloudsync_payload_decode_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
     cloudsync_pk_decode_bind_context *decode_context = (cloudsync_pk_decode_bind_context*)xdata;
     int rc = pk_decode_bind_callback(decode_context->vm, index, type, ival, dval, pval);
     
@@ -2183,7 +2183,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     
     for (uint32_t i=0; i<nrows; ++i) {
         size_t seek = 0;
-        pk_decode((char *)buffer, blen, ncols, &seek, cloudsync_pk_decode_bind_callback, &decoded_context);
+        pk_decode((char *)buffer, blen, ncols, &seek, cloudsync_payload_decode_callback, &decoded_context);
         // n is the pk_decode return value, I don't think I should assert here because in any case the next databasevm_step would fail
         // assert(n == ncols);
                 
