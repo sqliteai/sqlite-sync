@@ -953,9 +953,7 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
         Datum datum = SPI_getbinval(tuple, SPI_tuptable->tupdesc, 1, &isnull);
         if (!isnull) {
             text *txt = DatumGetTextP(datum);
-            MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
             char *name = text_to_cstring(txt);
-            MemoryContextSwitchTo(old);
             pk_names[i] = (name) ? cloudsync_string_dup(name) : NULL;
             if (name) pfree(name);
         } else {
