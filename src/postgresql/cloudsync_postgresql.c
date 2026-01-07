@@ -62,6 +62,38 @@ static cloudsync_context *get_cloudsync_context(void) {
 
 // MARK: - Extension Entry Points -
 
+static void cloudsync_pg_ensure_initialized (cloudsync_context *data, bool spi_connected) {
+    if (!data) return;
+    if (data->site_id[0] != 0) return;
+
+    if (!spi_connected) {
+        int spi_rc = SPI_connect();
+        if (spi_rc != SPI_OK_CONNECT) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
+        }
+    }
+
+    PG_TRY();
+    {
+        if (cloudsync_config_exists(data)) {
+            if (cloudsync_context_init(data) == NULL) {
+                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("An error occurred while trying to initialize context")));
+            }
+
+            // make sure to update internal version to current version
+            dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
+        }
+
+        if (!spi_connected) SPI_finish();
+    }
+    PG_CATCH();
+    {
+        if (!spi_connected) SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+}
+
 void _PG_init (void) {
     // Extension initialization
     // SPI will be connected per-function call
@@ -69,33 +101,6 @@ void _PG_init (void) {
     
     // Initialize memory debugger (NOOP in production)
     cloudsync_memory_init(1);
-    
-    // load config, if exists
-    cloudsync_context *data = get_cloudsync_context();
-    
-    int spi_rc = SPI_connect();
-    if (spi_rc != SPI_OK_CONNECT) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
-    }
-    
-    PG_TRY();
-    {
-        if (cloudsync_config_exists(data)) {
-            if (cloudsync_context_init(data) == NULL) {
-                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("An error occurred while trying to initialize context")));
-            }
-            
-            // make sure to update internal version to current version
-            dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
-        }
-        SPI_finish();
-    }
-    PG_CATCH();
-    {
-        SPI_finish();
-        PG_RE_THROW();
-    }
-    PG_END_TRY();
 }
 
 void _PG_fini (void) {
@@ -124,6 +129,7 @@ Datum pg_cloudsync_siteid (PG_FUNCTION_ARGS) {
     UNUSED_PARAMETER(fcinfo);
 
     cloudsync_context *data = get_cloudsync_context();
+    cloudsync_pg_ensure_initialized(data, false);
     const void *siteid = cloudsync_siteid(data);
 
     if (!siteid) {
@@ -169,6 +175,7 @@ Datum cloudsync_db_version (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
+        cloudsync_pg_ensure_initialized(data, true);
         int rc = cloudsync_dbversion_check_uptodate(data);
         if (rc != DBRES_OK) {
             ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to retrieve db_version (%s)", database_errmsg(data))));
@@ -205,6 +212,7 @@ Datum cloudsync_db_version_next (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
+        cloudsync_pg_ensure_initialized(data, true);
         int64_t next_version = cloudsync_dbversion_next(data, merging_version);
         SPI_finish();
 
@@ -233,6 +241,7 @@ static bytea *cloudsync_init_internal (cloudsync_context *data, const char *tabl
 
     PG_TRY();
     {
+        cloudsync_pg_ensure_initialized(data, true);
         // Begin savepoint for transactional init
         int rc = database_begin_savepoint(data, "cloudsync_init");
         if (rc != DBRES_OK) {
@@ -258,11 +267,10 @@ static bytea *cloudsync_init_internal (cloudsync_context *data, const char *tabl
 
         cloudsync_update_schema_hash(data);
 
-        // Build site_id as TEXT to return
-        char buffer[UUID_STR_MAXLEN];
-        cloudsync_uuid_v7_stringify(cloudsync_siteid(data), buffer, false);
-        result = cstring_to_text(buffer);
-        ereport(DEBUG1, (errmsg("cloudsync_init_internal uuid %s", buffer)));
+        // Build site_id as bytea to return
+        result = (bytea *)palloc(UUID_LEN + VARHDRSZ);
+        SET_VARSIZE(result, UUID_LEN + VARHDRSZ);
+        memcpy(VARDATA(result), cloudsync_siteid(data), UUID_LEN);
 
         SPI_finish();
     }
@@ -325,6 +333,8 @@ Datum cloudsync_enable (PG_FUNCTION_ARGS) {
     }
 
     const char *table = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    cloudsync_context *data = get_cloudsync_context();
+    cloudsync_pg_ensure_initialized(data, false);
     cloudsync_enable_disable(table, true);
     PG_RETURN_BOOL(true);
 }
@@ -337,6 +347,8 @@ Datum cloudsync_disable (PG_FUNCTION_ARGS) {
     }
 
     const char *table = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    cloudsync_context *data = get_cloudsync_context();
+    cloudsync_pg_ensure_initialized(data, false);
     cloudsync_enable_disable(table, false);
     PG_RETURN_BOOL(true);
 }
@@ -349,6 +361,7 @@ Datum cloudsync_is_enabled (PG_FUNCTION_ARGS) {
     }
 
     cloudsync_context *data = get_cloudsync_context();
+    cloudsync_pg_ensure_initialized(data, false);
     const char *table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
     cloudsync_table_context *table = table_lookup(data, table_name);
 
@@ -375,6 +388,7 @@ Datum pg_cloudsync_cleanup (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
+        cloudsync_pg_ensure_initialized(data, true);
         int rc = cloudsync_cleanup(data, table);
         SPI_finish();
 
@@ -406,6 +420,7 @@ Datum pg_cloudsync_terminate (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
+        cloudsync_pg_ensure_initialized(data, true);
         int rc = cloudsync_terminate(data);
         SPI_finish();
         PG_RETURN_INT32(rc);
@@ -449,6 +464,7 @@ Datum cloudsync_set (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
+        cloudsync_pg_ensure_initialized(data, true);
         dbutils_settings_set_key_value(data, key, value);
         SPI_finish();
         PG_RETURN_BOOL(true);
@@ -487,6 +503,7 @@ Datum cloudsync_set_table (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
+        cloudsync_pg_ensure_initialized(data, true);
         dbutils_table_settings_set_key_value(data, tbl, "*", key, value);
         SPI_finish();
         PG_RETURN_BOOL(true);
@@ -531,6 +548,7 @@ Datum cloudsync_set_column (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
+        cloudsync_pg_ensure_initialized(data, true);
         dbutils_table_settings_set_key_value(data, tbl, col, key, value);
         SPI_finish();
         PG_RETURN_BOOL(true);
@@ -562,6 +580,7 @@ Datum pg_cloudsync_begin_alter (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
+        cloudsync_pg_ensure_initialized(data, true);
         int rc = cloudsync_begin_alter(data, table_name);
         SPI_finish();
 
@@ -598,6 +617,7 @@ Datum pg_cloudsync_commit_alter (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
+        cloudsync_pg_ensure_initialized(data, true);
         int rc = cloudsync_commit_alter(data, table_name);
         SPI_finish();
 
@@ -639,6 +659,7 @@ Datum cloudsync_payload_encode_transfn (PG_FUNCTION_ARGS) {
 
     int argc = 0;
     cloudsync_context *data = get_cloudsync_context();
+    cloudsync_pg_ensure_initialized(data, false);
     pgvalue_t **argv = pgvalues_from_args(fcinfo, 1, &argc);
     
     // Wrap variadic args into pgvalue_t so pk/payload helpers can read types safely.
@@ -667,6 +688,7 @@ Datum cloudsync_payload_encode_finalfn (PG_FUNCTION_ARGS) {
 
     cloudsync_payload_context *payload = (cloudsync_payload_context *)PG_GETARG_POINTER(0);
     cloudsync_context *data = get_cloudsync_context();
+    cloudsync_pg_ensure_initialized(data, false);
 
     int rc = cloudsync_payload_encode_final(payload, data);
     if (rc != DBRES_OK) {
@@ -716,6 +738,7 @@ Datum cloudsync_payload_decode (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
+        cloudsync_pg_ensure_initialized(data, true);
         int nrows = 0;
         int rc = cloudsync_payload_apply(data, payload, blen, &nrows);
         SPI_finish();
@@ -777,6 +800,7 @@ static void cloudsync_pg_cleanup(int code, Datum arg) {
 PG_FUNCTION_INFO_V1(cloudsync_is_sync);
 Datum cloudsync_is_sync (PG_FUNCTION_ARGS) {
     cloudsync_context *data = get_cloudsync_context();
+    cloudsync_pg_ensure_initialized(data, false);
 
     if (cloudsync_insync(data)) {
         PG_RETURN_BOOL(true);
@@ -799,6 +823,7 @@ Datum cloudsync_seq (PG_FUNCTION_ARGS) {
     UNUSED_PARAMETER(fcinfo);
 
     cloudsync_context *data = get_cloudsync_context();
+    cloudsync_pg_ensure_initialized(data, false);
     int seq = cloudsync_bumpseq(data);
 
     PG_RETURN_INT32(seq);
@@ -930,9 +955,7 @@ Datum cloudsync_insert (PG_FUNCTION_ARGS) {
 
     PG_ENSURE_ERROR_CLEANUP(cloudsync_pg_cleanup, PointerGetDatum(&cleanup));
     {
-        if (cloudsync_context_init(data) == NULL) {
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to initialize cloudsync context")));
-        }
+        cloudsync_pg_ensure_initialized(data, true);
 
         // Lookup table (load from settings if needed)
         cloudsync_table_context *table = table_lookup(data, table_name);
@@ -1029,9 +1052,7 @@ Datum cloudsync_delete (PG_FUNCTION_ARGS) {
 
     PG_ENSURE_ERROR_CLEANUP(cloudsync_pg_cleanup, PointerGetDatum(&cleanup));
     {
-        if (cloudsync_context_init(data) == NULL) {
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to initialize cloudsync context")));
-        }
+        cloudsync_pg_ensure_initialized(data, true);
 
         cloudsync_table_context *table = table_lookup(data, table_name);
         if (!table) {
