@@ -963,7 +963,7 @@ bool table_add_to_context (cloudsync_context *data, table_algo algo, const char 
         table->col_value_stmt = (dbvm_t **)cloudsync_memory_alloc((uint64_t)(sizeof(void *) * ncols));
         if (!table->col_value_stmt) goto abort_add_table;
         
-        char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID, table_name);
+        char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID, table_name, table_name);
         if (!sql) goto abort_add_table;
         rc = database_exec_callback(data, sql, table_add_to_context_cb, (void *)table);
         cloudsync_memory_free(sql);
