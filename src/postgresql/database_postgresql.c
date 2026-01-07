@@ -1289,7 +1289,7 @@ int databasevm_bind_text (dbvm_t *vm, int index, const char *value, int size) {
     if (!value) return databasevm_bind_null(vm, index);
     
     // validate size fits Size and won't overflow
-    if (size < 0) return DBRES_MISUSE;
+    if (size < 0) size = (int)strlen(value);
     if (size > (uint64) (MaxAllocSize - VARHDRSZ)) return DBRES_NOMEM;
     
     int idx = index - 1;
