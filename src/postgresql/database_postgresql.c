@@ -503,11 +503,9 @@ int database_exec (cloudsync_context *data, const char *sql) {
         PushActiveSnapshot(GetTransactionSnapshot());
 
         // Clear error on success
-        elog(DEBUG1, "database_exec %s: OK", sql);
         return map_spi_result(rc);
     }
 
-    elog(DEBUG1, "database_exec %s: ERROR", sql);
     return cloudsync_set_error(data, "SPI_execute failed", DBRES_ERROR);
 }
 

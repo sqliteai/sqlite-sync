@@ -118,11 +118,18 @@ src/
 
 ### Database Abstraction Layer
 
-The codebase uses a database abstraction layer (`database.h`) that wraps database-specific APIs. Database-specific implementations are organized in subdirectories: `src/sqlite/database_sqlite.c` for SQLite, `src/postgresql/database_postgresql.c` for PostgreSQL. All database interactions go through this abstraction layer using types like:
-- `db_t` - database handle
-- `dbvm_t` - prepared statement/virtual machine
-- `dbvalue_t` - column value
-- `dbcontext_t` - function context
+The codebase uses a database abstraction layer (`database.h`) that wraps database-specific APIs. Database-specific implementations are organized in subdirectories: `src/sqlite/database_sqlite.c` for SQLite, `src/postgresql/database_postgresql.c` for PostgreSQL. All database interactions go through this abstraction layer using:
+- `cloudsync_context` - opaque per-database context shared across layers
+- `dbvm_t` - opaque prepared statement/virtual machine handle
+- `dbvalue_t` - opaque database value handle
+
+The abstraction exposes:
+- Result/status codes (`DBRES`), data types (`DBTYPE`), and flags (`DBFLAG`).
+- Core query helpers (`database_exec`, `database_select_*`, `database_write`).
+- Schema/metadata helpers (`database_table_exists`, `database_trigger_exists`, `database_count_*`, `database_pk_names`).
+- Transaction helpers (`database_begin_savepoint`, `database_commit_savepoint`, `database_rollback_savepoint`, `database_in_transaction`).
+- VM lifecycle (`databasevm_prepare/step/reset/finalize/clear_bindings`) plus bind/value/column accessors.
+- Backend memory helpers (`dbmem_*`) and SQL builder helpers (`sql_build_*`).
 
 ### CRDT Implementation
 
@@ -554,3 +561,14 @@ For CRDT merge to work correctly:
   - Parameterized SQL must be provided via functions in the database layer (as with `database_count_pk`) so each backend can build statements appropriately.
   - Put backend-specific SQL templates in `src/<database>/sql_<engine>.c`; add a `database_<engine>.c` helper (exposed in `database.h`) whenever placeholder rules, quoting/escaping, or catalog-driven SQL generation differ between backends.
 - Preserve existing coding style and patterns (e.g., prepared statements with bind/step/reset, use `cloudsync_memory_*` macros, return SQLite error codes). Ask the user before significant structural changes or refactors.
+
+## PostgreSQL Database Backend Patterns
+
+- SPI usage: prefer `SPI_execute()` for one-shot catalog queries and `SPI_prepare` + `SPI_execute_plan` for reusable statements.
+- Error handling: wrap SPI calls in `PG_TRY()/PG_CATCH()`, capture with `CopyErrorData()`, call `cloudsync_set_error(...)`, and `FlushErrorState()`; helpers should not rethrow.
+- Statement lifecycle: `databasevm_prepare/step/reset/finalize` owns a `pg_stmt_t` with `stmt_mcxt`, plus `bind_mcxt` and `row_mcxt` subcontexts; reset uses `MemoryContextReset` (not free).
+- Cursor strategy: use portals (`SPI_cursor_open`/`SPI_cursor_fetch`) only for cursorable plans (check `SPI_is_cursor_plan`); non-cursorable plans execute once.
+- Binding: bind arrays (`values`, `nulls`, `types`) live in `bind_mcxt` and are cleared in `databasevm_clear_bindings`.
+- Row access: extract values via `SPI_getbinval` with OID checks, convert to C types, and copy into cloudsync-managed buffers.
+- SQL construction: prefer `snprintf` into fixed buffers, fall back to `cloudsync_memory_mprintf` for dynamic sizes.
+- SPI context: helpers assume the caller has already executed `SPI_connect()`; they avoid managing SPI connection state.

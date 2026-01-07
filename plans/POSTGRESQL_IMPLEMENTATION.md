@@ -95,6 +95,7 @@ src/
 - [ ] Test extension loading and basic functions
 - [ ] Align PostgreSQL `dbmem_*` with core expectations (use uint64_t, decide OOM semantics vs palloc ERROR, clarify dbmem_size=0)
 - [ ] TODOs to fix `sql_postgresql.c`
+- [ ] Apply PG_ENSURE_ERROR_CLEANUP pattern to other SPI-using functions with shared cleanup needs
 
 ## Progress Log
 
@@ -548,3 +549,36 @@ make postgres-dev-rebuild
 - Fix any compilation errors
 - Test extension loading: `CREATE EXTENSION cloudsync`
 - Complete remaining aggregate functions
+
+### [2025-12-20] PostgreSQL Trigger + SPI Cleanup Work ✅
+
+**Trigger functions implemented in `src/postgresql/database_postgresql.c`:**
+- `database_create_insert_trigger` implemented with per-table PL/pgSQL function and trigger.
+- `database_create_update_trigger_gos`/`database_create_delete_trigger_gos` implemented (BEFORE triggers, raise on update/delete when enabled).
+- `database_create_update_trigger` implemented with VALUES list + `cloudsync_update` aggregate call.
+- `database_create_delete_trigger` implemented to call `cloudsync_delete`.
+- `database_create_triggers` wired to create insert/update/delete triggers based on algo.
+- `database_delete_triggers` updated to drop insert/update/delete triggers and their functions.
+
+**PostgreSQL SQL registration updates:**
+- Added `cloudsync_delete` to `src/postgresql/cloudsync--1.0.sql`.
+
+**Internal function updates:**
+- Implemented `cloudsync_delete` C function (mirrors SQLite delete path).
+- `cloudsync_insert`/`cloudsync_delete` now lazily load table context when missing.
+- Refactored `cloudsync_insert`/`cloudsync_delete` to use `PG_ENSURE_ERROR_CLEANUP` and shared cleanup helper.
+
+**SPI execution fixes:**
+- `databasevm_step` now uses `SPI_is_cursor_plan` before opening a portal to avoid “cannot open INSERT query as cursor”.
+- Persistent statements now allocate their memory contexts under `TopMemoryContext`.
+
+**Error formatting:**
+- `cloudsync_set_error` now avoids `snprintf` aliasing when `database_errmsg` points at `data->errmsg`.
+
+**Smoke test updates:**
+- `docker/postgresql/smoke_test.sql` now validates insert/delete metadata, tombstones, and site_id fields.
+- Test output uses `\echo` markers for each check.
+
+**Documentation updates:**
+- Added PostgreSQL SPI patterns to `AGENTS.md`.
+- Updated Database Abstraction Layer section in `AGENTS.md` to match `database.h`.

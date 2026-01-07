@@ -2,7 +2,7 @@
 # Supports compilation for Linux, macOS, Windows, Android and iOS
 
 # customize sqlite3 executable with 
-# make test SQLITE3=/opt/homebrew/Cellar/sqlite/3.49.1/bin/sqlite3
+# make test SQLITE3=/opt/homebrew/Cellar/sqlite/3.50.4/bin/sqlite3
 SQLITE3 ?= sqlite3
 
 # set curl version to download and build
