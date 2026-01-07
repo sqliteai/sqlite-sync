@@ -102,54 +102,6 @@ const char * const SQL_DBVERSION_BUILD_QUERY =
     ") "
     "SELECT string_agg(part, ' UNION ALL ') FROM query_parts;";
 
-const char * const SQL_DBVERSION_GET_QUERY =
-    "SELECT COALESCE(MAX(v), 0) FROM (%s) AS versions(v);";
-// TODO: include pre_alter_dbversion union and single composed query generation like SQLite
-
-const char * const SQL_INSERT_SITE_ID_FROM_STRING_FORMAT =
-    "INSERT INTO cloudsync_site_id (site_id) VALUES (decode('%s', 'hex'));";
-
-// Note: PostgreSQL doesn't have a direct equivalent to SQLite's %w formatter
-// We'll use quote_ident() function in the code instead
-const char * const SQL_METADATA_TABLE_FORMAT =
-    "CREATE TABLE IF NOT EXISTS %s ("
-    "pk TEXT PRIMARY KEY NOT NULL, "
-    "db_version BIGINT NOT NULL, "
-    "seq INTEGER NOT NULL DEFAULT 0, "
-    "site_id BYTEA NOT NULL, "
-    "last_op INTEGER NOT NULL DEFAULT 0"
-    ");";
-
-const char * const SQL_METADATA_TABLE_SITE_ID_INDEX_FORMAT =
-    "CREATE INDEX IF NOT EXISTS %s_idx ON %s(site_id);";
-
-const char * const SQL_METADATA_TABLE_DB_VERSION_INDEX_FORMAT =
-    "CREATE INDEX IF NOT EXISTS %s_idx ON %s(db_version);";
-
-const char * const SQL_METADATA_GET_PK_FORMAT =
-    "SELECT pk FROM %s WHERE site_id=$1 ORDER BY db_version DESC, seq DESC LIMIT 1;";
-
-const char * const SQL_METADATA_GET_DB_VERSION_BY_PK_FORMAT =
-    "SELECT db_version, seq FROM %s WHERE pk=$1;";
-
-const char * const SQL_METADATA_INSERT_FORMAT =
-    "INSERT INTO %s (pk, db_version, seq, site_id, last_op) VALUES ($1, $2, $3, $4, $5);";
-
-const char * const SQL_METADATA_UPDATE_FORMAT =
-    "UPDATE %s SET db_version=$1, seq=$2, site_id=$3, last_op=$4 WHERE pk=$5;";
-
-const char * const SQL_METADATA_DELETE_FORMAT =
-    "DELETE FROM %s WHERE pk=$1;";
-
-const char * const SQL_METADATA_GET_ALL_PKS_FORMAT =
-    "SELECT pk FROM %s ORDER BY db_version, seq;";
-
-const char * const SQL_METADATA_GET_ALL_FORMAT =
-    "SELECT pk, db_version, seq, site_id, last_op FROM %s ORDER BY db_version, seq;";
-
-const char * const SQL_METADATA_CLEANUP_DROP_FORMAT =
-    "DROP TABLE IF EXISTS %s CASCADE;";
-
 const char * const SQL_CHANGES_INSERT_ROW =
     "INSERT INTO cloudsync_changes(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) "
     "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9);";
