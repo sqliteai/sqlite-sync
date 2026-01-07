@@ -221,9 +221,9 @@ Datum cloudsync_db_version_next (PG_FUNCTION_ARGS) {
 // MARK: - Table Initialization -
 
 // Internal helper for cloudsync_init - replicates dbsync_init logic from SQLite
-// Returns site_id as text on success, raises error on failure
-static text *cloudsync_init_internal (cloudsync_context *data, const char *table, const char *algo, bool skip_int_pk_check) {
-    text *result = NULL;
+// Returns site_id as bytea on success, raises error on failure
+static bytea *cloudsync_init_internal (cloudsync_context *data, const char *table, const char *algo, bool skip_int_pk_check) {
+    bytea *result = NULL;
 
     // Connect SPI for database operations
     int spi_rc = SPI_connect();
@@ -303,9 +303,9 @@ Datum cloudsync_init (PG_FUNCTION_ARGS) {
 
     cloudsync_context *data = get_cloudsync_context();
 
-    // Call internal helper and return site_id as text
-    text *result = cloudsync_init_internal(data, table, algo, skip_int_pk_check);
-    PG_RETURN_TEXT_P(result);
+    // Call internal helper and return site_id as bytea
+    bytea *result = cloudsync_init_internal(data, table, algo, skip_int_pk_check);
+    PG_RETURN_BYTEA_P(result);
 }
 
 // MARK: - Table Enable/Disable Functions -

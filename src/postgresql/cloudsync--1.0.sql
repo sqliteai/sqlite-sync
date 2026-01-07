@@ -44,19 +44,19 @@ AS 'MODULE_PATHNAME', 'cloudsync_db_version_next'
 LANGUAGE C VOLATILE;
 
 -- Initialize CloudSync for a table (3 variants for 1-3 arguments)
--- Returns site_id as text
+-- Returns site_id as bytea
 CREATE FUNCTION cloudsync_init(table_name text)
-RETURNS text
+RETURNS bytea
 AS 'MODULE_PATHNAME', 'cloudsync_init'
 LANGUAGE C VOLATILE;
 
 CREATE FUNCTION cloudsync_init(table_name text, algo text)
-RETURNS text
+RETURNS bytea
 AS 'MODULE_PATHNAME', 'cloudsync_init'
 LANGUAGE C VOLATILE;
 
 CREATE FUNCTION cloudsync_init(table_name text, algo text, skip_int_pk_check boolean)
-RETURNS text
+RETURNS bytea
 AS 'MODULE_PATHNAME', 'cloudsync_init'
 LANGUAGE C VOLATILE;
 
