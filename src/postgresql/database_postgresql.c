@@ -789,7 +789,6 @@ int database_create_metatable (cloudsync_context *data, const char *table_name) 
 
 // MARK: - TRIGGERS -
 
-// TODO
 int database_create_insert_trigger (cloudsync_context *data, const char *table_name, char *trigger_when) {
     if (!table_name) return DBRES_MISUSE;
 
@@ -844,7 +843,6 @@ int database_create_insert_trigger (cloudsync_context *data, const char *table_n
     return rc;
 }
 
-// TODO
 int database_create_update_trigger_gos (cloudsync_context *data, const char *table_name) {
     if (!table_name) return DBRES_MISUSE;
 
@@ -880,7 +878,6 @@ int database_create_update_trigger_gos (cloudsync_context *data, const char *tab
     return rc;
 }
 
-// TODO
 int database_create_update_trigger (cloudsync_context *data, const char *table_name, const char *trigger_when) {
     if (!table_name) return DBRES_MISUSE;
 
@@ -974,7 +971,6 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
     return rc;
 }
 
-// TODO
 int database_create_delete_trigger_gos (cloudsync_context *data, const char *table_name) {
     if (!table_name) return DBRES_MISUSE;
 
@@ -1010,7 +1006,6 @@ int database_create_delete_trigger_gos (cloudsync_context *data, const char *tab
     return rc;
 }
 
-// TODO
 int database_create_delete_trigger (cloudsync_context *data, const char *table_name, const char *trigger_when) {
     if (!table_name) return DBRES_MISUSE;
 
@@ -1065,7 +1060,6 @@ int database_create_delete_trigger (cloudsync_context *data, const char *table_n
     return rc;
 }
 
-// TODO
 int database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo) {
     if (!table_name) return DBRES_MISUSE;
 
