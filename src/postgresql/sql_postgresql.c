@@ -324,8 +324,14 @@ const char * const SQL_CLOUDSYNC_SELECT_SITE_ID_BY_PK_COL =
     "SELECT site_id FROM %s_cloudsync WHERE pk = $1 AND col_name = $2;";
 
 const char * const SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID =
-    "SELECT column_name, ordinal_position FROM information_schema.columns "
-    "WHERE table_name = '%s' "
+    "SELECT c.column_name, c.ordinal_position "
+    "FROM information_schema.columns c "
+    "WHERE c.table_name = '%s' "
+    "AND c.column_name NOT IN ("
+    "  SELECT kcu.column_name FROM information_schema.table_constraints tc "
+    "  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
+    "  WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY'"
+    ") "
     "ORDER BY ordinal_position;";
 
 const char * const SQL_DROP_CLOUDSYNC_TABLE =
