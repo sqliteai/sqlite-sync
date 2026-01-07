@@ -764,13 +764,13 @@ int database_create_metatable (cloudsync_context *data, const char *table_name) 
     // Create the metadata table
     snprintf(sql, sizeof(sql),
              "CREATE TABLE IF NOT EXISTS \"%s_cloudsync\" ("
-             "pk TEXT PRIMARY KEY,"
+             "pk BYTEA NOT NULL,"
+             "col_name TEXT NOT NULL,"
+             "col_version BIGINT,"
              "db_version BIGINT NOT NULL DEFAULT 0,"
              "seq INTEGER NOT NULL DEFAULT 0,"
-             "site_id TEXT NOT NULL DEFAULT '',"
-             "col_version BIGINT,"
-             "col_name TEXT,"
-             "col_site_id TEXT"
+             "site_id BIGINT NOT NULL DEFAULT 0,"
+             "PRIMARY KEY (pk, col_name)"
              ");",
              table_name);
 
@@ -791,59 +791,359 @@ int database_create_metatable (cloudsync_context *data, const char *table_name) 
 
 // TODO
 int database_create_insert_trigger (cloudsync_context *data, const char *table_name, char *trigger_when) {
-    // PostgreSQL triggers are more complex - placeholder implementation
-    // Full implementation would create trigger functions and triggers
-    elog(WARNING, "database_create_insert_trigger not yet implemented for PostgreSQL");
-    return DBRES_OK;
+    if (!table_name) return DBRES_MISUSE;
+
+    char trigger_name[1024];
+    char func_name[1024];
+    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_insert_%s", table_name);
+    snprintf(func_name, sizeof(func_name), "cloudsync_after_insert_%s_fn", table_name);
+
+    if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
+
+    char sql[2048];
+    snprintf(sql, sizeof(sql),
+             "SELECT string_agg('NEW.' || quote_ident(kcu.column_name), ',' ORDER BY kcu.ordinal_position) "
+             "FROM information_schema.table_constraints tc "
+             "JOIN information_schema.key_column_usage kcu "
+             "  ON tc.constraint_name = kcu.constraint_name "
+             "WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY';",
+             table_name);
+
+    char *pk_list = NULL;
+    int rc = database_select_text(data, sql, &pk_list);
+    if (rc != DBRES_OK) return rc;
+    if (!pk_list || pk_list[0] == '\0') {
+        if (pk_list) cloudsync_memory_free(pk_list);
+        return cloudsync_set_error(data, "No primary key columns found for table", DBRES_ERROR);
+    }
+
+    char *sql2 = cloudsync_memory_mprintf(
+        "CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$ "
+        "BEGIN "
+        "  IF cloudsync_is_sync('%s') THEN RETURN NEW; END IF; "
+        "  PERFORM cloudsync_insert('%s', VARIADIC ARRAY[%s]); "
+        "  RETURN NEW; "
+        "END; "
+        "$$ LANGUAGE plpgsql;",
+        func_name, table_name, table_name, pk_list);
+    cloudsync_memory_free(pk_list);
+    if (!sql2) return DBRES_NOMEM;
+
+    rc = database_exec(data, sql2);
+    cloudsync_memory_free(sql2);
+    if (rc != DBRES_OK) return rc;
+
+    sql2 = cloudsync_memory_mprintf(
+        "CREATE TRIGGER %s AFTER INSERT ON \"%s\" %s "
+        "EXECUTE FUNCTION %s();",
+        trigger_name, table_name, trigger_when ? trigger_when : "", func_name);
+    if (!sql2) return DBRES_NOMEM;
+
+    rc = database_exec(data, sql2);
+    cloudsync_memory_free(sql2);
+    return rc;
 }
 
 // TODO
 int database_create_update_trigger_gos (cloudsync_context *data, const char *table_name) {
-    elog(WARNING, "database_create_update_trigger_gos not yet implemented for PostgreSQL");
-    return DBRES_OK;
+    if (!table_name) return DBRES_MISUSE;
+
+    char trigger_name[1024];
+    char func_name[1024];
+    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_update_%s", table_name);
+    snprintf(func_name, sizeof(func_name), "cloudsync_before_update_%s_fn", table_name);
+
+    if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
+
+    char *sql = cloudsync_memory_mprintf(
+        "CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$ "
+        "BEGIN "
+        "  RAISE EXCEPTION 'Error: UPDATE operation is not allowed on table %s.'; "
+        "END; "
+        "$$ LANGUAGE plpgsql;",
+        func_name, table_name);
+    if (!sql) return DBRES_NOMEM;
+
+    int rc = database_exec(data, sql);
+    cloudsync_memory_free(sql);
+    if (rc != DBRES_OK) return rc;
+
+    sql = cloudsync_memory_mprintf(
+        "CREATE TRIGGER %s BEFORE UPDATE ON \"%s\" "
+        "FOR EACH ROW WHEN (cloudsync_is_enabled('%s') = true) "
+        "EXECUTE FUNCTION %s();",
+        trigger_name, table_name, table_name, func_name);
+    if (!sql) return DBRES_NOMEM;
+
+    rc = database_exec(data, sql);
+    cloudsync_memory_free(sql);
+    return rc;
 }
 
 // TODO
 int database_create_update_trigger (cloudsync_context *data, const char *table_name, const char *trigger_when) {
-    elog(WARNING, "database_create_update_trigger not yet implemented for PostgreSQL");
-    return DBRES_OK;
+    if (!table_name) return DBRES_MISUSE;
+
+    char trigger_name[1024];
+    char func_name[1024];
+    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_update_%s", table_name);
+    snprintf(func_name, sizeof(func_name), "cloudsync_after_update_%s_fn", table_name);
+
+    if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
+
+    char sql[2048];
+    snprintf(sql, sizeof(sql),
+             "SELECT string_agg("
+             "  '(''' || kcu.column_name || ''', NEW.' || quote_ident(kcu.column_name) || ', OLD.' || quote_ident(kcu.column_name) || ')', "
+             "  ', ' ORDER BY kcu.ordinal_position"
+             ") "
+             "FROM information_schema.table_constraints tc "
+             "JOIN information_schema.key_column_usage kcu "
+             "  ON tc.constraint_name = kcu.constraint_name "
+             "WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY';",
+             table_name);
+
+    char *pk_values_list = NULL;
+    int rc = database_select_text(data, sql, &pk_values_list);
+    if (rc != DBRES_OK) return rc;
+    if (!pk_values_list || pk_values_list[0] == '\0') {
+        if (pk_values_list) cloudsync_memory_free(pk_values_list);
+        return cloudsync_set_error(data, "No primary key columns found for table", DBRES_ERROR);
+    }
+
+    snprintf(sql, sizeof(sql),
+             "SELECT string_agg("
+             "  '(''' || c.column_name || ''', NEW.' || quote_ident(c.column_name) || ', OLD.' || quote_ident(c.column_name) || ')', "
+             "  ', ' ORDER BY c.ordinal_position"
+             ") "
+             "FROM information_schema.columns c "
+             "WHERE c.table_name = '%s' "
+             "AND NOT EXISTS ("
+             "  SELECT 1 FROM information_schema.table_constraints tc "
+             "  JOIN information_schema.key_column_usage kcu "
+             "    ON tc.constraint_name = kcu.constraint_name "
+             "  WHERE tc.table_name = c.table_name "
+             "  AND tc.constraint_type = 'PRIMARY KEY' "
+             "  AND kcu.column_name = c.column_name"
+             ");",
+             table_name);
+
+    char *col_values_list = NULL;
+    rc = database_select_text(data, sql, &col_values_list);
+    if (rc != DBRES_OK) {
+        if (pk_values_list) cloudsync_memory_free(pk_values_list);
+        return rc;
+    }
+
+    char *values_query = NULL;
+    if (col_values_list && col_values_list[0] != '\0') {
+        values_query = cloudsync_memory_mprintf("VALUES %s, %s", pk_values_list, col_values_list);
+    } else {
+        values_query = cloudsync_memory_mprintf("VALUES %s", pk_values_list);
+    }
+
+    if (pk_values_list) cloudsync_memory_free(pk_values_list);
+    if (col_values_list) cloudsync_memory_free(col_values_list);
+    if (!values_query) return DBRES_NOMEM;
+
+    char *sql2 = cloudsync_memory_mprintf(
+        "CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$ "
+        "BEGIN "
+        "  IF cloudsync_is_sync('%s') THEN RETURN NEW; END IF; "
+        "  PERFORM cloudsync_update(table_name, new_value, old_value) "
+        "  FROM (%s) AS v(table_name, new_value, old_value); "
+        "  RETURN NEW; "
+        "END; "
+        "$$ LANGUAGE plpgsql;",
+        func_name, table_name, values_query);
+    cloudsync_memory_free(values_query);
+    if (!sql2) return DBRES_NOMEM;
+
+    rc = database_exec(data, sql2);
+    cloudsync_memory_free(sql2);
+    if (rc != DBRES_OK) return rc;
+
+    sql2 = cloudsync_memory_mprintf(
+        "CREATE TRIGGER %s AFTER UPDATE ON \"%s\" %s "
+        "EXECUTE FUNCTION %s();",
+        trigger_name, table_name, trigger_when ? trigger_when : "", func_name);
+    if (!sql2) return DBRES_NOMEM;
+
+    rc = database_exec(data, sql2);
+    cloudsync_memory_free(sql2);
+    return rc;
 }
 
 // TODO
 int database_create_delete_trigger_gos (cloudsync_context *data, const char *table_name) {
-    elog(WARNING, "database_create_delete_trigger_gos not yet implemented for PostgreSQL");
-    return DBRES_OK;
+    if (!table_name) return DBRES_MISUSE;
+
+    char trigger_name[1024];
+    char func_name[1024];
+    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_delete_%s", table_name);
+    snprintf(func_name, sizeof(func_name), "cloudsync_before_delete_%s_fn", table_name);
+
+    if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
+
+    char *sql = cloudsync_memory_mprintf(
+        "CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$ "
+        "BEGIN "
+        "  RAISE EXCEPTION 'Error: DELETE operation is not allowed on table %s.'; "
+        "END; "
+        "$$ LANGUAGE plpgsql;",
+        func_name, table_name);
+    if (!sql) return DBRES_NOMEM;
+
+    int rc = database_exec(data, sql);
+    cloudsync_memory_free(sql);
+    if (rc != DBRES_OK) return rc;
+
+    sql = cloudsync_memory_mprintf(
+        "CREATE TRIGGER %s BEFORE DELETE ON \"%s\" "
+        "FOR EACH ROW WHEN (cloudsync_is_enabled('%s') = true) "
+        "EXECUTE FUNCTION %s();",
+        trigger_name, table_name, table_name, func_name);
+    if (!sql) return DBRES_NOMEM;
+
+    rc = database_exec(data, sql);
+    cloudsync_memory_free(sql);
+    return rc;
 }
 
 // TODO
 int database_create_delete_trigger (cloudsync_context *data, const char *table_name, const char *trigger_when) {
-    elog(WARNING, "database_create_delete_trigger not yet implemented for PostgreSQL");
-    return DBRES_OK;
+    if (!table_name) return DBRES_MISUSE;
+
+    char trigger_name[1024];
+    char func_name[1024];
+    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_delete_%s", table_name);
+    snprintf(func_name, sizeof(func_name), "cloudsync_after_delete_%s_fn", table_name);
+
+    if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
+
+    char sql[2048];
+    snprintf(sql, sizeof(sql),
+             "SELECT string_agg('OLD.' || quote_ident(kcu.column_name), ',' ORDER BY kcu.ordinal_position) "
+             "FROM information_schema.table_constraints tc "
+             "JOIN information_schema.key_column_usage kcu "
+             "  ON tc.constraint_name = kcu.constraint_name "
+             "WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY';",
+             table_name);
+
+    char *pk_list = NULL;
+    int rc = database_select_text(data, sql, &pk_list);
+    if (rc != DBRES_OK) return rc;
+    if (!pk_list || pk_list[0] == '\0') {
+        if (pk_list) cloudsync_memory_free(pk_list);
+        return cloudsync_set_error(data, "No primary key columns found for table", DBRES_ERROR);
+    }
+
+    char *sql2 = cloudsync_memory_mprintf(
+        "CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$ "
+        "BEGIN "
+        "  IF cloudsync_is_sync('%s') THEN RETURN OLD; END IF; "
+        "  PERFORM cloudsync_delete('%s', VARIADIC ARRAY[%s]); "
+        "  RETURN OLD; "
+        "END; "
+        "$$ LANGUAGE plpgsql;",
+        func_name, table_name, table_name, pk_list);
+    cloudsync_memory_free(pk_list);
+    if (!sql2) return DBRES_NOMEM;
+
+    rc = database_exec(data, sql2);
+    cloudsync_memory_free(sql2);
+    if (rc != DBRES_OK) return rc;
+
+    sql2 = cloudsync_memory_mprintf(
+        "CREATE TRIGGER %s AFTER DELETE ON \"%s\" %s "
+        "EXECUTE FUNCTION %s();",
+        trigger_name, table_name, trigger_when ? trigger_when : "", func_name);
+    if (!sql2) return DBRES_NOMEM;
+
+    rc = database_exec(data, sql2);
+    cloudsync_memory_free(sql2);
+    return rc;
 }
 
 // TODO
 int database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo) {
-    // Placeholder - triggers need to be implemented with PostgreSQL PL/pgSQL
-    elog(WARNING, "database_create_triggers not yet implemented for PostgreSQL");
-    return DBRES_OK;
+    if (!table_name) return DBRES_MISUSE;
+
+    char trigger_when[1024];
+    snprintf(trigger_when, sizeof(trigger_when),
+             "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false)",
+             table_name);
+
+    int rc = database_create_insert_trigger(data, table_name, trigger_when);
+    if (rc != DBRES_OK) return rc;
+
+    if (algo == table_algo_crdt_gos) {
+        rc = database_create_update_trigger_gos(data, table_name);
+    } else {
+        rc = database_create_update_trigger(data, table_name, trigger_when);
+    }
+    if (rc != DBRES_OK) return rc;
+
+    if (algo == table_algo_crdt_gos) {
+        rc = database_create_delete_trigger_gos(data, table_name);
+    } else {
+        rc = database_create_delete_trigger(data, table_name, trigger_when);
+    }
+
+    return rc;
 }
 
 int database_delete_triggers (cloudsync_context *data, const char *table) {
     char sql[1024];
 
     snprintf(sql, sizeof(sql),
-             "DROP TRIGGER IF EXISTS \"%s_insert_trigger\" ON \"%s\";",
+             "DROP TRIGGER IF EXISTS \"cloudsync_after_insert_%s\" ON \"%s\";",
              table, table);
     database_exec(data, sql);
 
     snprintf(sql, sizeof(sql),
-             "DROP TRIGGER IF EXISTS \"%s_update_trigger\" ON \"%s\";",
+             "DROP FUNCTION IF EXISTS cloudsync_after_insert_%s_fn() CASCADE;",
+             table);
+    database_exec(data, sql);
+
+    snprintf(sql, sizeof(sql),
+             "DROP TRIGGER IF EXISTS \"cloudsync_after_update_%s\" ON \"%s\";",
              table, table);
     database_exec(data, sql);
 
     snprintf(sql, sizeof(sql),
-             "DROP TRIGGER IF EXISTS \"%s_delete_trigger\" ON \"%s\";",
+             "DROP TRIGGER IF EXISTS \"cloudsync_before_update_%s\" ON \"%s\";",
              table, table);
+    database_exec(data, sql);
+
+    snprintf(sql, sizeof(sql),
+             "DROP FUNCTION IF EXISTS cloudsync_after_update_%s_fn() CASCADE;",
+             table);
+    database_exec(data, sql);
+
+    snprintf(sql, sizeof(sql),
+             "DROP FUNCTION IF EXISTS cloudsync_before_update_%s_fn() CASCADE;",
+             table);
+    database_exec(data, sql);
+
+    snprintf(sql, sizeof(sql),
+             "DROP TRIGGER IF EXISTS \"cloudsync_after_delete_%s\" ON \"%s\";",
+             table, table);
+    database_exec(data, sql);
+
+    snprintf(sql, sizeof(sql),
+             "DROP TRIGGER IF EXISTS \"cloudsync_before_delete_%s\" ON \"%s\";",
+             table, table);
+    database_exec(data, sql);
+
+    snprintf(sql, sizeof(sql),
+             "DROP FUNCTION IF EXISTS cloudsync_after_delete_%s_fn() CASCADE;",
+             table);
+    database_exec(data, sql);
+
+    snprintf(sql, sizeof(sql),
+             "DROP FUNCTION IF EXISTS cloudsync_before_delete_%s_fn() CASCADE;",
+             table);
     database_exec(data, sql);
 
     return DBRES_OK;

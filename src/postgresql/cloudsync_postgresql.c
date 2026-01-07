@@ -18,6 +18,7 @@
 #include "catalog/pg_type.h"
 #include "executor/spi.h"
 #include "access/xact.h"
+#include "storage/ipc.h"
 #include "utils/memutils.h"
 #include "utils/array.h"
 #include "pgvalue.h"
@@ -741,6 +742,37 @@ Datum pg_cloudsync_payload_apply (PG_FUNCTION_ARGS) {
 
 // MARK: - Private/Internal Functions -
 
+typedef struct cloudsync_pg_cleanup_state {
+    char *pk;
+    char pk_buffer[1024];
+    pgvalue_t **argv;
+    int argc;
+    bool spi_connected;
+} cloudsync_pg_cleanup_state;
+
+static void cloudsync_pg_cleanup(int code, Datum arg) {
+    cloudsync_pg_cleanup_state *state = (cloudsync_pg_cleanup_state *)DatumGetPointer(arg);
+    if (!state) return;
+    UNUSED_PARAMETER(code);
+
+    if (state->pk && state->pk != state->pk_buffer) {
+        cloudsync_memory_free(state->pk);
+    }
+    state->pk = NULL;
+
+    for (int i = 0; i < state->argc; i++) {
+        database_value_free((dbvalue_t *)state->argv[i]);
+    }
+    if (state->argv) cloudsync_memory_free(state->argv);
+    state->argv = NULL;
+    state->argc = 0;
+
+    if (state->spi_connected) {
+        SPI_finish();
+        state->spi_connected = false;
+    }
+}
+
 // cloudsync_is_sync - Check if table has sync metadata
 PG_FUNCTION_INFO_V1(cloudsync_is_sync);
 Datum cloudsync_is_sync (PG_FUNCTION_ARGS) {
@@ -790,7 +822,9 @@ Datum cloudsync_pk_encode (PG_FUNCTION_ARGS) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("cloudsync_pk_encode failed to encode primary key")));
     }
 
-    text *result = cstring_to_text_with_len(encoded, (int)pklen);
+    bytea *result = (bytea *)palloc(pklen + VARHDRSZ);
+    SET_VARSIZE(result, pklen + VARHDRSZ);
+    memcpy(VARDATA(result), encoded, pklen);
     cloudsync_memory_free(encoded);
 
     for (int i = 0; i < argc; i++) {
@@ -798,15 +832,81 @@ Datum cloudsync_pk_encode (PG_FUNCTION_ARGS) {
     }
     if (argv) cloudsync_memory_free(argv);
 
-    PG_RETURN_TEXT_P(result);
+    PG_RETURN_BYTEA_P(result);
 }
 
 // cloudsync_pk_decode - Decode primary key component at given index
 PG_FUNCTION_INFO_V1(cloudsync_pk_decode);
+typedef struct cloudsync_pk_decode_ctx {
+    int target_index;
+    text *result;
+    bool found;
+} cloudsync_pk_decode_ctx;
+
+static int cloudsync_pk_decode_set_result (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
+    cloudsync_pk_decode_ctx *ctx = (cloudsync_pk_decode_ctx *)xdata;
+    if (!ctx || ctx->found || (index + 1) != ctx->target_index) return DBRES_OK;
+
+    switch (type) {
+        case DBTYPE_INTEGER: {
+            char *cstr = DatumGetCString(DirectFunctionCall1(int8out, Int64GetDatum(ival)));
+            ctx->result = cstring_to_text(cstr);
+            pfree(cstr);
+            break;
+        }
+        case DBTYPE_FLOAT: {
+            char *cstr = DatumGetCString(DirectFunctionCall1(float8out, Float8GetDatum(dval)));
+            ctx->result = cstring_to_text(cstr);
+            pfree(cstr);
+            break;
+        }
+        case DBTYPE_TEXT: {
+            ctx->result = cstring_to_text_with_len(pval, (int)ival);
+            break;
+        }
+        case DBTYPE_BLOB: {
+            bytea *ba = (bytea *)palloc(ival + VARHDRSZ);
+            SET_VARSIZE(ba, ival + VARHDRSZ);
+            memcpy(VARDATA(ba), pval, (size_t)ival);
+            char *cstr = DatumGetCString(DirectFunctionCall1(byteaout, PointerGetDatum(ba)));
+            ctx->result = cstring_to_text(cstr);
+            pfree(cstr);
+            pfree(ba);
+            break;
+        }
+        case DBTYPE_NULL:
+        default:
+            ctx->result = NULL;
+            break;
+    }
+
+    ctx->found = true;
+    return DBRES_OK;
+}
+
 Datum cloudsync_pk_decode (PG_FUNCTION_ARGS) {
-    // TODO: Implement pk_decode with callback pattern
-    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_pk_decode not yet implemented - requires callback implementation")));
-    PG_RETURN_NULL();
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1)) {
+        PG_RETURN_NULL();
+    }
+
+    bytea *ba = PG_GETARG_BYTEA_P(0);
+    int index = PG_GETARG_INT32(1);
+    if (index < 1) PG_RETURN_NULL();
+
+    cloudsync_pk_decode_ctx ctx = {
+        .target_index = index,
+        .result = NULL,
+        .found = false
+    };
+
+    char *buffer = VARDATA(ba);
+    size_t blen = (size_t)(VARSIZE(ba) - VARHDRSZ);
+    if (pk_decode_prikey(buffer, blen, cloudsync_pk_decode_set_result, &ctx) < 0) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("cloudsync_pk_decode failed to decode primary key")));
+    }
+
+    if (!ctx.found || ctx.result == NULL) PG_RETURN_NULL();
+    PG_RETURN_TEXT_P(ctx.result);
 }
 
 // cloudsync_insert - Internal insert handler
@@ -819,54 +919,59 @@ Datum cloudsync_insert (PG_FUNCTION_ARGS) {
 
     const char *table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
     cloudsync_context *data = get_cloudsync_context();
-
-    // Lookup table
-    cloudsync_table_context *table = table_lookup(data, table_name);
-    if (!table) {
-        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Unable to retrieve table name %s in cloudsync_insert", table_name)));
-    }
-
-    // Extract PK values from VARIADIC anyarray (arg 1)
-    int argc = 0;
-    pgvalue_t **argv = NULL;
-
-    if (!PG_ARGISNULL(1)) {
-        ArrayType *pk_array = PG_GETARG_ARRAYTYPE_P(1);
-        argv = pgvalues_from_array(pk_array, &argc);
-    }
-
-    // Verify we have the correct number of PK columns
-    int expected_pks = table_count_pks(table);
-    if (argc != expected_pks) {
-        // Cleanup before error
-        for (int i = 0; i < argc; i++) {
-            database_value_free((dbvalue_t *)argv[i]);
-        }
-        if (argv) cloudsync_memory_free(argv);
-
-        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Expected %d primary key values, got %d", expected_pks, argc)));
-    }
+    cloudsync_pg_cleanup_state cleanup = {0};
 
     // Connect SPI for database operations
     int spi_rc = SPI_connect();
     if (spi_rc != SPI_OK_CONNECT) {
-        // Cleanup before error
-        for (int i = 0; i < argc; i++) {
-            database_value_free((dbvalue_t *)argv[i]);
-        }
-        if (argv) cloudsync_memory_free(argv);
-
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
     }
+    cleanup.spi_connected = true;
 
-    PG_TRY();
+    PG_ENSURE_ERROR_CLEANUP(cloudsync_pg_cleanup, PointerGetDatum(&cleanup));
     {
-        // Encode the primary key values into a buffer
-        char buffer[1024];
-        size_t pklen = sizeof(buffer);
-        char *pk = pk_encode_prikey((dbvalue_t **)argv, argc, buffer, &pklen);
+        if (cloudsync_context_init(data) == NULL) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to initialize cloudsync context")));
+        }
 
-        if (!pk) {
+        // Lookup table (load from settings if needed)
+        cloudsync_table_context *table = table_lookup(data, table_name);
+        if (!table) {
+            char meta_name[1024];
+            snprintf(meta_name, sizeof(meta_name), "%s_cloudsync", table_name);
+            if (!database_table_exists(data, meta_name)) {
+                ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Unable to retrieve table name %s in cloudsync_insert", table_name)));
+            }
+
+            table_algo algo = dbutils_table_settings_get_algo(data, table_name);
+            if (algo == table_algo_none) algo = table_algo_crdt_cls;
+            if (!table_add_to_context(data, algo, table_name)) {
+                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to load table context for %s", table_name)));
+            }
+
+            table = table_lookup(data, table_name);
+            if (!table) {
+                ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Unable to retrieve table name %s in cloudsync_insert", table_name)));
+            }
+        }
+
+        // Extract PK values from VARIADIC anyarray (arg 1)
+        if (!PG_ARGISNULL(1)) {
+            ArrayType *pk_array = PG_GETARG_ARRAYTYPE_P(1);
+            cleanup.argv = pgvalues_from_array(pk_array, &cleanup.argc);
+        }
+
+        // Verify we have the correct number of PK columns
+        int expected_pks = table_count_pks(table);
+        if (cleanup.argc != expected_pks) {
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Expected %d primary key values, got %d", expected_pks, cleanup.argc)));
+        }
+
+        // Encode the primary key values into a buffer
+        size_t pklen = sizeof(cleanup.pk_buffer);
+        cleanup.pk = pk_encode_prikey((dbvalue_t **)cleanup.argv, cleanup.argc, cleanup.pk_buffer, &pklen);
+
+        if (!cleanup.pk) {
             ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Not enough memory to encode the primary key(s)")));
         }
 
@@ -875,55 +980,111 @@ Datum cloudsync_insert (PG_FUNCTION_ARGS) {
 
         // Check if a row with the same primary key already exists
         // (if so, this might be a previously deleted sentinel)
-        bool pk_exists = table_pk_exists(table, pk, pklen);
+        bool pk_exists = table_pk_exists(table, cleanup.pk, pklen);
         int rc = DBRES_OK;
 
         if (table_count_cols(table) == 0) {
             // If there are no columns other than primary keys, insert a sentinel record
-            rc = local_mark_insert_sentinel_meta(table, pk, pklen, db_version, cloudsync_bumpseq(data));
-            if (rc != DBRES_OK) goto cleanup;
+            rc = local_mark_insert_sentinel_meta(table, cleanup.pk, pklen, db_version, cloudsync_bumpseq(data));
         } else if (pk_exists) {
             // If a row with the same primary key already exists, update the sentinel record
-            rc = local_update_sentinel(table, pk, pklen, db_version, cloudsync_bumpseq(data));
-            if (rc != DBRES_OK) goto cleanup;
+            rc = local_update_sentinel(table, cleanup.pk, pklen, db_version, cloudsync_bumpseq(data));
         }
 
-        // Process each non-primary key column for insert or update
-        for (int i = 0; i < table_count_cols(table); i++) {
-            rc = local_mark_insert_or_update_meta(table, pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
-            if (rc != DBRES_OK) goto cleanup;
+        if (rc == DBRES_OK) {
+            // Process each non-primary key column for insert or update
+            for (int i = 0; i < table_count_cols(table); i++) {
+                rc = local_mark_insert_or_update_meta(table, cleanup.pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
+                if (rc != DBRES_OK) break;
+            }
         }
-
-    cleanup:
-        // Free memory if the primary key was dynamically allocated
-        if (pk != buffer) cloudsync_memory_free(pk);
-
-        // Free pgvalue_t wrappers
-        for (int i = 0; i < argc; i++) {
-            database_value_free((dbvalue_t *)argv[i]);
-        }
-        if (argv) cloudsync_memory_free(argv);
-
-        SPI_finish();
 
         if (rc != DBRES_OK) {
             ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", database_errmsg(data))));
         }
-
-        PG_RETURN_BOOL(true);
     }
-    PG_CATCH();
+    PG_END_ENSURE_ERROR_CLEANUP(cloudsync_pg_cleanup, PointerGetDatum(&cleanup));
+
+    cloudsync_pg_cleanup(0, PointerGetDatum(&cleanup));
+    PG_RETURN_BOOL(true);
+}
+
+// cloudsync_delete - Internal delete handler
+// Signature: cloudsync_delete(table_name text, VARIADIC pk_values anyarray)
+PG_FUNCTION_INFO_V1(cloudsync_delete);
+Datum cloudsync_delete (PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0)) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name cannot be NULL")));
+    }
+
+    const char *table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    cloudsync_context *data = get_cloudsync_context();
+    cloudsync_pg_cleanup_state cleanup = {0};
+
+    int spi_rc = SPI_connect();
+    if (spi_rc != SPI_OK_CONNECT) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
+    }
+    cleanup.spi_connected = true;
+
+    PG_ENSURE_ERROR_CLEANUP(cloudsync_pg_cleanup, PointerGetDatum(&cleanup));
     {
-        // Cleanup on exception
-        for (int i = 0; i < argc; i++) {
-            database_value_free((dbvalue_t *)argv[i]);
+        if (cloudsync_context_init(data) == NULL) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to initialize cloudsync context")));
         }
-        if (argv) cloudsync_memory_free(argv);
 
-        SPI_finish();
-        PG_RE_THROW();
+        cloudsync_table_context *table = table_lookup(data, table_name);
+        if (!table) {
+            char meta_name[1024];
+            snprintf(meta_name, sizeof(meta_name), "%s_cloudsync", table_name);
+            if (!database_table_exists(data, meta_name)) {
+                ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Unable to retrieve table name %s in cloudsync_delete", table_name)));
+            }
+
+            table_algo algo = dbutils_table_settings_get_algo(data, table_name);
+            if (algo == table_algo_none) algo = table_algo_crdt_cls;
+            if (!table_add_to_context(data, algo, table_name)) {
+                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to load table context for %s", table_name)));
+            }
+
+            table = table_lookup(data, table_name);
+            if (!table) {
+                ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Unable to retrieve table name %s in cloudsync_delete", table_name)));
+            }
+        }
+
+        if (!PG_ARGISNULL(1)) {
+            ArrayType *pk_array = PG_GETARG_ARRAYTYPE_P(1);
+            cleanup.argv = pgvalues_from_array(pk_array, &cleanup.argc);
+        }
+
+        int expected_pks = table_count_pks(table);
+        if (cleanup.argc != expected_pks) {
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Expected %d primary key values, got %d", expected_pks, cleanup.argc)));
+        }
+        int rc = DBRES_OK;
+
+        size_t pklen = sizeof(cleanup.pk_buffer);
+        cleanup.pk = pk_encode_prikey((dbvalue_t **)cleanup.argv, cleanup.argc, cleanup.pk_buffer, &pklen);
+        if (!cleanup.pk) {
+            ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Not enough memory to encode the primary key(s)")));
+        }
+
+        int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
+
+        rc = local_mark_delete_meta(table, cleanup.pk, pklen, db_version, cloudsync_bumpseq(data));
+        if (rc == DBRES_OK) {
+            rc = local_drop_meta(table, cleanup.pk, pklen);
+        }
+
+        if (rc != DBRES_OK) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", database_errmsg(data))));
+        }
     }
-    PG_END_TRY();
+    PG_END_ENSURE_ERROR_CLEANUP(cloudsync_pg_cleanup, PointerGetDatum(&cleanup));
+
+    cloudsync_pg_cleanup(0, PointerGetDatum(&cleanup));
+    PG_RETURN_BOOL(true);
 }
 
 // Aggregate function: cloudsync_update (not implemented - complex)
