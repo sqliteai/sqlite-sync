@@ -95,7 +95,6 @@ src/
 - [ ] Test extension loading and basic functions
 - [ ] Align PostgreSQL `dbmem_*` with core expectations (use uint64_t, decide OOM semantics vs palloc ERROR, clarify dbmem_size=0)
 - [ ] TODOs to fix `sql_postgresql.c`
-- [ ] Apply PG_ENSURE_ERROR_CLEANUP pattern to other SPI-using functions with shared cleanup needs
 
 ## Progress Log
 
