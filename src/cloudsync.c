@@ -2011,14 +2011,6 @@ int cloudsync_payload_encode_step (cloudsync_payload_context *payload, cloudsync
     return DBRES_OK;
 }
 
-char *cloudsync_payload_blob (cloudsync_payload_context *payload, int64_t *blob_size, int64_t *nrows) {
-    DEBUG_FUNCTION("cloudsync_payload_blob");
-    
-    if (blob_size) *blob_size = (int64_t)payload->bsize;
-    if (nrows) *nrows = (int64_t)payload->nrows;
-    return payload->buffer;
-}
-
 int cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsync_context *data) {
     DEBUG_FUNCTION("cloudsync_payload_encode_final");
     
@@ -2037,9 +2029,25 @@ int cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsyn
         return DBRES_ERROR;
     }
     
-    // try to allocate buffer used for compressed data
+    // sanity check about buffer size
     int header_size = (int)sizeof(cloudsync_payload_header);
-    int real_buffer_size = (int)(payload->bused - header_size);
+    int64_t buffer_size = (int64_t)payload->bused - (int64_t)header_size;
+    if (buffer_size < 0) {
+        if (payload->buffer) cloudsync_memory_free(payload->buffer);
+        payload->buffer = NULL;
+        payload->bsize = 0;
+        cloudsync_set_error(data, "cloudsync_encode: internal size underflow", DBRES_ERROR);
+        return DBRES_ERROR;
+    }
+    if (buffer_size > INT_MAX) {
+        if (payload->buffer) cloudsync_memory_free(payload->buffer);
+        payload->buffer = NULL;
+        payload->bsize = 0;
+        cloudsync_set_error(data, "cloudsync_encode: payload too large to compress (INT_MAX limit)", DBRES_ERROR);
+        return DBRES_ERROR;
+    }
+    // try to allocate buffer used for compressed data
+    int real_buffer_size = (int)buffer_size;
     int zbound = LZ4_compressBound(real_buffer_size);
     char *zbuffer = cloudsync_memory_alloc(zbound + header_size); // if for some reasons allocation fails then just skip compression
     
@@ -2073,6 +2081,14 @@ int cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsyn
     }
     
     return DBRES_OK;
+}
+
+char *cloudsync_payload_blob (cloudsync_payload_context *payload, int64_t *blob_size, int64_t *nrows) {
+    DEBUG_FUNCTION("cloudsync_payload_blob");
+    
+    if (blob_size) *blob_size = (int64_t)payload->bsize;
+    if (nrows) *nrows = (int64_t)payload->nrows;
+    return payload->buffer;
 }
 
 static int cloudsync_payload_decode_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {

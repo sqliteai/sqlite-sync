@@ -64,6 +64,10 @@
  * Versatility: The ability to handle multiple data types and variable-length data makes this solution suitable for complex data structures.
  * Simplicity: The functions are designed to be straightforward to use, with clear memory management responsibilities.
  
+ Notes
+ 
+ * Floating point values are encoded as IEEE754 double, 64-bit, big-endian byte order.
+ 
  */
 
 // Three bits are reserved for the type field, so only values in the 0..7 range can be used (8 values)
@@ -76,6 +80,24 @@
 #define DATABASE_TYPE_NEGATIVE_INTEGER      0   // was SQLITE_NEGATIVE_INTEGER
 #define DATABASE_TYPE_MAX_NEGATIVE_INTEGER  6   // was SQLITE_MAX_NEGATIVE_INTEGER
 #define DATABASE_TYPE_NEGATIVE_FLOAT        7   // was SQLITE_NEGATIVE_FLOAT
+
+// MARK: - Utils -
+
+static inline uint64_t host_to_be64(uint64_t v) {
+    #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    return __builtin_bswap64(v);
+    #else
+    return v;
+    #endif
+}
+
+static inline uint64_t be64_to_host(uint64_t v) {
+    #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    return __builtin_bswap64(v);
+    #else
+    return v;
+    #endif
+}
 
 // MARK: - Decoding -
 
@@ -123,7 +145,7 @@ int pk_decode_print_callback (void *xdata, int index, int type, int64_t ival, do
             break;
             
         case DBTYPE_TEXT:
-            printf("%d\tTEXT:\t%s\n", index, pval);
+            printf("%d\tTEXT:\t%.*s\n", index, (int)ival, pval);
             break;
             
         case DBTYPE_BLOB:
@@ -160,9 +182,13 @@ char *pk_decode_data (char *buffer, size_t *bseek, int32_t blen) {
 }
 
 double pk_decode_double (char *buffer, size_t *bseek) {
+    // Doubles are encoded as IEEE754 64-bit, big-endian.
+    // Convert back to host order before memcpy into double.
+    
     double value = 0;
-    int64_t int64value = pk_decode_int64(buffer, bseek, sizeof(int64_t));
-    memcpy(&value, &int64value, sizeof(int64_t));
+    uint64_t bits_be = (uint64_t)pk_decode_int64(buffer, bseek, sizeof(uint64_t));
+    uint64_t bits = be64_to_host(bits_be);
+    memcpy(&value, &bits, sizeof(bits));
     
     return value;
 }
@@ -228,14 +254,15 @@ int pk_decode_prikey (char *buffer, size_t blen, int (*cb) (void *xdata, int ind
 // MARK: - Encoding -
 
 size_t pk_encode_nbytes_needed (int64_t value) {
-    if (value <= 0x7F) return 1; // 7 bits
-    if (value <= 0x7FFF) return 2; // 15 bits
-    if (value <= 0x7FFFFF) return 3; // 23 bits
-    if (value <= 0x7FFFFFFF) return 4; // 31 bits
-    if (value <= 0x7FFFFFFFFF) return 5; // 39 bits
-    if (value <= 0x7FFFFFFFFFFF) return 6; // 47 bits
-    if (value <= 0x7FFFFFFFFFFFFF) return 7; // 55 bits
-    return 8; // Larger than 7-byte range, needs 8 bytes
+    uint64_t v = (uint64_t)value;
+    if (v <= 0xFFULL) return 1;
+    if (v <= 0xFFFFULL) return 2;
+    if (v <= 0xFFFFFFULL) return 3;
+    if (v <= 0xFFFFFFFFULL) return 4;
+    if (v <= 0xFFFFFFFFFFULL) return 5;
+    if (v <= 0xFFFFFFFFFFFFULL) return 6;
+    if (v <= 0xFFFFFFFFFFFFFFULL) return 7;
+    return 8;
 }
 
 size_t pk_encode_size (dbvalue_t **argv, int argc, int reserved) {
@@ -326,12 +353,14 @@ char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bs
             }
                 break;
             case DBTYPE_FLOAT: {
+                // Encode doubles as IEEE754 64-bit, big-endian
                 double value = database_value_double(argv[i]);
                 if (value < 0) {value = -value; type = DATABASE_TYPE_NEGATIVE_FLOAT;}
-                int64_t net_double;
-                memcpy(&net_double, &value, sizeof(int64_t));
+                uint64_t bits;
+                memcpy(&bits, &value, sizeof(bits));
+                bits = host_to_be64(bits);
                 bseek = pk_encode_u8(buffer, bseek, (uint8_t)type);
-                bseek = pk_encode_int64(buffer, bseek, net_double, sizeof(int64_t));
+                bseek = pk_encode_int64(buffer, bseek, (int64_t)bits, sizeof(bits));
             }
                 break;
             case DBTYPE_TEXT:
