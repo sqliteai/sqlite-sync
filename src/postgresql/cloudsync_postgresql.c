@@ -167,12 +167,16 @@ Datum cloudsync_db_version (PG_FUNCTION_ARGS) {
     UNUSED_PARAMETER(fcinfo);
 
     cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    int64_t version = 0;
+    bool spi_connected = false;
 
     // Connect SPI for database operations
     int spi_rc = SPI_connect();
     if (spi_rc != SPI_OK_CONNECT) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
     }
+    spi_connected = true;
 
     PG_TRY();
     {
@@ -182,23 +186,25 @@ Datum cloudsync_db_version (PG_FUNCTION_ARGS) {
             ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to retrieve db_version (%s)", database_errmsg(data))));
         }
 
-        int64_t version = cloudsync_dbversion(data);
-        SPI_finish();
-
-        PG_RETURN_INT64(version);
+        version = cloudsync_dbversion(data);
     }
     PG_CATCH();
     {
-        SPI_finish();
+        if (spi_connected) SPI_finish();
         PG_RE_THROW();
     }
     PG_END_TRY();
+
+    if (spi_connected) SPI_finish();
+    PG_RETURN_INT64(version);
 }
 
 // cloudsync_db_version_next([merging_version]) - Get next database version
 PG_FUNCTION_INFO_V1(cloudsync_db_version_next);
 Datum cloudsync_db_version_next (PG_FUNCTION_ARGS) {
     cloudsync_context *data = get_cloudsync_context();
+    int64_t next_version = 0;
+    bool spi_connected = false;
 
     int64_t merging_version = CLOUDSYNC_VALUE_NOTSET;
     if (PG_NARGS() == 1 && !PG_ARGISNULL(0)) {
@@ -210,21 +216,22 @@ Datum cloudsync_db_version_next (PG_FUNCTION_ARGS) {
     if (spi_rc != SPI_OK_CONNECT) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
     }
+    spi_connected = true;
 
     PG_TRY();
     {
         cloudsync_pg_ensure_initialized(data, true);
-        int64_t next_version = cloudsync_dbversion_next(data, merging_version);
-        SPI_finish();
-
-        PG_RETURN_INT64(next_version);
+        next_version = cloudsync_dbversion_next(data, merging_version);
     }
     PG_CATCH();
     {
-        SPI_finish();
+        if (spi_connected) SPI_finish();
         PG_RE_THROW();
     }
     PG_END_TRY();
+
+    if (spi_connected) SPI_finish();
+    PG_RETURN_INT64(next_version);
 }
 
 // MARK: - Table Initialization -
@@ -381,30 +388,33 @@ Datum pg_cloudsync_cleanup (PG_FUNCTION_ARGS) {
 
     const char *table = text_to_cstring(PG_GETARG_TEXT_PP(0));
     cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    bool spi_connected = false;
 
     int spi_rc = SPI_connect();
     if (spi_rc != SPI_OK_CONNECT) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
     }
+    spi_connected = true;
 
     PG_TRY();
     {
         cloudsync_pg_ensure_initialized(data, true);
-        int rc = cloudsync_cleanup(data, table);
-        SPI_finish();
-
-        if (rc != DBRES_OK) {
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
-        }
-
-        PG_RETURN_BOOL(true);
+        rc = cloudsync_cleanup(data, table);
     }
     PG_CATCH();
     {
-        SPI_finish();
+        if (spi_connected) SPI_finish();
         PG_RE_THROW();
     }
     PG_END_TRY();
+
+    if (spi_connected) SPI_finish();
+    if (rc != DBRES_OK) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+    }
+
+    PG_RETURN_BOOL(true);
 }
 
 // cloudsync_terminate - Terminate CloudSync
@@ -413,25 +423,29 @@ Datum pg_cloudsync_terminate (PG_FUNCTION_ARGS) {
     UNUSED_PARAMETER(fcinfo);
 
     cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    bool spi_connected = false;
 
     int spi_rc = SPI_connect();
     if (spi_rc != SPI_OK_CONNECT) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
     }
+    spi_connected = true;
 
     PG_TRY();
     {
         cloudsync_pg_ensure_initialized(data, true);
-        int rc = cloudsync_terminate(data);
-        SPI_finish();
-        PG_RETURN_INT32(rc);
+        rc = cloudsync_terminate(data);
     }
     PG_CATCH();
     {
-        SPI_finish();
+        if (spi_connected) SPI_finish();
         PG_RE_THROW();
     }
     PG_END_TRY();
+
+    if (spi_connected) SPI_finish();
+    PG_RETURN_INT32(rc);
 }
 
 // MARK: - Settings Functions -
@@ -455,6 +469,7 @@ Datum cloudsync_set (PG_FUNCTION_ARGS) {
     }
 
     cloudsync_context *data = get_cloudsync_context();
+    bool spi_connected = false;
 
     int spi_rc = SPI_connect();
     if (spi_rc != SPI_OK_CONNECT) {
@@ -462,20 +477,22 @@ Datum cloudsync_set (PG_FUNCTION_ARGS) {
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("SPI_connect failed: %d", spi_rc)));
     }
+    spi_connected = true;
 
     PG_TRY();
     {
         cloudsync_pg_ensure_initialized(data, true);
         dbutils_settings_set_key_value(data, key, value);
-        SPI_finish();
-        PG_RETURN_BOOL(true);
     }
     PG_CATCH();
     {
-        SPI_finish();
+        if (spi_connected) SPI_finish();
         PG_RE_THROW();
     }
     PG_END_TRY();
+
+    if (spi_connected) SPI_finish();
+    PG_RETURN_BOOL(true);
 }
 
 // cloudsync_set_table - Set table-level configuration
@@ -496,25 +513,28 @@ Datum cloudsync_set_table (PG_FUNCTION_ARGS) {
     }
 
     cloudsync_context *data = get_cloudsync_context();
+    bool spi_connected = false;
 
     int spi_rc = SPI_connect();
     if (spi_rc != SPI_OK_CONNECT) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
     }
+    spi_connected = true;
 
     PG_TRY();
     {
         cloudsync_pg_ensure_initialized(data, true);
         dbutils_table_settings_set_key_value(data, tbl, "*", key, value);
-        SPI_finish();
-        PG_RETURN_BOOL(true);
     }
     PG_CATCH();
     {
-        SPI_finish();
+        if (spi_connected) SPI_finish();
         PG_RE_THROW();
     }
     PG_END_TRY();
+
+    if (spi_connected) SPI_finish();
+    PG_RETURN_BOOL(true);
 }
 
 // cloudsync_set_column - Set column-level configuration
@@ -539,6 +559,7 @@ Datum cloudsync_set_column (PG_FUNCTION_ARGS) {
     }
 
     cloudsync_context *data = get_cloudsync_context();
+    bool spi_connected = false;
 
     int spi_rc = SPI_connect();
     if (spi_rc != SPI_OK_CONNECT) {
@@ -546,20 +567,22 @@ Datum cloudsync_set_column (PG_FUNCTION_ARGS) {
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("SPI_connect failed: %d", spi_rc)));
     }
+    spi_connected = true;
 
     PG_TRY();
     {
         cloudsync_pg_ensure_initialized(data, true);
         dbutils_table_settings_set_key_value(data, tbl, col, key, value);
-        SPI_finish();
-        PG_RETURN_BOOL(true);
     }
     PG_CATCH();
     {
-        SPI_finish();
+        if (spi_connected) SPI_finish();
         PG_RE_THROW();
     }
     PG_END_TRY();
+
+    if (spi_connected) SPI_finish();
+    PG_RETURN_BOOL(true);
 }
 
 // MARK: - Schema Alteration -
@@ -573,32 +596,34 @@ Datum pg_cloudsync_begin_alter (PG_FUNCTION_ARGS) {
 
     const char *table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
     cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    bool spi_connected = false;
 
     int spi_rc = SPI_connect();
     if (spi_rc != SPI_OK_CONNECT) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
     }
+    spi_connected = true;
 
     PG_TRY();
     {
         cloudsync_pg_ensure_initialized(data, true);
-        int rc = cloudsync_begin_alter(data, table_name);
-        SPI_finish();
-
-        if (rc != DBRES_OK) {
-            ereport(ERROR,
-                    (errcode(ERRCODE_INTERNAL_ERROR),
-                     errmsg("%s", cloudsync_errmsg(data))));
-        }
-
-        PG_RETURN_BOOL(true);
+        rc = cloudsync_begin_alter(data, table_name);
     }
     PG_CATCH();
     {
-        SPI_finish();
+        if (spi_connected) SPI_finish();
         PG_RE_THROW();
     }
     PG_END_TRY();
+
+    if (spi_connected) SPI_finish();
+    if (rc != DBRES_OK) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("%s", cloudsync_errmsg(data))));
+    }
+    PG_RETURN_BOOL(true);
 }
 
 // cloudsync_commit_alter - Commit schema alteration
@@ -610,30 +635,32 @@ Datum pg_cloudsync_commit_alter (PG_FUNCTION_ARGS) {
 
     const char *table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
     cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    bool spi_connected = false;
 
     int spi_rc = SPI_connect();
     if (spi_rc != SPI_OK_CONNECT) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
     }
+    spi_connected = true;
 
     PG_TRY();
     {
         cloudsync_pg_ensure_initialized(data, true);
-        int rc = cloudsync_commit_alter(data, table_name);
-        SPI_finish();
-
-        if (rc != DBRES_OK) {
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
-        }
-
-        PG_RETURN_BOOL(true);
+        rc = cloudsync_commit_alter(data, table_name);
     }
     PG_CATCH();
     {
-        SPI_finish();
+        if (spi_connected) SPI_finish();
         PG_RE_THROW();
     }
     PG_END_TRY();
+
+    if (spi_connected) SPI_finish();
+    if (rc != DBRES_OK) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+    }
+    PG_RETURN_BOOL(true);
 }
 
 // MARK: - Payload Functions -
@@ -731,31 +758,33 @@ Datum cloudsync_payload_decode (PG_FUNCTION_ARGS) {
 
     const char *payload = VARDATA(payload_data);
     cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    int nrows = 0;
+    bool spi_connected = false;
 
     int spi_rc = SPI_connect();
     if (spi_rc != SPI_OK_CONNECT) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
     }
+    spi_connected = true;
 
     PG_TRY();
     {
         cloudsync_pg_ensure_initialized(data, true);
-        int nrows = 0;
-        int rc = cloudsync_payload_apply(data, payload, blen, &nrows);
-        SPI_finish();
-
-        if (rc != DBRES_OK) {
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
-        }
-
-        PG_RETURN_INT32(nrows);
+        rc = cloudsync_payload_apply(data, payload, blen, &nrows);
     }
     PG_CATCH();
     {
-        SPI_finish();
+        if (spi_connected) SPI_finish();
         PG_RE_THROW();
     }
     PG_END_TRY();
+
+    if (spi_connected) SPI_finish();
+    if (rc != DBRES_OK) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+    }
+    PG_RETURN_INT32(nrows);
 }
 
 // Alias for payload_decode
