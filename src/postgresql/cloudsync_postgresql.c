@@ -64,7 +64,8 @@ static cloudsync_context *get_cloudsync_context(void) {
 
 static void cloudsync_pg_ensure_initialized (cloudsync_context *data, bool spi_connected) {
     if (!data) return;
-    if (data->site_id[0] != 0) return;
+    const uint8_t *site_id = (const uint8_t *)cloudsync_siteid(data);
+    if (site_id && site_id[0] != 0) return;
 
     if (!spi_connected) {
         int spi_rc = SPI_connect();
