@@ -818,6 +818,65 @@ Datum cloudsync_is_sync (PG_FUNCTION_ARGS) {
     PG_RETURN_BOOL(result);
 }
 
+typedef struct cloudsync_update_payload {
+    pgvalue_t   *table_name;
+    pgvalue_t   **new_values;
+    pgvalue_t   **old_values;
+    int         count;
+    int         capacity;
+} cloudsync_update_payload;
+
+static void cloudsync_update_payload_free (cloudsync_update_payload *payload) {
+    if (!payload) return;
+
+    for (int i = 0; i < payload->count; i++) {
+        database_value_free((dbvalue_t *)payload->new_values[i]);
+        database_value_free((dbvalue_t *)payload->old_values[i]);
+    }
+    if (payload->new_values) cloudsync_memory_free(payload->new_values);
+    if (payload->old_values) cloudsync_memory_free(payload->old_values);
+    if (payload->table_name) database_value_free((dbvalue_t *)payload->table_name);
+
+    payload->new_values = NULL;
+    payload->old_values = NULL;
+    payload->table_name = NULL;
+    payload->count = 0;
+    payload->capacity = 0;
+}
+
+static bool cloudsync_update_payload_append (cloudsync_update_payload *payload, pgvalue_t *table_name, pgvalue_t *new_value, pgvalue_t *old_value) {
+    if (!payload) return false;
+
+    if (payload->count >= payload->capacity) {
+        int newcap = payload->capacity ? payload->capacity * 2 : 128;
+
+        pgvalue_t **new_values_2 = (pgvalue_t **)cloudsync_memory_realloc(payload->new_values, newcap * sizeof(*new_values_2));
+        if (!new_values_2) return false;
+        payload->new_values = new_values_2;
+
+        pgvalue_t **old_values_2 = (pgvalue_t **)cloudsync_memory_realloc(payload->old_values, newcap * sizeof(*old_values_2));
+        if (!old_values_2) return false;
+        payload->old_values = old_values_2;
+
+        payload->capacity = newcap;
+    }
+
+    int index = payload->count;
+    if (payload->table_name == NULL) {
+        payload->table_name = table_name;
+    } else if (dbutils_value_compare((dbvalue_t *)payload->table_name, (dbvalue_t *)table_name) != 0) {
+        return false;
+    } else {
+        database_value_free((dbvalue_t *)table_name);
+    }
+
+    payload->new_values[index] = new_value;
+    payload->old_values[index] = old_value;
+    payload->count++;
+
+    return true;
+}
+
 // cloudsync_seq - Get sequence number
 PG_FUNCTION_INFO_V1(cloudsync_seq);
 Datum cloudsync_seq (PG_FUNCTION_ARGS) {
@@ -1118,16 +1177,181 @@ Datum cloudsync_update (PG_FUNCTION_ARGS) {
 
 PG_FUNCTION_INFO_V1(cloudsync_update_transfn);
 Datum cloudsync_update_transfn (PG_FUNCTION_ARGS) {
-    // TODO: Implement update aggregate transition function
-    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_update_transfn not yet implemented")));
-    PG_RETURN_NULL();
+    MemoryContext aggContext;
+    cloudsync_update_payload *payload = NULL;
+
+    if (!AggCheckCallContext(fcinfo, &aggContext)) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("cloudsync_update_transfn called in non-aggregate context")));
+    }
+
+    if (PG_ARGISNULL(0)) {
+        MemoryContext old = MemoryContextSwitchTo(aggContext);
+        payload = (cloudsync_update_payload *)palloc0(sizeof(cloudsync_update_payload));
+        MemoryContextSwitchTo(old);
+    } else {
+        payload = (cloudsync_update_payload *)PG_GETARG_POINTER(0);
+    }
+
+    Oid table_type = get_fn_expr_argtype(fcinfo->flinfo, 1);
+    bool table_null = PG_ARGISNULL(1);
+    Datum table_datum = table_null ? (Datum)0 : PG_GETARG_DATUM(1);
+    Oid new_type = get_fn_expr_argtype(fcinfo->flinfo, 2);
+    bool new_null = PG_ARGISNULL(2);
+    Datum new_datum = new_null ? (Datum)0 : PG_GETARG_DATUM(2);
+    Oid old_type = get_fn_expr_argtype(fcinfo->flinfo, 3);
+    bool old_null = PG_ARGISNULL(3);
+    Datum old_datum = old_null ? (Datum)0 : PG_GETARG_DATUM(3);
+
+    MemoryContext old_ctx = MemoryContextSwitchTo(aggContext);
+    pgvalue_t *table_name = pgvalue_create(table_datum, table_type, -1, fcinfo->fncollation, table_null);
+    pgvalue_t *new_value = pgvalue_create(new_datum, new_type, -1, fcinfo->fncollation, new_null);
+    pgvalue_t *old_value = pgvalue_create(old_datum, old_type, -1, fcinfo->fncollation, old_null);
+    if (table_name) pgvalue_ensure_detoast(table_name);
+    if (new_value) pgvalue_ensure_detoast(new_value);
+    if (old_value) pgvalue_ensure_detoast(old_value);
+    MemoryContextSwitchTo(old_ctx);
+
+    if (!table_name || !new_value || !old_value) {
+        if (table_name) database_value_free((dbvalue_t *)table_name);
+        if (new_value) database_value_free((dbvalue_t *)new_value);
+        if (old_value) database_value_free((dbvalue_t *)old_value);
+        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("cloudsync_update_transfn failed to allocate values")));
+    }
+
+    if (!cloudsync_update_payload_append(payload, table_name, new_value, old_value)) {
+        if (table_name && payload->table_name != table_name) database_value_free((dbvalue_t *)table_name);
+        if (new_value) database_value_free((dbvalue_t *)new_value);
+        if (old_value) database_value_free((dbvalue_t *)old_value);
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("cloudsync_update_transfn failed to append payload")));
+    }
+
+    PG_RETURN_POINTER(payload);
 }
 
 PG_FUNCTION_INFO_V1(cloudsync_update_finalfn);
 Datum cloudsync_update_finalfn (PG_FUNCTION_ARGS) {
-    // TODO: Implement update aggregate finalize function
-    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_update_finalfn not yet implemented")));
-    PG_RETURN_NULL();
+    if (PG_ARGISNULL(0)) {
+        PG_RETURN_BOOL(true);
+    }
+
+    cloudsync_update_payload *payload = (cloudsync_update_payload *)PG_GETARG_POINTER(0);
+    if (!payload || payload->count == 0) {
+        PG_RETURN_BOOL(true);
+    }
+
+    cloudsync_context *data = get_cloudsync_context();
+    cloudsync_table_context *table = NULL;
+    int rc = DBRES_OK;
+    bool spi_connected = false;
+    char buffer[1024];
+    char buffer2[1024];
+    size_t pklen = sizeof(buffer);
+    size_t oldpklen = sizeof(buffer2);
+    char *pk = NULL;
+    char *oldpk = NULL;
+
+    int spi_rc = SPI_connect();
+    if (spi_rc != SPI_OK_CONNECT) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
+    }
+    spi_connected = true;
+
+    PG_TRY();
+    {
+        cloudsync_pg_ensure_initialized(data, true);
+
+        const char *table_name = database_value_text((dbvalue_t *)payload->table_name);
+        table = table_lookup(data, table_name);
+        if (!table) {
+            char meta_name[1024];
+            snprintf(meta_name, sizeof(meta_name), "%s_cloudsync", table_name);
+            if (!database_table_exists(data, meta_name)) {
+                ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Unable to retrieve table name %s in cloudsync_update", table_name)));
+            }
+
+            table_algo algo = dbutils_table_settings_get_algo(data, table_name);
+            if (algo == table_algo_none) algo = table_algo_crdt_cls;
+            if (!table_add_to_context(data, algo, table_name)) {
+                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to load table context for %s", table_name)));
+            }
+
+            table = table_lookup(data, table_name);
+            if (!table) {
+                ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Unable to retrieve table name %s in cloudsync_update", table_name)));
+            }
+        }
+
+        int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
+
+        int pk_count = table_count_pks(table);
+        if (payload->count < pk_count) {
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Not enough primary key values in cloudsync_update payload")));
+        }
+
+        bool prikey_changed = false;
+        for (int i = 0; i < pk_count; i++) {
+            if (dbutils_value_compare((dbvalue_t *)payload->old_values[i], (dbvalue_t *)payload->new_values[i]) != 0) {
+                prikey_changed = true;
+                break;
+            }
+        }
+
+        pk = pk_encode_prikey((dbvalue_t **)payload->new_values, pk_count, buffer, &pklen);
+        if (!pk) {
+            ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Not enough memory to encode the primary key(s)")));
+        }
+
+        if (prikey_changed) {
+            oldpk = pk_encode_prikey((dbvalue_t **)payload->old_values, pk_count, buffer2, &oldpklen);
+            if (!oldpk) {
+                rc = DBRES_NOMEM;
+                goto cleanup;
+            }
+
+            rc = local_mark_delete_meta(table, oldpk, oldpklen, db_version, cloudsync_bumpseq(data));
+            if (rc != DBRES_OK) goto cleanup;
+
+            rc = local_update_move_meta(table, pk, pklen, oldpk, oldpklen, db_version);
+            if (rc != DBRES_OK) goto cleanup;
+
+            rc = local_mark_insert_sentinel_meta(table, pk, pklen, db_version, cloudsync_bumpseq(data));
+            if (rc != DBRES_OK) goto cleanup;
+        }
+
+        for (int i = 0; i < table_count_cols(table); i++) {
+            int col_index = pk_count + i;
+            if (col_index >= payload->count) break;
+
+            if (dbutils_value_compare((dbvalue_t *)payload->old_values[col_index], (dbvalue_t *)payload->new_values[col_index]) != 0) {
+                rc = local_mark_insert_or_update_meta(table, pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
+                if (rc != DBRES_OK) goto cleanup;
+            }
+        }
+
+cleanup:
+        if (pk != buffer) cloudsync_memory_free(pk);
+        if (oldpk && (oldpk != buffer2)) cloudsync_memory_free(oldpk);
+    }
+    PG_CATCH();
+    {
+        if (payload) {
+            cloudsync_update_payload_free(payload);
+        }
+        if (spi_connected) SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    if (payload) {
+        cloudsync_update_payload_free(payload);
+    }
+    if (spi_connected) SPI_finish();
+
+    if (rc != DBRES_OK) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", database_errmsg(data))));
+    }
+
+    PG_RETURN_BOOL(true);
 }
 
 // Placeholder - not implemented yet

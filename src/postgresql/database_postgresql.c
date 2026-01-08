@@ -910,7 +910,7 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
 
     snprintf(sql, sizeof(sql),
              "SELECT string_agg("
-             "  '(''' || c.column_name || ''', NEW.' || quote_ident(c.column_name) || ', OLD.' || quote_ident(c.column_name) || ')', "
+             "  '(''%s'', NEW.' || quote_ident(c.column_name) || ', OLD.' || quote_ident(c.column_name) || ')', "
              "  ', ' ORDER BY c.ordinal_position"
              ") "
              "FROM information_schema.columns c "
@@ -923,7 +923,7 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
              "  AND tc.constraint_type = 'PRIMARY KEY' "
              "  AND kcu.column_name = c.column_name"
              ");",
-             table_name);
+             table_name, table_name);
 
     char *col_values_list = NULL;
     rc = database_select_text(data, sql, &col_values_list);

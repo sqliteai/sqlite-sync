@@ -172,7 +172,7 @@ AS 'MODULE_PATHNAME', 'cloudsync_delete'
 LANGUAGE C VOLATILE;
 
 -- Internal update tracking (aggregate function)
-CREATE FUNCTION cloudsync_update_transfn(state internal, table_name text, pk text, new_value anyelement)
+CREATE FUNCTION cloudsync_update_transfn(state internal, table_name text, new_value anyelement, old_value anyelement)
 RETURNS internal
 AS 'MODULE_PATHNAME', 'cloudsync_update_transfn'
 LANGUAGE C;
@@ -182,7 +182,7 @@ RETURNS boolean
 AS 'MODULE_PATHNAME', 'cloudsync_update_finalfn'
 LANGUAGE C;
 
-CREATE AGGREGATE cloudsync_update(text, text, anyelement) (
+CREATE AGGREGATE cloudsync_update(text, anyelement, anyelement) (
     SFUNC = cloudsync_update_transfn,
     STYPE = internal,
     FINALFUNC = cloudsync_update_finalfn
