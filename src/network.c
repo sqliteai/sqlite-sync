@@ -715,7 +715,6 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     cloudsync_memory_free(blob);
     if (sent == false) {
         network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to upload BLOB changes to remote host.");
-        network_result_cleanup(&res);
         return SQLITE_ERROR;
     }
     
@@ -729,7 +728,6 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     res = network_receive_buffer(data, data->upload_endpoint, data->authentication, true, true, json_payload, CLOUDSYNC_HEADER_SQLITECLOUD);
     if (res.code != CLOUDSYNC_NETWORK_OK) {
         network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to notify BLOB upload to remote host.");
-        network_result_cleanup(&res);
         return SQLITE_ERROR;
     }
     
