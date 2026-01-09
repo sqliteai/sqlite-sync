@@ -45,33 +45,10 @@ PG_MODULE_MAGIC;
 // Global context stored per backend
 static cloudsync_context *pg_cloudsync_context = NULL;
 
-// Get or create the CloudSync context for this backend
-static cloudsync_context *get_cloudsync_context(void) {
-    if (pg_cloudsync_context == NULL) {
-        // Create context - db_t is not used in PostgreSQL mode
-        MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
-        pg_cloudsync_context = cloudsync_context_create(NULL);
-        MemoryContextSwitchTo(old);
-        if (!pg_cloudsync_context) {
-            ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Not enough memory to create a database context")));
-        }
-    }
-    
-    return pg_cloudsync_context;
-}
-
-// MARK: - Extension Entry Points -
-
-static void cloudsync_pg_ensure_initialized (cloudsync_context *data, bool spi_connected) {
-    if (!data) return;
-    const uint8_t *site_id = (const uint8_t *)cloudsync_siteid(data);
-    if (site_id && site_id[0] != 0) return;
-
-    if (!spi_connected) {
-        int spi_rc = SPI_connect();
-        if (spi_rc != SPI_OK_CONNECT) {
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
-        }
+static void cloudsync_pg_context_init (cloudsync_context *data) {
+    int spi_rc = SPI_connect();
+    if (spi_rc != SPI_OK_CONNECT) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
     }
 
     PG_TRY();
@@ -85,15 +62,34 @@ static void cloudsync_pg_ensure_initialized (cloudsync_context *data, bool spi_c
             dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
         }
 
-        if (!spi_connected) SPI_finish();
+        SPI_finish();
     }
     PG_CATCH();
     {
-        if (!spi_connected) SPI_finish();
+        SPI_finish();
         PG_RE_THROW();
     }
     PG_END_TRY();
 }
+
+// Get or create the CloudSync context for this backend
+static cloudsync_context *get_cloudsync_context(void) {
+    if (pg_cloudsync_context == NULL) {
+        // Create context - db_t is not used in PostgreSQL mode
+        MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
+        cloudsync_context *data = cloudsync_context_create(NULL);
+        MemoryContextSwitchTo(old);
+        if (!data) {
+            ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Not enough memory to create a database context")));
+        }
+        cloudsync_pg_context_init(data);
+        pg_cloudsync_context = data;
+    }
+    
+    return pg_cloudsync_context;
+}
+
+// MARK: - Extension Entry Points -
 
 void _PG_init (void) {
     // Extension initialization
@@ -130,7 +126,6 @@ Datum pg_cloudsync_siteid (PG_FUNCTION_ARGS) {
     UNUSED_PARAMETER(fcinfo);
 
     cloudsync_context *data = get_cloudsync_context();
-    cloudsync_pg_ensure_initialized(data, false);
     const void *siteid = cloudsync_siteid(data);
 
     if (!siteid) {
@@ -167,7 +162,6 @@ Datum cloudsync_db_version (PG_FUNCTION_ARGS) {
     UNUSED_PARAMETER(fcinfo);
 
     cloudsync_context *data = get_cloudsync_context();
-    int rc = DBRES_OK;
     int64_t version = 0;
     bool spi_connected = false;
 
@@ -180,7 +174,6 @@ Datum cloudsync_db_version (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
-        cloudsync_pg_ensure_initialized(data, true);
         int rc = cloudsync_dbversion_check_uptodate(data);
         if (rc != DBRES_OK) {
             ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to retrieve db_version (%s)", database_errmsg(data))));
@@ -220,7 +213,6 @@ Datum cloudsync_db_version_next (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
-        cloudsync_pg_ensure_initialized(data, true);
         next_version = cloudsync_dbversion_next(data, merging_version);
     }
     PG_CATCH();
@@ -249,7 +241,6 @@ static bytea *cloudsync_init_internal (cloudsync_context *data, const char *tabl
 
     PG_TRY();
     {
-        cloudsync_pg_ensure_initialized(data, true);
         // Begin savepoint for transactional init
         int rc = database_begin_savepoint(data, "cloudsync_init");
         if (rc != DBRES_OK) {
@@ -341,8 +332,6 @@ Datum cloudsync_enable (PG_FUNCTION_ARGS) {
     }
 
     const char *table = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    cloudsync_context *data = get_cloudsync_context();
-    cloudsync_pg_ensure_initialized(data, false);
     cloudsync_enable_disable(table, true);
     PG_RETURN_BOOL(true);
 }
@@ -355,8 +344,6 @@ Datum cloudsync_disable (PG_FUNCTION_ARGS) {
     }
 
     const char *table = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    cloudsync_context *data = get_cloudsync_context();
-    cloudsync_pg_ensure_initialized(data, false);
     cloudsync_enable_disable(table, false);
     PG_RETURN_BOOL(true);
 }
@@ -369,7 +356,6 @@ Datum cloudsync_is_enabled (PG_FUNCTION_ARGS) {
     }
 
     cloudsync_context *data = get_cloudsync_context();
-    cloudsync_pg_ensure_initialized(data, false);
     const char *table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
     cloudsync_table_context *table = table_lookup(data, table_name);
 
@@ -399,7 +385,6 @@ Datum pg_cloudsync_cleanup (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
-        cloudsync_pg_ensure_initialized(data, true);
         rc = cloudsync_cleanup(data, table);
     }
     PG_CATCH();
@@ -434,7 +419,6 @@ Datum pg_cloudsync_terminate (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
-        cloudsync_pg_ensure_initialized(data, true);
         rc = cloudsync_terminate(data);
     }
     PG_CATCH();
@@ -481,7 +465,6 @@ Datum cloudsync_set (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
-        cloudsync_pg_ensure_initialized(data, true);
         dbutils_settings_set_key_value(data, key, value);
     }
     PG_CATCH();
@@ -523,7 +506,6 @@ Datum cloudsync_set_table (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
-        cloudsync_pg_ensure_initialized(data, true);
         dbutils_table_settings_set_key_value(data, tbl, "*", key, value);
     }
     PG_CATCH();
@@ -571,7 +553,6 @@ Datum cloudsync_set_column (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
-        cloudsync_pg_ensure_initialized(data, true);
         dbutils_table_settings_set_key_value(data, tbl, col, key, value);
     }
     PG_CATCH();
@@ -607,7 +588,6 @@ Datum pg_cloudsync_begin_alter (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
-        cloudsync_pg_ensure_initialized(data, true);
         rc = cloudsync_begin_alter(data, table_name);
     }
     PG_CATCH();
@@ -646,7 +626,6 @@ Datum pg_cloudsync_commit_alter (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
-        cloudsync_pg_ensure_initialized(data, true);
         rc = cloudsync_commit_alter(data, table_name);
     }
     PG_CATCH();
@@ -687,7 +666,6 @@ Datum cloudsync_payload_encode_transfn (PG_FUNCTION_ARGS) {
 
     int argc = 0;
     cloudsync_context *data = get_cloudsync_context();
-    cloudsync_pg_ensure_initialized(data, false);
     pgvalue_t **argv = pgvalues_from_args(fcinfo, 1, &argc);
     
     // Wrap variadic args into pgvalue_t so pk/payload helpers can read types safely.
@@ -716,7 +694,6 @@ Datum cloudsync_payload_encode_finalfn (PG_FUNCTION_ARGS) {
 
     cloudsync_payload_context *payload = (cloudsync_payload_context *)PG_GETARG_POINTER(0);
     cloudsync_context *data = get_cloudsync_context();
-    cloudsync_pg_ensure_initialized(data, false);
 
     int rc = cloudsync_payload_encode_final(payload, data);
     if (rc != DBRES_OK) {
@@ -770,7 +747,6 @@ Datum cloudsync_payload_decode (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
-        cloudsync_pg_ensure_initialized(data, true);
         rc = cloudsync_payload_apply(data, payload, blen, &nrows);
     }
     PG_CATCH();
@@ -830,7 +806,6 @@ static void cloudsync_pg_cleanup(int code, Datum arg) {
 PG_FUNCTION_INFO_V1(cloudsync_is_sync);
 Datum cloudsync_is_sync (PG_FUNCTION_ARGS) {
     cloudsync_context *data = get_cloudsync_context();
-    cloudsync_pg_ensure_initialized(data, false);
 
     if (cloudsync_insync(data)) {
         PG_RETURN_BOOL(true);
@@ -912,7 +887,6 @@ Datum cloudsync_seq (PG_FUNCTION_ARGS) {
     UNUSED_PARAMETER(fcinfo);
 
     cloudsync_context *data = get_cloudsync_context();
-    cloudsync_pg_ensure_initialized(data, false);
     int seq = cloudsync_bumpseq(data);
 
     PG_RETURN_INT32(seq);
@@ -1044,8 +1018,6 @@ Datum cloudsync_insert (PG_FUNCTION_ARGS) {
 
     PG_ENSURE_ERROR_CLEANUP(cloudsync_pg_cleanup, PointerGetDatum(&cleanup));
     {
-        cloudsync_pg_ensure_initialized(data, true);
-
         // Lookup table (load from settings if needed)
         cloudsync_table_context *table = table_lookup(data, table_name);
         if (!table) {
@@ -1141,8 +1113,6 @@ Datum cloudsync_delete (PG_FUNCTION_ARGS) {
 
     PG_ENSURE_ERROR_CLEANUP(cloudsync_pg_cleanup, PointerGetDatum(&cleanup));
     {
-        cloudsync_pg_ensure_initialized(data, true);
-
         cloudsync_table_context *table = table_lookup(data, table_name);
         if (!table) {
             char meta_name[1024];
@@ -1287,8 +1257,6 @@ Datum cloudsync_update_finalfn (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
-        cloudsync_pg_ensure_initialized(data, true);
-
         const char *table_name = database_value_text((dbvalue_t *)payload->table_name);
         table = table_lookup(data, table_name);
         if (!table) {
