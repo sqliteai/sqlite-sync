@@ -214,7 +214,7 @@ cleanup:
     return result;
 }
 
-static size_t network_read_callback(char *buffer, size_t size, size_t nitems, void *userdata) {
+static size_t network_read_callback (char *buffer, size_t size, size_t nitems, void *userdata) {
     network_read_data *rd = (network_read_data *)userdata;
     size_t max_read = size * nitems;
     size_t bytes_left = rd->size - rd->read_pos;
@@ -228,7 +228,7 @@ static size_t network_read_callback(char *buffer, size_t size, size_t nitems, vo
     return to_copy;
 }
 
-bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size) {
+bool network_send_buffer (network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size) {
     struct curl_slist *headers = NULL;
     curl_mime *mime = NULL;
     bool result = false;
@@ -322,8 +322,6 @@ int network_set_sqlite_result (sqlite3_context *context, NETWORK_RESULT *result)
             rc = (int)result->blen;
             break;
     }
-    
-    network_result_cleanup(result);
     return rc;
 }
 
@@ -342,16 +340,16 @@ int network_download_changes (sqlite3_context *context, const char *download_url
     int rc = SQLITE_OK;
     if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
         rc = cloudsync_payload_apply(xdata, result.buffer, (int)result.blen, pnrows);
-        network_result_cleanup(&result);
     } else {
         rc = network_set_sqlite_result(context, &result);
         if (pnrows) *pnrows = 0;
     }
+    network_result_cleanup(&result);
     
     return rc;
 }
 
-char *network_authentication_token(const char *key, const char *value) {
+char *network_authentication_token (const char *key, const char *value) {
     size_t len = strlen(key) + strlen(value) + 64;
     char *buffer = cloudsync_memory_zeroalloc(len);
     if (!buffer) return NULL;
@@ -359,11 +357,10 @@ char *network_authentication_token(const char *key, const char *value) {
     // build new token
     // we don't need a prefix because the token alreay include a prefix "sqa_"
     snprintf(buffer, len, "%s", value);
-    
     return buffer;
 }
 
-int network_extract_query_param(const char *query, const char *key, char *output, size_t output_size) {
+int network_extract_query_param (const char *query, const char *key, char *output, size_t output_size) {
     if (!query || !key || !output || output_size == 0) {
         return -1; // Invalid input
     }
@@ -556,12 +553,11 @@ finalize:
 void network_result_to_sqlite_error (sqlite3_context *context, NETWORK_RESULT res, const char *default_error_message) {
     sqlite3_result_error(context, ((res.code == CLOUDSYNC_NETWORK_ERROR) && (res.buffer)) ? res.buffer : default_error_message, -1);
     sqlite3_result_error_code(context, SQLITE_ERROR);
-    network_result_cleanup(&res);
 }
 
 // MARK: - Init / Cleanup -
 
-network_data *cloudsync_network_data(sqlite3_context *context) {
+network_data *cloudsync_network_data (sqlite3_context *context) {
     cloudsync_context *xdata = (cloudsync_context *)sqlite3_user_data(context);
     network_data *data = (network_data *)cloudsync_auxdata(xdata);
     if (data) return data;
@@ -730,6 +726,7 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     if (res.code != CLOUDSYNC_NETWORK_BUFFER) {
         cloudsync_memory_free(blob);
         network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to receive upload URL");
+        network_result_cleanup(&res);
         return SQLITE_ERROR;
     }
     
@@ -801,6 +798,7 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows) {
         rc = network_set_sqlite_result(context, &result);
     }
     
+    network_result_cleanup(&result);
     return rc;
 }
 
