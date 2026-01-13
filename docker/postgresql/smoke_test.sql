@@ -5,7 +5,7 @@
 \set ON_ERROR_STOP on
 \set fail 0
 \if :{?DEBUG}
-SET client_min_messages = debug1; SET log_min_messages = debug1;
+SET client_min_messages = debug1; SET log_min_messages = debug1; SET log_error_verbosity = verbose;
 \set QUIET 0
 \pset tuples_only off
 \pset format aligned
@@ -86,11 +86,117 @@ WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id']::text[])
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
--- 'Test delete metadata tombstone'
-DELETE FROM smoke_tbl WHERE id = :'smoke_id';
-SELECT (COUNT(*) = 1) AS delete_meta_ok
+-- 'Test update val only'
+SELECT col_version AS val_ver_before
 FROM smoke_tbl_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id']::text[])
+  AND col_name = 'val' \gset
+UPDATE smoke_tbl SET val = 'hello2' WHERE id = :'smoke_id';
+SELECT col_version AS val_ver_after
+FROM smoke_tbl_cloudsync
+WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id']::text[])
+  AND col_name = 'val' \gset
+SELECT (:val_ver_after::bigint > :val_ver_before::bigint) AS update_val_ok \gset
+\if :update_val_ok
+\echo '[PASS] Test update val only'
+\else
+\echo '[FAIL] Test update val only'
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- 'Test update id only'
+SELECT cloudsync_uuid() AS smoke_id2 \gset
+UPDATE smoke_tbl SET id = :'smoke_id2' WHERE id = :'smoke_id';
+SELECT (COUNT(*) = 1) AS update_id_old_tombstone_ok
+FROM smoke_tbl_cloudsync
+WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id']::text[])
+  AND col_name = '__[RIP]__' \gset
+\if :update_id_old_tombstone_ok
+\echo '[PASS] Test update id only (old tombstone)'
+\else
+\echo '[FAIL] Test update id only (old tombstone)'
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+SELECT (COUNT(*) = 0) AS update_id_old_val_gone_ok
+FROM smoke_tbl_cloudsync
+WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id']::text[])
+  AND col_name = 'val' \gset
+\if :update_id_old_val_gone_ok
+\echo '[PASS] Test update id only (old val gone)'
+\else
+\echo '[FAIL] Test update id only (old val gone)'
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+SELECT (COUNT(*) = 1) AS update_id_new_val_ok
+FROM smoke_tbl_cloudsync
+WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id2']::text[])
+  AND col_name = 'val' \gset
+\if :update_id_new_val_ok
+\echo '[PASS] Test update id only (new val)'
+\else
+\echo '[FAIL] Test update id only (new val)'
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+SELECT (COUNT(*) = 1) AS update_id_new_tombstone_ok
+FROM smoke_tbl_cloudsync
+WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id2']::text[])
+  AND col_name = '__[RIP]__' \gset
+\if :update_id_new_tombstone_ok
+\echo '[PASS] Test update id only (new tombstone)'
+\else
+\echo '[FAIL] Test update id only (new tombstone)'
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- 'Test update id and val'
+SELECT cloudsync_uuid() AS smoke_id3 \gset
+UPDATE smoke_tbl SET id = :'smoke_id3', val = 'hello3' WHERE id = :'smoke_id2';
+SELECT (COUNT(*) = 1) AS update_both_old_tombstone_ok
+FROM smoke_tbl_cloudsync
+WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id2']::text[])
+  AND col_name = '__[RIP]__' \gset
+\if :update_both_old_tombstone_ok
+\echo '[PASS] Test update id and val (old tombstone)'
+\else
+\echo '[FAIL] Test update id and val (old tombstone)'
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+SELECT (COUNT(*) = 0) AS update_both_old_val_gone_ok
+FROM smoke_tbl_cloudsync
+WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id2']::text[])
+  AND col_name = 'val' \gset
+\if :update_both_old_val_gone_ok
+\echo '[PASS] Test update id and val (old val gone)'
+\else
+\echo '[FAIL] Test update id and val (old val gone)'
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+SELECT (COUNT(*) = 1) AS update_both_new_val_ok
+FROM smoke_tbl_cloudsync
+WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id3']::text[])
+  AND col_name = 'val' \gset
+\if :update_both_new_val_ok
+\echo '[PASS] Test update id and val (new val)'
+\else
+\echo '[FAIL] Test update id and val (new val)'
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+SELECT (COUNT(*) = 1) AS update_both_new_tombstone_ok
+FROM smoke_tbl_cloudsync
+WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id3']::text[])
+  AND col_name = '__[RIP]__' \gset
+\if :update_both_new_tombstone_ok
+\echo '[PASS] Test update id and val (new tombstone)'
+\else
+\echo '[FAIL] Test update id and val (new tombstone)'
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- 'Test delete metadata tombstone'
+DELETE FROM smoke_tbl WHERE id = :'smoke_id3';
+SELECT (COUNT(*) = 1) AS delete_meta_ok
+FROM smoke_tbl_cloudsync
+WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id3']::text[])
   AND col_name = '__[RIP]__' \gset
 \if :delete_meta_ok
 \echo '[PASS] Test delete metadata tombstone'
@@ -102,7 +208,7 @@ SELECT (:fail::int + 1) AS fail \gset
 -- 'Test delete metadata fields'
 SELECT (db_version > 0 AND seq >= 0) AS delete_meta_fields_ok
 FROM smoke_tbl_cloudsync
-WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id']::text[])
+WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id3']::text[])
   AND col_name = '__[RIP]__' \gset
 \if :delete_meta_fields_ok
 \echo '[PASS] Test delete metadata fields'
@@ -114,7 +220,7 @@ SELECT (:fail::int + 1) AS fail \gset
 -- 'Test delete removes non-tombstone metadata'
 SELECT (COUNT(*) = 0) AS delete_meta_only_ok
 FROM smoke_tbl_cloudsync
-WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id']::text[])
+WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id3']::text[])
   AND col_name != '__[RIP]__' \gset
 \if :delete_meta_only_ok
 \echo '[PASS] Test delete removes non-tombstone metadata'

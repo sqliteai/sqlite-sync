@@ -7,29 +7,30 @@
 
 // Define POSIX feature test macros before any includes
 #define _POSIX_C_SOURCE 200809L
-#define _GNU_SOURCE
 
 // PostgreSQL requires postgres.h to be included FIRST
 #include "postgres.h"
-#include "fmgr.h"
-#include "funcapi.h"
-#include "utils/builtins.h"
-#include "utils/uuid.h"
+#include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "catalog/namespace.h"
 #include "executor/spi.h"
-#include "access/xact.h"
-#include "storage/ipc.h"
-#include "utils/memutils.h"
 #include "utils/lsyscache.h"
 #include "utils/array.h"
+#include "fmgr.h"
+#include "funcapi.h"
 #include "pgvalue.h"
+#include "storage/ipc.h"
+#include "utils/array.h"
+#include "utils/builtins.h"
+#include "utils/memutils.h"
+#include "utils/uuid.h"
 
 // CloudSync headers (after PostgreSQL headers)
 #include "../cloudsync.h"
 #include "../database.h"
 #include "../dbutils.h"
 #include "../pk.h"
+#include "../utils.h"
 
 // Note: network.h is not needed for PostgreSQL implementation
 
@@ -669,7 +670,7 @@ Datum cloudsync_payload_encode_transfn (PG_FUNCTION_ARGS) {
     int argc = 0;
     cloudsync_context *data = get_cloudsync_context();
     pgvalue_t **argv = pgvalues_from_args(fcinfo, 1, &argc);
-    
+
     // Wrap variadic args into pgvalue_t so pk/payload helpers can read types safely.
     if (argc > 0) {
         int rc = cloudsync_payload_encode_step(payload, data, argc, (dbvalue_t **)argv);
@@ -825,22 +826,49 @@ Datum cloudsync_is_sync (PG_FUNCTION_ARGS) {
 }
 
 typedef struct cloudsync_update_payload {
-    pgvalue_t   *table_name;
-    pgvalue_t   **new_values;
-    pgvalue_t   **old_values;
-    int         count;
-    int         capacity;
+    pgvalue_t       *table_name;
+    pgvalue_t       **new_values;
+    pgvalue_t       **old_values;
+    int             count;
+    int             capacity;
+    MemoryContext   mcxt;
+    // Context-owned callback info for early-exit cleanup.
+    // We null the payload pointer on normal finalization to avoid double-free.
+    struct cloudsync_mcxt_cb_info *mcxt_cb_info;
 } cloudsync_update_payload;
+
+static void cloudsync_update_payload_free (cloudsync_update_payload *payload);
+
+typedef struct cloudsync_mcxt_cb_info {
+    MemoryContext               mcxt;
+    const char                  *name;
+    cloudsync_update_payload    *payload;
+} cloudsync_mcxt_cb_info;
+
+static void cloudsync_mcxt_reset_cb (void *arg) {
+    cloudsync_mcxt_cb_info *info = (cloudsync_mcxt_cb_info *)arg;
+    if (!info) return;
+    if (!info->payload) return;
+  
+    // Context reset means the aggregate state would be lost; clean it here.
+    cloudsync_update_payload_free(info->payload);
+    info->payload = NULL;
+}
 
 static void cloudsync_update_payload_free (cloudsync_update_payload *payload) {
     if (!payload) return;
+
+    if (payload->mcxt_cb_info) {
+        // Normal finalize path: prevent the reset callback from double-free.
+        payload->mcxt_cb_info->payload = NULL;
+    }
 
     for (int i = 0; i < payload->count; i++) {
         database_value_free((dbvalue_t *)payload->new_values[i]);
         database_value_free((dbvalue_t *)payload->old_values[i]);
     }
-    if (payload->new_values) cloudsync_memory_free(payload->new_values);
-    if (payload->old_values) cloudsync_memory_free(payload->old_values);
+    if (payload->new_values) pfree(payload->new_values);
+    if (payload->old_values) pfree(payload->old_values);
     if (payload->table_name) database_value_free((dbvalue_t *)payload->table_name);
 
     payload->new_values = NULL;
@@ -848,31 +876,57 @@ static void cloudsync_update_payload_free (cloudsync_update_payload *payload) {
     payload->table_name = NULL;
     payload->count = 0;
     payload->capacity = 0;
+    payload->mcxt = NULL;
+    payload->mcxt_cb_info = NULL;
 }
 
 static bool cloudsync_update_payload_append (cloudsync_update_payload *payload, pgvalue_t *table_name, pgvalue_t *new_value, pgvalue_t *old_value) {
     if (!payload) return false;
+    if (!payload->mcxt || !MemoryContextIsValid(payload->mcxt)) {
+        elog(DEBUG1, "cloudsync_update_payload_append invalid payload context payload=%p mcxt=%p", payload, payload->mcxt);
+        return false;
+    }
+    if (payload->count < 0 || payload->capacity < 0) {
+        elog(DEBUG1, "cloudsync_update_payload_append invalid counters payload=%p count=%d cap=%d", payload, payload->count, payload->capacity);
+        return false;
+    }
 
     if (payload->count >= payload->capacity) {
         int newcap = payload->capacity ? payload->capacity * 2 : 128;
-
-        pgvalue_t **new_values_2 = (pgvalue_t **)cloudsync_memory_realloc(payload->new_values, newcap * sizeof(*new_values_2));
-        if (!new_values_2) return false;
-        payload->new_values = new_values_2;
-
-        pgvalue_t **old_values_2 = (pgvalue_t **)cloudsync_memory_realloc(payload->old_values, newcap * sizeof(*old_values_2));
-        if (!old_values_2) return false;
-        payload->old_values = old_values_2;
-
+        elog(DEBUG1, "cloudsync_update_payload_append newcap=%d", newcap);
+        MemoryContext old = MemoryContextSwitchTo(payload->mcxt);
+        if (payload->capacity == 0) {
+            payload->new_values = (pgvalue_t **)palloc0(newcap * sizeof(*payload->new_values));
+            payload->old_values = (pgvalue_t **)palloc0(newcap * sizeof(*payload->old_values));
+        } else {
+            payload->new_values = (pgvalue_t **)repalloc(payload->new_values, newcap * sizeof(*payload->new_values));
+            payload->old_values = (pgvalue_t **)repalloc(payload->old_values, newcap * sizeof(*payload->old_values));
+        }
         payload->capacity = newcap;
+        MemoryContextSwitchTo(old);
+    }
+
+    if (payload->count >= payload->capacity) {
+        elog(DEBUG1,
+            "cloudsync_update_payload_append count>=capacity payload=%p count=%d "
+            "cap=%d new_values=%p old_values=%p",
+            payload, payload->count, payload->capacity, payload->new_values,
+            payload->old_values);
+        return false;
     }
 
     int index = payload->count;
     if (payload->table_name == NULL) {
         payload->table_name = table_name;
-    } else if (dbutils_value_compare((dbvalue_t *)payload->table_name, (dbvalue_t *)table_name) != 0) {
-        return false;
     } else {
+        // Compare within the payload context so any lazy text/detoast buffers
+        // are allocated in a stable context (not ExprContext).
+        MemoryContext old = MemoryContextSwitchTo(payload->mcxt);
+        int cmp = dbutils_value_compare((dbvalue_t *)payload->table_name, (dbvalue_t *)table_name);
+        MemoryContextSwitchTo(old);
+        if (cmp != 0) {
+            return false;
+        }
         database_value_free((dbvalue_t *)table_name);
     }
 
@@ -1169,29 +1223,70 @@ Datum cloudsync_delete (PG_FUNCTION_ARGS) {
     PG_RETURN_BOOL(true);
 }
 
-// Aggregate function: cloudsync_update (not implemented - complex)
-PG_FUNCTION_INFO_V1(cloudsync_update);
-Datum cloudsync_update (PG_FUNCTION_ARGS) {
-    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_update not yet implemented - aggregate function")));
-    PG_RETURN_NULL();
-}
-
 PG_FUNCTION_INFO_V1(cloudsync_update_transfn);
 Datum cloudsync_update_transfn (PG_FUNCTION_ARGS) {
     MemoryContext aggContext;
+    MemoryContext allocContext = NULL;
     cloudsync_update_payload *payload = NULL;
 
     if (!AggCheckCallContext(fcinfo, &aggContext)) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("cloudsync_update_transfn called in non-aggregate context")));
     }
 
+    allocContext = aggContext;
+    if (aggContext && aggContext->name && strcmp(aggContext->name, "ExprContext") == 0 && aggContext->parent) {
+        allocContext = aggContext->parent;
+    }
+
     if (PG_ARGISNULL(0)) {
-        MemoryContext old = MemoryContextSwitchTo(aggContext);
+        MemoryContext old = MemoryContextSwitchTo(allocContext);
         payload = (cloudsync_update_payload *)palloc0(sizeof(cloudsync_update_payload));
+        payload->mcxt = allocContext;
         MemoryContextSwitchTo(old);
     } else {
         payload = (cloudsync_update_payload *)PG_GETARG_POINTER(0);
+        if (payload->mcxt == NULL || payload->mcxt != allocContext) {
+            elog(DEBUG1, "cloudsync_update_transfn repairing payload context payload=%p old_mcxt=%p new_mcxt=%p",
+           payload, payload->mcxt, allocContext);
+        payload->mcxt = allocContext;
     }
+  }
+
+    if (!payload) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("cloudsync_update_transfn payload is null")));
+    }
+
+    if (payload->mcxt_cb_info && payload->mcxt_cb_info->mcxt != allocContext) {
+        payload->mcxt_cb_info->payload = NULL;
+        payload->mcxt_cb_info = NULL;
+    }
+
+    if (!payload->mcxt_cb_info) {
+        MemoryContext old = MemoryContextSwitchTo(allocContext);
+        // info and cb are automatically freed when that context is reset or deleted
+        cloudsync_mcxt_cb_info *info = (cloudsync_mcxt_cb_info *)palloc0(sizeof(*info));
+        info->mcxt = allocContext;
+        info->name = allocContext ? allocContext->name : "<null>";
+        info->payload = payload;
+        MemoryContextCallback *cb = (MemoryContextCallback *)palloc0(sizeof(*cb));
+        cb->func = cloudsync_mcxt_reset_cb;
+        cb->arg = info;
+        MemoryContextRegisterResetCallback(allocContext, cb);
+        payload->mcxt_cb_info = info;
+        MemoryContextSwitchTo(old);
+    }
+
+    if (payload->count < 0 || payload->capacity < 0 ||payload->count > payload->capacity) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("cloudsync_update_transfn invalid payload state: count=%d cap=%d", payload->count, payload->capacity)));
+  }
+
+  elog(DEBUG1,
+       "cloudsync_update_transfn contexts current=%p name=%s agg=%p name=%s "
+       "alloc=%p name=%s",
+       CurrentMemoryContext,
+       CurrentMemoryContext ? CurrentMemoryContext->name : "<null>", aggContext,
+       aggContext ? aggContext->name : "<null>", allocContext,
+       allocContext ? allocContext->name : "<null>");
 
     Oid table_type = get_fn_expr_argtype(fcinfo->flinfo, 1);
     bool table_null = PG_ARGISNULL(1);
@@ -1203,7 +1298,12 @@ Datum cloudsync_update_transfn (PG_FUNCTION_ARGS) {
     bool old_null = PG_ARGISNULL(3);
     Datum old_datum = old_null ? (Datum)0 : PG_GETARG_DATUM(3);
 
-    MemoryContext old_ctx = MemoryContextSwitchTo(aggContext);
+    if (!OidIsValid(table_type) || !OidIsValid(new_type) || !OidIsValid(old_type)) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("cloudsync_update_transfn invalid argument types")));
+    }
+
+    MemoryContext old_ctx = MemoryContextSwitchTo(allocContext);
+    MemoryContextStats(allocContext);
     pgvalue_t *table_name = pgvalue_create(table_datum, table_type, -1, fcinfo->fncollation, table_null);
     pgvalue_t *new_value = pgvalue_create(new_datum, new_type, -1, fcinfo->fncollation, new_null);
     pgvalue_t *old_value = pgvalue_create(old_datum, old_type, -1, fcinfo->fncollation, old_null);
@@ -1283,8 +1383,15 @@ Datum cloudsync_update_finalfn (PG_FUNCTION_ARGS) {
         int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
 
         int pk_count = table_count_pks(table);
-        if (payload->count < pk_count) {
+        if (payload->count < pk_count) { 
             ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Not enough primary key values in cloudsync_update payload")));
+        }
+        int max_expected = pk_count + table_count_cols(table);
+        if (payload->count > max_expected) {
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                            errmsg("Too many values in cloudsync_update payload: got "
+                                "%d expected <= %d",
+                                payload->count, max_expected)));
         }
 
         bool prikey_changed = false;
@@ -1299,7 +1406,6 @@ Datum cloudsync_update_finalfn (PG_FUNCTION_ARGS) {
         if (!pk) {
             ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Not enough memory to encode the primary key(s)")));
         }
-
         if (prikey_changed) {
             oldpk = pk_encode_prikey((dbvalue_t **)payload->old_values, pk_count, buffer2, &oldpklen);
             if (!oldpk) {

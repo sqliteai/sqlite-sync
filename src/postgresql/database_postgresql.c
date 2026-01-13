@@ -10,26 +10,26 @@
 #include "postgres.h"
 
 #include <inttypes.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "../cloudsync.h"
 #include "../database.h"
 #include "../dbutils.h"
-#include "../utils.h"
 #include "../sql.h"
+#include "../utils.h"
 
 // PostgreSQL SPI and other headers
-#include "executor/spi.h"
-#include "utils/builtins.h"
-#include "catalog/pg_type.h"
-#include "utils/memutils.h"
 #include "access/xact.h"
-#include "utils/snapmgr.h"
+#include "catalog/pg_type.h"
+#include "executor/spi.h"
 #include "funcapi.h"
 #include "utils/array.h"
-#include "utils/lsyscache.h"
+#include "utils/builtins.h"
 #include "utils/datum.h"
+#include "utils/lsyscache.h"
+#include "utils/memutils.h"
+#include "utils/snapmgr.h"
 
 #include "pgvalue.h"
 
@@ -50,12 +50,12 @@
 // PostgreSQL SPI handles require knowing parameter count and types upfront.
 // Solution: Defer actual SPI_prepare until first step(), after all bindings are set.
 #define MAX_PARAMS 32
- 
+
 typedef struct {
     // Prepared plan
     SPIPlanPtr      plan;
     bool            plan_is_prepared;
-    
+
     // Cursor execution
     Portal          portal;             // owned by statement
     bool            portal_open;
@@ -64,19 +64,19 @@ typedef struct {
     SPITupleTable  *last_tuptable;      // must SPI_freetuptable() before next fetch
     HeapTuple       current_tuple;
     TupleDesc       current_tupdesc;
-    
+
     // Params
     int             nparams;
     Oid             types[MAX_PARAMS];
     Datum           values[MAX_PARAMS];
     char            nulls[MAX_PARAMS];
     bool            executed_nonselect; // non-select executed already
-    
+
     // Memory
     MemoryContext   stmt_mcxt;          // lifetime = pg_stmt_t
     MemoryContext   bind_mcxt;          // resettable region for parameters (cleared on clear_bindings/reset)
     MemoryContext   row_mcxt;           // per-row scratch (cleared each step after consumer copies)
-    
+
     // Context
     const char        *sql;
     cloudsync_context *data;
@@ -138,11 +138,11 @@ char *sql_escape_name (const char *name, char *buffer, size_t bsize) {
 char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_name) {
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_NONPK_COLS_BY_PK, table_name);
     if (!sql) return NULL;
-    
+
     char *query = NULL;
     int rc = database_select_text(data, sql, &query);
     cloudsync_memory_free(sql);
-    
+
     return (rc == DBRES_OK) ? query : NULL;
 }
 
@@ -526,7 +526,7 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
     PG_TRY();
     { 
         rc = SPI_execute(sql, true, 0);
-      }
+    }
     PG_CATCH();
     {
         ErrorData *edata = CopyErrorData();
@@ -534,7 +534,6 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
         FreeErrorData(edata);
         FlushErrorState();
         is_error = true;
-
     }
     PG_END_TRY();
 
@@ -898,15 +897,16 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
 
     char sql[2048];
     snprintf(sql, sizeof(sql),
-             "SELECT string_agg("
-             "  '(''' || kcu.column_name || ''', NEW.' || quote_ident(kcu.column_name) || ', OLD.' || quote_ident(kcu.column_name) || ')', "
-             "  ', ' ORDER BY kcu.ordinal_position"
-             ") "
-             "FROM information_schema.table_constraints tc "
-             "JOIN information_schema.key_column_usage kcu "
-             "  ON tc.constraint_name = kcu.constraint_name "
-             "WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY';",
-             table_name);
+           "SELECT string_agg("
+           "  '(''%s'', NEW.' || quote_ident(kcu.column_name) || ', OLD.' || "
+           "quote_ident(kcu.column_name) || ')', "
+           "  ', ' ORDER BY kcu.ordinal_position"
+           ") "
+           "FROM information_schema.table_constraints tc "
+           "JOIN information_schema.key_column_usage kcu "
+           "  ON tc.constraint_name = kcu.constraint_name "
+           "WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY';",
+           table_name, table_name);
 
     char *pk_values_list = NULL;
     int rc = database_select_text(data, sql, &pk_values_list);
@@ -917,21 +917,22 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
     }
 
     snprintf(sql, sizeof(sql),
-             "SELECT string_agg("
-             "  '(''%s'', NEW.' || quote_ident(c.column_name) || ', OLD.' || quote_ident(c.column_name) || ')', "
-             "  ', ' ORDER BY c.ordinal_position"
-             ") "
-             "FROM information_schema.columns c "
-             "WHERE c.table_name = '%s' "
-             "AND NOT EXISTS ("
-             "  SELECT 1 FROM information_schema.table_constraints tc "
-             "  JOIN information_schema.key_column_usage kcu "
-             "    ON tc.constraint_name = kcu.constraint_name "
-             "  WHERE tc.table_name = c.table_name "
-             "  AND tc.constraint_type = 'PRIMARY KEY' "
-             "  AND kcu.column_name = c.column_name"
-             ");",
-             table_name, table_name);
+           "SELECT string_agg("
+           "  '(''%s'', NEW.' || quote_ident(c.column_name) || ', OLD.' || "
+           "quote_ident(c.column_name) || ')', "
+           "  ', ' ORDER BY c.ordinal_position"
+           ") "
+           "FROM information_schema.columns c "
+           "WHERE c.table_name = '%s' "
+           "AND NOT EXISTS ("
+           "  SELECT 1 FROM information_schema.table_constraints tc "
+           "  JOIN information_schema.key_column_usage kcu "
+           "    ON tc.constraint_name = kcu.constraint_name "
+           "  WHERE tc.table_name = c.table_name "
+           "  AND tc.constraint_type = 'PRIMARY KEY' "
+           "  AND kcu.column_name = c.column_name"
+           ");",
+           table_name, table_name);
 
     char *col_values_list = NULL;
     rc = database_select_text(data, sql, &col_values_list);
@@ -1290,7 +1291,7 @@ int databasevm_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, i
         MemoryContext parent = (flags & DBFLAG_PERSISTENT) ? TopMemoryContext : CurrentMemoryContext;
         stmt->stmt_mcxt = AllocSetContextCreate(parent, "cloudsync stmt", ALLOCSET_DEFAULT_SIZES);
         stmt->bind_mcxt = AllocSetContextCreate(stmt->stmt_mcxt, "cloudsync binds", ALLOCSET_DEFAULT_SIZES);
-        stmt->row_mcxt  = AllocSetContextCreate(stmt->stmt_mcxt, "cloudsync row", ALLOCSET_DEFAULT_SIZES);
+        stmt->row_mcxt = AllocSetContextCreate(stmt->stmt_mcxt, "cloudsync row", ALLOCSET_DEFAULT_SIZES);
         
         MemoryContext old = MemoryContextSwitchTo(stmt->stmt_mcxt);
         stmt->sql = pstrdup(sql);
@@ -1319,6 +1320,10 @@ int databasevm_step0 (pg_stmt_t *stmt) {
     // prepare plan
     PG_TRY();
     {
+        if (!stmt || !stmt->sql) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("databasevm_step0 invalid stmt or sql pointer")));
+        }
+        
         stmt->plan = SPI_prepare(stmt->sql, stmt->nparams, stmt->types);
         if (stmt->plan == NULL) {
             int err = cloudsync_set_error(data, "Unable to prepare SQL statement", DBRES_ERROR);
@@ -1796,17 +1801,17 @@ int database_column_type (dbvm_t *vm, int index) {
         case INT4OID:
         case INT8OID:
             return DBTYPE_INTEGER;
-            
+
         case FLOAT4OID:
         case FLOAT8OID:
         case NUMERICOID:
             return DBTYPE_FLOAT;
-            
+
         case TEXTOID:
         case VARCHAROID:
         case BPCHAROID:
             return DBTYPE_TEXT;
-            
+
         case BYTEAOID:
             return DBTYPE_BLOB;
     }
@@ -2044,7 +2049,7 @@ void *dbmem_realloc (void *ptr, uint64_t new_size) {
     return realloc(ptr, new_size);
 }
 
-char *dbmem_mprintf(const char *format, ...) {
+char *dbmem_mprintf (const char *format, ...) {
     if (!format) return NULL;
 
     va_list args;
