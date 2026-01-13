@@ -289,11 +289,18 @@ const char * const SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL =
     "DELETE FROM %s_cloudsync WHERE pk = $1 AND col_name != '%s';";  // TODO: match SQLite delete semantics
 
 const char * const SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL =
-    "INSERT INTO %s_cloudsync (pk, col_name, col_version, db_version, seq, site_id) "
-    "SELECT $1, col_name, 1, $2, cloudsync_seq(), 0 "
-    "FROM %s_cloudsync WHERE pk = $3 AND col_name != '%s' "
-    "ON CONFLICT (pk, col_name) DO UPDATE SET "
-    "col_version = 1, db_version = $2, seq = cloudsync_seq(), site_id = 0;";  // TODO: ensure parity with SQLite reset/rekey logic
+    "WITH moved AS ("
+    "  SELECT col_name "
+    "  FROM \"%s_cloudsync\" WHERE pk = $3 AND col_name != '%s'"
+    "), "
+    "upserted AS ("
+    "  INSERT INTO \"%s_cloudsync\" (pk, col_name, col_version, db_version, seq, site_id) "
+    "  SELECT $1, col_name, 1, $2, cloudsync_seq(), 0 "
+    "  FROM moved "
+    "  ON CONFLICT (pk, col_name) DO UPDATE SET "
+    "  col_version = 1, db_version = $2, seq = cloudsync_seq(), site_id = 0"
+    ") "
+    "DELETE FROM \"%s_cloudsync\" WHERE pk = $3 AND col_name != '%s';";
 
 const char * const SQL_CLOUDSYNC_GET_COL_VERSION_OR_ROW_EXISTS =
     "SELECT COALESCE("

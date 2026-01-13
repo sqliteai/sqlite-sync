@@ -729,7 +729,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     
     // precompile the update rows from meta when pk changes
     // see https://github.com/sqliteai/sqlite-sync/blob/main/docs/PriKey.md for more details
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+    sql = sql_build_rekey_pk_and_reset_version_except_col(data, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_update_move_stmt: %s", sql);
     
@@ -1163,7 +1163,7 @@ int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, c
     if (table->algo == table_algo_crdt_gos) table->enabled = 0;
     SYNCBIT_SET(data);
     rc = databasevm_step(vm);
-    DEBUG_MERGE("merge_insert(%02x%02x): %s (%d)", data->site_id[UUID_LEN-2], data->site_id[UUID_LEN-1], database_sql(vm), rc);
+    DEBUG_MERGE("merge_insert(%02x%02x): %s (%d)", data->site_id[UUID_LEN-2], data->site_id[UUID_LEN-1], databasevm_sql(vm), rc);
     dbvm_reset(vm);
     SYNCBIT_RESET(data);
     if (table->algo == table_algo_crdt_gos) table->enabled = 1;
@@ -1194,7 +1194,7 @@ int merge_delete (cloudsync_context *data, cloudsync_table_context *table, const
     // perform real operation and disable triggers
     SYNCBIT_SET(data);
     rc = databasevm_step(vm);
-    DEBUG_MERGE("merge_delete(%02x%02x): %s (%d)", data->site_id[UUID_LEN-2], data->site_id[UUID_LEN-1], database_sql(vm), rc);
+    DEBUG_MERGE("merge_delete(%02x%02x): %s (%d)", data->site_id[UUID_LEN-2], data->site_id[UUID_LEN-1], databasevm_sql(vm), rc);
     dbvm_reset(vm);
     SYNCBIT_RESET(data);
     if (rc == DBRES_DONE) rc = DBRES_OK;
@@ -1464,7 +1464,7 @@ void cloudsync_context_free (void *ctx) {
     cloudsync_context *data = (cloudsync_context *)ctx;
     DEBUG_SETTINGS("cloudsync_context_free %p", data);
     if (!data) return;
-        
+
     cloudsync_memory_free(data->tables);
     cloudsync_memory_free(data);
 }

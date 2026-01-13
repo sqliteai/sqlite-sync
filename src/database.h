@@ -142,6 +142,7 @@ char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name);
 char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_name);
 char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_name, const char *colname);
 char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_name, const char *colname);
+char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, const char *table_name, const char *except_col);
 
 // USED ONLY by SQLite Cloud to implement RLS
 typedef struct cloudsync_pk_decode_bind_context cloudsync_pk_decode_bind_context;

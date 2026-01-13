@@ -170,6 +170,12 @@ char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_na
     return (rc == DBRES_OK) ? query : NULL;
 }
 
+char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, const char *table_name, const char *except_col) {
+    UNUSED_PARAMETER(data);
+
+    return cloudsync_memory_mprintf(SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL, table_name, except_col);
+}
+
 // MARK: - PRIVATE -
 
 static int database_select1_value (cloudsync_context *data, const char *sql, char **ptr_value, int64_t *int_value, DBTYPE expected_type) {

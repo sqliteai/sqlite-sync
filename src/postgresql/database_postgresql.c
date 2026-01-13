@@ -190,6 +190,14 @@ char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_na
     return (rc == DBRES_OK) ? query : NULL;
 }
 
+char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, const char *table_name, const char *except_col) {
+    UNUSED_PARAMETER(data);
+    char escaped[512];
+    sql_escape_name(table_name, escaped, sizeof(escaped));
+    
+    return cloudsync_memory_mprintf(SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL, escaped, except_col, escaped, escaped, except_col);
+}
+
 // MARK: - HELPER FUNCTIONS -
 
 // TODO: is this really necessary? We now control the SQL statements and so we can use the Postgres style when needed
