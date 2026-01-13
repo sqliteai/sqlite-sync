@@ -1,6 +1,9 @@
 # PostgreSQL Docker image with CloudSync extension (debug build)
 FROM postgres:16
 
+# Enable ASAN build flags when requested (used by docker-compose.asan.yml).
+ARG ENABLE_ASAN=0
+
 # Install build dependencies and debug symbols
 RUN apt-get update && apt-get install -y \
     ca-certificates \
@@ -16,6 +19,7 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     dpkg-dev \
     gdb \
+    libasan8 \
     postgresql-server-dev-16 \
     postgresql-16-dbgsym \
     git \
@@ -35,8 +39,21 @@ COPY docker/ ./docker/
 COPY Makefile .
 
 # Build and install the CloudSync extension with debug flags
-RUN make postgres-build PG_DEBUG=1 && \
-    make postgres-install PG_DEBUG=1 && \
+RUN set -eux; \
+    ASAN_CFLAGS=""; \
+    ASAN_LDFLAGS=""; \
+    if [ "${ENABLE_ASAN}" = "1" ]; then \
+        ASAN_CFLAGS="-fsanitize=address"; \
+        ASAN_LDFLAGS="-fsanitize=address"; \
+    fi; \
+    make postgres-build PG_DEBUG=1 \
+    PG_CFLAGS="-fPIC -Wall -Wextra -Wno-unused-parameter -std=c11 -g -O0 -fno-omit-frame-pointer ${ASAN_CFLAGS}" \
+    PG_LDFLAGS="-shared ${ASAN_LDFLAGS}" \
+    PG_CPPFLAGS="-I$(pg_config --includedir-server) -Isrc -Isrc/postgresql -DCLOUDSYNC_POSTGRESQL_BUILD -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -DMEMORY_CONTEXT_CHECKING" && \
+    make postgres-install PG_DEBUG=1 \
+    PG_CFLAGS="-fPIC -Wall -Wextra -Wno-unused-parameter -std=c11 -g -O0 -fno-omit-frame-pointer ${ASAN_CFLAGS}" \
+    PG_LDFLAGS="-shared ${ASAN_LDFLAGS}" \
+    PG_CPPFLAGS="-I$(pg_config --includedir-server) -Isrc -Isrc/postgresql -DCLOUDSYNC_POSTGRESQL_BUILD -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -DMEMORY_CONTEXT_CHECKING" && \
     make postgres-clean
 
 # Verify installation
