@@ -16,10 +16,12 @@
 #include "utils/builtins.h"
 #include "utils/uuid.h"
 #include "catalog/pg_type.h"
+#include "catalog/namespace.h"
 #include "executor/spi.h"
 #include "access/xact.h"
 #include "storage/ipc.h"
 #include "utils/memutils.h"
+#include "utils/lsyscache.h"
 #include "utils/array.h"
 #include "pgvalue.h"
 
@@ -1356,4 +1358,342 @@ PG_FUNCTION_INFO_V1(cloudsync_payload_encode);
 Datum cloudsync_payload_encode (PG_FUNCTION_ARGS) {
     ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_payload_encode should not be called directly - use aggregate version")));
     PG_RETURN_NULL();
+}
+
+// MARK: - Changes -
+
+typedef struct {
+    Portal    portal;
+    TupleDesc outdesc;
+    bool      spi_connected;
+} SRFState;
+
+static char * build_union_sql (void) {
+    char *result = NULL;
+    
+    if (SPI_connect() != SPI_OK_CONNECT) {
+        ereport(ERROR, (errmsg("cloudsync: SPI_connect failed")));
+    }
+    
+    PG_TRY();
+    {
+        const char *sql =
+        "SELECT n.nspname, c.relname "
+        "FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE c.relkind = 'r' "
+        "  AND n.nspname NOT IN ('pg_catalog','information_schema') "
+        "  AND c.relname LIKE '%\\_cloudsync' ESCAPE '\\' "
+        "ORDER BY n.nspname, c.relname";
+        
+        int rc = SPI_execute(sql, true, 0);
+        if (rc != SPI_OK_SELECT) {
+            ereport(ERROR, (errmsg("cloudsync: SPI_execute failed while listing *_cloudsync")));
+        }
+        
+        StringInfoData buf;
+        initStringInfo(&buf);
+        
+        bool first = true;
+        for (uint64 i = 0; i < SPI_processed; i++) {
+            HeapTuple tup = SPI_tuptable->vals[i];
+            TupleDesc td = SPI_tuptable->tupdesc;
+            
+            bool isnull1 = false;
+            bool isnull2 = false;
+            char *nsp = NULL;
+            char *rel = NULL;
+            Datum dnsp = SPI_getbinval(tup, td, 1, &isnull1);
+            Datum drel = SPI_getbinval(tup, td, 2, &isnull2);
+            if (!isnull1) nsp = TextDatumGetCString(dnsp);
+            if (!isnull2) rel = TextDatumGetCString(drel);
+            if (isnull1 || isnull2) {if (nsp) pfree(nsp); if (rel) pfree(rel); continue;}
+            
+            size_t rlen = strlen(rel);
+            if (rlen <= 10) {pfree(nsp); pfree(rel); continue;} /* "_cloudsync" */
+            
+            char *base = pstrdup(rel);
+            base[rlen - 10] = '\0';
+            
+            char *quoted_base = quote_literal_cstr(base);
+            const char *quoted_nsp = quote_identifier(nsp);
+            const char *quoted_rel = quote_identifier(rel);
+            
+            if (!first) appendStringInfoString(&buf, " UNION ALL ");
+            first = false;
+            
+            appendStringInfo(&buf,
+                             "SELECT %s AS tbl, t1.pk, t1.col_name, t1.col_value::text AS col_value, "
+                             "t1.col_version, t1.db_version, t1.site_id, "
+                             "COALESCE(t2.col_version, 1) AS cl, t1.seq "
+                             "FROM %s.%s t1 "
+                             "LEFT JOIN %s.%s t2 "
+                             "  ON t1.pk = t2.pk AND t2.col_name = '%s' "
+                             "WHERE t1.col_value::text IS DISTINCT FROM '%s'",
+                             quoted_base,
+                             quoted_nsp, quoted_rel,
+                             quoted_nsp, quoted_rel,
+                             CLOUDSYNC_TOMBSTONE_VALUE,
+                             CLOUDSYNC_RLS_RESTRICTED_VALUE
+                             );
+            
+            pfree(base);
+            pfree(quoted_base);
+            pfree(nsp);
+            pfree((void *)quoted_nsp);
+            pfree(rel);
+            pfree((void *)quoted_rel);
+        }
+        
+        if (first) {
+            result = pstrdup(
+                             "SELECT NULL::text AS tbl, NULL::bytea AS pk, NULL::text AS col_name, NULL::text AS col_value, "
+                             "NULL::bigint AS col_version, NULL::bigint AS db_version, NULL::bytea AS site_id, "
+                             "NULL::bigint AS cl, NULL::bigint AS seq WHERE false"
+                             );
+        } else {
+            result = buf.data;
+        }
+        
+        SPI_finish();
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    
+    return result;
+}
+
+static Oid lookup_column_type_oid (const char *tbl, const char *col_name) {
+    // SPI_connect not needed here
+    
+    // lookup table OID (search_path-aware)
+    Oid relid = RelnameGetRelid(tbl);
+    if (!OidIsValid(relid)) ereport(ERROR, (errmsg("cloudsync: table \"%s\" not found (check search_path)", tbl)));
+        
+    // find attribute
+    int attnum = get_attnum(relid, col_name);
+    if (attnum == InvalidAttrNumber) ereport(ERROR, (errmsg("cloudsync: column \"%s\" not found in table \"%s\"", col_name, tbl)));
+        
+    Oid typoid = get_atttype(relid, attnum);
+    if (!OidIsValid(typoid)) ereport(ERROR, (errmsg("cloudsync: could not resolve type for %s.%s", tbl, col_name)));
+    
+    return typoid;
+}
+
+PG_FUNCTION_INFO_V1(cloudsync_changes_srf);
+Datum cloudsync_changes_srf(PG_FUNCTION_ARGS) {
+    FuncCallContext *funcctx;
+    SRFState *st_local = NULL;
+    bool spi_connected_local = false;
+    
+    PG_TRY();
+    {
+        if (SRF_IS_FIRSTCALL()) {
+            funcctx = SRF_FIRSTCALL_INIT();
+            MemoryContext oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+            
+            int64 min_db_version = PG_GETARG_INT64(0);
+            bool site_is_null = PG_ARGISNULL(1);
+            bytea *filter_site_id = site_is_null ? NULL : PG_GETARG_BYTEA_PP(1);
+            
+            char *union_sql = build_union_sql();
+            
+            StringInfoData q;
+            initStringInfo(&q);
+            appendStringInfo(&q,
+                             "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                             "FROM ( %s ) u "
+                             "WHERE db_version > $1 "
+                             "  AND ($2 IS NULL OR site_id = $2) "
+                             "ORDER BY db_version, seq ASC",
+                             union_sql
+                             );
+            
+            if (SPI_connect() != SPI_OK_CONNECT) {
+                ereport(ERROR, (errmsg("cloudsync: SPI_connect failed in SRF")));
+            }
+            spi_connected_local = true;
+            
+            Oid argtypes[2] = {INT8OID, BYTEAOID};
+            Datum values[2];
+            char nulls[2] = {' ', ' '};
+            
+            values[0] = Int64GetDatum(min_db_version);
+            if (site_is_null) { nulls[1] = 'n'; values[1] = (Datum)0; }
+            else values[1] = PointerGetDatum(filter_site_id);
+            
+            Portal portal = SPI_cursor_open_with_args(NULL, q.data, 2, argtypes, values, nulls, true, 0);
+            if (!portal) {
+                ereport(ERROR, (errmsg("cloudsync: SPI_cursor_open failed in SRF")));
+            }
+            
+            TupleDesc outdesc;
+            if (get_call_result_type(fcinfo, NULL, &outdesc) != TYPEFUNC_COMPOSITE) {
+                ereport(ERROR, (errmsg("cloudsync: return type must be composite")));
+            }
+            outdesc = BlessTupleDesc(outdesc);
+            
+            SRFState *st = palloc0(sizeof(SRFState));
+            st->portal = portal;
+            st->outdesc = outdesc;
+            st->spi_connected = true;
+            funcctx->user_fctx = st;
+            st_local = st;
+            
+            pfree(union_sql);
+            pfree(q.data);
+            
+            MemoryContextSwitchTo(oldcontext);
+        }
+        
+        funcctx = SRF_PERCALL_SETUP();
+        SRFState *st = (SRFState *) funcctx->user_fctx;
+        st_local = st;
+        
+        SPI_cursor_fetch(st->portal, true, 1);
+        if (SPI_processed == 0) {
+            SPI_cursor_close(st->portal);
+            st->portal = NULL;
+
+            SPI_finish();
+            st->spi_connected = false;
+
+            SRF_RETURN_DONE(funcctx);
+        }
+        
+        HeapTuple tup = SPI_tuptable->vals[0];
+        TupleDesc td = SPI_tuptable->tupdesc;
+        
+        Datum outvals[9];
+        bool outnulls[9];
+        for (int i = 0; i < 9; i++) {
+            outvals[i] = SPI_getbinval(tup, td, i+1, &outnulls[i]);
+        }
+        
+        HeapTuple outtup = heap_form_tuple(st->outdesc, outvals, outnulls);
+        SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(outtup));
+    }
+    PG_CATCH();
+    {
+        if (st_local && st_local->portal) {
+            SPI_cursor_close(st_local->portal);
+            st_local->portal = NULL;
+        }
+        
+        if (st_local && st_local->spi_connected) {
+            SPI_finish();
+            st_local->spi_connected = false;
+            spi_connected_local = false;
+        } else if (spi_connected_local) {
+            SPI_finish();
+            spi_connected_local = false;
+        }
+        
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+}
+
+// Trigger INSERT
+
+PG_FUNCTION_INFO_V1(cloudsync_changes_insert_trg);
+Datum cloudsync_changes_insert_trg (PG_FUNCTION_ARGS) {
+    // sanity check
+    bool spi_connected = false;
+    TriggerData *trigdata = (TriggerData *) fcinfo->context;
+    if (!CALLED_AS_TRIGGER(fcinfo)) ereport(ERROR, (errmsg("cloudsync_changes_insert_trg must be called as trigger")));
+    if (!TRIGGER_FIRED_BY_INSERT(trigdata->tg_event)) ereport(ERROR, (errmsg("Only INSERT allowed on cloudsync_changes")));
+    
+    HeapTuple newtup = trigdata->tg_trigtuple;
+    PG_TRY();
+    {
+        if (SPI_connect() != SPI_OK_CONNECT) ereport(ERROR, (errmsg("cloudsync: SPI_connect failed in trigger")));
+        spi_connected = true;
+        
+        TupleDesc desc = trigdata->tg_relation->rd_att;
+        bool isnull;
+        
+        char *insert_tbl = text_to_cstring((text*) DatumGetPointer(heap_getattr(newtup, 1, desc, &isnull)));
+        if (isnull) ereport(ERROR, (errmsg("tbl cannot be NULL")));
+        
+        bytea *insert_pk = (bytea*) DatumGetPointer(heap_getattr(newtup, 2, desc, &isnull));
+        if (isnull) ereport(ERROR, (errmsg("pk cannot be NULL")));
+        int insert_pk_len = (int)(VARSIZE_ANY_EXHDR(insert_pk));
+        
+        char *insert_name = text_to_cstring((text*) DatumGetPointer(heap_getattr(newtup, 3, desc, &isnull)));
+        if (isnull) ereport(ERROR, (errmsg("col_name cannot be NULL")));
+        
+        // raw_insert_value is declated as text in the view (any input is converted to text)
+        Datum raw_insert_value = heap_getattr(newtup, 4, desc, &isnull);
+        char *insert_value_text = isnull ? NULL : text_to_cstring((text*) DatumGetPointer(raw_insert_value));
+        
+        int64 insert_col_version = DatumGetInt64(heap_getattr(newtup, 5, desc, &isnull));
+        if (isnull) ereport(ERROR, (errmsg("col_version cannot be NULL")));
+        
+        int64 insert_db_version = DatumGetInt64(heap_getattr(newtup, 6, desc, &isnull));
+        if (isnull) ereport(ERROR, (errmsg("db_version cannot be NULL")));
+        
+        bytea *insert_site_id = (bytea*) DatumGetPointer(heap_getattr(newtup, 7, desc, &isnull));
+        if (isnull) ereport(ERROR, (errmsg("site_id cannot be NULL")));
+        int insert_site_id_len = (int)(VARSIZE_ANY_EXHDR(insert_site_id));
+        
+        int64 insert_cl = DatumGetInt64(heap_getattr(newtup, 8, desc, &isnull));
+        if (isnull) ereport(ERROR, (errmsg("cl cannot be NULL")));
+        
+        int64 insert_seq = DatumGetInt64(heap_getattr(newtup, 9, desc, &isnull));
+        if (isnull) ereport(ERROR, (errmsg("seq cannot be NULL")));
+        
+        // get real column type from tbl.col_name
+        Oid target_typoid = lookup_column_type_oid(insert_tbl, insert_name);
+        char *target_typname = format_type_be(target_typoid);
+        
+        // lookup algo in cloudsync_tables
+        cloudsync_context *data = get_cloudsync_context();
+        cloudsync_table_context *table = table_lookup(data, insert_tbl);
+        if (!table) ereport(ERROR, (errmsg("Unable to find table")));
+        
+        pgvalue_t *col_value = NULL;
+        bool typed_isnull = (insert_value_text == NULL);
+        if (!typed_isnull) {
+            StringInfoData castq;
+            initStringInfo(&castq);
+            appendStringInfo(&castq, "SELECT $1::%s", target_typname);
+            Oid argt[1] = {TEXTOID};
+            Datum argv[1] = {CStringGetTextDatum(insert_value_text)};
+            char argn[1] = {' '};
+            
+            int rc = SPI_execute_with_args(castq.data, 1, argt, argv, argn, true, 1);
+            if (rc != SPI_OK_SELECT || SPI_processed != 1) ereport(ERROR, (errmsg("cloudsync: failed to cast value to %s", target_typname)));
+            pfree(castq.data);
+            
+            Datum typed_value = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &typed_isnull);
+            int32 typmod = TupleDescAttr(SPI_tuptable->tupdesc, 1)->atttypmod;
+            Oid collation = TupleDescAttr(SPI_tuptable->tupdesc, 1)->attcollation;
+            
+            col_value = pgvalue_create(typed_value, target_typoid, typmod, collation, typed_isnull);
+        }
+        
+        int rc = DBRES_OK;
+        int64_t rowid = 0;
+        if (table_algo_isgos(table)) {
+            rc = merge_insert_col(data, table, VARDATA_ANY(insert_pk), insert_pk_len, insert_name, col_value, (int64_t)insert_col_version, (int64_t)insert_db_version, VARDATA_ANY(insert_site_id), insert_site_id_len, (int64_t)insert_seq, &rowid);
+        } else {
+            rc = merge_insert (data, table, VARDATA_ANY(insert_pk), insert_pk_len, insert_cl, insert_name, col_value, insert_col_version, insert_db_version, VARDATA_ANY(insert_site_id), insert_site_id_len, insert_seq, &rowid);
+        }
+        
+        SPI_finish();
+        spi_connected = false;
+    }
+    PG_CATCH();
+    {
+        if (spi_connected) SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    
+    return PointerGetDatum(newtup);
 }

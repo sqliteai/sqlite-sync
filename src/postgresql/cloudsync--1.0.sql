@@ -205,3 +205,41 @@ CREATE OR REPLACE FUNCTION cloudsync_pk_decode(encoded_pk bytea, index integer)
 RETURNS text
 AS 'MODULE_PATHNAME', 'cloudsync_pk_decode'
 LANGUAGE C IMMUTABLE STRICT;
+
+-- ============================================================================
+-- Changes Functions
+-- ============================================================================
+
+-- SetReturningFunction: To implement SELECT FROM cloudsync_changes
+CREATE FUNCTION cloudsync_changes_srf(
+  min_db_version bigint DEFAULT 0,
+  filter_site_id bytea DEFAULT NULL
+)
+RETURNS TABLE (
+  tbl text,
+  pk bytea,
+  col_name text,
+  col_value text,      -- ANY SQLite translated to TEXT in PG (dynamic cast is used in this case)
+  col_version bigint,
+  db_version bigint,
+  site_id bytea,
+  cl bigint,
+  seq bigint
+)
+AS 'MODULE_PATHNAME', 'cloudsync_changes_srf'
+LANGUAGE C STABLE;
+
+-- View con lo stesso nome della vtab SQLite
+CREATE OR REPLACE VIEW cloudsync_changes AS
+SELECT * FROM cloudsync_changes_srf(0, NULL);
+
+-- Trigger function to implement INSERT on the cloudsync_changes view
+CREATE FUNCTION cloudsync_changes_insert_trg()
+RETURNS trigger
+AS 'MODULE_PATHNAME', 'cloudsync_changes_insert_trg'
+LANGUAGE C;
+
+CREATE OR REPLACE TRIGGER cloudsync_changes_insert
+INSTEAD OF INSERT ON cloudsync_changes
+FOR EACH ROW
+EXECUTE FUNCTION cloudsync_changes_insert_trg();
