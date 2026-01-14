@@ -387,3 +387,14 @@ char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bs
 char *pk_encode_prikey (dbvalue_t **argv, int argc, char *b, size_t *bsize) {
     return pk_encode(argv, argc, b, true, bsize);
 }
+
+char *pk_encode_value (dbvalue_t *value, size_t *bsize) {
+    dbvalue_t *argv[1] = {value};
+    
+    size_t blen = pk_encode_size(argv, 1, 0);
+    char *buffer = cloudsync_memory_alloc((uint64_t)blen);
+    if (!buffer) return NULL;
+    
+    *bsize = blen;
+    return pk_encode(argv, 1, buffer, false, bsize);
+}
