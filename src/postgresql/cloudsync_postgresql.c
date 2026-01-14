@@ -22,6 +22,7 @@
 #include "storage/ipc.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/hsearch.h"
 #include "utils/memutils.h"
 #include "utils/uuid.h"
 
@@ -1468,14 +1469,377 @@ Datum cloudsync_payload_encode (PG_FUNCTION_ARGS) {
 
 // MARK: - Changes -
 
+// Goal: Cache prepared plans for fetching a specific column by PK.
+typedef struct {
+    Oid relid;
+    AttrNumber attnum;
+} cloudsync_colplan_key;
+
+// Goal: Store cached SPI plan metadata for a table+column lookup.
+typedef struct {
+    SPIPlanPtr plan;
+    int npk;
+} cloudsync_colplan_entry;
+
+// Goal: Hold prepared statement cache for cloudsync_col_value_encoded.
+static HTAB *cloudsync_colplan_cache = NULL;
+
+// Goal: Initialize the column plan cache in a long-lived context.
+static void cloudsync_colplan_cache_init(void) {
+    if (cloudsync_colplan_cache) return;
+
+    HASHCTL ctl;
+    memset(&ctl, 0, sizeof(ctl));
+    ctl.keysize = sizeof(cloudsync_colplan_key);
+    ctl.entrysize = sizeof(cloudsync_colplan_entry);
+    ctl.hcxt = TopMemoryContext;
+    cloudsync_colplan_cache = hash_create("cloudsync col plan cache", 128, &ctl, HASH_ELEM | HASH_CONTEXT);
+}
+
+// Goal: Encode raw bytes to hex for safe SQL bytea literals.
+static char *cloudsync_hex_encode_bytes(const char *data, size_t len) {
+    static const char hex[] = "0123456789abcdef";
+    size_t outlen = len * 2;
+    char *out = palloc(outlen + 1);
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)data[i];
+        out[i * 2] = hex[c >> 4];
+        out[i * 2 + 1] = hex[c & 0x0F];
+    }
+    out[outlen] = '\0';
+    return out;
+}
+
+// Goal: Encode a single value using cloudsync pk encoding.
+static bytea *cloudsync_encode_value_from_datum(Datum val, Oid typeid, int32 typmod, Oid collation, bool isnull) {
+    pgvalue_t *v = pgvalue_create(val, typeid, typmod, collation, isnull);
+    if (!v) {
+        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("cloudsync: failed to allocate value")));
+    }
+    if (!isnull) {
+        pgvalue_ensure_detoast(v);
+    }
+
+    size_t encoded_len = pk_encode_size((dbvalue_t **)&v, 1, 0);
+    char *buf = cloudsync_memory_alloc((uint64_t)encoded_len);
+    if (!buf) {
+        database_value_free((dbvalue_t *)v);
+        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("cloudsync: failed to allocate encoding buffer")));
+    }
+
+    pk_encode((dbvalue_t **)&v, 1, buf, false, NULL);
+
+    bytea *out = (bytea *)palloc(VARHDRSZ + encoded_len);
+    SET_VARSIZE(out, VARHDRSZ + encoded_len);
+    memcpy(VARDATA(out), buf, encoded_len);
+
+    cloudsync_memory_free(buf);
+    database_value_free((dbvalue_t *)v);
+    return out;
+}
+
+// Goal: Encode a text sentinel using cloudsync pk encoding.
+static bytea *cloudsync_encode_text_value(const char *cstring) {
+    text *txt = cstring_to_text(cstring);
+    return cloudsync_encode_value_from_datum(PointerGetDatum(txt), TEXTOID, -1, InvalidOid, false);
+}
+
+// Goal: Encode a NULL value using cloudsync pk encoding.
+static bytea *cloudsync_encode_null_value(void) {
+    return cloudsync_encode_value_from_datum((Datum)0, TEXTOID, -1, InvalidOid, true);
+}
+
+// Goal: Build a SQL bytea literal for an encoded text sentinel.
+static char *cloudsync_encode_text_literal(const char *text) {
+    bytea *ba = cloudsync_encode_text_value(text);
+    size_t len = (size_t)VARSIZE_ANY_EXHDR(ba);
+    char *hex = cloudsync_hex_encode_bytes((const char *)VARDATA_ANY(ba), len);
+    char *literal = psprintf("E'\\\\x%s'::bytea", hex);
+    pfree(hex);
+    pfree(ba);
+    return literal;
+}
+
+// Goal: Cache pk component text parameters while decoding encoded pk.
+typedef struct {
+    Datum *values;
+    char *nulls;
+    int capacity;
+} cloudsync_pk_text_bind_ctx;
+
+// Goal: Decode pk-encoded values into text parameters for SPI bindings.
+static int cloudsync_pk_decode_to_text(void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
+    cloudsync_pk_text_bind_ctx *ctx = (cloudsync_pk_text_bind_ctx *)xdata;
+    if (!ctx || index < 0 || index >= ctx->capacity) return DBRES_ERROR;
+
+    switch (type) {
+        case DBTYPE_INTEGER: {
+            char *s = psprintf("%lld", (long long)ival);
+            ctx->values[index] = CStringGetTextDatum(s);
+            ctx->nulls[index] = ' ';
+        } break;
+        case DBTYPE_FLOAT: {
+            char *s = DatumGetCString(DirectFunctionCall1(float8out, Float8GetDatum(dval)));
+            ctx->values[index] = CStringGetTextDatum(s);
+            ctx->nulls[index] = ' ';
+        } break;
+        case DBTYPE_TEXT: {
+            text *t = cstring_to_text_with_len(pval, (int)ival);
+            ctx->values[index] = PointerGetDatum(t);
+            ctx->nulls[index] = ' ';
+        } break;
+        case DBTYPE_BLOB: {
+            char *hex = cloudsync_hex_encode_bytes(pval, (size_t)ival);
+            char *s = psprintf("\\\\x%s", hex);
+            ctx->values[index] = CStringGetTextDatum(s);
+            ctx->nulls[index] = ' ';
+            pfree(hex);
+        } break;
+        case DBTYPE_NULL: {
+            ctx->values[index] = (Datum)0;
+            ctx->nulls[index] = 'n';
+        } break;
+        default:
+            return DBRES_ERROR;
+    }
+    return DBRES_OK;
+}
+
+// Goal: Hold decoded value in text form for casting.
+typedef struct {
+    char *text;
+    bool isnull;
+} cloudsync_decoded_text;
+
+// Goal: Decode a single pk-encoded value into a text representation.
+static int cloudsync_decode_value_to_text_cb(void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
+    cloudsync_decoded_text *out = (cloudsync_decoded_text *)xdata;
+    if (!out || index != 0) return DBRES_ERROR;
+
+    switch (type) {
+        case DBTYPE_INTEGER:
+            out->text = psprintf("%lld", (long long)ival);
+            out->isnull = false;
+            break;
+        case DBTYPE_FLOAT:
+            out->text = DatumGetCString(DirectFunctionCall1(float8out, Float8GetDatum(dval)));
+            out->isnull = false;
+            break;
+        case DBTYPE_TEXT:
+            out->text = pnstrdup(pval, (int)ival);
+            out->isnull = false;
+            break;
+        case DBTYPE_BLOB: {
+            char *hex = cloudsync_hex_encode_bytes(pval, (size_t)ival);
+            out->text = psprintf("\\\\x%s", hex);
+            out->isnull = false;
+            pfree(hex);
+        } break;
+        case DBTYPE_NULL:
+            out->text = NULL;
+            out->isnull = true;
+            break;
+        default:
+            return DBRES_ERROR;
+    }
+    return DBRES_OK;
+}
+
+// Goal: Decode pk-encoded bytes into text for casting to a target type.
+static char *cloudsync_decode_value_to_text(bytea *encoded, bool *isnull) {
+    if (!encoded) {
+        if (isnull) *isnull = true;
+        return NULL;
+    }
+    cloudsync_decoded_text out = {.text = NULL, .isnull = false};
+    int blen = (int)VARSIZE_ANY_EXHDR(encoded);
+    int decoded = pk_decode((char *)VARDATA_ANY(encoded), (size_t)blen, 1, NULL, cloudsync_decode_value_to_text_cb, &out);
+    if (decoded != 1) {
+        ereport(ERROR, (errmsg("cloudsync: failed to decode encoded value")));
+    }
+    if (isnull) *isnull = out.isnull;
+    return out.text;
+}
+
+// Goal: Build or fetch a cached SPI plan to select a column by pk.
+static cloudsync_colplan_entry *cloudsync_colplan_get_or_build(Oid relid, AttrNumber attnum) {
+    cloudsync_colplan_cache_init();
+
+    cloudsync_colplan_key key = {relid, attnum};
+    bool found = false;
+    cloudsync_colplan_entry *entry = hash_search(cloudsync_colplan_cache, &key, HASH_ENTER, &found);
+    if (found && entry->plan) return entry;
+
+    char *relname = get_rel_name(relid);
+    Oid nspid = get_rel_namespace(relid);
+    char *nspname = get_namespace_name(nspid);
+    char *colname = get_attname(relid, attnum, false);
+
+    if (!relname || !nspname || !colname) {
+        ereport(ERROR, (errmsg("cloudsync: failed to resolve relation metadata")));
+    }
+
+    StringInfoData pkq;
+    initStringInfo(&pkq);
+    appendStringInfo(&pkq,
+                     "SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS typ "
+                     "FROM pg_index x "
+                     "JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
+                     "JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = k.attnum "
+                     "WHERE x.indrelid = %u AND x.indisprimary "
+                     "ORDER BY k.ord",
+                     relid);
+
+    int rc = SPI_execute(pkq.data, true, 0);
+    pfree(pkq.data);
+    if (rc != SPI_OK_SELECT || SPI_processed == 0) {
+        ereport(ERROR, (errmsg("cloudsync: failed to resolve primary key for relation")));
+    }
+
+    int npk = (int)SPI_processed;
+    char **pk_names = palloc(sizeof(char *) * npk);
+    char **pk_types = palloc(sizeof(char *) * npk);
+    for (int i = 0; i < npk; i++) {
+        HeapTuple tup = SPI_tuptable->vals[i];
+        TupleDesc td = SPI_tuptable->tupdesc;
+        pk_names[i] = SPI_getvalue(tup, td, 1);
+        pk_types[i] = SPI_getvalue(tup, td, 2);
+    }
+    SPI_freetuptable(SPI_tuptable);
+
+    StringInfoData sql;
+    initStringInfo(&sql);
+    appendStringInfo(&sql, "SELECT %s FROM %s.%s WHERE ",
+                     quote_identifier(colname),
+                     quote_identifier(nspname),
+                     quote_identifier(relname));
+    for (int i = 0; i < npk; i++) {
+        if (i > 0) appendStringInfoString(&sql, " AND ");
+        appendStringInfo(&sql, "%s = $%d::%s",
+                         quote_identifier(pk_names[i]),
+                         i + 1,
+                         pk_types[i]);
+    }
+
+    Oid *argtypes = palloc(sizeof(Oid) * npk);
+    for (int i = 0; i < npk; i++) argtypes[i] = TEXTOID;
+
+    SPIPlanPtr plan = SPI_prepare(sql.data, npk, argtypes);
+    if (!plan) {
+        ereport(ERROR, (errmsg("cloudsync: SPI_prepare failed for column lookup")));
+    }
+
+    entry->plan = SPI_saveplan(plan);
+    entry->npk = npk;
+
+    for (int i = 0; i < npk; i++) {
+        if (pk_names[i]) pfree(pk_names[i]);
+        if (pk_types[i]) pfree(pk_types[i]);
+    }
+    pfree(pk_names);
+    pfree(pk_types);
+    pfree(argtypes);
+    pfree(sql.data);
+    if (relname) pfree(relname);
+    if (nspname) pfree(nspname);
+    if (colname) pfree(colname);
+
+    return entry;
+}
+
+// Goal: Return encoded col_value bytea from base table using cached plans.
+PG_FUNCTION_INFO_V1(cloudsync_col_value_encoded);
+Datum cloudsync_col_value_encoded(PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) || PG_ARGISNULL(3)) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("cloudsync_col_value_encoded arguments cannot be NULL")));
+    }
+
+    char *nsp = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    char *tbl = text_to_cstring(PG_GETARG_TEXT_PP(1));
+    char *col_name = text_to_cstring(PG_GETARG_TEXT_PP(2));
+    bytea *encoded_pk = PG_GETARG_BYTEA_P(3);
+
+    if (strcmp(col_name, CLOUDSYNC_TOMBSTONE_VALUE) == 0) {
+        bytea *null_encoded = cloudsync_encode_null_value();
+        PG_RETURN_BYTEA_P(null_encoded);
+    }
+
+    Oid nspid = get_namespace_oid(nsp, false);
+    Oid relid = get_relname_relid(tbl, nspid);
+    if (!OidIsValid(relid)) {
+        ereport(ERROR, (errmsg("cloudsync: table \"%s.%s\" not found", nsp, tbl)));
+    }
+
+    AttrNumber attnum = get_attnum(relid, col_name);
+    if (attnum == InvalidAttrNumber) {
+        ereport(ERROR, (errmsg("cloudsync: column \"%s\" not found in table \"%s.%s\"", col_name, nsp, tbl)));
+    }
+
+    int spi_rc = SPI_connect();
+    if (spi_rc != SPI_OK_CONNECT) {
+        ereport(ERROR, (errmsg("cloudsync: SPI_connect failed in cloudsync_col_value_encoded")));
+    }
+
+    bytea *result = NULL;
+    PG_TRY();
+    {
+        cloudsync_colplan_entry *entry = cloudsync_colplan_get_or_build(relid, attnum);
+
+        Datum *values = palloc(sizeof(Datum) * entry->npk);
+        char *nulls = palloc(sizeof(char) * entry->npk);
+        memset(nulls, ' ', entry->npk);
+
+        cloudsync_pk_text_bind_ctx ctx = {.values = values, .nulls = nulls, .capacity = entry->npk};
+        int pk_len = (int)VARSIZE_ANY_EXHDR(encoded_pk);
+        int decoded = pk_decode_prikey((char *)VARDATA_ANY(encoded_pk), (size_t)pk_len, cloudsync_pk_decode_to_text, &ctx);
+        if (decoded != entry->npk) {
+            ereport(ERROR, (errmsg("cloudsync: primary key decode failed")));
+        }
+
+        int rc = SPI_execute_plan(entry->plan, values, nulls, true, 1);
+        if (rc != SPI_OK_SELECT || SPI_processed != 1) {
+            result = cloudsync_encode_text_value(CLOUDSYNC_RLS_RESTRICTED_VALUE);
+        } else {
+            HeapTuple tup = SPI_tuptable->vals[0];
+            TupleDesc td = SPI_tuptable->tupdesc;
+            bool isnull = false;
+            Datum val = SPI_getbinval(tup, td, 1, &isnull);
+            Oid typoid = TupleDescAttr(td, 0)->atttypid;
+            int32 typmod = TupleDescAttr(td, 0)->atttypmod;
+            Oid collation = TupleDescAttr(td, 0)->attcollation;
+            result = cloudsync_encode_value_from_datum(val, typoid, typmod, collation, isnull);
+        }
+        if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
+
+        SPI_finish();
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    PG_RETURN_BYTEA_P(result);
+}
+
+// Goal: Track SRF execution state across calls.
 typedef struct {
     Portal    portal;
     TupleDesc outdesc;
     bool      spi_connected;
 } SRFState;
 
+// Goal: Capture schema/table names from SPI catalog scan.
+typedef struct {
+    char *nsp;
+    char *rel;
+} cloudsync_table_info;
+
+// Goal: Build the UNION ALL SQL for cloudsync_changes SRF.
 static char * build_union_sql (void) {
     char *result = NULL;
+    MemoryContext caller_ctx = CurrentMemoryContext;
     
     if (SPI_connect() != SPI_OK_CONNECT) {
         ereport(ERROR, (errmsg("cloudsync: SPI_connect failed")));
@@ -1483,6 +1847,7 @@ static char * build_union_sql (void) {
     
     PG_TRY();
     {
+        char *rls_literal = cloudsync_encode_text_literal(CLOUDSYNC_RLS_RESTRICTED_VALUE);
         const char *sql =
         "SELECT n.nspname, c.relname "
         "FROM pg_class c "
@@ -1500,20 +1865,25 @@ static char * build_union_sql (void) {
         StringInfoData buf;
         initStringInfo(&buf);
         
-        bool first = true;
-        for (uint64 i = 0; i < SPI_processed; i++) {
+        uint64 ntables = SPI_processed;
+        cloudsync_table_info *tables = palloc0(sizeof(cloudsync_table_info) * ntables);
+        for (uint64 i = 0; i < ntables; i++) {
             HeapTuple tup = SPI_tuptable->vals[i];
             TupleDesc td = SPI_tuptable->tupdesc;
-            
-            bool isnull1 = false;
-            bool isnull2 = false;
-            char *nsp = NULL;
-            char *rel = NULL;
-            Datum dnsp = SPI_getbinval(tup, td, 1, &isnull1);
-            Datum drel = SPI_getbinval(tup, td, 2, &isnull2);
-            if (!isnull1) nsp = TextDatumGetCString(dnsp);
-            if (!isnull2) rel = TextDatumGetCString(drel);
-            if (isnull1 || isnull2) {if (nsp) pfree(nsp); if (rel) pfree(rel); continue;}
+            tables[i].nsp = SPI_getvalue(tup, td, 1);
+            tables[i].rel = SPI_getvalue(tup, td, 2);
+        }
+        SPI_freetuptable(SPI_tuptable);
+
+        bool first = true;
+        for (uint64 i = 0; i < ntables; i++) {
+            char *nsp = tables[i].nsp;
+            char *rel = tables[i].rel;
+            if (!nsp || !rel) {
+                if (nsp) pfree(nsp);
+                if (rel) pfree(rel);
+                continue;
+            }
             
             size_t rlen = strlen(rel);
             if (rlen <= 10) {pfree(nsp); pfree(rel); continue;} /* "_cloudsync" */
@@ -1522,44 +1892,55 @@ static char * build_union_sql (void) {
             base[rlen - 10] = '\0';
             
             char *quoted_base = quote_literal_cstr(base);
+            char *quoted_nsp_lit = quote_literal_cstr(nsp);
             const char *quoted_nsp = quote_identifier(nsp);
             const char *quoted_rel = quote_identifier(rel);
-            
+
             if (!first) appendStringInfoString(&buf, " UNION ALL ");
             first = false;
             
             appendStringInfo(&buf,
-                             "SELECT %s AS tbl, t1.pk, t1.col_name, t1.col_value::text AS col_value, "
-                             "t1.col_version, t1.db_version, t1.site_id, "
+                             "SELECT * FROM ("
+                             "SELECT %s AS tbl, t1.pk, t1.col_name, "
+                             "cloudsync_col_value_encoded(%s::text, %s::text, t1.col_name, t1.pk) AS col_value, "
+                             "t1.col_version, t1.db_version, site_tbl.site_id, "
                              "COALESCE(t2.col_version, 1) AS cl, t1.seq "
                              "FROM %s.%s t1 "
+                             "LEFT JOIN cloudsync_site_id site_tbl ON t1.site_id = site_tbl.id "
                              "LEFT JOIN %s.%s t2 "
-                             "  ON t1.pk = t2.pk AND t2.col_name = '%s' "
-                             "WHERE t1.col_value::text IS DISTINCT FROM '%s'",
+                              "  ON t1.pk = t2.pk AND t2.col_name = '%s'"
+                             ") s WHERE s.col_value IS DISTINCT FROM %s",
                              quoted_base,
+                             quoted_nsp_lit, quoted_base,
                              quoted_nsp, quoted_rel,
                              quoted_nsp, quoted_rel,
                              CLOUDSYNC_TOMBSTONE_VALUE,
-                             CLOUDSYNC_RLS_RESTRICTED_VALUE
+                             rls_literal
                              );
             
             pfree(base);
             pfree(quoted_base);
             pfree(nsp);
+            pfree(quoted_nsp_lit);
             pfree((void *)quoted_nsp);
             pfree(rel);
             pfree((void *)quoted_rel);
         }
+        if (tables) pfree(tables);
+        pfree(rls_literal);
         
+        // Ensure result survives SPI_finish by allocating in the caller context.
+        MemoryContext old_ctx = MemoryContextSwitchTo(caller_ctx);
         if (first) {
             result = pstrdup(
-                             "SELECT NULL::text AS tbl, NULL::bytea AS pk, NULL::text AS col_name, NULL::text AS col_value, "
+                             "SELECT NULL::text AS tbl, NULL::bytea AS pk, NULL::text AS col_name, NULL::bytea AS col_value, "
                              "NULL::bigint AS col_version, NULL::bigint AS db_version, NULL::bytea AS site_id, "
                              "NULL::bigint AS cl, NULL::bigint AS seq WHERE false"
                              );
         } else {
-            result = buf.data;
+            result = pstrdup(buf.data);
         }
+        MemoryContextSwitchTo(old_ctx);
         
         SPI_finish();
     }
@@ -1733,9 +2114,9 @@ Datum cloudsync_changes_insert_trg (PG_FUNCTION_ARGS) {
         char *insert_name = text_to_cstring((text*) DatumGetPointer(heap_getattr(newtup, 3, desc, &isnull)));
         if (isnull) ereport(ERROR, (errmsg("col_name cannot be NULL")));
         
-        // raw_insert_value is declated as text in the view (any input is converted to text)
-        Datum raw_insert_value = heap_getattr(newtup, 4, desc, &isnull);
-        char *insert_value_text = isnull ? NULL : text_to_cstring((text*) DatumGetPointer(raw_insert_value));
+        // raw_insert_value is declared as bytea in the view (cloudsync-encoded value)
+        bytea *insert_value_encoded = (bytea*) DatumGetPointer(heap_getattr(newtup, 4, desc, &isnull));
+        char *insert_value_text = isnull ? NULL : cloudsync_decode_value_to_text(insert_value_encoded, &isnull);
         
         int64 insert_col_version = DatumGetInt64(heap_getattr(newtup, 5, desc, &isnull));
         if (isnull) ereport(ERROR, (errmsg("col_version cannot be NULL")));
@@ -1763,7 +2144,7 @@ Datum cloudsync_changes_insert_trg (PG_FUNCTION_ARGS) {
         if (!table) ereport(ERROR, (errmsg("Unable to find table")));
         
         pgvalue_t *col_value = NULL;
-        bool typed_isnull = (insert_value_text == NULL);
+        bool typed_isnull = (insert_value_text == NULL) || isnull;
         if (!typed_isnull) {
             StringInfoData castq;
             initStringInfo(&castq);

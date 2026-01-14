@@ -210,21 +210,32 @@ LANGUAGE C IMMUTABLE STRICT;
 -- Changes Functions
 -- ============================================================================
 
+-- Encoded column value helper (PG): returns cloudsync-encoded bytea
+CREATE OR REPLACE FUNCTION cloudsync_col_value_encoded(
+  schema_name text,
+  table_name text,
+  col_name text,
+  pk bytea
+)
+RETURNS bytea
+AS 'MODULE_PATHNAME', 'cloudsync_col_value_encoded'
+LANGUAGE C STABLE;
+
 -- SetReturningFunction: To implement SELECT FROM cloudsync_changes
 CREATE FUNCTION cloudsync_changes_srf(
   min_db_version bigint DEFAULT 0,
   filter_site_id bytea DEFAULT NULL
 )
 RETURNS TABLE (
-  tbl text,
-  pk bytea,
-  col_name text,
-  col_value text,      -- ANY SQLite translated to TEXT in PG (dynamic cast is used in this case)
-  col_version bigint,
-  db_version bigint,
-  site_id bytea,
-  cl bigint,
-  seq bigint
+    tbl text,
+    pk bytea,
+    col_name text,
+    col_value bytea,     -- pk_encoded value bytes
+    col_version bigint,
+    db_version bigint,
+    site_id bytea,
+    cl bigint,
+    seq bigint
 )
 AS 'MODULE_PATHNAME', 'cloudsync_changes_srf'
 LANGUAGE C STABLE;
