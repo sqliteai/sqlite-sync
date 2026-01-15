@@ -5,6 +5,8 @@
 //  Created by Claude Code on 18/12/25.
 //
 
+#define CLOUDSYNC_RLS_RESTRICTED_VALUE_BYTEA "E'\\\\x0b095f5f5b524c535d5f5f'::bytea"
+
 // Define POSIX feature test macros before any includes
 #define _POSIX_C_SOURCE 200809L
 
@@ -1549,17 +1551,6 @@ static bytea *cloudsync_encode_null_value(void) {
     return cloudsync_encode_value_from_datum((Datum)0, TEXTOID, -1, InvalidOid, true);
 }
 
-// Goal: Build a SQL bytea literal for an encoded text sentinel.
-static char *cloudsync_encode_text_literal(const char *text) {
-    bytea *ba = cloudsync_encode_text_value(text);
-    size_t len = (size_t)VARSIZE_ANY_EXHDR(ba);
-    char *hex = cloudsync_hex_encode_bytes((const char *)VARDATA_ANY(ba), len);
-    char *literal = psprintf("E'\\\\x%s'::bytea", hex);
-    pfree(hex);
-    pfree(ba);
-    return literal;
-}
-
 // Goal: Cache pk component text parameters while decoding encoded pk.
 typedef struct {
     Datum *values;
@@ -1611,32 +1602,47 @@ typedef struct {
     bool isnull;
 } cloudsync_decoded_text;
 
-// Goal: Decode a single pk-encoded value into a text representation.
-static int cloudsync_decode_value_to_text_cb(void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
-    cloudsync_decoded_text *out = (cloudsync_decoded_text *)xdata;
+// Goal: Hold a decoded pk-encoded value with its original type.
+typedef struct {
+    int dbtype;
+    int64_t ival;
+    double dval;
+    char *pval;
+    int64_t len;
+    bool isnull;
+} cloudsync_decoded_value;
+
+// Goal: Decode a single pk-encoded value into a typed representation.
+static int cloudsync_decode_value_cb(void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
+    cloudsync_decoded_value *out = (cloudsync_decoded_value *)xdata;
     if (!out || index != 0) return DBRES_ERROR;
+
+    out->dbtype = type;
+    out->isnull = false;
+    out->ival = 0;
+    out->dval = 0.0;
+    out->pval = NULL;
+    out->len = 0;
 
     switch (type) {
         case DBTYPE_INTEGER:
-            out->text = psprintf("%lld", (long long)ival);
-            out->isnull = false;
+            out->ival = ival;
             break;
         case DBTYPE_FLOAT:
-            out->text = DatumGetCString(DirectFunctionCall1(float8out, Float8GetDatum(dval)));
-            out->isnull = false;
+            out->dval = dval;
             break;
         case DBTYPE_TEXT:
-            out->text = pnstrdup(pval, (int)ival);
-            out->isnull = false;
+            out->pval = pnstrdup(pval, (int)ival);
+            out->len = ival;
             break;
-        case DBTYPE_BLOB: {
-            char *hex = cloudsync_hex_encode_bytes(pval, (size_t)ival);
-            out->text = psprintf("\\\\x%s", hex);
-            out->isnull = false;
-            pfree(hex);
-        } break;
+        case DBTYPE_BLOB:
+            if (ival > 0) {
+                out->pval = (char *)palloc((size_t)ival);
+                memcpy(out->pval, pval, (size_t)ival);
+            }
+            out->len = ival;
+            break;
         case DBTYPE_NULL:
-            out->text = NULL;
             out->isnull = true;
             break;
         default:
@@ -1645,20 +1651,77 @@ static int cloudsync_decode_value_to_text_cb(void *xdata, int index, int type, i
     return DBRES_OK;
 }
 
-// Goal: Decode pk-encoded bytes into text for casting to a target type.
-static char *cloudsync_decode_value_to_text(bytea *encoded, bool *isnull) {
-    if (!encoded) {
-        if (isnull) *isnull = true;
-        return NULL;
-    }
-    cloudsync_decoded_text out = {.text = NULL, .isnull = false};
+// Goal: Decode encoded bytea into a pgvalue_t matching the target type.
+static pgvalue_t *cloudsync_decode_bytea_to_pgvalue(bytea *encoded, Oid target_typoid, const char *target_typname, bool *out_isnull) {
+    // Decode input guardrails.
+    if (out_isnull) *out_isnull = true;
+    if (!encoded) return NULL;
+
+    // Decode bytea into C types with dbtype info.
+    cloudsync_decoded_value dv = {.isnull = true};
     int blen = (int)VARSIZE_ANY_EXHDR(encoded);
-    int decoded = pk_decode((char *)VARDATA_ANY(encoded), (size_t)blen, 1, NULL, cloudsync_decode_value_to_text_cb, &out);
-    if (decoded != 1) {
-        ereport(ERROR, (errmsg("cloudsync: failed to decode encoded value")));
+    int decoded = pk_decode((char *)VARDATA_ANY(encoded), (size_t)blen, 1, NULL, -1,
+                            cloudsync_decode_value_cb, &dv);
+    if (decoded != 1) ereport(ERROR, (errmsg("cloudsync: failed to decode encoded value")));
+    if (out_isnull) *out_isnull = dv.isnull;
+    if (dv.isnull) return NULL;
+
+    // Map decoded C types into a PostgreSQL Datum.
+    Oid argt[1] = {TEXTOID};
+    Datum argv[1];
+    char argn[1] = {' '};
+
+    switch (dv.dbtype) {
+        case DBTYPE_INTEGER:
+            argt[0] = INT8OID;
+            argv[0] = Int64GetDatum(dv.ival);
+            break;
+        case DBTYPE_FLOAT:
+            argt[0] = FLOAT8OID;
+            argv[0] = Float8GetDatum(dv.dval);
+            break;
+        case DBTYPE_TEXT:
+            argt[0] = TEXTOID;
+            argv[0] = PointerGetDatum(cstring_to_text_with_len(dv.pval ? dv.pval : "", (int)(dv.len)));
+            break;
+        case DBTYPE_BLOB: {
+            argt[0] = BYTEAOID;
+            bytea *ba = (bytea *)palloc(VARHDRSZ + dv.len);
+            SET_VARSIZE(ba, VARHDRSZ + dv.len);
+            if (dv.len > 0) memcpy(VARDATA(ba), dv.pval, (size_t)dv.len);
+            argv[0] = PointerGetDatum(ba);
+        } break;
+        case DBTYPE_NULL:
+            if (out_isnull) *out_isnull = true;
+            if (dv.pval) pfree(dv.pval);
+            return NULL;
+        default:
+            if (dv.pval) pfree(dv.pval);
+            ereport(ERROR, (errmsg("cloudsync: unsupported decoded type")));
     }
-    if (isnull) *isnull = out.isnull;
-    return out.text;
+
+    if (dv.pval) pfree(dv.pval);
+
+    // Cast to the target column type from the table schema.
+    if (argt[0] == target_typoid) {
+        return pgvalue_create(argv[0], target_typoid, -1, InvalidOid, false);
+    }
+
+    StringInfoData castq;
+    initStringInfo(&castq);
+    appendStringInfo(&castq, "SELECT $1::%s", target_typname);
+
+    int rc = SPI_execute_with_args(castq.data, 1, argt, argv, argn, true, 1);
+    if (rc != SPI_OK_SELECT || SPI_processed != 1) ereport(ERROR, (errmsg("cloudsync: failed to cast value to %s", target_typname)));
+    pfree(castq.data);
+
+    bool typed_isnull = false;
+    Datum typed_value = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &typed_isnull);
+    int32 typmod = TupleDescAttr(SPI_tuptable->tupdesc, 1)->atttypmod;
+    Oid collation = TupleDescAttr(SPI_tuptable->tupdesc, 1)->attcollation;
+
+    if (out_isnull) *out_isnull = typed_isnull;
+    return pgvalue_create(typed_value, target_typoid, typmod, collation, typed_isnull);
 }
 
 // Goal: Build or fetch a cached SPI plan to select a column by pk.
@@ -1847,7 +1910,6 @@ static char * build_union_sql (void) {
     
     PG_TRY();
     {
-        char *rls_literal = cloudsync_encode_text_literal(CLOUDSYNC_RLS_RESTRICTED_VALUE);
         const char *sql =
         "SELECT n.nspname, c.relname "
         "FROM pg_class c "
@@ -1915,7 +1977,7 @@ static char * build_union_sql (void) {
                              quoted_nsp, quoted_rel,
                              quoted_nsp, quoted_rel,
                              CLOUDSYNC_TOMBSTONE_VALUE,
-                             rls_literal
+                             CLOUDSYNC_RLS_RESTRICTED_VALUE_BYTEA
                              );
             
             pfree(base);
@@ -1927,7 +1989,6 @@ static char * build_union_sql (void) {
             pfree((void *)quoted_rel);
         }
         if (tables) pfree(tables);
-        pfree(rls_literal);
         
         // Ensure result survives SPI_finish by allocating in the caller context.
         MemoryContext old_ctx = MemoryContextSwitchTo(caller_ctx);
@@ -2116,7 +2177,6 @@ Datum cloudsync_changes_insert_trg (PG_FUNCTION_ARGS) {
         
         // raw_insert_value is declared as bytea in the view (cloudsync-encoded value)
         bytea *insert_value_encoded = (bytea*) DatumGetPointer(heap_getattr(newtup, 4, desc, &isnull));
-        char *insert_value_text = isnull ? NULL : cloudsync_decode_value_to_text(insert_value_encoded, &isnull);
         
         int64 insert_col_version = DatumGetInt64(heap_getattr(newtup, 5, desc, &isnull));
         if (isnull) ereport(ERROR, (errmsg("col_version cannot be NULL")));
@@ -2143,26 +2203,7 @@ Datum cloudsync_changes_insert_trg (PG_FUNCTION_ARGS) {
         cloudsync_table_context *table = table_lookup(data, insert_tbl);
         if (!table) ereport(ERROR, (errmsg("Unable to find table")));
         
-        pgvalue_t *col_value = NULL;
-        bool typed_isnull = (insert_value_text == NULL) || isnull;
-        if (!typed_isnull) {
-            StringInfoData castq;
-            initStringInfo(&castq);
-            appendStringInfo(&castq, "SELECT $1::%s", target_typname);
-            Oid argt[1] = {TEXTOID};
-            Datum argv[1] = {CStringGetTextDatum(insert_value_text)};
-            char argn[1] = {' '};
-            
-            int rc = SPI_execute_with_args(castq.data, 1, argt, argv, argn, true, 1);
-            if (rc != SPI_OK_SELECT || SPI_processed != 1) ereport(ERROR, (errmsg("cloudsync: failed to cast value to %s", target_typname)));
-            pfree(castq.data);
-            
-            Datum typed_value = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &typed_isnull);
-            int32 typmod = TupleDescAttr(SPI_tuptable->tupdesc, 1)->atttypmod;
-            Oid collation = TupleDescAttr(SPI_tuptable->tupdesc, 1)->attcollation;
-            
-            col_value = pgvalue_create(typed_value, target_typoid, typmod, collation, typed_isnull);
-        }
+        pgvalue_t *col_value = cloudsync_decode_bytea_to_pgvalue(insert_value_encoded, target_typoid, target_typname, NULL);
         
         int rc = DBRES_OK;
         int64_t rowid = 0;
@@ -2171,7 +2212,8 @@ Datum cloudsync_changes_insert_trg (PG_FUNCTION_ARGS) {
         } else {
             rc = merge_insert (data, table, VARDATA_ANY(insert_pk), insert_pk_len, insert_cl, insert_name, col_value, insert_col_version, insert_db_version, VARDATA_ANY(insert_site_id), insert_site_id_len, insert_seq, &rowid);
         }
-        
+        if (rc != DBRES_OK) ereport(ERROR, (errmsg(database_errmsg(data))));
+
         SPI_finish();
         spi_connected = false;
     }
