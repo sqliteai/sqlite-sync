@@ -226,6 +226,9 @@ const char * const SQL_BUILD_UPSERT_PK_AND_COL =
     "  WHERE x.indisprimary "
     "  ORDER BY k.ord"
     "), "
+    "pk_count AS ("
+    "  SELECT count(*) AS n FROM pk"
+    "), "
     "col AS ("
     "  SELECT '%s'::text AS colname"
     ") "
@@ -233,9 +236,11 @@ const char * const SQL_BUILD_UPSERT_PK_AND_COL =
     "  'INSERT INTO ' || (SELECT (oid::regclass)::text FROM tbl)"
     "  || ' (' || (SELECT string_agg(format('%%I', attname), ',') FROM pk)"
     "  || ',' || (SELECT format('%%I', colname) FROM col) || ')'"
-    "  || ' VALUES (' || (SELECT string_agg('?', ',') FROM pk) || ',?)'"
+    "  || ' VALUES (' || (SELECT string_agg(format('$%%s', ord), ',') FROM pk)"
+    "  || ',' || (SELECT format('$%%s', (SELECT n FROM pk_count) + 1)) || ')'"
     "  || ' ON CONFLICT (' || (SELECT string_agg(format('%%I', attname), ',') FROM pk) || ')'"
-    "  || ' DO UPDATE SET ' || (SELECT format('%%I', colname) FROM col) || '=?;';";
+    "  || ' DO UPDATE SET ' || (SELECT format('%%I', colname) FROM col)"
+    "  || '=' || (SELECT format('$%%s', (SELECT n FROM pk_count) + 2)) || ';';";
 
 const char * const SQL_SELECT_COLS_BY_ROWID_FMT =
     "SELECT %s%s%s FROM %s WHERE ctid = $1;";  // TODO: align with PK/rowid selection builder
