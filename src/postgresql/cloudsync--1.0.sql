@@ -222,7 +222,7 @@ AS 'MODULE_PATHNAME', 'cloudsync_col_value_encoded'
 LANGUAGE C STABLE;
 
 -- SetReturningFunction: To implement SELECT FROM cloudsync_changes
-CREATE FUNCTION cloudsync_changes_srf(
+CREATE FUNCTION cloudsync_changes_select(
   min_db_version bigint DEFAULT 0,
   filter_site_id bytea DEFAULT NULL
 )
@@ -237,20 +237,20 @@ RETURNS TABLE (
     cl bigint,
     seq bigint
 )
-AS 'MODULE_PATHNAME', 'cloudsync_changes_srf'
+AS 'MODULE_PATHNAME', 'cloudsync_changes_select'
 LANGUAGE C STABLE;
 
 -- View con lo stesso nome della vtab SQLite
 CREATE OR REPLACE VIEW cloudsync_changes AS
-SELECT * FROM cloudsync_changes_srf(0, NULL);
+SELECT * FROM cloudsync_changes_select(0, NULL);
 
 -- Trigger function to implement INSERT on the cloudsync_changes view
-CREATE FUNCTION cloudsync_changes_insert_trg()
+CREATE FUNCTION cloudsync_changes_insert_trigger()
 RETURNS trigger
-AS 'MODULE_PATHNAME', 'cloudsync_changes_insert_trg'
+AS 'MODULE_PATHNAME', 'cloudsync_changes_insert_trigger'
 LANGUAGE C;
 
 CREATE OR REPLACE TRIGGER cloudsync_changes_insert
 INSTEAD OF INSERT ON cloudsync_changes
 FOR EACH ROW
-EXECUTE FUNCTION cloudsync_changes_insert_trg();
+EXECUTE FUNCTION cloudsync_changes_insert_trigger();

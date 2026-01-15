@@ -2032,8 +2032,8 @@ static Oid lookup_column_type_oid (const char *tbl, const char *col_name) {
     return typoid;
 }
 
-PG_FUNCTION_INFO_V1(cloudsync_changes_srf);
-Datum cloudsync_changes_srf(PG_FUNCTION_ARGS) {
+PG_FUNCTION_INFO_V1(cloudsync_changes_select);
+Datum cloudsync_changes_select(PG_FUNCTION_ARGS) {
     FuncCallContext *funcctx;
     SRFState *st_local = NULL;
     bool spi_connected_local = false;
@@ -2148,12 +2148,12 @@ Datum cloudsync_changes_srf(PG_FUNCTION_ARGS) {
 
 // Trigger INSERT
 
-PG_FUNCTION_INFO_V1(cloudsync_changes_insert_trg);
-Datum cloudsync_changes_insert_trg (PG_FUNCTION_ARGS) {
+PG_FUNCTION_INFO_V1(cloudsync_changes_insert_trigger);
+Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
     // sanity check
     bool spi_connected = false;
     TriggerData *trigdata = (TriggerData *) fcinfo->context;
-    if (!CALLED_AS_TRIGGER(fcinfo)) ereport(ERROR, (errmsg("cloudsync_changes_insert_trg must be called as trigger")));
+    if (!CALLED_AS_TRIGGER(fcinfo)) ereport(ERROR, (errmsg("cloudsync_changes_insert_trigger must be called as trigger")));
     if (!TRIGGER_FIRED_BY_INSERT(trigdata->tg_event)) ereport(ERROR, (errmsg("Only INSERT allowed on cloudsync_changes")));
     
     HeapTuple newtup = trigdata->tg_trigtuple;
@@ -2212,7 +2212,9 @@ Datum cloudsync_changes_insert_trg (PG_FUNCTION_ARGS) {
         } else {
             rc = merge_insert (data, table, VARDATA_ANY(insert_pk), insert_pk_len, insert_cl, insert_name, col_value, insert_col_version, insert_db_version, VARDATA_ANY(insert_site_id), insert_site_id_len, insert_seq, &rowid);
         }
-        if (rc != DBRES_OK) ereport(ERROR, (errmsg(database_errmsg(data))));
+        if (rc != DBRES_OK) {
+            ereport(ERROR, (errmsg("Eroor during merge_insert: %s", database_errmsg(data))));
+        }
 
         SPI_finish();
         spi_connected = false;
