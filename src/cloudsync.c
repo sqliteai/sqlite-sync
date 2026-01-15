@@ -134,6 +134,8 @@ struct cloudsync_context {
     cloudsync_table_context **tables;   // dense vector: [0..tables_count-1] are valid
     int tables_count;                   // size
     int tables_cap;                     // capacity
+
+    int skip_decode_idx;                // -1 in sqlite, col_value index in postgresql
 };
 
 struct cloudsync_table_context {
@@ -1457,6 +1459,12 @@ cloudsync_context *cloudsync_context_create (void *db) {
     data->tables_count = 0;
     data->db = db;
     
+    // SQLite exposes col_value as ANY, but other databases require a concrete type.
+    // In PostgreSQL we expose col_value as bytea, which holds the pk-encoded value bytes (type + data).
+    // Because col_value is already encoded, we skip decoding this field and pass it through as bytea.
+    // It is decoded to the target column type just before applying changes to the base table.
+    data->skip_decode_idx = (db == NULL) ? CLOUDSYNC_PK_INDEX_COLVALUE : -1;
+
     return data;
 }
 
@@ -2207,7 +2215,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     
     for (uint32_t i=0; i<nrows; ++i) {
         size_t seek = 0;
-        pk_decode((char *)buffer, blen, ncols, &seek, cloudsync_payload_decode_callback, &decoded_context);
+        pk_decode((char *)buffer, blen, ncols, &seek, data->skip_decode_idx, cloudsync_payload_decode_callback, &decoded_context);
         // n is the pk_decode return value, I don't think I should assert here because in any case the next databasevm_step would fail
         // assert(n == ncols);
                 

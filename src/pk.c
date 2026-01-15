@@ -7,6 +7,7 @@
 
 #include "pk.h"
 #include "utils.h"
+#include "cloudsync.h"
 #include <inttypes.h>
  
 /*
@@ -193,7 +194,8 @@ double pk_decode_double (char *buffer, size_t *bseek) {
     return value;
 }
 
-int pk_decode(char *buffer, size_t blen, int count, size_t *seek, int (*cb) (void *xdata, int index, int type, int64_t ival, double dval, char *pval), void *xdata) {
+int pk_decode(char *buffer, size_t blen, int count, size_t *seek, int skip_decode_idx, int (*cb) (void *xdata, int index, int type, int64_t ival, double dval, char *pval), void *xdata) {
+    cloudsync_pk_decode_bind_context *decode_context = (cloudsync_pk_decode_bind_context*)xdata;
     size_t bseek = (seek) ? *seek : 0;
     if (count == -1) count = pk_decode_u8(buffer, &bseek);
     
@@ -201,7 +203,13 @@ int pk_decode(char *buffer, size_t blen, int count, size_t *seek, int (*cb) (voi
         uint8_t type_byte = (uint8_t)pk_decode_u8(buffer, &bseek);
         int type = (int)(type_byte & 0x07);
         size_t nbytes = (type_byte >> 3) & 0x1F;
-        
+        bool skip_decode = false;
+
+        if (i == skip_decode_idx) {
+            type = DBTYPE_BLOB;
+            skip_decode = true;
+        }
+
         switch (type) {
             case DATABASE_TYPE_MAX_NEGATIVE_INTEGER: {
                 int64_t value = INT64_MIN;
@@ -228,8 +236,13 @@ int pk_decode(char *buffer, size_t blen, int count, size_t *seek, int (*cb) (voi
                 
             case DBTYPE_TEXT:
             case DBTYPE_BLOB: {
+                size_t initial_bseek = bseek;
                 int64_t length = pk_decode_int64(buffer, &bseek, nbytes);
                 char *value = pk_decode_data(buffer, &bseek, (int32_t)length);
+                if (skip_decode) {
+                    length = bseek - initial_bseek;
+                    value = buffer + initial_bseek;
+                }
                 if (cb) if (cb(xdata, (int)i, type, length, 0.0, value) != DBRES_OK) return -1;
             }
                 break;
@@ -248,7 +261,7 @@ int pk_decode(char *buffer, size_t blen, int count, size_t *seek, int (*cb) (voi
 int pk_decode_prikey (char *buffer, size_t blen, int (*cb) (void *xdata, int index, int type, int64_t ival, double dval, char *pval), void *xdata) {
     size_t bseek = 0;
     uint8_t count = pk_decode_u8(buffer, &bseek);
-    return pk_decode(buffer, blen, count, &bseek, cb, xdata);
+    return pk_decode(buffer, blen, count, &bseek, -1, cb, xdata);
 }
 
 // MARK: - Encoding -
