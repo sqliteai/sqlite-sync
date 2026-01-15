@@ -181,21 +181,21 @@ void dbsync_col_value (sqlite3_context *context, int argc, sqlite3_value **argv)
     // argv[1] -> column name
     // argv[2] -> encoded pk
     
-    // lookup table
-    const char *table_name = (const char *)database_value_text(argv[0]);
-    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    cloudsync_table_context *table = table_lookup(data, table_name);
-    if (!table) {
-        dbsync_set_error(context, "Unable to retrieve table name %s in clousdsync_colvalue.", table_name);
-        return;
-    }
-    
     // retrieve column name
     const char *col_name = (const char *)database_value_text(argv[1]);
     
     // check for special tombstone value
     if (strcmp(col_name, CLOUDSYNC_TOMBSTONE_VALUE) == 0) {
         sqlite3_result_null(context);
+        return;
+    }
+    
+    // lookup table
+    const char *table_name = (const char *)database_value_text(argv[0]);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    cloudsync_table_context *table = table_lookup(data, table_name);
+    if (!table) {
+        dbsync_set_error(context, "Unable to retrieve table name %s in clousdsync_colvalue.", table_name);
         return;
     }
     

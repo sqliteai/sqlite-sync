@@ -210,15 +210,19 @@ LANGUAGE C IMMUTABLE STRICT;
 -- Changes Functions
 -- ============================================================================
 
+CREATE OR REPLACE FUNCTION cloudsync_encode_value(anyelement)
+RETURNS bytea
+AS 'MODULE_PATHNAME', 'cloudsync_encode_value'
+LANGUAGE C IMMUTABLE;
+
 -- Encoded column value helper (PG): returns cloudsync-encoded bytea
-CREATE OR REPLACE FUNCTION cloudsync_col_value_encoded(
-  schema_name text,
+CREATE OR REPLACE FUNCTION cloudsync_col_value(
   table_name text,
   col_name text,
   pk bytea
 )
 RETURNS bytea
-AS 'MODULE_PATHNAME', 'cloudsync_col_value_encoded'
+AS 'MODULE_PATHNAME', 'cloudsync_col_value'
 LANGUAGE C STABLE;
 
 -- SetReturningFunction: To implement SELECT FROM cloudsync_changes

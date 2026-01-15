@@ -247,12 +247,12 @@ const char * const SQL_SELECT_COLS_BY_ROWID_FMT =
 
 const char * const SQL_BUILD_SELECT_COLS_BY_PK_FMT =
     "WITH tbl AS ("
-    "  SELECT to_regclass('%s') AS oid"
+    "  SELECT to_regclass('%s') AS tblreg"
     "), "
     "pk AS ("
     "  SELECT a.attname, k.ord "
     "  FROM pg_index x "
-    "  JOIN tbl t ON t.oid = x.indrelid "
+    "  JOIN tbl t ON t.tblreg = x.indrelid "
     "  JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
     "  JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = k.attnum "
     "  WHERE x.indisprimary "
@@ -262,10 +262,12 @@ const char * const SQL_BUILD_SELECT_COLS_BY_PK_FMT =
     "  SELECT '%s'::text AS colname"
     ") "
     "SELECT "
-    "  'SELECT ' || (SELECT format('%%I', colname) FROM col)"
-    "  || ' FROM ' || (SELECT (oid::regclass)::text FROM tbl)"
+    "  'SELECT cloudsync_encode_value(' || "
+    "       (SELECT format('%%I', colname) FROM col) || "
+    "       ')' "
+    "  || ' FROM ' || (SELECT tblreg::text FROM tbl)"
     "  || ' WHERE '"
-    "  || (SELECT string_agg(format('%%I=?', attname), ' AND ') FROM pk)"
+    "  || (SELECT string_agg(format('%%I=$%%s', attname, ord), ' AND ' ORDER BY ord) FROM pk)"
     "  || ';';";
 
 const char * const SQL_CLOUDSYNC_ROW_EXISTS_BY_PK =

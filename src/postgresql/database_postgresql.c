@@ -1646,6 +1646,17 @@ int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value) {
 
 // MARK: - COLUMN -
 
+Datum database_column_datum (dbvm_t *vm, int index) {
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    if (!vm || index >= MAX_PARAMS) return (Datum)0;
+    if (!stmt->last_tuptable || !stmt->current_tupdesc) return (Datum)0;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return (Datum)0;
+    
+    bool isnull = true;
+    Datum d = get_datum(stmt, index, &isnull, NULL);
+    return (isnull) ? (Datum)0 : d;
+}
+
 const void *database_column_blob (dbvm_t *vm, int index) {
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
     if (!vm || index >= MAX_PARAMS) return NULL;
