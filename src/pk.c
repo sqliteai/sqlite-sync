@@ -194,7 +194,7 @@ double pk_decode_double (char *buffer, size_t *bseek) {
     return value;
 }
 
-int pk_decode(char *buffer, size_t blen, int count, size_t *seek, int skip_decode_idx, int (*cb) (void *xdata, int index, int type, int64_t ival, double dval, char *pval), void *xdata) {
+int pk_decode (char *buffer, size_t blen, int count, size_t *seek, int skip_decode_idx, int (*cb) (void *xdata, int index, int type, int64_t ival, double dval, char *pval), void *xdata) {
     size_t bseek = (seek) ? *seek : 0;
     if (count == -1) count = pk_decode_u8(buffer, &bseek);
     
