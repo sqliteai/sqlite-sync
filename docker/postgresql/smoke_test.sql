@@ -229,6 +229,45 @@ WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id3']::text[])
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
+-- 'Test cloudsync_changes view write'
+SELECT cloudsync_uuid() AS smoke_id4 \gset
+INSERT INTO cloudsync_changes (tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq)
+VALUES (
+  'smoke_tbl',
+  cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id4']::text[]),
+  'val',
+  -- "change_write" encoded as cloudsync text value (type 0x61 + len 0x0c)
+  decode('0b0c6368616e67655f7772697465', 'hex'),
+  1,
+  cloudsync_db_version_next(),
+  cloudsync_siteid(),
+  1,
+  0
+);
+SELECT (COUNT(*) = 1) AS changes_write_row_ok
+FROM smoke_tbl
+WHERE id = :'smoke_id4' AND val = 'change_write' \gset
+\if :changes_write_row_ok
+\echo '[PASS] Test cloudsync_changes view write'
+\else
+\echo '[FAIL] Test cloudsync_changes view write'
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- 'Test cloudsync_changes view read'
+SELECT COUNT(*) AS changes_view_count
+FROM cloudsync_changes
+WHERE tbl = 'smoke_tbl' \gset
+SELECT COUNT(*) AS changes_meta_count
+FROM smoke_tbl_cloudsync \gset
+SELECT (:changes_view_count::int = :changes_meta_count::int) AS changes_read_ok \gset
+\if :changes_read_ok
+\echo '[PASS] Test cloudsync_changes view read'
+\else
+\echo '[FAIL] Test cloudsync_changes view read'
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
 -- 'Test site id visibility'
 SELECT cloudsync_siteid() AS site_id \gset
 \echo [PASS] Test site id visibility :site_id
