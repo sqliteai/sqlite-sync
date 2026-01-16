@@ -48,6 +48,7 @@ PG_MODULE_MAGIC;
 #endif
 
 #define CLOUDSYNC_RLS_RESTRICTED_VALUE_BYTEA "E'\\\\x0b095f5f5b524c535d5f5f'::bytea"
+#define CLOUDSYNC_NULL_VALUE_BYTEA "E'\\\\x05'::bytea"
 
 // External declaration
 Datum database_column_datum (dbvm_t *vm, int index);
@@ -1858,11 +1859,11 @@ static char * build_union_sql (void) {
             initStringInfo(&caseexpr);
             appendStringInfoString(&caseexpr,
                                    "CASE "
-                                   "WHEN t1.col_name = '" CLOUDSYNC_TOMBSTONE_VALUE "' THEN cloudsync_encode_value(NULL::text) "
+                                   "WHEN t1.col_name = '" CLOUDSYNC_TOMBSTONE_VALUE "' THEN " CLOUDSYNC_NULL_VALUE_BYTEA " "
                                    "WHEN b.ctid IS NULL THEN " CLOUDSYNC_RLS_RESTRICTED_VALUE_BYTEA " "
                                    "ELSE CASE t1.col_name "
                                    );
-            
+
             for (uint64 k = 0; k < ncols; k++) {
                 HeapTuple ct = SPI_tuptable->vals[k];
                 TupleDesc cd = SPI_tuptable->tupdesc;
