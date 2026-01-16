@@ -5,8 +5,6 @@
 //  Created by Claude Code on 18/12/25.
 //
 
-#define CLOUDSYNC_RLS_RESTRICTED_VALUE_BYTEA "E'\\\\x0b095f5f5b524c535d5f5f'::bytea"
-
 // Define POSIX feature test macros before any includes
 #define _POSIX_C_SOURCE 200809L
 
@@ -48,6 +46,8 @@ PG_MODULE_MAGIC;
 #ifndef UNUSED_PARAMETER
 #define UNUSED_PARAMETER(X) (void)(X)
 #endif
+
+#define CLOUDSYNC_RLS_RESTRICTED_VALUE_BYTEA "E'\\\\x0b095f5f5b524c535d5f5f'::bytea"
 
 // External declaration
 Datum database_column_datum (dbvm_t *vm, int index);
@@ -988,8 +988,6 @@ Datum cloudsync_pk_encode (PG_FUNCTION_ARGS) {
     PG_RETURN_BYTEA_P(result);
 }
 
-// cloudsync_pk_decode - Decode primary key component at given index
-PG_FUNCTION_INFO_V1(cloudsync_pk_decode);
 typedef struct cloudsync_pk_decode_ctx {
     int target_index;
     text *result;
@@ -1037,6 +1035,8 @@ static int cloudsync_pk_decode_set_result (void *xdata, int index, int type, int
     return DBRES_OK;
 }
 
+// cloudsync_pk_decode - Decode primary key component at given index
+PG_FUNCTION_INFO_V1(cloudsync_pk_decode);
 Datum cloudsync_pk_decode (PG_FUNCTION_ARGS) {
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1)) {
         PG_RETURN_NULL();
@@ -1629,22 +1629,33 @@ static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, Oid target_
 
 PG_FUNCTION_INFO_V1(cloudsync_encode_value);
 Datum cloudsync_encode_value(PG_FUNCTION_ARGS) {
-    bool  isnull = PG_ARGISNULL(0);
-    int32 typmod = -1;
-    Oid   collid = InvalidOid;
-    
-    Datum value = PG_GETARG_DATUM(0);
-    Oid typeoid = get_fn_expr_argtype(fcinfo->flinfo, 0);
-    
-    if (fcinfo->flinfo && fcinfo->flinfo->fn_expr && IsA(fcinfo->flinfo->fn_expr, FuncExpr)) {
-        FuncExpr *fexpr = (FuncExpr *) fcinfo->flinfo->fn_expr;
-        Node *arg = (Node *) linitial(fexpr->args);
-        
-        typmod = exprTypmod(arg);
-        collid = exprCollation(arg);
+    if (PG_ARGISNULL(0)) {
+        bytea *null_encoded = cloudsync_encode_null_value();
+        PG_RETURN_BYTEA_P(null_encoded);
     }
     
-    bytea *result = cloudsync_encode_value_from_datum(value, typeoid, typmod, collid, isnull);
+    Oid   typeoid = get_fn_expr_argtype(fcinfo->flinfo, 0);
+    int32 typmod  = -1;
+    Oid   collid  = PG_GET_COLLATION();
+    
+    if (!OidIsValid(typeoid) || typeoid == ANYELEMENTOID) {
+        if (fcinfo->flinfo->fn_expr && IsA(fcinfo->flinfo->fn_expr, FuncExpr)) {
+            FuncExpr *fexpr = (FuncExpr *) fcinfo->flinfo->fn_expr;
+            if (fexpr->args && list_length(fexpr->args) >= 1) {
+                Node *arg = (Node *) linitial(fexpr->args);
+                typeoid = exprType(arg);
+                typmod  = exprTypmod(arg);
+                collid  = exprCollation(arg);
+            }
+        }
+    }
+    
+    if (!OidIsValid(typeoid) || typeoid == ANYELEMENTOID) {
+        ereport(ERROR, (errmsg("cloudsync_encode_any: unable to resolve argument type")));
+    }
+    
+    Datum val = PG_GETARG_DATUM(0);
+    bytea *result = cloudsync_encode_value_from_datum(val, typeoid, typmod, collid, false);
     PG_RETURN_BYTEA_P(result);
 }
 
@@ -1739,7 +1750,7 @@ static char * build_union_sql (void) {
         
         StringInfoData buf;
         initStringInfo(&buf);
-         
+        
         uint64 ntables = SPI_processed;
         bool first = true;
         for (uint64 i = 0; i < ntables; i++) {
@@ -1762,29 +1773,145 @@ static char * build_union_sql (void) {
             char *quoted_base = quote_literal_cstr(base);
             const char *quoted_nsp = quote_identifier(nsp);
             const char *quoted_rel = quote_identifier(rel);
-
+            
             if (!first) appendStringInfoString(&buf, " UNION ALL ");
             first = false;
             
+            
+            /*
+             * Build a single SELECT per table that:
+             *  - reads change rows from <table>_cloudsync (t1)
+             *  - joins the base table (b) using decoded PK components
+             *  - computes col_value in-SQL with a CASE over col_name
+             *
+             * This avoids calling cloudsync_col_value() (and therefore avoids
+             * executing extra SPI queries per row), while still honoring RLS:
+             * if the base row is not visible, the LEFT JOIN yields NULL and we
+             * return the restricted sentinel value (then filtered out).
+             */
+            
+            char *nsp_lit = quote_literal_cstr(nsp);
+            char *base_lit = quote_literal_cstr(base);
+            
+            /* Collect PK columns (name + SQL type) */
+            StringInfoData pkq;
+            initStringInfo(&pkq);
+            appendStringInfo(&pkq,
+                             "SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS typ "
+                             "FROM pg_index i "
+                             "JOIN pg_class c ON c.oid = i.indrelid "
+                             "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                             "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey) "
+                             "WHERE i.indisprimary AND n.nspname = %s AND c.relname = %s "
+                             "ORDER BY array_position(i.indkey, a.attnum)",
+                             nsp_lit, base_lit
+                             );
+            int pkrc = SPI_execute(pkq.data, true, 0);
+            pfree(pkq.data);
+            if (pkrc != SPI_OK_SELECT || SPI_processed == 0) {
+                ereport(ERROR, (errmsg("cloudsync: unable to resolve primary key for %s.%s", nsp, base)));
+            }
+            uint64 npk = SPI_processed;
+            
+            StringInfoData joincond;
+            initStringInfo(&joincond);
+            for (uint64 k = 0; k < npk; k++) {
+                HeapTuple pkt = SPI_tuptable->vals[k];
+                TupleDesc pkd = SPI_tuptable->tupdesc;
+                char *pkname = SPI_getvalue(pkt, pkd, 1);
+                char *pktype = SPI_getvalue(pkt, pkd, 2);
+                if (!pkname || !pktype) ereport(ERROR, (errmsg("cloudsync: invalid pk metadata for %s.%s", nsp, base)));
+                
+                if (k > 0) appendStringInfoString(&joincond, " AND ");
+                appendStringInfo(&joincond,
+                                 "b.%s = cloudsync_pk_decode(t1.pk, %llu)::%s",
+                                 quote_identifier(pkname),
+                                 (unsigned long long)(k + 1),
+                                 pktype
+                                 );
+                pfree(pkname);
+                pfree(pktype);
+            }
+            SPI_freetuptable(SPI_tuptable);
+            
+            /* Collect all base-table columns to build CASE over t1.col_name */
+            StringInfoData colq;
+            initStringInfo(&colq);
+            appendStringInfo(&colq,
+                             "SELECT a.attname "
+                             "FROM pg_attribute a "
+                             "JOIN pg_class c ON c.oid = a.attrelid "
+                             "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                             "WHERE a.attnum > 0 AND NOT a.attisdropped "
+                             "  AND n.nspname = %s AND c.relname = %s "
+                             "ORDER BY a.attnum",
+                             nsp_lit, base_lit
+                             );
+            int colrc = SPI_execute(colq.data, true, 0);
+            pfree(colq.data);
+            if (colrc != SPI_OK_SELECT) {
+                ereport(ERROR, (errmsg("cloudsync: unable to resolve columns for %s.%s", nsp, base)));
+            }
+            uint64 ncols = SPI_processed;
+            
+            StringInfoData caseexpr;
+            initStringInfo(&caseexpr);
+            appendStringInfoString(&caseexpr,
+                                   "CASE "
+                                   "WHEN t1.col_name = '" CLOUDSYNC_TOMBSTONE_VALUE "' THEN cloudsync_encode_value(NULL::text) "
+                                   "WHEN b.ctid IS NULL THEN " CLOUDSYNC_RLS_RESTRICTED_VALUE_BYTEA " "
+                                   "ELSE CASE t1.col_name "
+                                   );
+            
+            for (uint64 k = 0; k < ncols; k++) {
+                HeapTuple ct = SPI_tuptable->vals[k];
+                TupleDesc cd = SPI_tuptable->tupdesc;
+                char *cname = SPI_getvalue(ct, cd, 1);
+                if (!cname) continue;
+                
+                appendStringInfo(&caseexpr,
+                                 "WHEN %s THEN cloudsync_encode_value(b.%s) ",
+                                 quote_literal_cstr(cname),
+                                 quote_identifier(cname)
+                                 );
+                pfree(cname);
+            }
+            SPI_freetuptable(SPI_tuptable);
+            
+            appendStringInfoString(&caseexpr,
+                                   "ELSE " CLOUDSYNC_RLS_RESTRICTED_VALUE_BYTEA " END END"
+                                   );
+            
+            const char *quoted_base_ident = quote_identifier(base);
+            
             appendStringInfo(&buf,
-                "SELECT * FROM ("
-                "SELECT %s AS tbl, t1.pk, t1.col_name, "
-                "cloudsync_col_value(%s::text, t1.col_name, t1.pk) AS col_value, "
-                "t1.col_version, t1.db_version, site_tbl.site_id, "
-                "COALESCE(t2.col_version, 1) AS cl, t1.seq "
-                "FROM %s.%s t1 "
-                "LEFT JOIN cloudsync_site_id site_tbl ON t1.site_id = site_tbl.id "
-                "LEFT JOIN %s.%s t2 "
-                "  ON t1.pk = t2.pk AND t2.col_name = '%s'"
-                ") s WHERE s.col_value IS DISTINCT FROM %s",
-                quoted_base, quoted_base,
-                quoted_nsp,  quoted_rel,
-                quoted_nsp,  quoted_rel,
-                CLOUDSYNC_TOMBSTONE_VALUE,
-                CLOUDSYNC_RLS_RESTRICTED_VALUE_BYTEA
-            );
+                             "SELECT * FROM ("
+                             "SELECT %s AS tbl, t1.pk, t1.col_name, "
+                             "%s AS col_value, "
+                             "t1.col_version, t1.db_version, site_tbl.site_id, "
+                             "COALESCE(t2.col_version, 1) AS cl, t1.seq "
+                             "FROM %s.%s t1 "
+                             "LEFT JOIN cloudsync_site_id site_tbl ON t1.site_id = site_tbl.id "
+                             "LEFT JOIN %s.%s t2 "
+                             "  ON t1.pk = t2.pk AND t2.col_name = '%s' "
+                             "LEFT JOIN %s.%s b ON %s "
+                             ") s WHERE s.col_value IS DISTINCT FROM %s",
+                             quoted_base,
+                             caseexpr.data,
+                             quoted_nsp,  quoted_rel,
+                             quoted_nsp,  quoted_rel,
+                             CLOUDSYNC_TOMBSTONE_VALUE,
+                             quoted_nsp,  quoted_base_ident,
+                             joincond.data,
+                             CLOUDSYNC_RLS_RESTRICTED_VALUE_BYTEA
+                             );
+            
+            pfree((void*)quoted_base_ident);
+            pfree(joincond.data);
+            pfree(caseexpr.data);
             
             pfree(base);
+            
             pfree(quoted_base);
             pfree(nsp);
             pfree((void *)quoted_nsp);
