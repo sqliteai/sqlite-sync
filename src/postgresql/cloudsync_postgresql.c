@@ -691,7 +691,7 @@ Datum cloudsync_payload_encode_transfn (PG_FUNCTION_ARGS) {
 
     // payload_encode_step does not retain pgvalue_t*, free transient wrappers now
     for (int i = 0; i < argc; i++) {
-        database_value_free((dbvalue_t *)argv[i]);
+        pgvalue_free(argv[i]);
     }
     if (argv) cloudsync_memory_free(argv);
 
@@ -803,7 +803,7 @@ static void cloudsync_pg_cleanup(int code, Datum arg) {
     state->pk = NULL;
 
     for (int i = 0; i < state->argc; i++) {
-        database_value_free((dbvalue_t *)state->argv[i]);
+        pgvalue_free(state->argv[i]);
     }
     if (state->argv) cloudsync_memory_free(state->argv);
     state->argv = NULL;
@@ -874,12 +874,12 @@ static void cloudsync_update_payload_free (cloudsync_update_payload *payload) {
     }
 
     for (int i = 0; i < payload->count; i++) {
-        database_value_free((dbvalue_t *)payload->new_values[i]);
-        database_value_free((dbvalue_t *)payload->old_values[i]);
+        pgvalue_free(payload->new_values[i]);
+        pgvalue_free(payload->old_values[i]);
     }
     if (payload->new_values) pfree(payload->new_values);
     if (payload->old_values) pfree(payload->old_values);
-    if (payload->table_name) database_value_free((dbvalue_t *)payload->table_name);
+    if (payload->table_name) pgvalue_free(payload->table_name);
 
     payload->new_values = NULL;
     payload->old_values = NULL;
@@ -937,7 +937,7 @@ static bool cloudsync_update_payload_append (cloudsync_update_payload *payload, 
         if (cmp != 0) {
             return false;
         }
-        database_value_free((dbvalue_t *)table_name);
+        pgvalue_free(table_name);
     }
 
     payload->new_values[index] = new_value;
@@ -982,7 +982,7 @@ Datum cloudsync_pk_encode (PG_FUNCTION_ARGS) {
     cloudsync_memory_free(encoded);
 
     for (int i = 0; i < argc; i++) {
-        database_value_free((dbvalue_t *)argv[i]);
+        pgvalue_free(argv[i]);
     }
     if (argv) cloudsync_memory_free(argv);
 
@@ -1323,16 +1323,16 @@ Datum cloudsync_update_transfn (PG_FUNCTION_ARGS) {
     MemoryContextSwitchTo(old_ctx);
 
     if (!table_name || !new_value || !old_value) {
-        if (table_name) database_value_free((dbvalue_t *)table_name);
-        if (new_value) database_value_free((dbvalue_t *)new_value);
-        if (old_value) database_value_free((dbvalue_t *)old_value);
+        if (table_name) pgvalue_free(table_name);
+        if (new_value) pgvalue_free(new_value);
+        if (old_value) pgvalue_free(old_value);
         ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("cloudsync_update_transfn failed to allocate values")));
     }
 
     if (!cloudsync_update_payload_append(payload, table_name, new_value, old_value)) {
         if (table_name && payload->table_name != table_name) database_value_free((dbvalue_t *)table_name);
-        if (new_value) database_value_free((dbvalue_t *)new_value);
-        if (old_value) database_value_free((dbvalue_t *)old_value);
+        if (new_value) pgvalue_free(new_value);
+        if (old_value) pgvalue_free(old_value);
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("cloudsync_update_transfn failed to append payload")));
     }
 
@@ -1491,14 +1491,14 @@ static bytea *cloudsync_encode_value_from_datum (Datum val, Oid typeid, int32 ty
     size_t encoded_len = pk_encode_size((dbvalue_t **)&v, 1, 0);
     bytea *out = (bytea *)palloc(VARHDRSZ + encoded_len);
     if (!out) {
-        database_value_free((dbvalue_t *)v);
+        pgvalue_free(v);
         ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("cloudsync: failed to allocate encoding buffer")));
     }
     
     pk_encode((dbvalue_t **)&v, 1, VARDATA(out), false, &encoded_len);
     SET_VARSIZE(out, VARHDRSZ + encoded_len);
     
-    database_value_free((dbvalue_t *)v);
+    pgvalue_free(v);
     return out;
 }
 

@@ -33,6 +33,7 @@ typedef struct pgvalue_t {
 } pgvalue_t;
 
 pgvalue_t *pgvalue_create(Datum datum, Oid typeid, int32 typmod, Oid collation, bool isnull);
+void pgvalue_free (pgvalue_t *v);
 void pgvalue_ensure_detoast(pgvalue_t *v);
 bool pgvalue_is_text_type(Oid typeid);
 int pgvalue_dbtype(pgvalue_t *v);

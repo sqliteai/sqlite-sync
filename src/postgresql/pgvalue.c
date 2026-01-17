@@ -41,6 +41,18 @@ pgvalue_t *pgvalue_create(Datum datum, Oid typeid, int32 typmod, Oid collation, 
     return v;
 }
 
+void pgvalue_free (pgvalue_t *v) {
+    if (!v) return;
+
+    if (v->owned_detoast) {
+        pfree(v->owned_detoast);
+    }
+    if (v->owns_cstring && v->cstring) {
+        pfree(v->cstring);
+    }
+    cloudsync_memory_free(v);
+}
+
 void pgvalue_ensure_detoast(pgvalue_t *v) {
     if (!v || v->detoasted) return;
     if (!pgvalue_is_varlena(v->typeid) || v->isnull) return;

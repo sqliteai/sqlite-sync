@@ -1941,15 +1941,7 @@ int database_value_type (dbvalue_t *value) {
 
 void database_value_free (dbvalue_t *value) {
     pgvalue_t *v = (pgvalue_t *)value;
-    if (!v) return;
-
-    if (v->owned_detoast) {
-        pfree(v->owned_detoast);
-    }
-    if (v->owns_cstring && v->cstring) {
-        pfree(v->cstring);
-    }
-    cloudsync_memory_free(v);
+    pgvalue_free(v);
 }
 
 void *database_value_dup (dbvalue_t *value) {
