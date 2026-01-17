@@ -121,7 +121,6 @@ AS 'MODULE_PATHNAME', 'pg_cloudsync_commit_alter'
 LANGUAGE C VOLATILE;
 
 -- Payload encoding (aggregate function)
-CREATE OR REPLACE FUNCTION cloudsync_payload_encode_transfn(state internal)
 CREATE OR REPLACE FUNCTION cloudsync_payload_encode_transfn(state internal, tbl text, pk bytea, col_name text, col_value bytea, col_version bigint, db_version bigint, site_id bytea, cl bigint, seq bigint)
 RETURNS internal
 AS 'MODULE_PATHNAME', 'cloudsync_payload_encode_transfn'
