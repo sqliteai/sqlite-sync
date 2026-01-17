@@ -1948,6 +1948,7 @@ static char * build_union_sql (void) {
 
 static Oid lookup_column_type_oid (const char *tbl, const char *col_name) {
     // SPI_connect not needed here
+    if (strcmp(col_name, CLOUDSYNC_TOMBSTONE_VALUE) == 0) return BYTEAOID;
     
     // lookup table OID (search_path-aware)
     Oid relid = RelnameGetRelid(tbl);
@@ -2088,11 +2089,9 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
     if (!TRIGGER_FIRED_BY_INSERT(trigdata->tg_event)) ereport(ERROR, (errmsg("Only INSERT allowed on cloudsync_changes")));
     
     HeapTuple newtup = trigdata->tg_trigtuple;
+    pgvalue_t *col_value = NULL;
     PG_TRY();
     {
-        if (SPI_connect() != SPI_OK_CONNECT) ereport(ERROR, (errmsg("cloudsync: SPI_connect failed in trigger")));
-        spi_connected = true;
-        
         TupleDesc desc = trigdata->tg_relation->rd_att;
         bool isnull;
         
@@ -2103,8 +2102,16 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
         if (isnull) ereport(ERROR, (errmsg("pk cannot be NULL")));
         int insert_pk_len = (int)(VARSIZE_ANY_EXHDR(insert_pk));
         
-        char *insert_name = text_to_cstring((text*) DatumGetPointer(heap_getattr(newtup, 3, desc, &isnull)));
-        if (isnull) ereport(ERROR, (errmsg("col_name cannot be NULL")));
+        Datum insert_name_datum = heap_getattr(newtup, 3, desc, &isnull);
+        char *insert_name = NULL;
+        bool insert_name_owned = false;
+        if (isnull) {
+            insert_name = CLOUDSYNC_TOMBSTONE_VALUE;
+        } else {
+            insert_name = text_to_cstring((text*) DatumGetPointer(insert_name_datum));
+            insert_name_owned = true;
+        }
+        bool is_tombstone = (strcmp(insert_name, CLOUDSYNC_TOMBSTONE_VALUE) == 0);
         
         // raw_insert_value is declared as bytea in the view (cloudsync-encoded value)
         bytea *insert_value_encoded = (bytea*) DatumGetPointer(heap_getattr(newtup, 4, desc, &isnull));
@@ -2125,16 +2132,25 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
         int64 insert_seq = DatumGetInt64(heap_getattr(newtup, 9, desc, &isnull));
         if (isnull) ereport(ERROR, (errmsg("seq cannot be NULL")));
         
-        // get real column type from tbl.col_name
-        Oid target_typoid = lookup_column_type_oid(insert_tbl, insert_name);
-        char *target_typname = format_type_be(target_typoid);
-        
         // lookup algo in cloudsync_tables
         cloudsync_context *data = get_cloudsync_context();
         cloudsync_table_context *table = table_lookup(data, insert_tbl);
         if (!table) ereport(ERROR, (errmsg("Unable to find table")));
-        
-        pgvalue_t *col_value = cloudsync_decode_bytea_to_pgvalue(insert_value_encoded, target_typoid, target_typname, NULL);
+
+        // get real column type from tbl.col_name (skip tombstone sentinel)
+        Oid target_typoid = InvalidOid;
+        char *target_typname = NULL;
+        if (!is_tombstone) {
+            target_typoid = lookup_column_type_oid(insert_tbl, insert_name);
+            target_typname = format_type_be(target_typoid);
+        }
+
+        if (SPI_connect() != SPI_OK_CONNECT) ereport(ERROR, (errmsg("cloudsync: SPI_connect failed in trigger")));
+        spi_connected = true;
+
+        if (!is_tombstone) {
+            col_value = cloudsync_decode_bytea_to_pgvalue(insert_value_encoded, target_typoid, target_typname, NULL);
+        }
         
         int rc = DBRES_OK;
         int64_t rowid = 0;
@@ -2144,15 +2160,23 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
             rc = merge_insert (data, table, VARDATA_ANY(insert_pk), insert_pk_len, insert_cl, insert_name, col_value, insert_col_version, insert_db_version, VARDATA_ANY(insert_site_id), insert_site_id_len, insert_seq, &rowid);
         }
         if (rc != DBRES_OK) {
-            ereport(ERROR, (errmsg("Eroor during merge_insert: %s", database_errmsg(data))));
+            ereport(ERROR, (errmsg("Error during merge_insert: %s", database_errmsg(data))));
         }
+
+        pgvalue_free(col_value);
+        pfree(insert_tbl);
+        if (insert_name_owned) pfree(insert_name);
 
         SPI_finish();
         spi_connected = false;
     }
     PG_CATCH();
     {
-        if (spi_connected) SPI_finish();
+        pgvalue_free(col_value);
+        if (spi_connected) {
+            SPI_finish();
+            spi_connected = false;
+        }
         PG_RE_THROW();
     }
     PG_END_TRY();
