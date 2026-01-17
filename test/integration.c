@@ -32,7 +32,6 @@
 #ifdef CLOUDSYNC_LOAD_FROM_SOURCES
 #include "cloudsync.h"
 #include "cloudsync_sqlite.h"
-#include "cloudsync_private.h"
 #endif
 
 #define DB_PATH         "health-track.sqlite"
