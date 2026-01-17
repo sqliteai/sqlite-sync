@@ -2191,6 +2191,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         }
         
         buffer = (const char *)clone;
+        blen = header.expanded_size;
     }
     
     // precompile the insert statement
