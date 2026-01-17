@@ -235,7 +235,7 @@ int pk_decode (char *buffer, size_t blen, int count, size_t *seek, int skip_deco
                 
             case DBTYPE_TEXT:
             case DBTYPE_BLOB: {
-                size_t initial_bseek = bseek;
+                size_t initial_bseek = bseek - 1;
                 int64_t length = pk_decode_int64(buffer, &bseek, nbytes);
                 char *value = pk_decode_data(buffer, &bseek, (int32_t)length);
                 if (skip_decode) {
