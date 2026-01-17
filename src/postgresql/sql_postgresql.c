@@ -162,7 +162,7 @@ const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_PK =
     "  || (SELECT string_agg(format('%%I', attname), ',') FROM nonpk)"
     "  || ' FROM ' || (SELECT (oid::regclass)::text FROM tbl)"
     "  || ' WHERE '"
-    "  || (SELECT string_agg(format('%%I=?', attname), ' AND ') FROM pk)"
+    "  || (SELECT string_agg(format('%%I=$%%s', attname, ord), ' AND ' ORDER BY ord) FROM pk)"
     "  || ';';";
 
 const char * const SQL_DELETE_ROW_BY_ROWID =
@@ -184,7 +184,7 @@ const char * const SQL_BUILD_DELETE_ROW_BY_PK =
     "SELECT "
     "  'DELETE FROM ' || (SELECT (oid::regclass)::text FROM tbl)"
     "  || ' WHERE '"
-    "  || (SELECT string_agg(format('%%I=?', attname), ' AND ') FROM pk)"
+    "  || (SELECT string_agg(format('%%I=$%%s', attname, ord), ' AND ' ORDER BY ord) FROM pk)"
     "  || ';';";
 
 const char * const SQL_INSERT_ROWID_IGNORE =
@@ -210,7 +210,7 @@ const char * const SQL_BUILD_INSERT_PK_IGNORE =
     "SELECT "
     "  'INSERT INTO ' || (SELECT (oid::regclass)::text FROM tbl)"
     "  || ' (' || (SELECT string_agg(format('%%I', attname), ',') FROM pk) || ')'"
-    "  || ' VALUES (' || (SELECT string_agg('?', ',') FROM pk) || ')'"
+    "  || ' VALUES (' || (SELECT string_agg(format('$%%s', ord), ',') FROM pk) || ')'"
     "  || ' ON CONFLICT DO NOTHING;';";
 
 const char * const SQL_BUILD_UPSERT_PK_AND_COL =
