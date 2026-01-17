@@ -1330,7 +1330,7 @@ Datum cloudsync_update_transfn (PG_FUNCTION_ARGS) {
     }
 
     if (!cloudsync_update_payload_append(payload, table_name, new_value, old_value)) {
-        if (table_name && payload->table_name != table_name) database_value_free((dbvalue_t *)table_name);
+        if (table_name && payload->table_name != table_name) pgvalue_free(table_name);
         if (new_value) pgvalue_free(new_value);
         if (old_value) pgvalue_free(old_value);
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("cloudsync_update_transfn failed to append payload")));
@@ -1488,14 +1488,14 @@ static bytea *cloudsync_encode_value_from_datum (Datum val, Oid typeid, int32 ty
         pgvalue_ensure_detoast(v);
     }
 
-    size_t encoded_len = pk_encode_size((dbvalue_t **)&v, 1, 0);
+    size_t encoded_len = pk_encode_size((dbvalue_t **)&v, 1, 0, -1);
     bytea *out = (bytea *)palloc(VARHDRSZ + encoded_len);
     if (!out) {
         pgvalue_free(v);
         ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("cloudsync: failed to allocate encoding buffer")));
     }
     
-    pk_encode((dbvalue_t **)&v, 1, VARDATA(out), false, &encoded_len);
+    pk_encode((dbvalue_t **)&v, 1, VARDATA(out), false, &encoded_len, -1);
     SET_VARSIZE(out, VARHDRSZ + encoded_len);
     
     pgvalue_free(v);

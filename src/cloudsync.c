@@ -2260,7 +2260,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
             if (rc != DBRES_DONE) {
                 // don't "break;", the error can be due to a RLS policy.
                 // in case of error we try to apply the following changes
-                // printf("cloudsync_payload_apply error on db_version %PRId64/%PRId64: (%d) %s\n", decoded_context.db_version, decoded_context.seq, rc, database_errmsg(data));
+                // DEBUG_ALWAYS("cloudsync_payload_apply error on db_version %PRId64/%PRId64: (%d) %s\n", decoded_context.db_version, decoded_context.seq, rc, database_errmsg(data));
             }
         }
         

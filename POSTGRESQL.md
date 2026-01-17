@@ -254,7 +254,7 @@ make postgres-docker-run
 
 ✅ **Internal**: is_sync, insert, pk_encode
 
-⚠️ **TODO**: pk_decode, update (aggregate), payload_encode (needs full variadic support)
+⚠️ **TODO**: parity tests for `cloudsync_update` and payload encoding; align PG SQL helpers with SQLite semantics (rowid/ctid and metadata bump/delete rules).
 
 ## Next Steps
 
