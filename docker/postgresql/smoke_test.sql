@@ -284,7 +284,7 @@ SELECT (:fail::int + 1) AS fail \gset
 -- 'Test double init no-op'
 SELECT cloudsync_init('smoke_tbl', 'CLS', true) AS _init_site_id2 \gset
 SELECT cloudsync_init('smoke_tbl', 'CLS', true) AS _init_site_id3 \gset
-\echo '[PASS] double init no-op'
+\echo '[PASS] Test double init no-op'
 
 -- 'Test payload roundtrip to another database'
 SELECT md5(COALESCE(string_agg(id || ':' || COALESCE(val, ''), ',' ORDER BY id), '')) AS smoke_hash
@@ -295,6 +295,17 @@ WHERE site_id = cloudsync_siteid() \gset
 DROP DATABASE IF EXISTS cloudsync_test_2;
 CREATE DATABASE cloudsync_test_2;
 \connect cloudsync_test_2
+\if :{?DEBUG}
+SET client_min_messages = debug1; SET log_min_messages = debug1; SET log_error_verbosity = verbose;
+\set QUIET 0
+\pset tuples_only off
+\pset format aligned
+\else
+SET client_min_messages = warning; SET log_min_messages = warning;
+\set QUIET 1
+\pset tuples_only on
+\pset format unaligned
+\endif
 CREATE EXTENSION cloudsync;
 DROP TABLE IF EXISTS smoke_tbl;
 CREATE TABLE smoke_tbl (id TEXT PRIMARY KEY, val TEXT);
