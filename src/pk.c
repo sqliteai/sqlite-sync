@@ -277,7 +277,7 @@ size_t pk_encode_nbytes_needed (int64_t value) {
     return 8;
 }
 
-size_t pk_encode_size (dbvalue_t **argv, int argc, int reserved) {
+size_t pk_encode_size (dbvalue_t **argv, int argc, int reserved, int skip_idx) {
     // estimate the required buffer size
     size_t required = reserved;
     size_t nbytes;
@@ -300,6 +300,12 @@ size_t pk_encode_size (dbvalue_t **argv, int argc, int reserved) {
                 break;
             case DBTYPE_TEXT:
             case DBTYPE_BLOB:
+                if (i == skip_idx) {
+                    len = database_value_bytes(argv[i]);
+                    required += len;
+                    break;
+                }
+
                 len = (int32_t)database_value_bytes(argv[i]);
                 nbytes = pk_encode_nbytes_needed(len);
                 required += 1 + len + nbytes;
@@ -330,12 +336,12 @@ size_t pk_encode_data (char *buffer, size_t bseek, char *data, size_t datalen) {
     return bseek + datalen;
 }
     
-char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bsize) {
+char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bsize, int skip_idx) {
     size_t bseek = 0;
     char *buffer = b;
     
     // always compute blen (even if it is not a primary key)
-    size_t blen = pk_encode_size(argv, argc, (is_prikey) ? 1 : 0);
+    size_t blen = pk_encode_size(argv, argc, (is_prikey) ? 1 : 0, skip_idx);
     
     // in primary-key encoding the number of items must be explicitly added to the encoded buffer
     if (is_prikey) {
@@ -378,6 +384,13 @@ char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bs
                 break;
             case DBTYPE_TEXT:
             case DBTYPE_BLOB: {
+                if (i == skip_idx) {
+                    int len = database_value_bytes(argv[i]);
+                    memcpy(buffer + bseek, (char *)database_value_blob(argv[i]), len);
+                    bseek += len;
+                    break;
+                }
+
                 int32_t len = (int32_t)database_value_bytes(argv[i]);
                 size_t nbytes = pk_encode_nbytes_needed(len);
                 uint8_t type_byte = (uint8_t)((nbytes << 3) | database_value_type(argv[i]));
@@ -398,16 +411,16 @@ char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bs
 }
 
 char *pk_encode_prikey (dbvalue_t **argv, int argc, char *b, size_t *bsize) {
-    return pk_encode(argv, argc, b, true, bsize);
+    return pk_encode(argv, argc, b, true, bsize, -1);
 }
 
 char *pk_encode_value (dbvalue_t *value, size_t *bsize) {
     dbvalue_t *argv[1] = {value};
     
-    size_t blen = pk_encode_size(argv, 1, 0);
+    size_t blen = pk_encode_size(argv, 1, 0, -1);
     char *buffer = cloudsync_memory_alloc((uint64_t)blen);
     if (!buffer) return NULL;
     
     *bsize = blen;
-    return pk_encode(argv, 1, buffer, false, bsize);
+    return pk_encode(argv, 1, buffer, false, bsize, -1);
 }

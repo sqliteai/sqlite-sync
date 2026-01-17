@@ -2002,13 +2002,13 @@ int cloudsync_payload_encode_step (cloudsync_payload_context *payload, cloudsync
     // check if the step function is called for the first time
     if (payload->nrows == 0) payload->ncols = (uint16_t)argc;
     
-    size_t breq = pk_encode_size((dbvalue_t **)argv, argc, 0);
+    size_t breq = pk_encode_size((dbvalue_t **)argv, argc, 0, data->skip_decode_idx);
     if (cloudsync_payload_encode_check(payload, breq) == false) {
         return cloudsync_set_error(data, "Not enough memory to resize payload internal buffer", DBRES_NOMEM);
     }
     
     char *buffer = payload->buffer + payload->bused;
-    pk_encode((dbvalue_t **)argv, argc, buffer, false, NULL);
+    pk_encode((dbvalue_t **)argv, argc, buffer, false, NULL, data->skip_decode_idx);
     
     // update buffer
     payload->bused += breq;
