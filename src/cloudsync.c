@@ -193,14 +193,14 @@ struct cloudsync_payload_context {
 #endif
 
 typedef struct PACKED {
-    uint32_t    signature;         // 'CLSY'
-    uint8_t     version;           // protocol version
-    uint8_t     libversion[3];     // major.minor.patch
+    uint32_t    signature;          // 'CLSY'
+    uint8_t     version;            // protocol version
+    uint8_t     libversion[3];      // major.minor.patch
     uint32_t    expanded_size;
     uint16_t    ncols;
     uint32_t    nrows;
     uint64_t    schema_hash;
-    uint8_t     unused[6];        // padding to ensure the struct is exactly 32 bytes
+    uint8_t     checksum[6];        // 48 bits checksum (to ensure struct is 32 bytes)
 } cloudsync_payload_header;
 
 #ifdef _MSC_VER
@@ -1949,6 +1949,31 @@ cleanup:
 
 // MARK: - Payload Encode / Decode -
 
+static void cloudsync_payload_checksum_store (cloudsync_payload_header *header, uint64_t checksum) {
+    uint64_t h = checksum & 0xFFFFFFFFFFFFULL; // keep 48 bits
+    header->checksum[0] = (uint8_t)(h >> 40);
+    header->checksum[1] = (uint8_t)(h >> 32);
+    header->checksum[2] = (uint8_t)(h >> 24);
+    header->checksum[3] = (uint8_t)(h >> 16);
+    header->checksum[4] = (uint8_t)(h >>  8);
+    header->checksum[5] = (uint8_t)(h >>  0);
+}
+
+static uint64_t cloudsync_payload_checksum_load (cloudsync_payload_header *header) {
+    return ((uint64_t)header->checksum[0] << 40) |
+           ((uint64_t)header->checksum[1] << 32) |
+           ((uint64_t)header->checksum[2] << 24) |
+           ((uint64_t)header->checksum[3] << 16) |
+           ((uint64_t)header->checksum[4] <<  8) |
+           ((uint64_t)header->checksum[5] <<  0);
+}
+
+static bool cloudsync_payload_checksum_verify (cloudsync_payload_header *header, uint64_t checksum) {
+    uint64_t checksum1 = cloudsync_payload_checksum_load(header);
+    uint64_t checksum2 = checksum & 0xFFFFFFFFFFFFULL;
+    return (checksum1 == checksum2);
+}
+
 static bool cloudsync_payload_encode_check (cloudsync_payload_context *payload, size_t needed) {
     if (payload->nrows == 0) needed += sizeof(cloudsync_payload_header);
     
@@ -2008,7 +2033,9 @@ int cloudsync_payload_encode_step (cloudsync_payload_context *payload, cloudsync
     }
     
     char *buffer = payload->buffer + payload->bused;
-    pk_encode((dbvalue_t **)argv, argc, buffer, false, NULL, data->skip_decode_idx);
+    size_t bsize = payload->balloc - payload->bused;
+    char *p = pk_encode((dbvalue_t **)argv, argc, buffer, false, &bsize, data->skip_decode_idx);
+    if (!p) cloudsync_set_error(data, "An error occurred while encoding payload", DBRES_ERROR);
     
     // update buffer
     payload->bused += breq;
@@ -2076,6 +2103,10 @@ int cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsyn
         zbuffer = payload->buffer;
         zused = real_buffer_size;
     }
+    
+    // compute checksum of the buffer
+    uint64_t checksum = pk_checksum(zbuffer + header_size, zused);
+    cloudsync_payload_checksum_store(&header, checksum);
     
     // copy header and data to SQLite BLOB
     memcpy(zbuffer, &header, sizeof(cloudsync_payload_header));
@@ -2179,6 +2210,12 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     const char *buffer = payload + sizeof(cloudsync_payload_header);
     blen -= sizeof(cloudsync_payload_header);
     
+    // sanity check checksum
+    uint64_t checksum = pk_checksum(buffer, blen);
+    if (cloudsync_payload_checksum_verify(&header, checksum) == false) {
+        return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid checksum", DBRES_MISUSE);
+    }
+    
     // check if payload is compressed
     char *clone = NULL;
     if (header.expanded_size != 0) {
@@ -2216,7 +2253,12 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     
     for (uint32_t i=0; i<nrows; ++i) {
         size_t seek = 0;
-        pk_decode((char *)buffer, blen, ncols, &seek, data->skip_decode_idx, cloudsync_payload_decode_callback, &decoded_context);
+        int res = pk_decode((char *)buffer, blen, ncols, &seek, data->skip_decode_idx, cloudsync_payload_decode_callback, &decoded_context);
+        if (res == -1) {
+            if (in_savepoint) database_rollback_savepoint(data, "cloudsync_payload_apply");
+            rc = DBRES_ERROR;
+            goto cleanup;
+        }
         // n is the pk_decode return value, I don't think I should assert here because in any case the next databasevm_step would fail
         // assert(n == ncols);
                 
@@ -2301,6 +2343,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         }
     }
 
+cleanup:
     // cleanup vm
     if (vm) databasevm_finalize(vm);
     
