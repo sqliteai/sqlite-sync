@@ -290,7 +290,7 @@ const char * const SQL_CLOUDSYNC_UPSERT_RAW_COLVERSION =
     "INSERT INTO %s_cloudsync (pk, col_name, col_version, db_version, seq, site_id) "
     "VALUES ($1, $2, $3, $4, $5, 0) "
     "ON CONFLICT (pk, col_name) DO UPDATE SET "
-    "col_version = EXCLUDED.col_version + 1, db_version = $4, seq = $5, site_id = 0;";  // TODO: align with SQLite raw colversion behavior
+    "col_version = %s_cloudsync.col_version + 1, db_version = $6, seq = $7, site_id = 0;";
 
 const char * const SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL =
     "DELETE FROM %s_cloudsync WHERE pk = $1 AND col_name != '%s';";  // TODO: match SQLite delete semantics

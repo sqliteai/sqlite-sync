@@ -712,7 +712,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
 
     // precompile the insert/update local row statement
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_UPSERT_RAW_COLVERSION, table->name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_UPSERT_RAW_COLVERSION, table->name, table->name);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_row_insert_update_stmt: %s", sql);
     

@@ -187,7 +187,7 @@ const char * const SQL_CLOUDSYNC_UPSERT_RAW_COLVERSION =
     "SELECT ?, ?, ?, ?, ?, 0 "
     "WHERE 1 "
     "ON CONFLICT DO UPDATE SET "
-    "col_version = col_version + 1, db_version = ?, seq = ?, site_id = 0;";
+    "col_version = \"%w_cloudsync\".col_version + 1, db_version = ?, seq = ?, site_id = 0;";
 
 const char * const SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL =
     "DELETE FROM \"%w_cloudsync\" WHERE pk=? AND col_name!='%s';";
