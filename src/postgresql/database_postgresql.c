@@ -1479,6 +1479,10 @@ void databasevm_finalize (dbvm_t *vm) {
 
 void databasevm_reset (dbvm_t *vm) {
     if (!vm) return;
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    clear_fetch_batch(stmt);
+    close_portal(stmt);
+    stmt->executed_nonselect = false;
     databasevm_clear_bindings(vm);
 }
 

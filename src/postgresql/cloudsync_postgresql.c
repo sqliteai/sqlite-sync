@@ -1712,8 +1712,10 @@ Datum cloudsync_col_value(PG_FUNCTION_ARGS) {
     }
     
     if (rc != DBRES_OK) {
+        databasevm_reset(vm);
         ereport(ERROR, (errmsg("cloudsync_col_value error: %s", cloudsync_errmsg(data))));
     }
+    databasevm_reset(vm);
     PG_RETURN_DATUM(d);
 }
 
