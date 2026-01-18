@@ -49,9 +49,12 @@
 #define CLOUDSYNC_INIT_NTABLES                  64
 #define CLOUDSYNC_MIN_DB_VERSION                0
 
-#define CLOUDSYNC_PAYLOAD_MINBUF_SIZE           512*1024
-#define CLOUDSYNC_PAYLOAD_VERSION               1
-#define CLOUDSYNC_PAYLOAD_SIGNATURE             'CLSY'
+#define CLOUDSYNC_PAYLOAD_MINBUF_SIZE                   512*1024
+#define CLOUDSYNC_PAYLOAD_SIGNATURE                     'CLSY'
+#define CLOUDSYNC_PAYLOAD_VERSION_ORIGNAL               1
+#define CLOUDSYNC_PAYLOAD_VERSION_1                     CLOUDSYNC_PAYLOAD_VERSION_ORIGNAL
+#define CLOUDSYNC_PAYLOAD_VERSION_2                     2
+#define CLOUDSYNC_PAYLOAD_MIN_VERSION_WITH_CHECKSUM     CLOUDSYNC_PAYLOAD_VERSION_2
 
 #ifndef MAX
 #define MAX(a, b)                               (((a)>(b))?(a):(b))
@@ -2010,7 +2013,7 @@ void cloudsync_payload_header_init (cloudsync_payload_header *header, uint32_t e
     sscanf(CLOUDSYNC_VERSION, "%d.%d.%d", &major, &minor, &patch);
     
     header->signature = htonl(CLOUDSYNC_PAYLOAD_SIGNATURE);
-    header->version = CLOUDSYNC_PAYLOAD_VERSION;
+    header->version = CLOUDSYNC_PAYLOAD_VERSION_2;
     header->libversion[0] = (uint8_t)major;
     header->libversion[1] = (uint8_t)minor;
     header->libversion[2] = (uint8_t)patch;
@@ -2187,7 +2190,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     // decode header
     cloudsync_payload_header header;
     memcpy(&header, payload, sizeof(cloudsync_payload_header));
-
+    
     header.signature = ntohl(header.signature);
     header.expanded_size = ntohl(header.expanded_size);
     header.ncols = ntohs(header.ncols);
@@ -2210,10 +2213,12 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     const char *buffer = payload + sizeof(cloudsync_payload_header);
     blen -= sizeof(cloudsync_payload_header);
     
-    // sanity check checksum
-    uint64_t checksum = pk_checksum(buffer, blen);
-    if (cloudsync_payload_checksum_verify(&header, checksum) == false) {
-        return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid checksum", DBRES_MISUSE);
+    // sanity check checksum (only if version is >= 2)
+    if (header.version >= CLOUDSYNC_PAYLOAD_MIN_VERSION_WITH_CHECKSUM) {
+        uint64_t checksum = pk_checksum(buffer, blen);
+        if (cloudsync_payload_checksum_verify(&header, checksum) == false) {
+            return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid checksum", DBRES_MISUSE);
+        }
     }
     
     // check if payload is compressed
