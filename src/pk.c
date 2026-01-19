@@ -7,7 +7,7 @@
 
 #include "pk.h"
 #include "utils.h"
-#include "endian.h"
+#include "cloudsync_endian.h"
 #include "cloudsync.h"
 
 #include <stdio.h>
