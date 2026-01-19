@@ -320,6 +320,91 @@ int test_enable_disable(const char *db_path) {
 ABORT_TEST
 }
 
+int test_offline_error(const char *db_path) {
+    sqlite3 *db = NULL;
+    int rc = open_load_ext(db_path, &db);
+    RCHECK
+
+    rc = db_exec(db, "CREATE TABLE IF NOT EXISTS test_table (id TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);");
+    RCHECK
+
+    rc = db_exec(db, "SELECT cloudsync_init('test_table');");
+    RCHECK
+
+    rc = db_exec(db, "INSERT INTO test_table (id, value) VALUES (cloudsync_uuid(), 'test1'), (cloudsync_uuid(), 'test2');");
+    RCHECK
+
+    // Initialize network with offline connection string
+    const char* offline_conn_str = getenv("CONNECTION_STRING_OFFLINE_PROJECT");
+    if (!offline_conn_str) {
+        printf("Skipping offline error test: CONNECTION_STRING_OFFLINE_PROJECT not set.\n");
+        rc = SQLITE_OK;
+        goto abort_test;
+    }
+
+    char network_init[512];
+    snprintf(network_init, sizeof(network_init), "SELECT cloudsync_network_init('%s');", offline_conn_str);
+    rc = db_exec(db, network_init);
+    RCHECK
+
+    // Try to sync - this should fail with the expected error
+    char *errmsg = NULL;
+    rc = sqlite3_exec(db, "SELECT cloudsync_network_sync();", NULL, NULL, &errmsg);
+
+    if (rc == SQLITE_OK) {
+        printf("Error: Expected network sync to fail, but it succeeded.\n");
+        rc = SQLITE_ERROR;
+        goto abort_test;
+    }
+
+    // Verify the error message contains the expected text
+    const char *expected_error = "cloudsync_network_send_changes unable to upload BLOB changes to remote host";
+    if (!errmsg || strstr(errmsg, expected_error) == NULL) {
+        printf("Error: Expected error message containing '%s', but got '%s'\n",
+               expected_error, errmsg ? errmsg : "NULL");
+        if (errmsg) sqlite3_free(errmsg);
+        rc = SQLITE_ERROR;
+        goto abort_test;
+    }
+
+    if (errmsg) sqlite3_free(errmsg);
+    rc = SQLITE_OK;
+
+ABORT_TEST
+}
+
+int test_double_empty_network_init(const char *db_path) {
+    sqlite3 *db = NULL;
+    int rc = open_load_ext(db_path, &db);
+    RCHECK
+
+    // First call with empty string - should return error
+    char *errmsg1 = NULL;
+    rc = sqlite3_exec(db, "SELECT cloudsync_network_init('');", NULL, NULL, &errmsg1);
+    if (rc == SQLITE_OK) {
+        printf("Error: First cloudsync_network_init('') should have failed but succeeded\n");
+        if (errmsg1) sqlite3_free(errmsg1);
+        rc = SQLITE_ERROR;
+        goto abort_test;
+    }
+    if (errmsg1) sqlite3_free(errmsg1);
+
+    // Second call with empty string - should also return error (not segfault)
+    char *errmsg2 = NULL;
+    rc = sqlite3_exec(db, "SELECT cloudsync_network_init('');", NULL, NULL, &errmsg2);
+    if (rc == SQLITE_OK) {
+        printf("Error: Second cloudsync_network_init('') should have failed but succeeded\n");
+        if (errmsg2) sqlite3_free(errmsg2);
+        rc = SQLITE_ERROR;
+        goto abort_test;
+    }
+    if (errmsg2) sqlite3_free(errmsg2);
+
+    rc = SQLITE_OK;
+
+ABORT_TEST
+}
+
 int version(void){
     sqlite3 *db = NULL;
     int rc = open_load_ext(":memory:", &db);
@@ -387,6 +472,8 @@ int main (void) {
     rc += test_report("Is Enabled Test:", test_is_enabled(DB_PATH));
     rc += test_report("DB Version Test:", test_db_version(DB_PATH));
     rc += test_report("Enable Disable Test:", test_enable_disable(DB_PATH));
+    rc += test_report("Offline Error Test:", test_offline_error(":memory:"));
+    rc += test_report("Double Empty Init Test:", test_double_empty_network_init(":memory:"));
 
     remove(DB_PATH); // remove the database file
 

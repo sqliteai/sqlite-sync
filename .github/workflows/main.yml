@@ -77,6 +77,7 @@ jobs:
 
     env:
       CONNECTION_STRING: ${{ secrets.CONNECTION_STRING }}
+      CONNECTION_STRING_OFFLINE_PROJECT: ${{ secrets.CONNECTION_STRING_OFFLINE_PROJECT }}
       APIKEY: ${{ secrets.APIKEY }}
       WEBLITE: ${{ secrets.WEBLITE }}
 
@@ -117,6 +118,7 @@ jobs:
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
             -e CONNECTION_STRING="${{ env.CONNECTION_STRING }}" \
+            -e CONNECTION_STRING_OFFLINE_PROJECT="${{ env.CONNECTION_STRING_OFFLINE_PROJECT }}" \
             -e APIKEY="${{ env.APIKEY }}" \
             -e WEBLITE="${{ env.WEBLITE }}" \
             alpine:latest \
@@ -189,6 +191,7 @@ jobs:
             mv -f /data/local/tmp/sqlite3 /system/xbin
             cd /data/local/tmp
             export CONNECTION_STRING="$CONNECTION_STRING"
+            export CONNECTION_STRING_OFFLINE_PROJECT="$CONNECTION_STRING_OFFLINE_PROJECT"
             export APIKEY="$APIKEY"
             export WEBLITE="$WEBLITE"
             $(make test PLATFORM=$PLATFORM ARCH=$ARCH -n)
@@ -419,6 +422,19 @@ jobs:
           echo "   Platform packages: 7"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
+      - name: build and publish expo package
+        if: steps.tag.outputs.version != ''
+        run: |
+          cd packages/expo
+
+          echo "Generating @sqliteai/sqlite-sync-expo package..."
+          node generate-expo-package.js "${{ steps.tag.outputs.version }}" "../../artifacts" "./expo-package"
+
+          echo "Publishing @sqliteai/sqlite-sync-expo to npm..."
+          cd expo-package
+          npm publish --provenance --access public
+          echo "✓ Published @sqliteai/sqlite-sync-expo@${{ steps.tag.outputs.version }}"
+
       - uses: softprops/action-gh-release@v2.2.1
         if: steps.tag.outputs.version != ''
         with:
@@ -427,6 +443,7 @@ jobs:
 
             [**Node**](https://www.npmjs.com/package/@sqliteai/sqlite-sync): `npm install @sqliteai/sqlite-sync`
             [**WASM**](https://www.npmjs.com/package/@sqliteai/sqlite-wasm): `npm install @sqliteai/sqlite-wasm`
+            [**Expo**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo): `npm install @sqliteai/sqlite-sync-expo`
             [**Android**](https://central.sonatype.com/artifact/ai.sqlite/sync): `ai.sqlite:sync:${{ steps.tag.outputs.version }}`
             [**Swift**](https://github.com/sqliteai/sqlite-sync#swift-package): [Installation Guide](https://github.com/sqliteai/sqlite-sync#swift-package)
 

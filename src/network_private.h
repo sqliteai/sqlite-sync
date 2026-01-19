@@ -29,7 +29,7 @@ typedef struct {
 } NETWORK_RESULT;
 
 char *network_data_get_siteid (network_data *data);
-bool network_data_set_endpoints (network_data *data, char *auth, char *check, char *upload, bool duplicate);
+bool network_data_set_endpoints (network_data *data, char *auth, char *check, char *upload);
 
 bool network_compute_endpoints (sqlite3_context *context, network_data *data, const char *conn_string);
 bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size);
