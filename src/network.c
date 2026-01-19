@@ -310,7 +310,7 @@ bool network_send_buffer (network_data *data, const char *endpoint, const char *
     }
     
     // Set headers if needed (S3 pre-signed URLs usually do not require additional headers)
-    struct curl_slist *tmp = curl_slist_append(headers, "Content-Type: application/octet-stream");
+    tmp = curl_slist_append(headers, "Content-Type: application/octet-stream");
     if (!tmp) {rc = CURLE_OUT_OF_MEMORY; goto cleanup;}
     headers = tmp;
     
