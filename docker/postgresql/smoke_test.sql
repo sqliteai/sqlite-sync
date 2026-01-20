@@ -2,6 +2,10 @@
 -- - normal: `psql postgresql://postgres:postgres@localhost:5432/cloudsync_test -f docker/postgresql/smoke_test.sql`
 -- - debug: `psql -v DEBUG=1 postgresql://postgres:postgres@localhost:5432/cloudsync_test -f docker/postgresql/smoke_test.sql`
 
+DROP DATABASE IF EXISTS cloudsync_test_1;
+CREATE DATABASE cloudsync_test_1;
+\connect cloudsync_test_1
+
 \set ON_ERROR_STOP on
 \set fail 0
 \if :{?DEBUG}
@@ -18,8 +22,8 @@ SET client_min_messages = warning; SET log_min_messages = warning;
 \endif
 
 -- Reset extension and install
-DROP EXTENSION IF EXISTS cloudsync CASCADE;
-CREATE EXTENSION cloudsync;
+-- DROP EXTENSION IF EXISTS cloudsync CASCADE;
+CREATE EXTENSION IF NOT EXISTS cloudsync;
 
 -- 'Test version visibility'
 SELECT cloudsync_version() AS version \gset
@@ -306,7 +310,7 @@ SET client_min_messages = warning; SET log_min_messages = warning;
 \pset tuples_only on
 \pset format unaligned
 \endif
-CREATE EXTENSION cloudsync;
+CREATE EXTENSION IF NOT EXISTS cloudsync;
 DROP TABLE IF EXISTS smoke_tbl;
 CREATE TABLE smoke_tbl (id TEXT PRIMARY KEY, val TEXT);
 SELECT cloudsync_init('smoke_tbl', 'CLS', true) AS _init_site_id_b \gset
