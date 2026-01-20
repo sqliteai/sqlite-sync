@@ -82,6 +82,8 @@ typedef struct {
     cloudsync_context *data;
 } pg_stmt_t;
 
+static int database_refresh_snapshot (void);
+
 // MARK: - SQL -
 
 char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta) {
@@ -265,11 +267,23 @@ static void clear_fetch_batch (pg_stmt_t *stmt) {
 
 static void close_portal (pg_stmt_t *stmt) {
     if (!stmt) return;
-    if (stmt->portal) {
-        SPI_cursor_close(stmt->portal);
-        stmt->portal = NULL;
-    }
+    
+    // Always clear portal_open first to maintain consistent state
     stmt->portal_open = false;
+    
+    if (!stmt->portal) return;
+    
+    PG_TRY();
+    {
+        SPI_cursor_close(stmt->portal);
+    }
+    PG_CATCH();
+    {
+        // Log but don't throw - we're cleaning up
+        FlushErrorState();
+    }
+    PG_END_TRY();
+    stmt->portal = NULL;
 }
 
 static inline Datum get_datum (pg_stmt_t *stmt, int col /* 0-based */, bool *isnull, Oid *type) {
@@ -378,10 +392,14 @@ int database_select3_values (cloudsync_context *data, const char *sql, char **va
     *len = 0;
 
     int rc = SPI_execute(sql, true, 0);
-    if (rc < 0) return DBRES_ERROR;
+    if (rc < 0) return cloudsync_set_error(data, "SPI_execute failed in database_select3_values", DBRES_ERROR);
 
-    if (!SPI_tuptable || !SPI_tuptable->tupdesc) return DBRES_ERROR;
-    if (SPI_tuptable->tupdesc->natts < 3) return DBRES_ERROR;
+    if (!SPI_tuptable || !SPI_tuptable->tupdesc) {
+        return cloudsync_set_error(data, "No result table in database_select3_values", DBRES_ERROR);
+    }
+    if (SPI_tuptable->tupdesc->natts < 3) {
+        return cloudsync_set_error(data, "Result has fewer than 3 columns in database_select3_values", DBRES_ERROR);
+    }
     if (SPI_processed == 0) return DBRES_OK;
 
     HeapTuple tuple = SPI_tuptable->vals[0];
@@ -443,38 +461,44 @@ int database_select3_values (cloudsync_context *data, const char *sql, char **va
 }
 
 bool database_system_exists (cloudsync_context *data, const char *name, const char *type) {
-    if (!name || !type) return false;
-    cloudsync_reset_error(data);
- 
-    char query[512];
-    bool exists = false;
+      if (!name || !type) return false;
+      cloudsync_reset_error(data);
 
-    if (strcmp(type, "table") == 0) {
-        snprintf(query, sizeof(query), "SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = '%s'", name);
-    } else if (strcmp(type, "trigger") == 0) {
-        snprintf(query, sizeof(query), "SELECT 1 FROM pg_trigger WHERE tgname = '%s'", name);
-    } else {
-        return false;
-    }
+      bool exists = false;
+      const char *query;
 
-    PG_TRY();
-    {
-        int rc = SPI_execute(query, true, 0);
-        exists = (rc >= 0 && SPI_processed > 0);
-    }
-    PG_CATCH();
-    {
-        ErrorData *edata = CopyErrorData();
-        cloudsync_set_error(data, edata->message, DBRES_ERROR);
-        FreeErrorData(edata);
-        FlushErrorState();
-        exists = false;
-    }
-    PG_END_TRY();
+      if (strcmp(type, "table") == 0) {
+          query = "SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = $1";
+      } else if (strcmp(type, "trigger") == 0) {
+          query = "SELECT 1 FROM pg_trigger WHERE tgname = $1";
+      } else {
+          return false;
+      }
 
-    elog(DEBUG1, "database_system_exists %s: %d", name, exists);
-    return exists;
-}
+      PG_TRY();
+      {
+          Oid argtypes[1] = {TEXTOID};
+          Datum values[1] = {CStringGetTextDatum(name)};
+          char nulls[1] = { ' ' };
+          
+          int rc = SPI_execute_with_args(query, 1, argtypes, values, nulls, true, 0);
+          exists = (rc >= 0 && SPI_processed > 0);
+          if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
+          pfree(DatumGetPointer(values[0]));
+      }
+      PG_CATCH();
+      {
+          ErrorData *edata = CopyErrorData();
+          cloudsync_set_error(data, edata->message, DBRES_ERROR);
+          FreeErrorData(edata);
+          FlushErrorState();
+          exists = false;
+      }
+      PG_END_TRY();
+
+      elog(DEBUG1, "database_system_exists %s: %d", name, exists);
+      return exists;
+  }
 
 // MARK: - GENERAL -
 
@@ -502,15 +526,7 @@ int database_exec (cloudsync_context *data, const char *sql) {
 
     // Increment command counter to make changes visible
     if (rc >= 0) {
-        CommandCounterIncrement();
-
-        // Refresh snapshot to ensure subsequent reads see the changes
-        if (ActiveSnapshotSet()) {
-            PopActiveSnapshot();
-        }
-        PushActiveSnapshot(GetTransactionSnapshot());
-
-        // Clear error on success
+        database_refresh_snapshot();
         return map_spi_result(rc);
     }
 
@@ -543,7 +559,10 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
     // Call callback for each row if provided
     if (callback && SPI_tuptable) {
         TupleDesc tupdesc = SPI_tuptable->tupdesc;
+        if (!tupdesc) return cloudsync_set_error(data, "Invalid tuple descriptor", DBRES_ERROR);
+        
         int ncols = tupdesc->natts;
+        if (ncols <= 0) return DBRES_OK;
 
         // Allocate arrays for column names and values
         char **names = cloudsync_memory_alloc(ncols * sizeof(char*));
@@ -551,14 +570,20 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
         char **values = cloudsync_memory_alloc(ncols * sizeof(char*));
         if (!values) {cloudsync_memory_free(names); return DBRES_NOMEM;}
 
-        // Get column names
+        // Get column names - make copies to avoid pointing to internal memory
         for (int i = 0; i < ncols; i++) {
-            names[i] = NameStr(TupleDescAttr(tupdesc, i)->attname);
+            Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+            if (attr) {
+                names[i] = cloudsync_string_dup(NameStr(attr->attname));
+            } else {
+                names[i] = NULL;
+            }
         }
 
         // Process each row
         for (uint64 row = 0; row < SPI_processed; row++) {
             HeapTuple tuple = SPI_tuptable->vals[row];
+            if (!tuple) continue;
 
             // Get values for this row
             for (int i = 0; i < ncols; i++) {
@@ -570,7 +595,7 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
             // Call user callback
             int cb_rc = callback(xdata, ncols, values, names);
 
-            // Cleanup values
+            // Cleanup values (SPI_getvalue uses palloc)
             for (int i = 0; i < ncols; i++) {
                 if (values[i]) {
                     pfree(values[i]);
@@ -579,6 +604,10 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
             }
             
             if (cb_rc != 0) {
+                // Free our name copies
+                for (int i = 0; i < ncols; i++) {
+                    if (names[i]) cloudsync_memory_free(names[i]);
+                }
                 cloudsync_memory_free(names);
                 cloudsync_memory_free(values);
                 char errmsg[1024];
@@ -587,6 +616,10 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
             }
         }
 
+        // Free our name copies
+        for (int i = 0; i < ncols; i++) {
+            if (names[i]) cloudsync_memory_free(names[i]);
+        }
         cloudsync_memory_free(names);
         cloudsync_memory_free(values);
     }
@@ -686,68 +719,70 @@ bool database_trigger_exists (cloudsync_context *data, const char *name) {
 
 // MARK: - SCHEMA INFO -
 
-int database_count_pk (cloudsync_context *data, const char *table_name, bool not_null) {
-    char sql[1024];
-    snprintf(sql, sizeof(sql),
-             "SELECT COUNT(*) FROM information_schema.table_constraints tc "
-             "JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
-             "WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY'",
-             table_name);
-
+static int64_t database_count_bind (cloudsync_context *data, const char *sql, const char *table_name) {
+    Oid argtypes[1] = { TEXTOID };
+    Datum values[1] = { CStringGetTextDatum(table_name) };
+    char nulls[1] = { ' ' };
+    
     int64_t count = 0;
-    database_select_int(data, sql, &count);
-    return (int)count;
+    int rc = SPI_execute_with_args(sql, 1, argtypes, values, nulls, true, 0);
+    if (rc >= 0 && SPI_processed > 0) {
+        bool isnull;
+        Datum d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
+        if (!isnull) count = DatumGetInt64(d);
+    }
+    
+    if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
+    pfree(DatumGetPointer(values[0]));
+    return count;
+}
+
+int database_count_pk (cloudsync_context *data, const char *table_name, bool not_null) {
+    const char *sql =
+            "SELECT COUNT(*) FROM information_schema.table_constraints tc "
+            "JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
+            "WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY'";
+    
+    return (int)database_count_bind(data, sql, table_name);
 }
 
 int database_count_nonpk (cloudsync_context *data, const char *table_name) {
-    char sql[1024];
-    snprintf(sql, sizeof(sql),
-             "SELECT COUNT(*) FROM information_schema.columns c "
-             "WHERE c.table_name = '%s' "
-             "AND c.column_name NOT IN ("
-             "  SELECT kcu.column_name FROM information_schema.table_constraints tc "
-             "  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
-             "  WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY'"
-             ")",
-             table_name, table_name);
-
-    int64_t count = 0;
-    database_select_int(data, sql, &count);
-    return (int)count;
+    const char *sql =
+            "SELECT COUNT(*) FROM information_schema.columns c "
+            "WHERE c.table_name = $1 "
+            "AND c.column_name NOT IN ("
+            "  SELECT kcu.column_name FROM information_schema.table_constraints tc "
+            "  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
+            "  WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY'"
+            ")";
+    
+    return (int)database_count_bind(data, sql, table_name);
 }
 
 int database_count_int_pk (cloudsync_context *data, const char *table_name) {
-    char sql[1024];
-    snprintf(sql, sizeof(sql),
-             "SELECT COUNT(*) FROM information_schema.columns c "
-             "JOIN information_schema.key_column_usage kcu ON c.column_name = kcu.column_name "
-             "JOIN information_schema.table_constraints tc ON kcu.constraint_name = tc.constraint_name "
-             "WHERE c.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY' "
-             "AND c.data_type IN ('smallint', 'integer', 'bigint')",
-             table_name);
-
-    int64_t count = 0;
-    database_select_int(data, sql, &count);
-    return (int)count;
+    const char *sql =
+              "SELECT COUNT(*) FROM information_schema.columns c "
+              "JOIN information_schema.key_column_usage kcu ON c.column_name = kcu.column_name "
+              "JOIN information_schema.table_constraints tc ON kcu.constraint_name = tc.constraint_name "
+              "WHERE c.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY' "
+              "AND c.data_type IN ('smallint', 'integer', 'bigint')";
+    
+    return (int)database_count_bind(data, sql, table_name);
 }
 
 int database_count_notnull_without_default (cloudsync_context *data, const char *table_name) {
-    char sql[1024];
-    snprintf(sql, sizeof(sql),
-             "SELECT COUNT(*) FROM information_schema.columns c "
-             "WHERE c.table_name = '%s' "
-             "AND c.is_nullable = 'NO' "
-             "AND c.column_default IS NULL "
-             "AND c.column_name NOT IN ("
-             "  SELECT kcu.column_name FROM information_schema.table_constraints tc "
-             "  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
-             "  WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY'"
-             ")",
-             table_name, table_name);
-
-    int64_t count = 0;
-    database_select_int(data, sql, &count);
-    return (int)count;
+    const char *sql =
+              "SELECT COUNT(*) FROM information_schema.columns c "
+              "WHERE c.table_name = $1 "
+              "AND c.is_nullable = 'NO' "
+              "AND c.column_default IS NULL "
+              "AND c.column_name NOT IN ("
+              "  SELECT kcu.column_name FROM information_schema.table_constraints tc "
+              "  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
+              "  WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY'"
+              ")";
+    
+    return (int)database_count_bind(data, sql, table_name);
 }
 
 /*
@@ -1228,26 +1263,30 @@ int database_pk_rowid (cloudsync_context *data, const char *table_name, char ***
 
 int database_pk_names (cloudsync_context *data, const char *table_name, char ***names, int *count) {
     if (!table_name || !names || !count) return DBRES_MISUSE;
-
-    char sql[1024];
-    snprintf(sql, sizeof(sql),
-             "SELECT kcu.column_name FROM information_schema.table_constraints tc "
-             "JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
-             "WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY' "
-             "ORDER BY kcu.ordinal_position",
-             table_name);
-
-    int rc = SPI_execute(sql, true, 0);
+    
+    const char *sql =
+            "SELECT kcu.column_name FROM information_schema.table_constraints tc "
+            "JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
+            "WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY' "
+            "ORDER BY kcu.ordinal_position";
+    
+    Oid argtypes[1] = { TEXTOID };
+    Datum values[1] = { CStringGetTextDatum(table_name) };
+    char nulls[1] = { ' ' };
+    
+    int rc = SPI_execute_with_args(sql, 1, argtypes, values, nulls, true, 0);
+    pfree(DatumGetPointer(values[0]));
+    
     if (rc < 0 || SPI_processed == 0) {
         *names = NULL;
         *count = 0;
         return DBRES_OK;
     }
-
+    
     uint64_t n = SPI_processed;
-    char **pk_names = cloudsync_memory_alloc(n * sizeof(char*));
+    char **pk_names = cloudsync_memory_zeroalloc(n * sizeof(char*));
     if (!pk_names) return DBRES_NOMEM;
-
+    
     for (int i = 0; i < n; i++) {
         HeapTuple tuple = SPI_tuptable->vals[i];
         bool isnull;
@@ -1257,11 +1296,18 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
             char *name = text_to_cstring(txt);
             pk_names[i] = (name) ? cloudsync_string_dup(name) : NULL;
             if (name) pfree(name);
-        } else {
-            pk_names[i] = NULL;
+        }
+        
+        // Cleanup on allocation failure
+        if (!isnull && pk_names[i] == NULL) {
+            for (int j = 0; j < i; j++) {
+                if (pk_names[j]) cloudsync_memory_free(pk_names[j]);
+            }
+            cloudsync_memory_free(pk_names);
+            return DBRES_NOMEM;
         }
     }
-
+    
     *names = pk_names;
     *count = (int)n;
     return DBRES_OK;
@@ -1290,6 +1336,10 @@ int databasevm_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, i
     {
         MemoryContext parent = (flags & DBFLAG_PERSISTENT) ? TopMemoryContext : CurrentMemoryContext;
         stmt->stmt_mcxt = AllocSetContextCreate(parent, "cloudsync stmt", ALLOCSET_DEFAULT_SIZES);
+        if (!stmt->stmt_mcxt) {
+            cloudsync_memory_free(stmt);
+            ereport(ERROR, (errmsg("Failed to create statement memory context")));
+        }
         stmt->bind_mcxt = AllocSetContextCreate(stmt->stmt_mcxt, "cloudsync binds", ALLOCSET_DEFAULT_SIZES);
         stmt->row_mcxt = AllocSetContextCreate(stmt->stmt_mcxt, "cloudsync row", ALLOCSET_DEFAULT_SIZES);
         
@@ -1299,9 +1349,12 @@ int databasevm_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, i
     }
     PG_CATCH();
     {
+        ErrorData *edata = CopyErrorData();
+        rc = cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        FreeErrorData(edata);
+        FlushErrorState();
         if (stmt->stmt_mcxt) MemoryContextDelete(stmt->stmt_mcxt);
         cloudsync_memory_free(stmt);
-        FlushErrorState();
         rc = DBRES_NOMEM;
         stmt = NULL;
     }
@@ -1367,13 +1420,20 @@ int databasevm_step (dbvm_t *vm) {
                 // free prior fetched row batch
                 clear_fetch_batch(stmt);
                 
-                SPI_cursor_fetch(stmt->portal, true /* forward */, 1);
+                SPI_cursor_fetch(stmt->portal, true, 1);
                 
                 if (SPI_processed == 0) {
-                    // done
                     clear_fetch_batch(stmt);
                     close_portal(stmt);
                     rc = DBRES_DONE;
+                    break;
+                }
+                
+                // null check for SPI_tuptable
+                if (!SPI_tuptable || !SPI_tuptable->tupdesc || !SPI_tuptable->vals) {
+                    clear_fetch_batch(stmt);
+                    close_portal(stmt);
+                    rc = cloudsync_set_error(data, "SPI_cursor_fetch returned invalid tuptable", DBRES_ERROR);
                     break;
                 }
                 
@@ -1399,16 +1459,25 @@ int databasevm_step (dbvm_t *vm) {
                     else stmt->portal = SPI_cursor_open(NULL, stmt->plan, stmt->values, stmt->nulls, false);
 
                     if (stmt->portal != NULL) {
-                        stmt->portal_open = true;
+                        // Don't set portal_open until we successfully fetch first row
                         
                         // fetch first row
                         clear_fetch_batch(stmt);
                         SPI_cursor_fetch(stmt->portal, true, 1);
                         
                         if (SPI_processed == 0) {
+                            // No rows - close portal, don't set portal_open
                             clear_fetch_batch(stmt);
                             close_portal(stmt);
                             rc = DBRES_DONE;
+                            break;
+                        }
+                        
+                        // null check for SPI_tuptable
+                        if (!SPI_tuptable || !SPI_tuptable->tupdesc || !SPI_tuptable->vals) {
+                            clear_fetch_batch(stmt);
+                            close_portal(stmt);
+                            rc = cloudsync_set_error(data, "SPI_cursor_fetch returned invalid tuptable", DBRES_ERROR);
                             break;
                         }
                         
@@ -1417,6 +1486,10 @@ int databasevm_step (dbvm_t *vm) {
                         stmt->last_tuptable = SPI_tuptable;
                         stmt->current_tupdesc = stmt->last_tuptable->tupdesc;
                         stmt->current_tuple = stmt->last_tuptable->vals[0];
+                        
+                        // Only set portal_open AFTER everything succeeded
+                        stmt->portal_open = true;
+                        
                         rc = DBRES_ROW;
                         break;
                     }
@@ -1622,6 +1695,8 @@ int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value) {
     if (!vm) return DBRES_ERROR;
     if (!value) return databasevm_bind_null(vm, index);
 
+    // validate index bounds properly (1-based index)
+    if (index < 1) return DBRES_ERROR;
     int idx = index - 1;
     if (idx >= MAX_PARAMS) return DBRES_ERROR;
     
@@ -1637,7 +1712,28 @@ int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value) {
         
         get_typlenbyval(v->typeid, &typlen, &typbyval);
         MemoryContext old = MemoryContextSwitchTo(stmt->bind_mcxt);
-        Datum dcopy = typbyval ? v->datum : datumCopy(v->datum, typbyval, typlen);
+        
+        Datum dcopy;
+        if (typbyval) {
+            // Pass-by-value: direct copy is safe
+            dcopy = v->datum;
+        } else {
+            // Pass-by-reference: need to copy the actual data
+            // Handle variable-length types (typlen == -1) and cstrings (typlen == -2)
+            if (typlen == -1) {
+                // Variable-length type (varlena): use datumCopy with correct size
+                Size len = VARSIZE(DatumGetPointer(v->datum));
+                dcopy = PointerGetDatum(palloc(len));
+                memcpy(DatumGetPointer(dcopy), DatumGetPointer(v->datum), len);
+            } else if (typlen == -2) {
+                // Null-terminated cstring
+                dcopy = CStringGetDatum(pstrdup(DatumGetCString(v->datum)));
+            } else {
+                // Fixed-length pass-by-reference
+                dcopy = datumCopy(v->datum, false, typlen);
+            }
+        }
+        
         stmt->values[idx] = dcopy;
         MemoryContextSwitchTo(old);
         stmt->types[idx] = OidIsValid(v->typeid) ? v->typeid : TEXTOID;
@@ -1651,10 +1747,10 @@ int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value) {
 // MARK: - COLUMN -
 
 Datum database_column_datum (dbvm_t *vm, int index) {
+    if (!vm) return (Datum)0;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
-    if (!vm || index >= MAX_PARAMS) return (Datum)0;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return (Datum)0;
-    if (index < 0 || index >= stmt->current_tupdesc->natts) return (Datum)0;
+    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return (Datum)0;
     
     bool isnull = true;
     Datum d = get_datum(stmt, index, &isnull, NULL);
@@ -1662,10 +1758,10 @@ Datum database_column_datum (dbvm_t *vm, int index) {
 }
 
 const void *database_column_blob (dbvm_t *vm, int index) {
+    if (!vm) return NULL;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
-    if (!vm || index >= MAX_PARAMS) return NULL;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return NULL;
-    if (index < 0 || index >= stmt->current_tupdesc->natts) return NULL;
+    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return NULL;
 
     bool isnull = true;
     Datum d = get_datum(stmt, index, &isnull, NULL);
@@ -1673,8 +1769,23 @@ const void *database_column_blob (dbvm_t *vm, int index) {
     
     MemoryContext old = MemoryContextSwitchTo(stmt->row_mcxt);
     bytea *ba = DatumGetByteaP(d);
+    
+    // Validate VARSIZE before computing length
+    Size varsize = VARSIZE(ba);
+    if (varsize < VARHDRSZ) {
+        // Corrupt or invalid bytea - VARSIZE should always be >= VARHDRSZ
+        MemoryContextSwitchTo(old);
+        elog(WARNING, "database_column_blob: invalid bytea VARSIZE %zu", varsize);
+        return NULL;
+    }
+    
     int len = VARSIZE(ba) - VARHDRSZ;
     void *out = palloc(len);
+    if (!out) {
+        MemoryContextSwitchTo(old);
+        return NULL;
+    }
+    
     memcpy(out, VARDATA(ba), len);
     MemoryContextSwitchTo(old);
     
@@ -1682,10 +1793,10 @@ const void *database_column_blob (dbvm_t *vm, int index) {
 }
 
 double database_column_double (dbvm_t *vm, int index) {
+    if (!vm) return 0.0;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
-    if (!vm || index >= MAX_PARAMS) return 0.0;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return 0.0;
-    if (index < 0 || index >= stmt->current_tupdesc->natts) return 0.0;
+    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return 0.0;
 
     bool isnull = true;
     Oid type = 0;
@@ -1705,10 +1816,10 @@ double database_column_double (dbvm_t *vm, int index) {
 }
 
 int64_t database_column_int (dbvm_t *vm, int index) {
+    if (!vm) return 0;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
-    if (!vm || index >= MAX_PARAMS) return 0;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return 0;
-    if (index < 0 || index >= stmt->current_tupdesc->natts) return 0;
+    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return 0;
 
     bool isnull = true;
     Oid type = 0;
@@ -1728,10 +1839,10 @@ int64_t database_column_int (dbvm_t *vm, int index) {
 }
 
 const char *database_column_text (dbvm_t *vm, int index) {
+    if (!vm) return NULL;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
-    if (!vm || index >= MAX_PARAMS) return NULL;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return NULL;
-    if (index < 0 || index >= stmt->current_tupdesc->natts) return NULL;
+    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return NULL;
 
     bool isnull = true;
     Oid type = 0;
@@ -1753,10 +1864,10 @@ const char *database_column_text (dbvm_t *vm, int index) {
 }
 
 dbvalue_t *database_column_value (dbvm_t *vm, int index) {
+    if (!vm) return NULL;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
-    if (!vm || index >= MAX_PARAMS) return NULL;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return NULL;
-    if (index < 0 || index >= stmt->current_tupdesc->natts) return NULL;
+    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return NULL;
     
     bool isnull = true;
     Oid type = 0;
@@ -1770,10 +1881,10 @@ dbvalue_t *database_column_value (dbvm_t *vm, int index) {
 }
 
 int database_column_bytes (dbvm_t *vm, int index) {
+    if (!vm) return 0;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
-    if (!vm || index >= MAX_PARAMS) return 0;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return 0;
-    if (index < 0 || index >= stmt->current_tupdesc->natts) return 0;
+    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return 0;
 
     bool isnull = true;
     Oid type = 0;
@@ -1801,10 +1912,10 @@ int database_column_bytes (dbvm_t *vm, int index) {
 }
 
 int database_column_type (dbvm_t *vm, int index) {
+    if (!vm) return DBTYPE_NULL;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
-    if (!vm || index >= MAX_PARAMS) return DBTYPE_NULL;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return DBTYPE_NULL;
-    if (index < 0 || index >= stmt->current_tupdesc->natts) return DBTYPE_NULL;
+    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return DBTYPE_NULL;
     
     bool isnull = true;
     Oid type = 0;
@@ -1903,17 +2014,28 @@ const char *database_value_text (dbvalue_t *value) {
     if (!v || v->isnull) return "";
 
     if (!v->cstring) {
-        if (pgvalue_is_text_type(v->typeid)) {
-            pgvalue_ensure_detoast(v);
-            v->cstring = text_to_cstring((text *)DatumGetPointer(v->datum));
-        } else {
-            // Fallback to type output function for non-text types
-            Oid outfunc;
-            bool isvarlena;
-            getTypeOutputInfo(v->typeid, &outfunc, &isvarlena);
-            v->cstring = OidOutputFunctionCall(outfunc, v->datum);
+        PG_TRY();
+        {
+            if (pgvalue_is_text_type(v->typeid)) {
+                pgvalue_ensure_detoast(v);
+                v->cstring = text_to_cstring((text *)DatumGetPointer(v->datum));
+            } else {
+                // Fallback to type output function for non-text types
+                Oid outfunc;
+                bool isvarlena;
+                getTypeOutputInfo(v->typeid, &outfunc, &isvarlena);
+                v->cstring = OidOutputFunctionCall(outfunc, v->datum);
+            }
+            v->owns_cstring = true;
         }
-        v->owns_cstring = true;
+        PG_CATCH();
+        {
+            // Handle conversion errors gracefully
+            FlushErrorState();
+            v->cstring = NULL;
+            v->owns_cstring = true;
+        }
+        PG_END_TRY();
     }
 
     return v->cstring;
@@ -1961,13 +2083,45 @@ void *database_value_dup (dbvalue_t *value) {
         copy->detoasted = true;
     }
     if (v->cstring) {
-        copy->cstring = copy->cstring ? pstrdup(v->cstring) : NULL;
+        copy->cstring = pstrdup(v->cstring);
         copy->owns_cstring = true;
     }
     return (void*)copy;
 }
 
 // MARK: - SAVEPOINTS -
+
+static int database_refresh_snapshot (void) {
+    // Only manipulate snapshots in a valid transaction
+    if (!IsTransactionState()) {
+        return DBRES_OK;  // Not in transaction, nothing to do
+    }
+    
+    PG_TRY();
+    {
+        CommandCounterIncrement();
+        
+        // Pop existing snapshot if any
+        if (ActiveSnapshotSet()) {
+            PopActiveSnapshot();
+        }
+        
+        // Push fresh snapshot
+        PushActiveSnapshot(GetTransactionSnapshot());
+    }
+    PG_CATCH();
+    {
+        // Snapshot refresh failed - log warning but don't fail operation
+        ErrorData *edata = CopyErrorData();
+        elog(WARNING, "refresh_snapshot_after_command failed: %s", edata->message);
+        FreeErrorData(edata);
+        FlushErrorState();
+        return DBRES_ERROR;
+    }
+    PG_END_TRY();
+    
+    return DBRES_OK;
+}
 
 int database_begin_savepoint (cloudsync_context *data, const char *savepoint_name) {
     cloudsync_reset_error(data);
@@ -1996,16 +2150,13 @@ int database_commit_savepoint (cloudsync_context *data, const char *savepoint_na
     PG_TRY();
     {
         ReleaseCurrentSubTransaction();
-        CommandCounterIncrement();
-
-        // Refresh snapshot
-        if (ActiveSnapshotSet()) {
-            PopActiveSnapshot();
-        }
-        PushActiveSnapshot(GetTransactionSnapshot());
+        database_refresh_snapshot();
     }
     PG_CATCH();
     {
+        ErrorData *edata = CopyErrorData();
+        cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        FreeErrorData(edata);
         FlushErrorState();
         rc = DBRES_ERROR;
     }
@@ -2017,24 +2168,22 @@ int database_commit_savepoint (cloudsync_context *data, const char *savepoint_na
 int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_name) {
     cloudsync_reset_error(data);
     int rc = DBRES_OK;
-
+    
     PG_TRY();
     {
         RollbackAndReleaseCurrentSubTransaction();
-
-        // Refresh snapshot
-        if (ActiveSnapshotSet()) {
-            PopActiveSnapshot();
-        }
-        PushActiveSnapshot(GetTransactionSnapshot());
+        database_refresh_snapshot();
     }
     PG_CATCH();
     {
+        ErrorData *edata = CopyErrorData();
+        cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        FreeErrorData(edata);
         FlushErrorState();
         rc = DBRES_ERROR;
     }
     PG_END_TRY();
-
+    
     return rc;
 }
 

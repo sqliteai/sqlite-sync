@@ -1683,20 +1683,20 @@ Datum cloudsync_col_value(PG_FUNCTION_ARGS) {
     cloudsync_context *data = get_cloudsync_context();
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) {
-        ereport(ERROR, (errmsg("Unable to retrieve table name %s in clousdsync_colvalue.", table_name)));
+        ereport(ERROR, (errmsg("Unable to retrieve table name %s in clousdsync_col_value.", table_name)));
     }
     
     // extract the right col_value vm associated to the column name
     dbvm_t *vm = table_column_lookup(table, col_name, false, NULL);
     if (!vm) {
-        ereport(ERROR, (errmsg("Unable to retrieve column value precompiled statement in clousdsync_colvalue.")));
+        ereport(ERROR, (errmsg("Unable to retrieve column value precompiled statement in clousdsync_col_value.")));
     }
     
     // bind primary key values
     size_t pk_len = (size_t)VARSIZE_ANY_EXHDR(encoded_pk);
     int count = pk_decode_prikey((char *)VARDATA_ANY(encoded_pk), pk_len, pk_decode_bind_callback, (void *)vm);
     if (count <= 0) {
-        ereport(ERROR, (errmsg("Unable to decode primary key value in clousdsync_colvalue.")));
+        ereport(ERROR, (errmsg("Unable to decode primary key value in clousdsync_col_value.")));
     }
     
     // execute vm

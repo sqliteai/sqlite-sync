@@ -21,15 +21,15 @@
 // dbvalue_t representation for PostgreSQL. We capture Datum + type metadata so
 // value helpers can resolve type/length/ownership without relying on fcinfo lifetime.
 typedef struct pgvalue_t {
-    Datum datum;
-    Oid typeid;
-    int32 typmod;
-    Oid collation;
-    bool isnull;
-    bool detoasted;
-    void *owned_detoast;
-    char *cstring;
-    bool owns_cstring;
+    Datum   datum;
+    Oid     typeid;
+    int32   typmod;
+    Oid     collation;
+    bool    isnull;
+    bool    detoasted;
+    void    *owned_detoast;
+    char    *cstring;
+    bool    owns_cstring;
 } pgvalue_t;
 
 pgvalue_t *pgvalue_create(Datum datum, Oid typeid, int32 typmod, Oid collation, bool isnull);
