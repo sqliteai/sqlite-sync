@@ -1,10 +1,10 @@
 # PostgreSQL Docker image with CloudSync extension pre-installed
-FROM postgres:16
+FROM postgres:17
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
-    postgresql-server-dev-16 \
+    postgresql-server-dev-17 \
     git \
     make \
     && rm -rf /var/lib/apt/lists/*

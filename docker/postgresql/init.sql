@@ -1,5 +1,7 @@
 -- CloudSync PostgreSQL Initialization Script
--- This script creates the metadata tables needed by the cloudsync extension
+-- This script loads the CloudSync extension during database init
+
+CREATE EXTENSION IF NOT EXISTS cloudsync;
 
 -- Log initialization
 DO $$

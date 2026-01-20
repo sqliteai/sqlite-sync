@@ -1,5 +1,5 @@
 # PostgreSQL Docker image with CloudSync extension (debug build)
-FROM postgres:16
+FROM postgres:17
 
 # Enable ASAN build flags when requested (used by docker-compose.asan.yml).
 ARG ENABLE_ASAN=0
@@ -20,14 +20,14 @@ RUN apt-get update && apt-get install -y \
     dpkg-dev \
     gdb \
     libasan8 \
-    postgresql-server-dev-16 \
-    postgresql-16-dbgsym \
+    postgresql-server-dev-17 \
+    postgresql-17-dbgsym \
     git \
     make \
-    && apt-get source postgresql-16 \
-    && mkdir -p /usr/src/postgresql-16 \
-    && srcdir="$(find . -maxdepth 1 -type d -name 'postgresql-16*' | head -n 1)" \
-    && if [ -n "$srcdir" ]; then cp -a "$srcdir"/. /usr/src/postgresql-16/; fi \
+    && apt-get source postgresql-17 \
+    && mkdir -p /usr/src/postgresql-17 \
+    && srcdir="$(find . -maxdepth 1 -type d -name 'postgresql-17*' | head -n 1)" \
+    && if [ -n "$srcdir" ]; then cp -a "$srcdir"/. /usr/src/postgresql-17/; fi \
     && rm -rf /var/lib/apt/lists/*
 
 # Create directory for extension source
