@@ -1,0 +1,86 @@
+# Build stage for CloudSync extension (match Supabase runtime)
+FROM public.ecr.aws/supabase/postgres:17.6.1.071 AS cloudsync-builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    ca-certificates \
+    git \
+    make \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create directory for extension source
+WORKDIR /tmp/cloudsync
+
+# Copy entire source tree (needed for includes and makefiles)
+COPY src/ ./src/
+COPY docker/ ./docker/
+COPY Makefile .
+
+# Build the CloudSync extension using Supabase's pg_config
+ENV CLOUDSYNC_PG_CONFIG=/root/.nix-profile/bin/pg_config
+RUN if [ ! -x "$CLOUDSYNC_PG_CONFIG" ]; then \
+        echo "Error: pg_config not found at $CLOUDSYNC_PG_CONFIG."; \
+        exit 1; \
+    fi; \
+    make postgres-build PG_CONFIG="$CLOUDSYNC_PG_CONFIG"
+
+# Collect build artifacts (avoid installing into the Nix store)
+RUN mkdir -p /tmp/cloudsync-artifacts/lib /tmp/cloudsync-artifacts/extension && \
+    cp /tmp/cloudsync/cloudsync.so /tmp/cloudsync-artifacts/lib/ && \
+    cp /tmp/cloudsync/src/postgresql/cloudsync--1.0.sql /tmp/cloudsync-artifacts/extension/ && \
+    cp /tmp/cloudsync/docker/postgresql/cloudsync.control /tmp/cloudsync-artifacts/extension/
+
+# Runtime image based on Supabase Postgres
+FROM public.ecr.aws/supabase/postgres:17.6.1.071
+
+# Match builder pg_config path
+ENV CLOUDSYNC_PG_CONFIG=/root/.nix-profile/bin/pg_config
+
+# Install CloudSync extension artifacts
+COPY --from=cloudsync-builder /tmp/cloudsync-artifacts/ /tmp/cloudsync-artifacts/
+RUN if [ ! -x "$CLOUDSYNC_PG_CONFIG" ]; then \
+        echo "Error: pg_config not found at $CLOUDSYNC_PG_CONFIG."; \
+        exit 1; \
+    fi; \
+    PKGLIBDIR="`$CLOUDSYNC_PG_CONFIG --pkglibdir`"; \
+    # Supabase wraps postgres and overrides libdir via NIX_PGLIBDIR.
+    NIX_PGLIBDIR="`grep -E \"^export NIX_PGLIBDIR\" /usr/bin/postgres | sed -E \"s/.*'([^']+)'.*/\\1/\"`"; \
+    if [ -n "$NIX_PGLIBDIR" ]; then PKGLIBDIR="$NIX_PGLIBDIR"; fi; \
+    SHAREDIR_PGCONFIG="`$CLOUDSYNC_PG_CONFIG --sharedir`"; \
+    SHAREDIR_STD="/usr/share/postgresql"; \
+    install -d "$PKGLIBDIR" "$SHAREDIR_PGCONFIG/extension" && \
+    install -m 755 /tmp/cloudsync-artifacts/lib/cloudsync.so "$PKGLIBDIR/" && \
+    install -m 644 /tmp/cloudsync-artifacts/extension/cloudsync* "$SHAREDIR_PGCONFIG/extension/"; \
+    if [ "$SHAREDIR_STD" != "$SHAREDIR_PGCONFIG" ]; then \
+        install -d "$SHAREDIR_STD/extension" && \
+        install -m 644 /tmp/cloudsync-artifacts/extension/cloudsync* "$SHAREDIR_STD/extension/"; \
+    fi
+
+# Verify installation
+RUN if [ ! -x "$CLOUDSYNC_PG_CONFIG" ]; then \
+        echo "Error: pg_config not found at $CLOUDSYNC_PG_CONFIG."; \
+        exit 1; \
+    fi; \
+    NIX_PGLIBDIR="`grep -E \"^export NIX_PGLIBDIR\" /usr/bin/postgres | sed -E \"s/.*'([^']+)'.*/\\1/\"`"; \
+    echo "Verifying CloudSync extension installation..." && \
+    if [ -n "$NIX_PGLIBDIR" ]; then \
+        ls -la "$NIX_PGLIBDIR/cloudsync.so"; \
+    else \
+        ls -la "`$CLOUDSYNC_PG_CONFIG --pkglibdir`/cloudsync.so"; \
+    fi && \
+    ls -la "`$CLOUDSYNC_PG_CONFIG --sharedir`/extension/cloudsync"* && \
+    if [ -d "/usr/share/postgresql/extension" ]; then \
+        ls -la /usr/share/postgresql/extension/cloudsync*; \
+    fi && \
+    echo "CloudSync extension installed successfully"
+
+# Expose PostgreSQL port
+EXPOSE 5432
+
+# Return to root directory
+WORKDIR /
+
+# Add label with extension version
+LABEL org.sqliteai.cloudsync.version="1.0" \
+      org.sqliteai.cloudsync.description="PostgreSQL with CloudSync CRDT extension"

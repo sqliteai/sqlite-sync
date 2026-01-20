@@ -11,8 +11,6 @@ docker/
 │   ├── docker-compose.yml
 │   ├── init.sql        # CloudSync metadata tables
 │   └── cloudsync.control
-└── supabase/           # Supabase integration
-    └── docker-compose.yml
 ```
 
 ## Option 1: Standalone PostgreSQL
@@ -105,78 +103,100 @@ Run and Debug -> `Attach to Postgres (gdb)` -> pick the PID from step 4 -> Conti
 6) Trigger your breakpoint  
 Run the SQL that exercises the code path. If `psql` blocks, the backend is paused at a breakpoint; continue in the debugger.
 
-## Option 2: Supabase Integration
+## Option 2: Supabase Integration (cli)
 
-Use this for testing CloudSync with Supabase's full stack (auth, realtime, storage, etc.).
+Use this when you're running `supabase start` and want CloudSync inside the local stack.
+The Supabase CLI uses a bundled PostgreSQL image (for example,
+`public.ecr.aws/supabase/postgres:17.6.1.071`). Build a matching image that
+includes CloudSync, then tag it with the same name so the CLI reuses it. This
+keeps your local Supabase stack intact (auth, realtime, storage, etc.) while
+enabling the extension in the CLI-managed Postgres container.
 
 ### Prerequisites
 
-Ensure you have both repositories cloned side-by-side:
-
-```bash
-parent-directory/
-├── supabase/
-└── sqlite-sync/
-```
+- Supabase CLI installed (`supabase start` works)
+- Docker running
 
 ### Setup
 
-1. Clone the Supabase repository:
+1. Initialize a Supabase project (use a separate workdir to keep generated files
+   out of the repo):
    ```bash
-   git clone --depth 1 https://github.com/supabase/supabase
-   cd supabase/docker
+   mkdir -p ~/supabase-local
+   supabase init --workdir ~/supabase-local
    ```
 
-2. Copy CloudSync override configuration:
+2. Start Supabase once so the CLI pulls the Postgres image:
    ```bash
-   cp ../../sqlite-sync/docker/supabase/docker-compose.yml docker-compose.override.yml
+   supabase start --workdir ~/supabase-local
    ```
 
-3. Copy the `.env` file and configure it:
+3. Build and tag a CloudSync image using the same tag as the running CLI stack:
    ```bash
-   cp .env.example .env
-   # Edit .env with your preferred settings
+   make postgres-supabase-build
+   ```
+   This auto-detects the running `supabase_db` image tag and rebuilds it with
+   CloudSync installed. If you need to override the tag, set
+   `SUPABASE_CLI_IMAGE=public.ecr.aws/supabase/postgres:<tag>`.
+   Example: 
+   ```bash
+   SUPABASE_CLI_IMAGE=public.ecr.aws/supabase/postgres:17.6.1.071 make postgres-supabase-build
    ```
 
-### Starting Supabase with CloudSync
-
-The override file will automatically build the custom PostgreSQL image:
-
-```bash
-cd supabase/docker
-docker-compose up -d
-```
-
-This will:
-- Build the CloudSync-enabled PostgreSQL image (first time only)
-- Start all Supabase services with CloudSync support
-- Initialize CloudSync metadata tables alongside Supabase tables
-
-Access Supabase Studio at http://localhost:3000
+4. Restart the stack:
+   ```bash
+   supabase stop --workdir ~/supabase-local
+   supabase start --workdir ~/supabase-local
+   ```
 
 ### Using the CloudSync Extension
 
-Connect to the database and enable the extension:
+You can load the extension automatically from a migration, or enable it
+manually.
+
+Migration-based (notes for CLI): Supabase CLI migrations run as the `postgres`
+role, which cannot create C extensions by default. Use manual enable or grant
+`USAGE` on language `c` once, then migrations will work.
+
+If you still want a migration file, add:
+```bash
+~/supabase-local/supabase/migrations/00000000000000_cloudsync.sql
+```
+Contents:
+```sql
+CREATE EXTENSION IF NOT EXISTS cloudsync;
+```
+
+Then either:
+- run `GRANT USAGE ON LANGUAGE c TO postgres;` once as `supabase_admin`, or
+- skip the migration and enable the extension manually after `supabase db reset`.
+
+Manual enable (no reset required):
+
+Connect as the Supabase superuser (C extensions require superuser or language
+privileges), then enable the extension:
 
 ```bash
-psql postgresql://postgres:postgres@localhost:5432/postgres
+psql postgresql://supabase_admin:postgres@127.0.0.1:54322/postgres
 ```
 
 ```sql
 CREATE EXTENSION cloudsync;
-
--- Verify installation
 SELECT cloudsync_version();
+```
+
+If you want to use the `postgres` role instead:
+
+```sql
+GRANT USAGE ON LANGUAGE c TO postgres;
 ```
 
 ### Rebuilding After Changes
 
-If you modify the CloudSync source code, rebuild the image:
+If you modify the CloudSync source code, rebuild the CLI image and restart:
 
 ```bash
-cd supabase/docker
-docker-compose build db
-docker-compose up -d
+make postgres-supabase-rebuild SUPABASE_WORKDIR=~/supabase-local
 ```
 
 ## Development Workflow

@@ -55,7 +55,9 @@ PG_EXTENSION_CONTROL = docker/postgresql/$(EXTENSION).control
 .PHONY: postgres-check postgres-build postgres-install postgres-clean postgres-test \
         postgres-docker-build postgres-docker-build-asan postgres-docker-run postgres-docker-run-asan postgres-docker-stop postgres-docker-rebuild \
         postgres-docker-debug-build postgres-docker-debug-run postgres-docker-debug-rebuild \
-        postgres-docker-shell postgres-dev-rebuild postgres-help unittest-pg
+        postgres-docker-shell postgres-dev-rebuild postgres-help unittest-pg \
+        postgres-supabase-build postgres-supabase-rebuild postgres-supabase-run-smoke-test \
+        postgres-docker-run-smoke-test
 
 # Check if PostgreSQL is available
 postgres-check:
@@ -119,6 +121,18 @@ postgres-test: postgres-install
 DOCKER_IMAGE = sqliteai/sqlite-sync-pg
 DOCKER_TAG ?= latest
 DOCKER_BUILD_ARGS ?=
+SUPABASE_CLI_IMAGE ?= $(shell docker ps --format '{{.Image}} {{.Names}}' | awk '/supabase_db/ {print $$1; exit}')
+SUPABASE_CLI_DOCKERFILE ?= docker/postgresql/Dockerfile.supabase
+SUPABASE_WORKDIR ?=
+SUPABASE_WORKDIR_ARG = $(if $(SUPABASE_WORKDIR),--workdir $(SUPABASE_WORKDIR),)
+SUPABASE_DB_HOST ?= 127.0.0.1
+SUPABASE_DB_PORT ?= 54322
+SUPABASE_DB_PASSWORD ?= postgres
+PG_DOCKER_DB_HOST ?= localhost
+PG_DOCKER_DB_PORT ?= 5432
+PG_DOCKER_DB_NAME ?= cloudsync_test
+PG_DOCKER_DB_USER ?= postgres
+PG_DOCKER_DB_PASSWORD ?= postgres
 
 # Build Docker image with pre-installed extension
 postgres-docker-build:
@@ -220,6 +234,58 @@ postgres-docker-shell:
 	@echo "Opening shell in PostgreSQL container..."
 	docker exec -it cloudsync-postgres bash
 
+# Build CloudSync into the Supabase CLI postgres image tag
+postgres-supabase-build:
+	@echo "Building CloudSync image for Supabase CLI..."
+	@if [ -z "$(SUPABASE_CLI_IMAGE)" ]; then \
+		echo "Error: Supabase CLI postgres image not found."; \
+		echo "Run 'supabase start' first, or set SUPABASE_CLI_IMAGE=public.ecr.aws/supabase/postgres:<tag>."; \
+		exit 1; \
+	fi
+	@tmp_dockerfile="$$(mktemp /tmp/cloudsync-supabase-cli.XXXXXX)"; \
+	src_dockerfile="$(SUPABASE_CLI_DOCKERFILE)"; \
+	if [ ! -f "$$src_dockerfile" ]; then \
+		if [ -f "docker/postgresql/Dockerfile.supabase" ]; then \
+			src_dockerfile="docker/postgresql/Dockerfile.supabase"; \
+		else \
+			echo "Error: Supabase Dockerfile not found (expected $$src_dockerfile)."; \
+			rm -f "$$tmp_dockerfile"; \
+			exit 1; \
+		fi; \
+	fi; \
+	sed -e "s|^FROM supabase/postgres:[^ ]*|FROM $(SUPABASE_CLI_IMAGE)|" \
+	    -e "s|^FROM public.ecr.aws/supabase/postgres:[^ ]*|FROM $(SUPABASE_CLI_IMAGE)|" \
+		"$$src_dockerfile" > "$$tmp_dockerfile"; \
+	if [ ! -s "$$tmp_dockerfile" ]; then \
+		echo "Error: Generated Dockerfile is empty."; \
+		rm -f "$$tmp_dockerfile"; \
+		exit 1; \
+	fi; \
+	echo "Using base image: $(SUPABASE_CLI_IMAGE)"; \
+	docker build -f "$$tmp_dockerfile" -t "$(SUPABASE_CLI_IMAGE)" .; \
+	rm -f "$$tmp_dockerfile"; \
+	echo "Build complete: $(SUPABASE_CLI_IMAGE)"
+
+# Rebuild CloudSync image and restart Supabase CLI stack
+postgres-supabase-rebuild: postgres-supabase-build
+	@echo "Restarting Supabase CLI stack..."
+	@command -v supabase >/dev/null 2>&1 || (echo "Error: supabase CLI not found in PATH." && exit 1)
+	@supabase stop $(SUPABASE_WORKDIR_ARG)
+	@supabase start $(SUPABASE_WORKDIR_ARG)
+	@echo "Supabase CLI stack restarted."
+
+# Run smoke test against Supabase CLI local database
+postgres-supabase-run-smoke-test:
+	@echo "Running Supabase CLI smoke test..."
+	@PGPASSWORD="$(SUPABASE_DB_PASSWORD)" psql postgresql://supabase_admin@$(SUPABASE_DB_HOST):$(SUPABASE_DB_PORT)/postgres -f docker/postgresql/smoke_test.sql
+	@echo "Smoke test completed."
+
+# Run smoke test against Docker standalone database
+postgres-docker-run-smoke-test:
+	@echo "Running Docker smoke test..."
+	@PGPASSWORD="$(PG_DOCKER_DB_PASSWORD)" psql postgresql://$(PG_DOCKER_DB_USER)@$(PG_DOCKER_DB_HOST):$(PG_DOCKER_DB_PORT)/$(PG_DOCKER_DB_NAME) -f docker/postgresql/smoke_test.sql
+	@echo "Smoke test completed."
+
 # ============================================================================
 # Development Workflow Targets
 # ============================================================================
@@ -259,6 +325,10 @@ postgres-help:
 	@echo "  postgres-docker-stop    - Stop PostgreSQL container"
 	@echo "  postgres-docker-rebuild - Rebuild image and restart container"
 	@echo "  postgres-docker-shell   - Open bash shell in running container"
+	@echo "  postgres-supabase-build     - Build CloudSync into Supabase CLI postgres image"
+	@echo "  postgres-supabase-rebuild   - Build CloudSync image and restart Supabase CLI stack"
+	@echo "  postgres-supabase-run-smoke-test - Run smoke test against Supabase CLI database"
+	@echo "  postgres-docker-run-smoke-test   - Run smoke test against Docker database"
 	@echo ""
 	@echo "Development:"
 	@echo "  postgres-dev-rebuild    - Rebuild extension in running container (fast)"
