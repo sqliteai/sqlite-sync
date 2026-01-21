@@ -139,13 +139,13 @@ CREATE OR REPLACE AGGREGATE cloudsync_payload_encode(text, bytea, text, bytea, b
 
 -- Payload decoding and application
 CREATE OR REPLACE FUNCTION cloudsync_payload_decode(payload bytea)
-RETURNS boolean
+RETURNS integer
 AS 'MODULE_PATHNAME', 'cloudsync_payload_decode'
 LANGUAGE C VOLATILE;
 
 -- Alias for payload_decode
 CREATE OR REPLACE FUNCTION cloudsync_payload_apply(payload bytea)
-RETURNS boolean
+RETURNS integer
 AS 'MODULE_PATHNAME', 'pg_cloudsync_payload_apply'
 LANGUAGE C VOLATILE;
 
