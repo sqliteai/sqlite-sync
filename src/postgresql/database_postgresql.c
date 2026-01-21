@@ -414,7 +414,6 @@ int database_select3_values (cloudsync_context *data, const char *sql, char **va
         goto cleanup;
     }
     if (SPI_tuptable->tupdesc->natts < 3) {
-        return cloudsync_set_error(data, "Result has fewer than 3 columns in database_select3_values", DBRES_ERROR);
         rc = cloudsync_set_error(data, "Result has fewer than 3 columns in database_select3_values", DBRES_ERROR);;
         goto cleanup;
     }
@@ -603,7 +602,6 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
 
         // Allocate arrays for column names and values
         char **names = cloudsync_memory_alloc(ncols * sizeof(char*));
-        if (!names) return DBRES_NOMEM;
         if (!names) {
             if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
             return DBRES_NOMEM;
