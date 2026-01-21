@@ -10,6 +10,7 @@
 
 // PostgreSQL requires postgres.h to be included FIRST
 #include "postgres.h"
+#include "utils/datum.h"
 #include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "catalog/namespace.h"
@@ -75,6 +76,10 @@ static void cloudsync_pg_context_init (cloudsync_context *data) {
             dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
         }
 
+        if (SPI_tuptable) {
+            SPI_freetuptable(SPI_tuptable);
+            SPI_tuptable = NULL;
+        }
         SPI_finish();
     }
     PG_CATCH();
@@ -407,6 +412,10 @@ Datum pg_cloudsync_cleanup (PG_FUNCTION_ARGS) {
     }
     PG_END_TRY();
 
+    if (SPI_tuptable) {
+        SPI_freetuptable(SPI_tuptable);
+        SPI_tuptable = NULL;
+    }
     if (spi_connected) SPI_finish();
     if (rc != DBRES_OK) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
@@ -1616,13 +1625,26 @@ static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, Oid target_
     appendStringInfo(&castq, "SELECT $1::%s", target_typname);
 
     int rc = SPI_execute_with_args(castq.data, 1, argt, argv, argn, true, 1);
-    if (rc != SPI_OK_SELECT || SPI_processed != 1) ereport(ERROR, (errmsg("cloudsync: failed to cast value to %s", target_typname)));
+    if (rc != SPI_OK_SELECT || SPI_processed != 1) {
+        if (SPI_tuptable) {
+            SPI_freetuptable(SPI_tuptable);
+        }
+        ereport(ERROR, (errmsg("cloudsync: failed to cast value to %s", target_typname)));
+    }
     pfree(castq.data);
 
     bool typed_isnull = false;
     Datum typed_value = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &typed_isnull);
     int32 typmod = TupleDescAttr(SPI_tuptable->tupdesc, 1)->atttypmod;
     Oid collation = TupleDescAttr(SPI_tuptable->tupdesc, 1)->attcollation;
+    if (!typed_isnull) {
+        Form_pg_attribute att = TupleDescAttr(SPI_tuptable->tupdesc, 0);
+        typed_value = datumCopy(typed_value, att->attbyval, att->attlen);
+    }
+    if (SPI_tuptable) {
+        SPI_freetuptable(SPI_tuptable);
+        SPI_tuptable = NULL;
+    }
 
     if (out_isnull) *out_isnull = typed_isnull;
     return pgvalue_create(typed_value, target_typoid, typmod, collation, typed_isnull);
@@ -1755,12 +1777,34 @@ static char * build_union_sql (void) {
         initStringInfo(&buf);
         
         uint64 ntables = SPI_processed;
-        bool first = true;
+        char **nsp_list = NULL;
+        char **rel_list = NULL;
+        if (ntables > 0) {
+            nsp_list = (char **)palloc0(sizeof(char *) * ntables);
+            rel_list = (char **)palloc0(sizeof(char *) * ntables);
+        }
         for (uint64 i = 0; i < ntables; i++) {
             HeapTuple tup = SPI_tuptable->vals[i];
             TupleDesc td = SPI_tuptable->tupdesc;
             char *nsp = SPI_getvalue(tup, td, 1);
             char *rel = SPI_getvalue(tup, td, 2);
+            if (!nsp || !rel) {
+                if (nsp) pfree(nsp);
+                if (rel) pfree(rel);
+                continue;
+            }
+            nsp_list[i] = pstrdup(nsp);
+            rel_list[i] = pstrdup(rel);
+            pfree(nsp);
+            pfree(rel);
+        }
+        SPI_freetuptable(SPI_tuptable);
+        SPI_tuptable = NULL;
+        
+        bool first = true;
+        for (uint64 i = 0; i < ntables; i++) {
+            char *nsp = nsp_list ? nsp_list[i] : NULL;
+            char *rel = rel_list ? rel_list[i] : NULL;
             if (!nsp || !rel) {
                 if (nsp) pfree(nsp);
                 if (rel) pfree(rel);
@@ -1921,7 +1965,8 @@ static char * build_union_sql (void) {
             pfree(rel);
             pfree((void *)quoted_rel);
         }
-        SPI_freetuptable(SPI_tuptable);
+        if (nsp_list) pfree(nsp_list);
+        if (rel_list) pfree(rel_list);
         
         // Ensure result survives SPI_finish by allocating in the caller context.
         MemoryContext old_ctx = MemoryContextSwitchTo(caller_ctx);
@@ -2038,6 +2083,10 @@ Datum cloudsync_changes_select(PG_FUNCTION_ARGS) {
         
         SPI_cursor_fetch(st->portal, true, 1);
         if (SPI_processed == 0) {
+            if (SPI_tuptable) {
+                SPI_freetuptable(SPI_tuptable);
+                SPI_tuptable = NULL;
+            }
             SPI_cursor_close(st->portal);
             st->portal = NULL;
 
@@ -2054,9 +2103,15 @@ Datum cloudsync_changes_select(PG_FUNCTION_ARGS) {
         bool outnulls[9];
         for (int i = 0; i < 9; i++) {
             outvals[i] = SPI_getbinval(tup, td, i+1, &outnulls[i]);
+            if (!outnulls[i]) {
+                Form_pg_attribute att = TupleDescAttr(td, i);
+                outvals[i] = datumCopy(outvals[i], att->attbyval, att->attlen);
+            }
         }
         
         HeapTuple outtup = heap_form_tuple(st->outdesc, outvals, outnulls);
+        SPI_freetuptable(SPI_tuptable);
+        SPI_tuptable = NULL;
         SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(outtup));
     }
     PG_CATCH();

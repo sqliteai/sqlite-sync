@@ -310,20 +310,24 @@ int database_select1_value (cloudsync_context *data, const char *sql, char **ptr
 
     int rc = SPI_execute(sql, true, 0);
     if (rc < 0) {
-        return cloudsync_set_error(data, "SPI_execute failed in database_select1_value", DBRES_ERROR);
+        rc = cloudsync_set_error(data, "SPI_execute failed in database_select1_value", DBRES_ERROR);
+        goto cleanup;
     }
 
     // ensure at least one column
     if (!SPI_tuptable || !SPI_tuptable->tupdesc) {
-        return cloudsync_set_error(data, "No result table", DBRES_ERROR);
+        rc = cloudsync_set_error(data, "No result table", DBRES_ERROR);
+        goto cleanup;
     }
     if (SPI_tuptable->tupdesc->natts < 1) {
-        return cloudsync_set_error(data, "No columns in result", DBRES_ERROR);
+        rc = cloudsync_set_error(data, "No columns in result", DBRES_ERROR);
+        goto cleanup;
     }
 
     // no rows OK
     if (SPI_processed == 0) {
-        return DBRES_OK;
+        rc = DBRES_OK;
+        goto cleanup;
     }
 
     HeapTuple tuple = SPI_tuptable->vals[0];
@@ -332,7 +336,8 @@ int database_select1_value (cloudsync_context *data, const char *sql, char **ptr
 
     // NULL value is OK
     if (isnull) {
-        return DBRES_OK;
+        rc = DBRES_OK;
+        goto cleanup;
     }
 
     // Get type info
@@ -350,7 +355,8 @@ int database_select1_value (cloudsync_context *data, const char *sql, char **ptr
                 *int_value = DatumGetInt64(datum);
                 break;
             default:
-                return cloudsync_set_error(data, "Type mismatch: expected integer", DBRES_ERROR);
+                rc = cloudsync_set_error(data, "Type mismatch: expected integer", DBRES_ERROR);
+                goto cleanup;
         }
     } else if (expected_type == DBTYPE_TEXT) {
         text *txt = DatumGetTextP(datum);
@@ -358,7 +364,8 @@ int database_select1_value (cloudsync_context *data, const char *sql, char **ptr
         if (len > 0) {
             char *ptr = cloudsync_memory_alloc(len + 1);
             if (!ptr) {
-                return cloudsync_set_error(data, "Memory allocation failed", DBRES_NOMEM);
+                rc = cloudsync_set_error(data, "Memory allocation failed", DBRES_NOMEM);
+                goto cleanup;
             }
             memcpy(ptr, VARDATA(txt), len);
             ptr[len] = '\0';
@@ -371,7 +378,8 @@ int database_select1_value (cloudsync_context *data, const char *sql, char **ptr
         if (len > 0) {
             char *ptr = cloudsync_memory_alloc(len);
             if (!ptr) {
-                return cloudsync_set_error(data, "Memory allocation failed", DBRES_NOMEM);
+                rc = cloudsync_set_error(data, "Memory allocation failed", DBRES_NOMEM);
+                goto cleanup;
             }
             memcpy(ptr, VARDATA(ba), len);
             *ptr_value = ptr;
@@ -379,7 +387,11 @@ int database_select1_value (cloudsync_context *data, const char *sql, char **ptr
         }
     }
 
-    return DBRES_OK;
+    rc = DBRES_OK;
+
+cleanup:
+    if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
+    return rc;
 }
 
 int database_select3_values (cloudsync_context *data, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
@@ -392,15 +404,24 @@ int database_select3_values (cloudsync_context *data, const char *sql, char **va
     *len = 0;
 
     int rc = SPI_execute(sql, true, 0);
-    if (rc < 0) return cloudsync_set_error(data, "SPI_execute failed in database_select3_values", DBRES_ERROR);
+    if (rc < 0) {
+        rc = cloudsync_set_error(data, "SPI_execute failed in database_select3_values", DBRES_ERROR);;
+        goto cleanup;
+    }
 
     if (!SPI_tuptable || !SPI_tuptable->tupdesc) {
-        return cloudsync_set_error(data, "No result table in database_select3_values", DBRES_ERROR);
+        rc = cloudsync_set_error(data, "No result table in database_select3_values", DBRES_ERROR);;
+        goto cleanup;
     }
     if (SPI_tuptable->tupdesc->natts < 3) {
         return cloudsync_set_error(data, "Result has fewer than 3 columns in database_select3_values", DBRES_ERROR);
+        rc = cloudsync_set_error(data, "Result has fewer than 3 columns in database_select3_values", DBRES_ERROR);;
+        goto cleanup;
     }
-    if (SPI_processed == 0) return DBRES_OK;
+    if (SPI_processed == 0) {
+        rc = DBRES_OK;
+        goto cleanup;
+    }
 
     HeapTuple tuple = SPI_tuptable->vals[0];
     bool isnull;
@@ -414,7 +435,10 @@ int database_select3_values (cloudsync_context *data, const char *sql, char **va
             int blob_len = VARSIZE(ba) - VARHDRSZ;
             if (blob_len > 0) {
                 char *ptr = cloudsync_memory_alloc(blob_len);
-                if (!ptr) return DBRES_NOMEM;
+                if (!ptr) {
+                    rc = DBRES_NOMEM;
+                    goto cleanup;
+                }
                 
                 memcpy(ptr, VARDATA(ba), blob_len);
                 *value = ptr;
@@ -425,7 +449,10 @@ int database_select3_values (cloudsync_context *data, const char *sql, char **va
             int text_len = VARSIZE(txt) - VARHDRSZ;
             if (text_len > 0) {
                 char *ptr = cloudsync_memory_alloc(text_len + 1);
-                if (!ptr) return DBRES_NOMEM;
+                if (!ptr) {
+                    rc = DBRES_NOMEM;
+                    goto cleanup;
+                }
                 
                 memcpy(ptr, VARDATA(txt), text_len);
                 ptr[text_len] = '\0';
@@ -457,7 +484,11 @@ int database_select3_values (cloudsync_context *data, const char *sql, char **va
         }
     }
 
-    return DBRES_OK;
+    rc = DBRES_OK;
+
+cleanup:
+    if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
+    return rc;
 }
 
 bool database_system_exists (cloudsync_context *data, const char *name, const char *type) {
@@ -511,6 +542,9 @@ int database_exec (cloudsync_context *data, const char *sql) {
     PG_TRY();
     {
         rc = SPI_execute(sql, false, 0);
+        if (SPI_tuptable) {
+            SPI_freetuptable(SPI_tuptable);
+        }
     }
     PG_CATCH();
     {
@@ -518,6 +552,9 @@ int database_exec (cloudsync_context *data, const char *sql) {
         rc = cloudsync_set_error(data, edata->message, DBRES_ERROR);
         FreeErrorData(edata);
         FlushErrorState();
+        if (SPI_tuptable) {
+            SPI_freetuptable(SPI_tuptable);
+        }
         is_error = true;
     }
     PG_END_TRY();
@@ -567,8 +604,16 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
         // Allocate arrays for column names and values
         char **names = cloudsync_memory_alloc(ncols * sizeof(char*));
         if (!names) return DBRES_NOMEM;
+        if (!names) {
+            if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
+            return DBRES_NOMEM;
+        }
         char **values = cloudsync_memory_alloc(ncols * sizeof(char*));
-        if (!values) {cloudsync_memory_free(names); return DBRES_NOMEM;}
+        if (!values) {
+            cloudsync_memory_free(names);
+            if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
+            return DBRES_NOMEM;
+        }
 
         // Get column names - make copies to avoid pointing to internal memory
         for (int i = 0; i < ncols; i++) {
@@ -612,7 +657,9 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
                 cloudsync_memory_free(values);
                 char errmsg[1024];
                 snprintf(errmsg, sizeof(errmsg), "database_exec_callback aborted %d", cb_rc);
-                return cloudsync_set_error(data, errmsg, DBRES_ABORT);
+                rc = cloudsync_set_error(data, errmsg, DBRES_ABORT);
+                if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
+                return rc;
             }
         }
 
@@ -624,6 +671,7 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
         cloudsync_memory_free(values);
     }
 
+    if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
     return DBRES_OK;
 }
 
@@ -1280,6 +1328,7 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
     if (rc < 0 || SPI_processed == 0) {
         *names = NULL;
         *count = 0;
+        if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
         return DBRES_OK;
     }
     
@@ -1310,6 +1359,7 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
     
     *names = pk_names;
     *count = (int)n;
+    if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
     return DBRES_OK;
 }
 
@@ -1498,6 +1548,10 @@ int databasevm_step (dbvm_t *vm) {
                 // Execute once (non-row-returning or cursor open failed).
                 if (stmt->nparams == 0) SPI_execute_plan(stmt->plan, NULL, NULL, false, 0);
                 else SPI_execute_plan(stmt->plan, stmt->values, stmt->nulls, false, 0);
+                if (SPI_tuptable) {
+                    SPI_freetuptable(SPI_tuptable);
+                    SPI_tuptable = NULL;
+                }
 
                 stmt->executed_nonselect = true;
                 rc = DBRES_DONE;
@@ -1532,6 +1586,10 @@ void databasevm_finalize (dbvm_t *vm) {
     {
         clear_fetch_batch(stmt);
         close_portal(stmt);
+        if (SPI_tuptable) {
+            SPI_freetuptable(SPI_tuptable);
+            SPI_tuptable = NULL;
+        }
         
         if (stmt->plan_is_prepared && stmt->plan) {
             SPI_freeplan(stmt->plan);
@@ -1555,6 +1613,10 @@ void databasevm_reset (dbvm_t *vm) {
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
     clear_fetch_batch(stmt);
     close_portal(stmt);
+    if (SPI_tuptable) {
+        SPI_freetuptable(SPI_tuptable);
+        SPI_tuptable = NULL;
+    }
     stmt->executed_nonselect = false;
     databasevm_clear_bindings(vm);
 }
@@ -1565,6 +1627,10 @@ void databasevm_clear_bindings (dbvm_t *vm) {
     
     clear_fetch_batch(stmt);
     close_portal(stmt);
+    if (SPI_tuptable) {
+        SPI_freetuptable(SPI_tuptable);
+        SPI_tuptable = NULL;
+    }
     
     if (stmt->plan_is_prepared && stmt->plan) {
         SPI_freeplan(stmt->plan);
