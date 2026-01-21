@@ -62,8 +62,9 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     
     NSString *check_endpoint = [NSString stringWithFormat:@"%s://%s:%s/%s%s/%s", scheme.UTF8String, host.UTF8String, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database.UTF8String, site_id];
     NSString *upload_endpoint = [NSString stringWithFormat: @"%s://%s:%s/%s%s/%s/%s", scheme.UTF8String, host.UTF8String, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database.UTF8String, site_id, CLOUDSYNC_ENDPOINT_UPLOAD];
-    
-    return network_data_set_endpoints(data, (char *)authentication.UTF8String, (char *)check_endpoint.UTF8String, (char *)upload_endpoint.UTF8String);
+    NSString *apply_endpoint = [NSString stringWithFormat: @"%s://%s:%s/%s%s/%s/%s", scheme.UTF8String, host.UTF8String, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database.UTF8String, site_id, CLOUDSYNC_ENDPOINT_UPLOAD];
+
+    return network_data_set_endpoints(data, (char *)authentication.UTF8String, (char *)check_endpoint.UTF8String, (char *)upload_endpoint.UTF8String, (char *)apply_endpoint.UTF8String);
 }
 
 bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size) {

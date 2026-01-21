@@ -49,6 +49,7 @@ struct network_data {
     char        *authentication; // apikey or token
     char        *check_endpoint;
     char        *upload_endpoint;
+    char        *apply_endpoint;
 };
 
 typedef struct {
@@ -79,7 +80,7 @@ char *network_data_get_siteid (network_data *data) {
     return data->site_id;
 }
 
-bool network_data_set_endpoints (network_data *data, char *auth, char *check, char *upload) {
+bool network_data_set_endpoints (network_data *data, char *auth, char *check, char *upload, char *apply) {
     // sanity check
     if (!check || !upload) return false;
     
@@ -87,17 +88,20 @@ bool network_data_set_endpoints (network_data *data, char *auth, char *check, ch
     if (data->authentication) cloudsync_memory_free(data->authentication);
     if (data->check_endpoint) cloudsync_memory_free(data->check_endpoint);
     if (data->upload_endpoint) cloudsync_memory_free(data->upload_endpoint);
-    
+    if (data->apply_endpoint) cloudsync_memory_free(data->apply_endpoint);
+
     // clear pointers
     data->authentication = NULL;
     data->check_endpoint = NULL;
     data->upload_endpoint = NULL;
-    
+    data->apply_endpoint = NULL;
+
     // make a copy of the new endpoints
     char *auth_copy = NULL;
     char *check_copy = NULL;
     char *upload_copy = NULL;
-    
+    char *apply_copy = NULL;
+
     // auth is optional
     if (auth) {
         auth_copy = cloudsync_string_dup(auth);
@@ -109,16 +113,20 @@ bool network_data_set_endpoints (network_data *data, char *auth, char *check, ch
     upload_copy = cloudsync_string_dup(upload);
     if (!upload_copy) goto abort_endpoints;
     
+    apply_copy = cloudsync_string_dup(apply);
+    if (!apply_copy) goto abort_endpoints;
 
     data->authentication = auth_copy;
     data->check_endpoint = check_copy;
     data->upload_endpoint = upload_copy;
+    data->apply_endpoint = apply_copy;
     return true;
     
 abort_endpoints:
     if (auth_copy) cloudsync_memory_free(auth_copy);
     if (check_copy) cloudsync_memory_free(check_copy);
     if (upload_copy) cloudsync_memory_free(upload_copy);
+    if (apply_copy) cloudsync_memory_free(apply_copy);
     return false;
 }
 
@@ -128,6 +136,7 @@ void network_data_free (network_data *data) {
     if (data->authentication) cloudsync_memory_free(data->authentication);
     if (data->check_endpoint) cloudsync_memory_free(data->check_endpoint);
     if (data->upload_endpoint) cloudsync_memory_free(data->upload_endpoint);
+    if (data->apply_endpoint) cloudsync_memory_free(data->apply_endpoint);
     cloudsync_memory_free(data);
 }
 
@@ -462,7 +471,8 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     char *authentication = NULL;
     char *check_endpoint = NULL;
     char *upload_endpoint = NULL;
-    
+    char *apply_endpoint = NULL;
+
     char *conn_string_https = NULL;
     
     #ifndef SQLITE_WASM_EXTRA_INIT
@@ -543,11 +553,14 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     size_t requested = strlen(scheme) + strlen(host) + strlen(port_or_default) + strlen(CLOUDSYNC_ENDPOINT_PREFIX) + strlen(database) + 64;
     check_endpoint = (char *)cloudsync_memory_zeroalloc(requested);
     upload_endpoint = (char *)cloudsync_memory_zeroalloc(requested);
-    if ((!upload_endpoint) || (!check_endpoint)) goto finalize;
-    
-    snprintf(check_endpoint, requested, "%s://%s:%s/%s%s/%s", scheme, host, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database, data->site_id);
+    apply_endpoint = (char *)cloudsync_memory_zeroalloc(requested);
+
+    if ((!upload_endpoint) || (!check_endpoint) || (!apply_endpoint)) goto finalize;
+
+    snprintf(check_endpoint, requested, "%s://%s:%s/%s%s/%s/%s", scheme, host, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database, data->site_id, CLOUDSYNC_ENDPOINT_CHECK);
     snprintf(upload_endpoint, requested, "%s://%s:%s/%s%s/%s/%s", scheme, host, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database, data->site_id, CLOUDSYNC_ENDPOINT_UPLOAD);
-    
+    snprintf(apply_endpoint, requested, "%s://%s:%s/%s%s/%s/%s", scheme, host, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database, data->site_id, CLOUDSYNC_ENDPOINT_APPLY);
+
     result = true;
     
 finalize:
@@ -565,6 +578,7 @@ finalize:
         if (authentication) cloudsync_memory_free(authentication);
         if (check_endpoint) cloudsync_memory_free(check_endpoint);
         if (upload_endpoint) cloudsync_memory_free(upload_endpoint);
+        if (apply_endpoint) cloudsync_memory_free(apply_endpoint);
     }
         
     if (result) {
@@ -578,6 +592,9 @@ finalize:
         
         if (data->upload_endpoint) cloudsync_memory_free(data->upload_endpoint);
         data->upload_endpoint = upload_endpoint;
+
+        if (data->apply_endpoint) cloudsync_memory_free(data->apply_endpoint);
+        data->apply_endpoint = apply_endpoint;
     }
     
     // cleanup memory
@@ -777,13 +794,13 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     }
     
     char json_payload[2024];
-    snprintf(json_payload, sizeof(json_payload), "{\"url\":\"%s\"}", s3_url);
+    snprintf(json_payload, sizeof(json_payload), "{\"url\":\"%s\", \"dbVersionMin\":%d, \"dbVersionMax\":%d}", s3_url, db_version, new_db_version);
     
     // free res
     network_result_cleanup(&res);
     
     // notify remote host that we succesfully uploaded changes
-    res = network_receive_buffer(netdata, netdata->upload_endpoint, netdata->authentication, true, true, json_payload, CLOUDSYNC_HEADER_SQLITECLOUD);
+    res = network_receive_buffer(netdata, netdata->apply_endpoint, netdata->authentication, true, true, json_payload, CLOUDSYNC_HEADER_SQLITECLOUD);
     if (res.code != CLOUDSYNC_NETWORK_OK) {
         network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to notify BLOB upload to remote host.");
         network_result_cleanup(&res);
@@ -822,12 +839,11 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows) {
     int seq = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_SEQ);
     if (seq<0) {sqlite3_result_error(context, "Unable to retrieve seq.", -1); return -1;}
 
-    // http://uuid.g5.sqlite.cloud/v1/cloudsync/{dbname}/{site_id}/{db_version}/{seq}/check
-    // the data->check_endpoint stops after {site_id}, just need to append /{db_version}/{seq}/check
-    char endpoint[2024];
-    snprintf(endpoint, sizeof(endpoint), "%s/%" PRId64 "/%d/%s", netdata->check_endpoint, db_version, seq, CLOUDSYNC_ENDPOINT_CHECK);
-    
-    NETWORK_RESULT result = network_receive_buffer(netdata, endpoint, netdata->authentication, true, true, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
+    char json_payload[2024];
+    snprintf(json_payload, sizeof(json_payload), "{\"dbVersion\":%d, \"seq\":%d}", db_version, seq);
+
+    // http://uuid.g5.sqlite.cloud/v2/cloudsync/{dbname}/{site_id}/check
+    NETWORK_RESULT result = network_receive_buffer(netdata, netdata->check_endpoint, netdata->authentication, true, true, json_payload, CLOUDSYNC_HEADER_SQLITECLOUD);
     int rc = SQLITE_OK;
     if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
         rc = network_download_changes(context, result.buffer, pnrows);

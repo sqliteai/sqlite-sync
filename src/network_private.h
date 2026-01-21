@@ -8,9 +8,10 @@
 #ifndef __CLOUDSYNC_NETWORK_PRIVATE__
 #define __CLOUDSYNC_NETWORK_PRIVATE__
 
-#define CLOUDSYNC_ENDPOINT_PREFIX           "v1/cloudsync"
+#define CLOUDSYNC_ENDPOINT_PREFIX           "v2/cloudsync"
 #define CLOUDSYNC_ENDPOINT_UPLOAD           "upload"
 #define CLOUDSYNC_ENDPOINT_CHECK            "check"
+#define CLOUDSYNC_ENDPOINT_APPLY            "apply"
 #define CLOUDSYNC_DEFAULT_ENDPOINT_PORT     "443"
 #define CLOUDSYNC_HEADER_SQLITECLOUD        "Accept: sqlc/plain"
 
@@ -29,7 +30,7 @@ typedef struct {
 } NETWORK_RESULT;
 
 char *network_data_get_siteid (network_data *data);
-bool network_data_set_endpoints (network_data *data, char *auth, char *check, char *upload);
+bool network_data_set_endpoints (network_data *data, char *auth, char *check, char *upload, char *apply);
 
 bool network_compute_endpoints (sqlite3_context *context, network_data *data, const char *conn_string);
 bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size);
