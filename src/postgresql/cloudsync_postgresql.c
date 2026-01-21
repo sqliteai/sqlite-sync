@@ -1265,10 +1265,9 @@ Datum cloudsync_update_transfn (PG_FUNCTION_ARGS) {
     } else {
         payload = (cloudsync_update_payload *)PG_GETARG_POINTER(0);
         if (payload->mcxt == NULL || payload->mcxt != allocContext) {
-            elog(DEBUG1, "cloudsync_update_transfn repairing payload context payload=%p old_mcxt=%p new_mcxt=%p",
-           payload, payload->mcxt, allocContext);
-        payload->mcxt = allocContext;
-    }
+            elog(DEBUG1, "cloudsync_update_transfn repairing payload context payload=%p old_mcxt=%p new_mcxt=%p", payload, payload->mcxt, allocContext);
+            payload->mcxt = allocContext;
+        }
   }
 
     if (!payload) {
@@ -1583,6 +1582,7 @@ static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, Oid target_
     Oid argt[1] = {TEXTOID};
     Datum argv[1];
     char argn[1] = {' '};
+    bool argv_is_pointer = false;  // Track if argv[0] needs pfree on error
 
     switch (dv.dbtype) {
         case DBTYPE_INTEGER:
@@ -1596,6 +1596,7 @@ static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, Oid target_
         case DBTYPE_TEXT:
             argt[0] = TEXTOID;
             argv[0] = PointerGetDatum(cstring_to_text_with_len(dv.pval ? dv.pval : "", (int)(dv.len)));
+            argv_is_pointer = true;
             break;
         case DBTYPE_BLOB: {
             argt[0] = BYTEAOID;
@@ -1603,6 +1604,7 @@ static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, Oid target_
             SET_VARSIZE(ba, VARHDRSZ + dv.len);
             if (dv.len > 0) memcpy(VARDATA(ba), dv.pval, (size_t)dv.len);
             argv[0] = PointerGetDatum(ba);
+            argv_is_pointer = true;
         } break;
         case DBTYPE_NULL:
             if (out_isnull) *out_isnull = true;
@@ -1617,7 +1619,11 @@ static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, Oid target_
 
     // Cast to the target column type from the table schema.
     if (argt[0] == target_typoid) {
-        return pgvalue_create(argv[0], target_typoid, -1, InvalidOid, false);
+        pgvalue_t *result = pgvalue_create(argv[0], target_typoid, -1, InvalidOid, false);
+        if (!result && argv_is_pointer) {
+            pfree(DatumGetPointer(argv[0]));
+        }
+        return result;
     }
 
     StringInfoData castq;
@@ -1625,18 +1631,19 @@ static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, Oid target_
     appendStringInfo(&castq, "SELECT $1::%s", target_typname);
 
     int rc = SPI_execute_with_args(castq.data, 1, argt, argv, argn, true, 1);
-    if (rc != SPI_OK_SELECT || SPI_processed != 1) {
-        if (SPI_tuptable) {
-            SPI_freetuptable(SPI_tuptable);
-        }
+    if (rc != SPI_OK_SELECT || SPI_processed != 1 || !SPI_tuptable) {
+        if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
+        pfree(castq.data);
+        if (argv_is_pointer) pfree(DatumGetPointer(argv[0]));
         ereport(ERROR, (errmsg("cloudsync: failed to cast value to %s", target_typname)));
     }
     pfree(castq.data);
 
     bool typed_isnull = false;
+    // SPI_getbinval uses 1-based column indexing, but TupleDescAttr uses 0-based indexing
     Datum typed_value = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &typed_isnull);
-    int32 typmod = TupleDescAttr(SPI_tuptable->tupdesc, 1)->atttypmod;
-    Oid collation = TupleDescAttr(SPI_tuptable->tupdesc, 1)->attcollation;
+    int32 typmod = TupleDescAttr(SPI_tuptable->tupdesc, 0)->atttypmod;
+    Oid collation = TupleDescAttr(SPI_tuptable->tupdesc, 0)->attcollation;
     if (!typed_isnull) {
         Form_pg_attribute att = TupleDescAttr(SPI_tuptable->tupdesc, 0);
         typed_value = datumCopy(typed_value, att->attbyval, att->attlen);
@@ -1769,7 +1776,7 @@ static char * build_union_sql (void) {
         "ORDER BY n.nspname, c.relname";
         
         int rc = SPI_execute(sql, true, 0);
-        if (rc != SPI_OK_SELECT) {
+        if (rc != SPI_OK_SELECT || !SPI_tuptable) {
             ereport(ERROR, (errmsg("cloudsync: SPI_execute failed while listing *_cloudsync")));
         }
         
@@ -1855,7 +1862,8 @@ static char * build_union_sql (void) {
                              );
             int pkrc = SPI_execute(pkq.data, true, 0);
             pfree(pkq.data);
-            if (pkrc != SPI_OK_SELECT || SPI_processed == 0) {
+            if (pkrc != SPI_OK_SELECT || (SPI_processed == 0) || (!SPI_tuptable)) {
+                if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
                 ereport(ERROR, (errmsg("cloudsync: unable to resolve primary key for %s.%s", nsp, base)));
             }
             uint64 npk = SPI_processed;
@@ -1867,7 +1875,13 @@ static char * build_union_sql (void) {
                 TupleDesc pkd = SPI_tuptable->tupdesc;
                 char *pkname = SPI_getvalue(pkt, pkd, 1);
                 char *pktype = SPI_getvalue(pkt, pkd, 2);
-                if (!pkname || !pktype) ereport(ERROR, (errmsg("cloudsync: invalid pk metadata for %s.%s", nsp, base)));
+                if (!pkname || !pktype) {
+                    if (pkname) pfree(pkname);
+                    if (pktype) pfree(pktype);
+                    pfree(joincond.data);
+                    SPI_freetuptable(SPI_tuptable);
+                    ereport(ERROR, (errmsg("cloudsync: invalid pk metadata for %s.%s", nsp, base)));
+                }
                 
                 if (k > 0) appendStringInfoString(&joincond, " AND ");
                 appendStringInfo(&joincond,
@@ -1896,7 +1910,8 @@ static char * build_union_sql (void) {
                              );
             int colrc = SPI_execute(colq.data, true, 0);
             pfree(colq.data);
-            if (colrc != SPI_OK_SELECT) {
+            if (colrc != SPI_OK_SELECT || !SPI_tuptable) {
+                if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
                 ereport(ERROR, (errmsg("cloudsync: unable to resolve columns for %s.%s", nsp, base)));
             }
             uint64 ncols = SPI_processed;

@@ -2232,6 +2232,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         
         uint32_t rc = LZ4_decompress_safe(buffer, clone, blen, header.expanded_size);
         if (rc <= 0 || rc != header.expanded_size) {
+            if (clone) cloudsync_memory_free(clone);
             return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to decompress BLOB", DBRES_MISUSE);
         }
         

@@ -572,11 +572,11 @@ int database_exec (cloudsync_context *data, const char *sql) {
 int database_exec_callback (cloudsync_context *data, const char *sql, int (*callback)(void *xdata, int argc, char **values, char **names), void *xdata) {
     if (!sql) return cloudsync_set_error(data, "SQL statement is NULL", DBRES_ERROR);
     cloudsync_reset_error(data);
-    
+
     int rc;
     bool is_error = false;
     PG_TRY();
-    { 
+    {
         rc = SPI_execute(sql, true, 0);
     }
     PG_CATCH();
@@ -595,21 +595,33 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
     // Call callback for each row if provided
     if (callback && SPI_tuptable) {
         TupleDesc tupdesc = SPI_tuptable->tupdesc;
-        if (!tupdesc) return cloudsync_set_error(data, "Invalid tuple descriptor", DBRES_ERROR);
-        
-        int ncols = tupdesc->natts;
-        if (ncols <= 0) return DBRES_OK;
+        if (!tupdesc) {
+            SPI_freetuptable(SPI_tuptable);
+            return cloudsync_set_error(data, "Invalid tuple descriptor", DBRES_ERROR);
+        }
 
-        // Allocate arrays for column names and values
+        int ncols = tupdesc->natts;
+        if (ncols <= 0) {
+            SPI_freetuptable(SPI_tuptable);
+            return DBRES_OK;
+        }
+
+        // IMPORTANT: Save SPI state before any callback can modify it.
+        // Callbacks may execute SPI queries which overwrite global SPI_tuptable.
+        // We must copy all data we need BEFORE calling any callbacks.
+        uint64 nrows = SPI_processed;
+        SPITupleTable *saved_tuptable = SPI_tuptable;
+
+        // No rows to process - free tuptable and return success
+        if (nrows == 0) {
+            SPI_freetuptable(saved_tuptable);
+            return DBRES_OK;
+        }
+
+        // Allocate array for column names (shared across all rows)
         char **names = cloudsync_memory_alloc(ncols * sizeof(char*));
         if (!names) {
-            if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
-            return DBRES_NOMEM;
-        }
-        char **values = cloudsync_memory_alloc(ncols * sizeof(char*));
-        if (!values) {
-            cloudsync_memory_free(names);
-            if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
+            SPI_freetuptable(saved_tuptable);
             return DBRES_NOMEM;
         }
 
@@ -623,50 +635,84 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
             }
         }
 
-        // Process each row
-        for (uint64 row = 0; row < SPI_processed; row++) {
-            HeapTuple tuple = SPI_tuptable->vals[row];
-            if (!tuple) continue;
-
-            // Get values for this row
+        // Pre-extract ALL row values before calling any callbacks.
+        // This prevents SPI state corruption when callbacks run queries.
+        char ***all_values = cloudsync_memory_alloc(nrows * sizeof(char**));
+        if (!all_values) {
             for (int i = 0; i < ncols; i++) {
-                bool isnull;
-                SPI_getbinval(tuple, tupdesc, i + 1, &isnull);
-                values[i] = (isnull) ? NULL : SPI_getvalue(tuple, tupdesc, i + 1);
+                if (names[i]) cloudsync_memory_free(names[i]);
             }
+            cloudsync_memory_free(names);
+            SPI_freetuptable(saved_tuptable);
+            return DBRES_NOMEM;
+        }
 
-            // Call user callback
-            int cb_rc = callback(xdata, ncols, values, names);
-
-            // Cleanup values (SPI_getvalue uses palloc)
-            for (int i = 0; i < ncols; i++) {
-                if (values[i]) {
-                    pfree(values[i]);
-                    values[i] = NULL;
+        // Extract values from all tuples
+        for (uint64 row = 0; row < nrows; row++) {
+            HeapTuple tuple = saved_tuptable->vals[row];
+            all_values[row] = cloudsync_memory_alloc(ncols * sizeof(char*));
+            if (!all_values[row]) {
+                // Cleanup already allocated rows
+                for (uint64 r = 0; r < row; r++) {
+                    for (int c = 0; c < ncols; c++) {
+                        if (all_values[r][c]) pfree(all_values[r][c]);
+                    }
+                    cloudsync_memory_free(all_values[r]);
                 }
-            }
-            
-            if (cb_rc != 0) {
-                // Free our name copies
+                cloudsync_memory_free(all_values);
                 for (int i = 0; i < ncols; i++) {
                     if (names[i]) cloudsync_memory_free(names[i]);
                 }
                 cloudsync_memory_free(names);
-                cloudsync_memory_free(values);
-                char errmsg[1024];
-                snprintf(errmsg, sizeof(errmsg), "database_exec_callback aborted %d", cb_rc);
-                rc = cloudsync_set_error(data, errmsg, DBRES_ABORT);
-                if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
-                return rc;
+                SPI_freetuptable(saved_tuptable);
+                return DBRES_NOMEM;
+            }
+
+            if (!tuple) {
+                for (int i = 0; i < ncols; i++) all_values[row][i] = NULL;
+                continue;
+            }
+
+            for (int i = 0; i < ncols; i++) {
+                bool isnull;
+                SPI_getbinval(tuple, tupdesc, i + 1, &isnull);
+                all_values[row][i] = (isnull) ? NULL : SPI_getvalue(tuple, tupdesc, i + 1);
             }
         }
 
-        // Free our name copies
+        // Free SPI_tuptable BEFORE calling callbacks - we have all data we need
+        SPI_freetuptable(saved_tuptable);
+        SPI_tuptable = NULL;
+
+        // Now process each row - callbacks can safely run SPI queries
+        int result = DBRES_OK;
+        for (uint64 row = 0; row < nrows; row++) {
+            int cb_rc = callback(xdata, ncols, all_values[row], names);
+
+            if (cb_rc != 0) {
+                char errmsg[1024];
+                snprintf(errmsg, sizeof(errmsg), "database_exec_callback aborted %d", cb_rc);
+                result = cloudsync_set_error(data, errmsg, DBRES_ABORT);
+                break;
+            }
+        }
+
+        // Cleanup all extracted values
+        for (uint64 row = 0; row < nrows; row++) {
+            for (int i = 0; i < ncols; i++) {
+                if (all_values[row][i]) pfree(all_values[row][i]);
+            }
+            cloudsync_memory_free(all_values[row]);
+        }
+        cloudsync_memory_free(all_values);
+
+        // Free column names
         for (int i = 0; i < ncols; i++) {
             if (names[i]) cloudsync_memory_free(names[i]);
         }
         cloudsync_memory_free(names);
-        cloudsync_memory_free(values);
+
+        return result;
     }
 
     if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
@@ -772,7 +818,7 @@ static int64_t database_count_bind (cloudsync_context *data, const char *sql, co
     
     int64_t count = 0;
     int rc = SPI_execute_with_args(sql, 1, argtypes, values, nulls, true, 0);
-    if (rc >= 0 && SPI_processed > 0) {
+    if (rc >= 0 && SPI_processed > 0 && SPI_tuptable) {
         bool isnull;
         Datum d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
         if (!isnull) count = DatumGetInt64(d);
@@ -1334,7 +1380,7 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
     char **pk_names = cloudsync_memory_zeroalloc(n * sizeof(char*));
     if (!pk_names) return DBRES_NOMEM;
     
-    for (int i = 0; i < n; i++) {
+    for (uint64_t i = 0; i < n; i++) {
         HeapTuple tuple = SPI_tuptable->vals[i];
         bool isnull;
         Datum datum = SPI_getbinval(tuple, SPI_tuptable->tupdesc, 1, &isnull);
@@ -1351,6 +1397,7 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
                 if (pk_names[j]) cloudsync_memory_free(pk_names[j]);
             }
             cloudsync_memory_free(pk_names);
+            if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
             return DBRES_NOMEM;
         }
     }
@@ -1843,14 +1890,14 @@ const void *database_column_blob (dbvm_t *vm, int index) {
         return NULL;
     }
     
-    int len = VARSIZE(ba) - VARHDRSZ;
+    Size len = VARSIZE(ba) - VARHDRSZ;
     void *out = palloc(len);
     if (!out) {
         MemoryContextSwitchTo(old);
         return NULL;
     }
     
-    memcpy(out, VARDATA(ba), len);
+    memcpy(out, VARDATA(ba), (size_t)len);
     MemoryContextSwitchTo(old);
     
     return out;
