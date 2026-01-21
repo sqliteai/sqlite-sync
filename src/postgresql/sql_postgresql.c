@@ -43,14 +43,14 @@ const char * const SQL_SETTINGS_LOAD_TABLE =
     "SELECT lower(tbl_name), lower(col_name), key, value FROM cloudsync_table_settings ORDER BY tbl_name;";
 
 const char * const SQL_CREATE_SETTINGS_TABLE =
-    "CREATE TABLE IF NOT EXISTS cloudsync_settings (key TEXT PRIMARY KEY NOT NULL, value TEXT);" 
-    "CREATE TABLE IF NOT EXISTS app_schema_version ("
+    "CREATE TABLE IF NOT EXISTS cloudsync_settings (key TEXT PRIMARY KEY NOT NULL, value TEXT);"
+    "CREATE TABLE IF NOT EXISTS public.app_schema_version ("
     "version BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY"
     ");"
     "CREATE OR REPLACE FUNCTION bump_app_schema_version() "
     "RETURNS event_trigger AS $$ "
     "BEGIN "
-    "INSERT INTO app_schema_version DEFAULT VALUES; "
+    "INSERT INTO public.app_schema_version DEFAULT VALUES; "
     "END;"
     "$$ LANGUAGE plpgsql;"
     "DROP EVENT TRIGGER IF EXISTS app_schema_change;"
