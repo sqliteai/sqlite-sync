@@ -199,6 +199,36 @@ If you modify the CloudSync source code, rebuild the CLI image and restart:
 make postgres-supabase-rebuild SUPABASE_WORKDIR=~/supabase-local
 ```
 
+### Supabase Realtime Migration Error (app_schema_version)
+
+If Supabase Realtime fails to start with:
+
+```
+ERROR 42P01 (undefined_table) relation "app_schema_version" does not exist
+```
+
+it's caused by CloudSync's `app_schema_change` event trigger firing during
+migrations while Realtime uses a restricted `search_path`. Fix it by
+fully qualifying the table in the trigger function:
+
+```sql
+CREATE TABLE IF NOT EXISTS public.app_schema_version (
+  version BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY
+);
+
+CREATE OR REPLACE FUNCTION bump_app_schema_version()
+RETURNS event_trigger AS $$
+BEGIN
+  INSERT INTO public.app_schema_version DEFAULT VALUES;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP EVENT TRIGGER IF EXISTS app_schema_change;
+CREATE EVENT TRIGGER app_schema_change
+ON ddl_command_end
+EXECUTE FUNCTION bump_app_schema_version();
+```
+
 ## Development Workflow
 
 ### 1. Make Changes
