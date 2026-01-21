@@ -49,6 +49,7 @@
 #define CLOUDSYNC_INIT_NTABLES                  64
 #define CLOUDSYNC_MIN_DB_VERSION                0
 
+#define CLOUDSYNC_PAYLOAD_SKIP_SCHEMA_HASH_CHECK        1
 #define CLOUDSYNC_PAYLOAD_MINBUF_SIZE                   512*1024
 #define CLOUDSYNC_PAYLOAD_SIGNATURE                     'CLSY'
 #define CLOUDSYNC_PAYLOAD_VERSION_ORIGNAL               1
@@ -2197,6 +2198,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     header.nrows = ntohl(header.nrows);
     header.schema_hash = ntohll(header.schema_hash);
     
+    #if !CLOUDSYNC_PAYLOAD_SKIP_SCHEMA_HASH_CHECK
     if (!data || header.schema_hash != data->schema_hash) {
         if (!database_check_schema_hash(data, header.schema_hash)) {
             char buffer[1024];
@@ -2204,6 +2206,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
             return cloudsync_set_error(data, buffer, DBRES_MISUSE);
         }
     }
+    #endif
     
     // sanity check header
     if ((header.signature != CLOUDSYNC_PAYLOAD_SIGNATURE) || (header.ncols == 0)) {
