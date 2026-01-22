@@ -541,7 +541,7 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     #endif
     
     if (query != NULL) {
-        char value[MAX_QUERY_VALUE_LEN];
+        char value[CLOUDSYNC_SESSION_TOKEN_MAXSIZE];
         if (!authentication && network_extract_query_param(query, "apikey", value, sizeof(value)) == 0) {
             authentication = network_authentication_token("apikey", value);
         }
