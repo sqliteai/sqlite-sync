@@ -1,3 +1,6 @@
+-- 'Unittest'
+
+\echo '\nRunning unittest ...'
 \connect postgres
 \ir helper_psql_conn_setup.sql
 

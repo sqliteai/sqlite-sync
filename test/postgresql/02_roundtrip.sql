@@ -1,3 +1,6 @@
+-- '2 db roundtrip test'
+
+\echo '\nRunning two-db roundtrip test ...'
 DROP DATABASE IF EXISTS cloudsync_test_2;
 CREATE DATABASE cloudsync_test_2;
 \connect cloudsync_test_2

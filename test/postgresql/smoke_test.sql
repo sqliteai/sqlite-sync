@@ -5,17 +5,20 @@
 \echo 'Running smoke_test...'
 
 \ir helper_psql_conn_setup.sql
-\set ON_ERROR_STOP on
+\set ON_ERROR_STOP off
 \set fail 0
 
-\echo '\nRunning 01_unittest.sql...' 
 \ir 01_unittest.sql
-
-\echo '\nRunning 02_2db_roundtrip.sql...'
-\ir 02_2db_roundtrip.sql
-
-\echo '\nRunning 03_3db_multiple_roundtrip.sql...'
-\ir 03_3db_multiple_roundtrip.sql
+\ir 02_roundtrip.sql
+\ir 03_multiple_roundtrip.sql
+\ir 04_colversion_skew.sql
+\ir 04_colversion_skew.sql
+\ir 05_delete_recreate_cycle.sql
+\ir 06_out_of_order_delivery.sql
+\ir 07_delete_vs_update.sql
+\ir 08_resurrect_delayed_delete.sql
+\ir 09_multicol_concurrent_edits.sql
+\ir 10_empty_payload_noop.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'
