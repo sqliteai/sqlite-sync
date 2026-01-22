@@ -1704,9 +1704,19 @@ const char *databasevm_sql (dbvm_t *vm) {
 
 // MARK: - BINDING -
 
+static int databasevm_bind_null_type (dbvm_t *vm, int index, Oid t) {
+    int rc = databasevm_bind_null(vm, index);
+    if (rc != DBRES_OK) return rc;
+    int idx = index - 1;
+
+    pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    stmt->types[idx] = t;
+    return rc;
+}
+
 int databasevm_bind_blob (dbvm_t *vm, int index, const void *value, uint64_t size) {
     if (!vm || index < 1) return DBRES_ERROR;
-    if (!value) return databasevm_bind_null(vm, index);
+    if (!value) return databasevm_bind_null_type(vm, index, BYTEAOID);
     
     // validate size fits Size and won't overflow
     if (size > (uint64) (MaxAllocSize - VARHDRSZ)) return DBRES_NOMEM;
@@ -1770,7 +1780,7 @@ int databasevm_bind_null (dbvm_t *vm, int index) {
     
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
     stmt->values[idx] = (Datum)0;
-    stmt->types[idx] = UNKNOWNOID;
+    stmt->types[idx] = BYTEAOID;
     stmt->nulls[idx] = 'n';
     
     if (stmt->nparams < idx + 1) stmt->nparams = idx + 1;
@@ -1779,7 +1789,7 @@ int databasevm_bind_null (dbvm_t *vm, int index) {
 
 int databasevm_bind_text (dbvm_t *vm, int index, const char *value, int size) {
     if (!vm || index < 1) return DBRES_ERROR;
-    if (!value) return databasevm_bind_null(vm, index);
+    if (!value) return databasevm_bind_null_type(vm, index, TEXTOID);
     
     // validate size fits Size and won't overflow
     if (size < 0) size = (int)strlen(value);
@@ -1804,7 +1814,7 @@ int databasevm_bind_text (dbvm_t *vm, int index, const char *value, int size) {
 
 int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value) {
     if (!vm) return DBRES_ERROR;
-    if (!value) return databasevm_bind_null(vm, index);
+    if (!value) return databasevm_bind_null_type(vm, index, TEXTOID);
 
     // validate index bounds properly (1-based index)
     if (index < 1) return DBRES_ERROR;
