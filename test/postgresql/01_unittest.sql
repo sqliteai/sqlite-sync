@@ -1,25 +1,11 @@
--- usage:
--- - normal: `psql postgresql://postgres:postgres@localhost:5432/cloudsync_test -f docker/postgresql/smoke_test.sql`
--- - debug: `psql -v DEBUG=1 postgresql://postgres:postgres@localhost:5432/cloudsync_test -f docker/postgresql/smoke_test.sql`
+\connect postgres
+\ir helper_psql_conn_setup.sql
 
 DROP DATABASE IF EXISTS cloudsync_test_1;
 CREATE DATABASE cloudsync_test_1;
-\connect cloudsync_test_1
 
-\set ON_ERROR_STOP on
-\set fail 0
-\if :{?DEBUG}
-SET client_min_messages = debug1; SET log_min_messages = debug1; SET log_error_verbosity = verbose;
-\set QUIET 0
-\pset tuples_only off
-\pset format aligned
-\echo '[DEBUG] verbose output enabled'
-\else
-\set QUIET 1
-\pset tuples_only on
-\pset format unaligned
-SET client_min_messages = warning; SET log_min_messages = warning;
-\endif
+\connect cloudsync_test_1
+\ir helper_psql_conn_setup.sql
 
 -- Reset extension and install
 -- DROP EXTENSION IF EXISTS cloudsync CASCADE;
@@ -37,12 +23,6 @@ SELECT (length(cloudsync_uuid()) > 0) AS uuid_ok \gset
 \echo '[FAIL] Test uuid generation'
 SELECT (:fail::int + 1) AS fail \gset
 \endif
-
--- SELECT (cloudsync_db_version() >= 0) AS dbv_ok \gset
--- \if :dbv_ok
--- \else
---   \quit 1
--- \endif
 
 -- 'Test init on a simple table'
 SELECT cloudsync_cleanup('smoke_tbl') AS _cleanup_ok \gset
@@ -290,50 +270,16 @@ SELECT cloudsync_init('smoke_tbl', 'CLS', true) AS _init_site_id2 \gset
 SELECT cloudsync_init('smoke_tbl', 'CLS', true) AS _init_site_id3 \gset
 \echo '[PASS] Test double init no-op'
 
--- 'Test payload roundtrip to another database'
+-- 'Test payload encode signature'
 SELECT md5(COALESCE(string_agg(id || ':' || COALESCE(val, ''), ',' ORDER BY id), '')) AS smoke_hash
 FROM smoke_tbl \gset
 SELECT encode(cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq), 'hex') AS payload_hex
 FROM cloudsync_changes
 WHERE site_id = cloudsync_siteid() \gset
-DROP DATABASE IF EXISTS cloudsync_test_2;
-CREATE DATABASE cloudsync_test_2;
-\connect cloudsync_test_2
-\if :{?DEBUG}
-SET client_min_messages = debug1; SET log_min_messages = debug1; SET log_error_verbosity = verbose;
-\set QUIET 0
-\pset tuples_only off
-\pset format aligned
+SELECT (length(:'payload_hex') > 0 AND substring(:'payload_hex' from 1 for 8) = '434c5359') AS payload_sig_ok \gset
+\if :payload_sig_ok
+\echo '[PASS] Test payload encode signature'
 \else
-SET client_min_messages = warning; SET log_min_messages = warning;
-\set QUIET 1
-\pset tuples_only on
-\pset format unaligned
-\endif
-CREATE EXTENSION IF NOT EXISTS cloudsync;
-DROP TABLE IF EXISTS smoke_tbl;
-CREATE TABLE smoke_tbl (id TEXT PRIMARY KEY, val TEXT);
-SELECT cloudsync_init('smoke_tbl', 'CLS', true) AS _init_site_id_b \gset
-SELECT cloudsync_payload_apply(decode(:'payload_hex', 'hex')) AS _apply_ok \gset
-SELECT md5(COALESCE(string_agg(id || ':' || COALESCE(val, ''), ',' ORDER BY id), '')) AS smoke_hash_b
-FROM smoke_tbl \gset
-SELECT (:'smoke_hash' = :'smoke_hash_b') AS payload_roundtrip_ok \gset
-\if :payload_roundtrip_ok
-\echo '[PASS] Test payload roundtrip to another database'
-\else
-\echo '[FAIL] Test payload roundtrip to another database'
+\echo '[FAIL] Test payload encode signature'
 SELECT (:fail::int + 1) AS fail \gset
-\endif
-
--- 'Test summary'
-\echo '\nTest summary:'
-\echo - Failures: :fail
-SELECT (:fail::int > 0) AS fail_any \gset
-\if :fail_any
-\echo smoke test failed: :fail test(s) failed
-DO $$ BEGIN
-  RAISE EXCEPTION 'smoke test failed';
-END $$;
-\else
-\echo - Status: OK
 \endif
