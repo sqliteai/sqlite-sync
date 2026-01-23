@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define CLOUDSYNC_VERSION                       "0.9.6"
+#define CLOUDSYNC_VERSION                       "0.9.7"
 #define CLOUDSYNC_MAX_TABLENAME_LEN             512
 
 #define CLOUDSYNC_VALUE_NOTSET                  -1
@@ -77,6 +77,8 @@ int cloudsync_errcode (cloudsync_context *data);
 void cloudsync_reset_error (cloudsync_context *data);
 int cloudsync_commit_hook (void *ctx);
 void cloudsync_rollback_hook (void *ctx);
+void cloudsync_set_schema (cloudsync_context *data, const char *schema);
+const char *cloudsync_schema (cloudsync_context *data);
 
 // Payload
 int    cloudsync_payload_apply (cloudsync_context *data, const char *payload, int blen, int *nrows);
@@ -100,6 +102,7 @@ const char *table_colname (cloudsync_table_context *table, int index);
 char **table_pknames (cloudsync_table_context *table);
 void table_set_pknames (cloudsync_table_context *table, char **pknames);
 bool table_algo_isgos (cloudsync_table_context *table);
+const char *table_schema (cloudsync_table_context *table);
 int table_remove (cloudsync_context *data, cloudsync_table_context *table);
 void table_free (cloudsync_table_context *table);
 

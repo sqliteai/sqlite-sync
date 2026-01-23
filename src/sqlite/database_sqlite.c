@@ -173,7 +173,22 @@ char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_na
 char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, const char *table_name, const char *except_col) {
     UNUSED_PARAMETER(data);
 
-    return cloudsync_memory_mprintf(SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL, table_name, except_col);
+    char *meta_ref = database_build_meta_ref(NULL, table_name);
+    if (!meta_ref) return NULL;
+
+    char *result = cloudsync_memory_mprintf(SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL, meta_ref, except_col);
+    cloudsync_memory_free(meta_ref);
+    return result;
+}
+
+char *database_build_meta_ref(const char *schema, const char *table_name) {
+    // schema unused in SQLite
+    return cloudsync_memory_mprintf("%s_cloudsync", table_name);
+}
+
+char *database_build_base_ref(const char *schema, const char *table_name) {
+    // schema unused in SQLite
+    return cloudsync_string_dup(table_name);
 }
 
 // MARK: - PRIVATE -

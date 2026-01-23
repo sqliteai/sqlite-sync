@@ -166,16 +166,16 @@ const char * const SQL_BUILD_SELECT_COLS_BY_PK_FMT =
     "SELECT 'SELECT %s%w%s FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'";
 
 const char * const SQL_CLOUDSYNC_ROW_EXISTS_BY_PK =
-    "SELECT EXISTS(SELECT 1 FROM \"%w_cloudsync\" WHERE pk = ? LIMIT 1);";
+    "SELECT EXISTS(SELECT 1 FROM \"%w\" WHERE pk = ? LIMIT 1);";
 
 const char * const SQL_CLOUDSYNC_UPDATE_COL_BUMP_VERSION =
-    "UPDATE \"%w_cloudsync\" "
+    "UPDATE \"%w\" "
     "SET col_version = CASE col_version %% 2 WHEN 0 THEN col_version + 1 ELSE col_version + 2 END, "
     "db_version = ?, seq = ?, site_id = 0 "
     "WHERE pk = ? AND col_name = '%s';";
 
 const char * const SQL_CLOUDSYNC_UPSERT_COL_INIT_OR_BUMP_VERSION =
-    "INSERT INTO \"%w_cloudsync\" (pk, col_name, col_version, db_version, seq, site_id) "
+    "INSERT INTO \"%w\" (pk, col_name, col_version, db_version, seq, site_id) "
     "SELECT ?, '%s', 1, ?, ?, 0 "
     "WHERE 1 "
     "ON CONFLICT DO UPDATE SET "
@@ -183,51 +183,51 @@ const char * const SQL_CLOUDSYNC_UPSERT_COL_INIT_OR_BUMP_VERSION =
     "db_version = ?, seq = ?, site_id = 0;";
 
 const char * const SQL_CLOUDSYNC_UPSERT_RAW_COLVERSION =
-    "INSERT INTO \"%w_cloudsync\" (pk, col_name, col_version, db_version, seq, site_id ) "
+    "INSERT INTO \"%w\" (pk, col_name, col_version, db_version, seq, site_id ) "
     "SELECT ?, ?, ?, ?, ?, 0 "
     "WHERE 1 "
     "ON CONFLICT DO UPDATE SET "
-    "col_version = \"%w_cloudsync\".col_version + 1, db_version = ?, seq = ?, site_id = 0;";
+    "col_version = \"%w\".col_version + 1, db_version = ?, seq = ?, site_id = 0;";
 
 const char * const SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL =
-    "DELETE FROM \"%w_cloudsync\" WHERE pk=? AND col_name!='%s';";
+    "DELETE FROM \"%w\" WHERE pk=? AND col_name!='%s';";
 
 const char * const SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL =
-    "UPDATE OR REPLACE \"%w_cloudsync\" "
+    "UPDATE OR REPLACE \"%w\" "
     "SET pk=?, db_version=?, col_version=1, seq=cloudsync_seq(), site_id=0 "
     "WHERE (pk=? AND col_name!='%s');";
 
 const char * const SQL_CLOUDSYNC_GET_COL_VERSION_OR_ROW_EXISTS =
     "SELECT COALESCE("
-    "(SELECT col_version FROM \"%w_cloudsync\" WHERE pk=? AND col_name='%s'), "
-    "(SELECT 1 FROM \"%w_cloudsync\" WHERE pk=?)"
+    "(SELECT col_version FROM \"%w\" WHERE pk=? AND col_name='%s'), "
+    "(SELECT 1 FROM \"%w\" WHERE pk=?)"
     ");";
 
 const char * const SQL_CLOUDSYNC_INSERT_RETURN_CHANGE_ID =
-    "INSERT OR REPLACE INTO \"%w_cloudsync\" "
+    "INSERT OR REPLACE INTO \"%w\" "
     "(pk, col_name, col_version, db_version, seq, site_id) "
     "VALUES (?, ?, ?, cloudsync_db_version_next(?), ?, ?) "
     "RETURNING ((db_version << 30) | seq);";
 
 const char * const SQL_CLOUDSYNC_TOMBSTONE_PK_EXCEPT_COL =
-    "UPDATE \"%w_cloudsync\" "
+    "UPDATE \"%w\" "
     "SET col_version = 0, db_version = cloudsync_db_version_next(?) "
     "WHERE pk=? AND col_name!='%s';";
 
 const char * const SQL_CLOUDSYNC_SELECT_COL_VERSION_BY_PK_COL =
-    "SELECT col_version FROM \"%w_cloudsync\" WHERE pk=? AND col_name=?;";
+    "SELECT col_version FROM \"%w\" WHERE pk=? AND col_name=?;";
 
 const char * const SQL_CLOUDSYNC_SELECT_SITE_ID_BY_PK_COL =
-    "SELECT site_id FROM \"%w_cloudsync\" WHERE pk=? AND col_name=?;";
+    "SELECT site_id FROM \"%w\" WHERE pk=? AND col_name=?;";
 
 const char * const SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID =
     "SELECT name, cid FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid;";
 
 const char * const SQL_DROP_CLOUDSYNC_TABLE =
-    "DROP TABLE IF EXISTS \"%w_cloudsync\";";
+    "DROP TABLE IF EXISTS \"%w\";";
 
 const char * const SQL_CLOUDSYNC_DELETE_COLS_NOT_IN_SCHEMA_OR_PKCOL =
-    "DELETE FROM \"%w_cloudsync\" WHERE \"col_name\" NOT IN ("
+    "DELETE FROM \"%w\" WHERE \"col_name\" NOT IN ("
     "SELECT name FROM pragma_table_info('%q') UNION SELECT '%s'"
     ")";
 
@@ -236,11 +236,11 @@ const char * const SQL_PRAGMA_TABLEINFO_PK_QUALIFIED_COLLIST_FMT =
     "FROM pragma_table_info('%s') WHERE pk>0 ORDER BY pk;";
 
 const char * const SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK =
-    "DELETE FROM \"%w_cloudsync\" "
+    "DELETE FROM \"%w\" "
     "WHERE (\"col_name\" != '%s' OR (\"col_name\" = '%s' AND col_version %% 2 != 0)) "
     "AND NOT EXISTS ("
     "SELECT 1 FROM \"%w\" "
-    "WHERE \"%w_cloudsync\".pk = cloudsync_pk_encode(%s) LIMIT 1"
+    "WHERE \"%w\".pk = cloudsync_pk_encode(%s) LIMIT 1"
     ");";
 
 const char * const SQL_PRAGMA_TABLEINFO_PK_COLLIST =
@@ -255,13 +255,13 @@ const char * const SQL_PRAGMA_TABLEINFO_PK_DECODE_SELECTLIST =
 
 const char * const SQL_CLOUDSYNC_INSERT_MISSING_PKS_FROM_BASE_EXCEPT_SYNC =
     "SELECT cloudsync_insert('%q', %s) "
-    "FROM (SELECT %s FROM \"%w\" EXCEPT SELECT %s FROM \"%w_cloudsync\");";
+    "FROM (SELECT %s FROM \"%w\" EXCEPT SELECT %s FROM \"%w\");";
 
 const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL =
     "WITH _cstemp1 AS (SELECT cloudsync_pk_encode(%s) AS pk FROM \"%w\") "
     "SELECT _cstemp1.pk FROM _cstemp1 "
     "WHERE NOT EXISTS ("
-    "SELECT 1 FROM \"%w_cloudsync\" _cstemp2 "
+    "SELECT 1 FROM \"%w\" _cstemp2 "
     "WHERE _cstemp2.pk = _cstemp1.pk AND _cstemp2.col_name = ?"
     ");";
 

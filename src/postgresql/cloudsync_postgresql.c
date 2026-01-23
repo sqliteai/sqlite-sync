@@ -100,10 +100,23 @@ static cloudsync_context *get_cloudsync_context(void) {
         if (!data) {
             ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Not enough memory to create a database context")));
         }
-        cloudsync_pg_context_init(data);
+        // Set early to prevent infinite recursion: during init, SQL queries may call
+        // cloudsync_schema() which calls get_cloudsync_context(). Without early assignment,
+        // each nested call sees NULL and tries to reinitialize, causing stack overflow.
         pg_cloudsync_context = data;
+        PG_TRY();
+        {
+            cloudsync_pg_context_init(data);
+        }
+        PG_CATCH();
+        {
+            pg_cloudsync_context = NULL;
+            cloudsync_context_free(data);
+            PG_RE_THROW();
+        }
+        PG_END_TRY();
     }
-    
+
     return pg_cloudsync_context;
 }
 
@@ -273,6 +286,12 @@ static bytea *cloudsync_init_internal (cloudsync_context *data, const char *tabl
             rc = database_commit_savepoint(data, "cloudsync_init");
             if (rc != DBRES_OK) {
                 ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to release cloudsync_init savepoint: %s", database_errmsg(data))));
+            }
+
+            // Persist schema to settings now that the settings table exists
+            const char *cur_schema = cloudsync_schema(data);
+            if (cur_schema) {
+                dbutils_settings_set_key_value(data, "schema", cur_schema);
             }
         } else {
             // In case of error, rollback transaction
@@ -1484,6 +1503,44 @@ Datum cloudsync_payload_encode (PG_FUNCTION_ARGS) {
     PG_RETURN_NULL();
 }
 
+// MARK: - Schema -
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_set_schema);
+Datum pg_cloudsync_set_schema (PG_FUNCTION_ARGS) {
+    const char *schema = NULL;
+
+    if (!PG_ARGISNULL(0)) {
+        schema = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    }
+
+    cloudsync_context *data = get_cloudsync_context();
+    cloudsync_set_schema(data, schema);
+
+    // Persist schema to settings so it is restored on context re-initialization.
+    // Only persist if settings table exists (it may not exist before cloudsync_init).
+    int spi_rc = SPI_connect();
+    if (spi_rc == SPI_OK_CONNECT) {
+        if (database_table_exists(data, "cloudsync_settings")) {
+            dbutils_settings_set_key_value(data, "schema", schema);
+        }
+        SPI_finish();
+    }
+
+    PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_schema);
+Datum pg_cloudsync_schema (PG_FUNCTION_ARGS) {
+    cloudsync_context *data = get_cloudsync_context();
+    const char *schema = cloudsync_schema(data);
+
+    if (!schema) {
+        PG_RETURN_NULL();
+    }
+    
+    PG_RETURN_TEXT_P(cstring_to_text(schema));
+}
+
 // MARK: - Changes -
 
 // Encode a single value using cloudsync pk encoding
@@ -2008,21 +2065,27 @@ static char * build_union_sql (void) {
     return result;
 }
 
-static Oid lookup_column_type_oid (const char *tbl, const char *col_name) {
+static Oid lookup_column_type_oid (const char *tbl, const char *col_name, const char *schema) {
     // SPI_connect not needed here
     if (strcmp(col_name, CLOUDSYNC_TOMBSTONE_VALUE) == 0) return BYTEAOID;
-    
-    // lookup table OID (search_path-aware)
-    Oid relid = RelnameGetRelid(tbl);
-    if (!OidIsValid(relid)) ereport(ERROR, (errmsg("cloudsync: table \"%s\" not found (check search_path)", tbl)));
-        
+
+    // lookup table OID with optional schema qualification
+    Oid relid;
+    if (schema) {
+        Oid nspid = get_namespace_oid(schema, false);
+        relid = get_relname_relid(tbl, nspid);
+    } else {
+        relid = RelnameGetRelid(tbl);
+    }
+    if (!OidIsValid(relid)) ereport(ERROR, (errmsg("cloudsync: table \"%s\" not found (schema: %s)", tbl, schema ? schema : "search_path")));
+
     // find attribute
     int attnum = get_attnum(relid, col_name);
     if (attnum == InvalidAttrNumber) ereport(ERROR, (errmsg("cloudsync: column \"%s\" not found in table \"%s\"", col_name, tbl)));
-        
+
     Oid typoid = get_atttype(relid, attnum);
     if (!OidIsValid(typoid)) ereport(ERROR, (errmsg("cloudsync: could not resolve type for %s.%s", tbl, col_name)));
-    
+
     return typoid;
 }
 
@@ -2213,7 +2276,7 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
         Oid target_typoid = InvalidOid;
         char *target_typname = NULL;
         if (!is_tombstone) {
-            target_typoid = lookup_column_type_oid(insert_tbl, insert_name);
+            target_typoid = lookup_column_type_oid(insert_tbl, insert_name, cloudsync_schema(data));
             target_typname = format_type_be(target_typoid);
         }
 

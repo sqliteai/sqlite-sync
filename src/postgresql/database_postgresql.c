@@ -138,7 +138,11 @@ char *sql_escape_name (const char *name, char *buffer, size_t bsize) {
 }
 
 char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_name) {
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_NONPK_COLS_BY_PK, table_name);
+    char *qualified = database_build_base_ref(cloudsync_schema(data), table_name);
+    if (!qualified) return NULL;
+
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_NONPK_COLS_BY_PK, qualified);
+    cloudsync_memory_free(qualified);
     if (!sql) return NULL;
 
     char *query = NULL;
@@ -149,7 +153,11 @@ char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_n
 }
 
 char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name) {
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_DELETE_ROW_BY_PK, table_name);
+    char *qualified = database_build_base_ref(cloudsync_schema(data), table_name);
+    if (!qualified) return NULL;
+
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_DELETE_ROW_BY_PK, qualified);
+    cloudsync_memory_free(qualified);
     if (!sql) return NULL;
 
     char *query = NULL;
@@ -160,7 +168,11 @@ char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name) {
 }
 
 char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_name) {
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_INSERT_PK_IGNORE, table_name);
+    char *qualified = database_build_base_ref(cloudsync_schema(data), table_name);
+    if (!qualified) return NULL;
+
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_INSERT_PK_IGNORE, qualified);
+    cloudsync_memory_free(qualified);
     if (!sql) return NULL;
 
     char *query = NULL;
@@ -171,7 +183,11 @@ char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_nam
 }
 
 char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_name, const char *colname) {
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_UPSERT_PK_AND_COL, table_name, colname);
+    char *qualified = database_build_base_ref(cloudsync_schema(data), table_name);
+    if (!qualified) return NULL;
+
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_UPSERT_PK_AND_COL, qualified, colname);
+    cloudsync_memory_free(qualified);
     if (!sql) return NULL;
 
     char *query = NULL;
@@ -182,7 +198,11 @@ char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_na
 }
 
 char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_name, const char *colname) {
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_COLS_BY_PK_FMT, table_name, colname);
+    char *qualified = database_build_base_ref(cloudsync_schema(data), table_name);
+    if (!qualified) return NULL;
+
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_COLS_BY_PK_FMT, qualified, colname);
+    cloudsync_memory_free(qualified);
     if (!sql) return NULL;
 
     char *query = NULL;
@@ -193,11 +213,22 @@ char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_na
 }
 
 char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, const char *table_name, const char *except_col) {
-    UNUSED_PARAMETER(data);
-    char escaped[512];
-    sql_escape_name(table_name, escaped, sizeof(escaped));
-    
-    return cloudsync_memory_mprintf(SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL, escaped, except_col, escaped, escaped, except_col);
+    char *meta_ref = database_build_meta_ref(cloudsync_schema(data), table_name);
+    if (!meta_ref) return NULL;
+
+    char *result = cloudsync_memory_mprintf(SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL, meta_ref, except_col, meta_ref, meta_ref, except_col);
+    cloudsync_memory_free(meta_ref);
+    return result;
+}
+
+char *database_build_meta_ref(const char *schema, const char *table_name) {
+    if (schema) return cloudsync_memory_mprintf("\"%s\".\"%s_cloudsync\"", schema, table_name);
+    return cloudsync_memory_mprintf("\"%s_cloudsync\"", table_name);
+}
+
+char *database_build_base_ref(const char *schema, const char *table_name) {
+    if (schema) return cloudsync_memory_mprintf("\"%s\".\"%s\"", schema, table_name);
+    return cloudsync_memory_mprintf("\"%s\"", table_name);
 }
 
 // MARK: - HELPER FUNCTIONS -
@@ -498,7 +529,7 @@ bool database_system_exists (cloudsync_context *data, const char *name, const ch
       const char *query;
 
       if (strcmp(type, "table") == 0) {
-          query = "SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = $1";
+          query = "SELECT 1 FROM pg_tables WHERE schemaname = COALESCE(cloudsync_schema(), current_schema()) AND tablename = $1";
       } else if (strcmp(type, "trigger") == 0) {
           query = "SELECT 1 FROM pg_trigger WHERE tgname = $1";
       } else {
@@ -833,8 +864,9 @@ int database_count_pk (cloudsync_context *data, const char *table_name, bool not
     const char *sql =
             "SELECT COUNT(*) FROM information_schema.table_constraints tc "
             "JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
-            "WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY'";
-    
+            "WHERE tc.table_name = $1 AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
+            "AND tc.constraint_type = 'PRIMARY KEY'";
+
     return (int)database_count_bind(data, sql, table_name);
 }
 
@@ -842,23 +874,26 @@ int database_count_nonpk (cloudsync_context *data, const char *table_name) {
     const char *sql =
             "SELECT COUNT(*) FROM information_schema.columns c "
             "WHERE c.table_name = $1 "
+            "AND c.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
             "AND c.column_name NOT IN ("
             "  SELECT kcu.column_name FROM information_schema.table_constraints tc "
             "  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
-            "  WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY'"
+            "  WHERE tc.table_name = $1 AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
+            "  AND tc.constraint_type = 'PRIMARY KEY'"
             ")";
-    
+
     return (int)database_count_bind(data, sql, table_name);
 }
 
 int database_count_int_pk (cloudsync_context *data, const char *table_name) {
     const char *sql =
               "SELECT COUNT(*) FROM information_schema.columns c "
-              "JOIN information_schema.key_column_usage kcu ON c.column_name = kcu.column_name "
-              "JOIN information_schema.table_constraints tc ON kcu.constraint_name = tc.constraint_name "
-              "WHERE c.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY' "
+              "JOIN information_schema.key_column_usage kcu ON c.column_name = kcu.column_name AND c.table_schema = kcu.table_schema AND c.table_name = kcu.table_name "
+              "JOIN information_schema.table_constraints tc ON kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema "
+              "WHERE c.table_name = $1 AND c.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
+              "AND tc.constraint_type = 'PRIMARY KEY' "
               "AND c.data_type IN ('smallint', 'integer', 'bigint')";
-    
+
     return (int)database_count_bind(data, sql, table_name);
 }
 
@@ -866,14 +901,16 @@ int database_count_notnull_without_default (cloudsync_context *data, const char 
     const char *sql =
               "SELECT COUNT(*) FROM information_schema.columns c "
               "WHERE c.table_name = $1 "
+              "AND c.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
               "AND c.is_nullable = 'NO' "
               "AND c.column_default IS NULL "
               "AND c.column_name NOT IN ("
               "  SELECT kcu.column_name FROM information_schema.table_constraints tc "
               "  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
-              "  WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY'"
+              "  WHERE tc.table_name = $1 AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
+              "  AND tc.constraint_type = 'PRIMARY KEY'"
               ")";
-    
+
     return (int)database_count_bind(data, sql, table_name);
 }
 
@@ -892,12 +929,14 @@ int database_debug (db_t *db, bool print_result) {
 // MARK: - METADATA TABLES -
 
 int database_create_metatable (cloudsync_context *data, const char *table_name) {
-    char sql[2048];
     int rc;
+    const char *schema = cloudsync_schema(data);
 
-    // Create the metadata table
-    snprintf(sql, sizeof(sql),
-             "CREATE TABLE IF NOT EXISTS \"%s_cloudsync\" ("
+    char *meta_ref = database_build_meta_ref(schema, table_name);
+    if (!meta_ref) return DBRES_NOMEM;
+
+    char *sql2 = cloudsync_memory_mprintf(
+             "CREATE TABLE IF NOT EXISTS %s ("
              "pk BYTEA NOT NULL,"
              "col_name TEXT NOT NULL,"
              "col_version BIGINT,"
@@ -906,18 +945,30 @@ int database_create_metatable (cloudsync_context *data, const char *table_name) 
              "site_id BIGINT NOT NULL DEFAULT 0,"
              "PRIMARY KEY (pk, col_name)"
              ");",
-             table_name);
+             meta_ref);
+    if (!sql2) { cloudsync_memory_free(meta_ref); return DBRES_NOMEM; }
 
-    rc = database_exec(data, sql);
-    if (rc != DBRES_OK) return rc;
+    rc = database_exec(data, sql2);
+    cloudsync_memory_free(sql2);
+    if (rc != DBRES_OK) { cloudsync_memory_free(meta_ref); return rc; }
 
     // Create indices for performance
-    snprintf(sql, sizeof(sql),
-             "CREATE INDEX IF NOT EXISTS \"%s_cloudsync_db_version_idx\" "
-             "ON \"%s_cloudsync\" (db_version);",
-             table_name, table_name);
+    if (schema) {
+        sql2 = cloudsync_memory_mprintf(
+                 "CREATE INDEX IF NOT EXISTS \"%s_cloudsync_db_version_idx\" "
+                 "ON \"%s\".\"%s_cloudsync\" (db_version);",
+                 table_name, schema, table_name);
+    } else {
+        sql2 = cloudsync_memory_mprintf(
+                 "CREATE INDEX IF NOT EXISTS \"%s_cloudsync_db_version_idx\" "
+                 "ON \"%s_cloudsync\" (db_version);",
+                 table_name, table_name);
+    }
+    cloudsync_memory_free(meta_ref);
+    if (!sql2) return DBRES_NOMEM;
 
-    rc = database_exec(data, sql);
+    rc = database_exec(data, sql2);
+    cloudsync_memory_free(sql2);
     return rc;
 }
 
@@ -939,7 +990,8 @@ int database_create_insert_trigger (cloudsync_context *data, const char *table_n
              "FROM information_schema.table_constraints tc "
              "JOIN information_schema.key_column_usage kcu "
              "  ON tc.constraint_name = kcu.constraint_name "
-             "WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY';",
+             "WHERE tc.table_name = '%s' AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
+             "AND tc.constraint_type = 'PRIMARY KEY';",
              table_name);
 
     char *pk_list = NULL;
@@ -966,10 +1018,14 @@ int database_create_insert_trigger (cloudsync_context *data, const char *table_n
     cloudsync_memory_free(sql2);
     if (rc != DBRES_OK) return rc;
 
+    char *base_ref = database_build_base_ref(cloudsync_schema(data), table_name);
+    if (!base_ref) return DBRES_NOMEM;
+
     sql2 = cloudsync_memory_mprintf(
-        "CREATE TRIGGER %s AFTER INSERT ON \"%s\" %s "
+        "CREATE TRIGGER %s AFTER INSERT ON %s %s "
         "EXECUTE FUNCTION %s();",
-        trigger_name, table_name, trigger_when ? trigger_when : "", func_name);
+        trigger_name, base_ref, trigger_when ? trigger_when : "", func_name);
+    cloudsync_memory_free(base_ref);
     if (!sql2) return DBRES_NOMEM;
 
     rc = database_exec(data, sql2);
@@ -1000,11 +1056,15 @@ int database_create_update_trigger_gos (cloudsync_context *data, const char *tab
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) return rc;
 
+    char *base_ref = database_build_base_ref(cloudsync_schema(data), table_name);
+    if (!base_ref) return DBRES_NOMEM;
+
     sql = cloudsync_memory_mprintf(
-        "CREATE TRIGGER %s BEFORE UPDATE ON \"%s\" "
+        "CREATE TRIGGER %s BEFORE UPDATE ON %s "
         "FOR EACH ROW WHEN (cloudsync_is_enabled('%s') = true) "
         "EXECUTE FUNCTION %s();",
-        trigger_name, table_name, table_name, func_name);
+        trigger_name, base_ref, table_name, func_name);
+    cloudsync_memory_free(base_ref);
     if (!sql) return DBRES_NOMEM;
 
     rc = database_exec(data, sql);
@@ -1032,7 +1092,8 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
            "FROM information_schema.table_constraints tc "
            "JOIN information_schema.key_column_usage kcu "
            "  ON tc.constraint_name = kcu.constraint_name "
-           "WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY';",
+           "WHERE tc.table_name = '%s' AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
+           "AND tc.constraint_type = 'PRIMARY KEY';",
            table_name, table_name);
 
     char *pk_values_list = NULL;
@@ -1051,11 +1112,13 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
            ") "
            "FROM information_schema.columns c "
            "WHERE c.table_name = '%s' "
+           "AND c.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
            "AND NOT EXISTS ("
            "  SELECT 1 FROM information_schema.table_constraints tc "
            "  JOIN information_schema.key_column_usage kcu "
            "    ON tc.constraint_name = kcu.constraint_name "
            "  WHERE tc.table_name = c.table_name "
+           "  AND tc.table_schema = c.table_schema "
            "  AND tc.constraint_type = 'PRIMARY KEY' "
            "  AND kcu.column_name = c.column_name"
            ");",
@@ -1096,10 +1159,14 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
     cloudsync_memory_free(sql2);
     if (rc != DBRES_OK) return rc;
 
+    char *base_ref = database_build_base_ref(cloudsync_schema(data), table_name);
+    if (!base_ref) return DBRES_NOMEM;
+
     sql2 = cloudsync_memory_mprintf(
-        "CREATE TRIGGER %s AFTER UPDATE ON \"%s\" %s "
+        "CREATE TRIGGER %s AFTER UPDATE ON %s %s "
         "EXECUTE FUNCTION %s();",
-        trigger_name, table_name, trigger_when ? trigger_when : "", func_name);
+        trigger_name, base_ref, trigger_when ? trigger_when : "", func_name);
+    cloudsync_memory_free(base_ref);
     if (!sql2) return DBRES_NOMEM;
 
     rc = database_exec(data, sql2);
@@ -1130,11 +1197,15 @@ int database_create_delete_trigger_gos (cloudsync_context *data, const char *tab
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) return rc;
 
+    char *base_ref = database_build_base_ref(cloudsync_schema(data), table_name);
+    if (!base_ref) return DBRES_NOMEM;
+
     sql = cloudsync_memory_mprintf(
-        "CREATE TRIGGER %s BEFORE DELETE ON \"%s\" "
+        "CREATE TRIGGER %s BEFORE DELETE ON %s "
         "FOR EACH ROW WHEN (cloudsync_is_enabled('%s') = true) "
         "EXECUTE FUNCTION %s();",
-        trigger_name, table_name, table_name, func_name);
+        trigger_name, base_ref, table_name, func_name);
+    cloudsync_memory_free(base_ref);
     if (!sql) return DBRES_NOMEM;
 
     rc = database_exec(data, sql);
@@ -1158,7 +1229,8 @@ int database_create_delete_trigger (cloudsync_context *data, const char *table_n
              "FROM information_schema.table_constraints tc "
              "JOIN information_schema.key_column_usage kcu "
              "  ON tc.constraint_name = kcu.constraint_name "
-             "WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY';",
+             "WHERE tc.table_name = '%s' AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
+             "AND tc.constraint_type = 'PRIMARY KEY';",
              table_name);
 
     char *pk_list = NULL;
@@ -1185,10 +1257,14 @@ int database_create_delete_trigger (cloudsync_context *data, const char *table_n
     cloudsync_memory_free(sql2);
     if (rc != DBRES_OK) return rc;
 
+    char *base_ref = database_build_base_ref(cloudsync_schema(data), table_name);
+    if (!base_ref) return DBRES_NOMEM;
+
     sql2 = cloudsync_memory_mprintf(
-        "CREATE TRIGGER %s AFTER DELETE ON \"%s\" %s "
+        "CREATE TRIGGER %s AFTER DELETE ON %s %s "
         "EXECUTE FUNCTION %s();",
-        trigger_name, table_name, trigger_when ? trigger_when : "", func_name);
+        trigger_name, base_ref, trigger_when ? trigger_when : "", func_name);
+    cloudsync_memory_free(base_ref);
     if (!sql2) return DBRES_NOMEM;
 
     rc = database_exec(data, sql2);
@@ -1224,58 +1300,60 @@ int database_create_triggers (cloudsync_context *data, const char *table_name, t
 }
 
 int database_delete_triggers (cloudsync_context *data, const char *table) {
-    char sql[1024];
+    char *base_ref = database_build_base_ref(cloudsync_schema(data), table);
+    if (!base_ref) return DBRES_NOMEM;
 
-    snprintf(sql, sizeof(sql),
-             "DROP TRIGGER IF EXISTS \"cloudsync_after_insert_%s\" ON \"%s\";",
-             table, table);
-    database_exec(data, sql);
+    char *sql = cloudsync_memory_mprintf(
+             "DROP TRIGGER IF EXISTS \"cloudsync_after_insert_%s\" ON %s;",
+             table, base_ref);
+    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
-    snprintf(sql, sizeof(sql),
+    sql = cloudsync_memory_mprintf(
              "DROP FUNCTION IF EXISTS cloudsync_after_insert_%s_fn() CASCADE;",
              table);
-    database_exec(data, sql);
+    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
-    snprintf(sql, sizeof(sql),
-             "DROP TRIGGER IF EXISTS \"cloudsync_after_update_%s\" ON \"%s\";",
-             table, table);
-    database_exec(data, sql);
+    sql = cloudsync_memory_mprintf(
+             "DROP TRIGGER IF EXISTS \"cloudsync_after_update_%s\" ON %s;",
+             table, base_ref);
+    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
-    snprintf(sql, sizeof(sql),
-             "DROP TRIGGER IF EXISTS \"cloudsync_before_update_%s\" ON \"%s\";",
-             table, table);
-    database_exec(data, sql);
+    sql = cloudsync_memory_mprintf(
+             "DROP TRIGGER IF EXISTS \"cloudsync_before_update_%s\" ON %s;",
+             table, base_ref);
+    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
-    snprintf(sql, sizeof(sql),
+    sql = cloudsync_memory_mprintf(
              "DROP FUNCTION IF EXISTS cloudsync_after_update_%s_fn() CASCADE;",
              table);
-    database_exec(data, sql);
+    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
-    snprintf(sql, sizeof(sql),
+    sql = cloudsync_memory_mprintf(
              "DROP FUNCTION IF EXISTS cloudsync_before_update_%s_fn() CASCADE;",
              table);
-    database_exec(data, sql);
+    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
-    snprintf(sql, sizeof(sql),
-             "DROP TRIGGER IF EXISTS \"cloudsync_after_delete_%s\" ON \"%s\";",
-             table, table);
-    database_exec(data, sql);
+    sql = cloudsync_memory_mprintf(
+             "DROP TRIGGER IF EXISTS \"cloudsync_after_delete_%s\" ON %s;",
+             table, base_ref);
+    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
-    snprintf(sql, sizeof(sql),
-             "DROP TRIGGER IF EXISTS \"cloudsync_before_delete_%s\" ON \"%s\";",
-             table, table);
-    database_exec(data, sql);
+    sql = cloudsync_memory_mprintf(
+             "DROP TRIGGER IF EXISTS \"cloudsync_before_delete_%s\" ON %s;",
+             table, base_ref);
+    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
-    snprintf(sql, sizeof(sql),
+    sql = cloudsync_memory_mprintf(
              "DROP FUNCTION IF EXISTS cloudsync_after_delete_%s_fn() CASCADE;",
              table);
-    database_exec(data, sql);
+    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
-    snprintf(sql, sizeof(sql),
+    sql = cloudsync_memory_mprintf(
              "DROP FUNCTION IF EXISTS cloudsync_before_delete_%s_fn() CASCADE;",
              table);
-    database_exec(data, sql);
+    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
+    cloudsync_memory_free(base_ref);
     return DBRES_OK;
 }
 
@@ -1291,7 +1369,7 @@ uint64_t database_schema_hash (cloudsync_context *data) {
     char *schema = NULL;
     database_select_text(data,
         "SELECT string_agg(LOWER(table_name || column_name || data_type), '' ORDER BY table_name, column_name) "
-        "FROM information_schema.columns WHERE table_schema = 'public'",
+        "FROM information_schema.columns WHERE table_schema = COALESCE(cloudsync_schema(), current_schema())",
         &schema);
 
     if (!schema) {
@@ -1318,7 +1396,7 @@ int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
     char *schema = NULL;
     int rc = database_select_text(data,
         "SELECT string_agg(LOWER(table_name || column_name || data_type), '' ORDER BY table_name, column_name) "
-        "FROM information_schema.columns WHERE table_schema = 'public'",
+        "FROM information_schema.columns WHERE table_schema = COALESCE(cloudsync_schema(), current_schema())",
         &schema);
 
     if (rc != DBRES_OK || !schema) return cloudsync_set_error(data, "database_update_schema_hash error 1", DBRES_ERROR);
@@ -1355,11 +1433,12 @@ int database_pk_rowid (cloudsync_context *data, const char *table_name, char ***
 
 int database_pk_names (cloudsync_context *data, const char *table_name, char ***names, int *count) {
     if (!table_name || !names || !count) return DBRES_MISUSE;
-    
+
     const char *sql =
             "SELECT kcu.column_name FROM information_schema.table_constraints tc "
             "JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
-            "WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY' "
+            "WHERE tc.table_name = $1 AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
+            "AND tc.constraint_type = 'PRIMARY KEY' "
             "ORDER BY kcu.ordinal_position";
     
     Oid argtypes[1] = { TEXTOID };

@@ -258,3 +258,16 @@ CREATE OR REPLACE TRIGGER cloudsync_changes_insert
 INSTEAD OF INSERT ON cloudsync_changes
 FOR EACH ROW
 EXECUTE FUNCTION cloudsync_changes_insert_trigger();
+
+-- Set current schema name
+CREATE OR REPLACE FUNCTION cloudsync_set_schema(schema text)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'pg_cloudsync_set_schema'
+LANGUAGE C VOLATILE;
+
+-- Get current schema name (if any)
+CREATE OR REPLACE FUNCTION cloudsync_schema()
+RETURNS text
+AS 'MODULE_PATHNAME', 'pg_cloudsync_schema'
+LANGUAGE C VOLATILE;
+

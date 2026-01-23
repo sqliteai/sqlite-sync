@@ -90,9 +90,9 @@ const char * const SQL_SETTINGS_CLEANUP_DROP_ALL =
 
 const char * const SQL_DBVERSION_BUILD_QUERY =
     "WITH table_names AS ("
-    "SELECT quote_ident(tablename) as tbl_name "
+    "SELECT quote_ident(schemaname) || '.' || quote_ident(tablename) as tbl_name "
     "FROM pg_tables "
-    "WHERE schemaname = current_schema() "
+    "WHERE schemaname = COALESCE(cloudsync_schema(), current_schema()) "
     "AND tablename LIKE '%_cloudsync'"
     "), "
     "query_parts AS ("
@@ -269,52 +269,52 @@ const char * const SQL_BUILD_SELECT_COLS_BY_PK_FMT =
     "  || ';';";
 
 const char * const SQL_CLOUDSYNC_ROW_EXISTS_BY_PK =
-    "SELECT EXISTS(SELECT 1 FROM %s_cloudsync WHERE pk = $1 LIMIT 1);";
+    "SELECT EXISTS(SELECT 1 FROM %s WHERE pk = $1 LIMIT 1);";
 
 const char * const SQL_CLOUDSYNC_UPDATE_COL_BUMP_VERSION =
-    "UPDATE %s_cloudsync "
+    "UPDATE %s "
     "SET col_version = CASE col_version %% 2 WHEN 0 THEN col_version + 1 ELSE col_version + 2 END, "
     "db_version = $1, seq = $2, site_id = 0 "
     "WHERE pk = $3 AND col_name = '%s';";
 
 const char * const SQL_CLOUDSYNC_UPSERT_COL_INIT_OR_BUMP_VERSION =
-    "INSERT INTO %s_cloudsync (pk, col_name, col_version, db_version, seq, site_id) "
+    "INSERT INTO %s (pk, col_name, col_version, db_version, seq, site_id) "
     "VALUES ($1, '%s', 1, $2, $3, 0) "
     "ON CONFLICT (pk, col_name) DO UPDATE SET "
     "col_version = CASE EXCLUDED.col_version %% 2 WHEN 0 THEN EXCLUDED.col_version + 1 ELSE EXCLUDED.col_version + 2 END, "
     "db_version = $2, seq = $3, site_id = 0;";  // TODO: mirror SQLite's bump rules and bind usage
 
 const char * const SQL_CLOUDSYNC_UPSERT_RAW_COLVERSION =
-    "INSERT INTO %s_cloudsync (pk, col_name, col_version, db_version, seq, site_id) "
+    "INSERT INTO %s (pk, col_name, col_version, db_version, seq, site_id) "
     "VALUES ($1, $2, $3, $4, $5, 0) "
     "ON CONFLICT (pk, col_name) DO UPDATE SET "
-    "col_version = %s_cloudsync.col_version + 1, db_version = $6, seq = $7, site_id = 0;";
+    "col_version = %s.col_version + 1, db_version = $6, seq = $7, site_id = 0;";
 
 const char * const SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL =
-    "DELETE FROM %s_cloudsync WHERE pk = $1 AND col_name != '%s';";  // TODO: match SQLite delete semantics
+    "DELETE FROM %s WHERE pk = $1 AND col_name != '%s';";  // TODO: match SQLite delete semantics
 
 const char * const SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL =
     "WITH moved AS ("
     "  SELECT col_name "
-    "  FROM \"%s_cloudsync\" WHERE pk = $3 AND col_name != '%s'"
+    "  FROM %s WHERE pk = $3 AND col_name != '%s'"
     "), "
     "upserted AS ("
-    "  INSERT INTO \"%s_cloudsync\" (pk, col_name, col_version, db_version, seq, site_id) "
+    "  INSERT INTO %s (pk, col_name, col_version, db_version, seq, site_id) "
     "  SELECT $1, col_name, 1, $2, cloudsync_seq(), 0 "
     "  FROM moved "
     "  ON CONFLICT (pk, col_name) DO UPDATE SET "
     "  col_version = 1, db_version = $2, seq = cloudsync_seq(), site_id = 0"
     ") "
-    "DELETE FROM \"%s_cloudsync\" WHERE pk = $3 AND col_name != '%s';";
+    "DELETE FROM %s WHERE pk = $3 AND col_name != '%s';";
 
 const char * const SQL_CLOUDSYNC_GET_COL_VERSION_OR_ROW_EXISTS =
     "SELECT COALESCE("
-    "(SELECT col_version FROM %s_cloudsync WHERE pk = $1 AND col_name = '%s'), "
-    "(SELECT 1 FROM %s_cloudsync WHERE pk = $1)"
-    ");";  // TODO: same behavior as SQLite helper
+    "(SELECT col_version FROM %s WHERE pk = $1 AND col_name = '%s'), "
+    "(SELECT 1 FROM %s WHERE pk = $1 LIMIT 1)"
+    ");";
 
 const char * const SQL_CLOUDSYNC_INSERT_RETURN_CHANGE_ID =
-    "INSERT INTO %s_cloudsync "
+    "INSERT INTO %s "
     "(pk, col_name, col_version, db_version, seq, site_id) "
     "VALUES ($1, $2, $3, cloudsync_db_version_next($4), $5, $6) "
     "ON CONFLICT (pk, col_name) DO UPDATE SET "
@@ -325,69 +325,75 @@ const char * const SQL_CLOUDSYNC_INSERT_RETURN_CHANGE_ID =
     "RETURNING ((db_version::bigint << 30) | seq);";  // TODO: align RETURNING and bump logic with SQLite (version increments on conflict)
 
 const char * const SQL_CLOUDSYNC_TOMBSTONE_PK_EXCEPT_COL =
-    "UPDATE %s_cloudsync "
+    "UPDATE %s "
     "SET col_version = 0, db_version = cloudsync_db_version_next($1) "
     "WHERE pk = $2 AND col_name != '%s';";  // TODO: confirm tombstone semantics match SQLite
 
 const char * const SQL_CLOUDSYNC_SELECT_COL_VERSION_BY_PK_COL =
-    "SELECT col_version FROM %s_cloudsync WHERE pk = $1 AND col_name = $2;";  // TODO: parity with SQLite helper
+    "SELECT col_version FROM %s WHERE pk = $1 AND col_name = $2;";
 
 const char * const SQL_CLOUDSYNC_SELECT_SITE_ID_BY_PK_COL =
-    "SELECT site_id FROM %s_cloudsync WHERE pk = $1 AND col_name = $2;";
+    "SELECT site_id FROM %s WHERE pk = $1 AND col_name = $2;";
 
 const char * const SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID =
     "SELECT c.column_name, c.ordinal_position "
     "FROM information_schema.columns c "
     "WHERE c.table_name = '%s' "
+    "AND c.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
     "AND c.column_name NOT IN ("
     "  SELECT kcu.column_name FROM information_schema.table_constraints tc "
     "  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
-    "  WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY'"
+    "  WHERE tc.table_name = '%s' AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
+    "  AND tc.constraint_type = 'PRIMARY KEY'"
     ") "
     "ORDER BY ordinal_position;";
 
 const char * const SQL_DROP_CLOUDSYNC_TABLE =
-    "DROP TABLE IF EXISTS %s_cloudsync CASCADE;";
+    "DROP TABLE IF EXISTS %s CASCADE;";
 
 const char * const SQL_CLOUDSYNC_DELETE_COLS_NOT_IN_SCHEMA_OR_PKCOL =
-    "DELETE FROM %s_cloudsync WHERE col_name NOT IN ("
+    "DELETE FROM %s WHERE col_name NOT IN ("
     "SELECT column_name FROM information_schema.columns WHERE table_name = '%s' "
+    "AND table_schema = COALESCE(cloudsync_schema(), current_schema()) "
     "UNION SELECT '%s'"
     ");";
 
 const char * const SQL_PRAGMA_TABLEINFO_PK_QUALIFIED_COLLIST_FMT =
     "SELECT string_agg(quote_ident(column_name), ',' ORDER BY ordinal_position) "
     "FROM information_schema.key_column_usage "
-    "WHERE table_name = '%s' AND constraint_name LIKE '%%_pkey';";
+    "WHERE table_name = '%s' AND table_schema = COALESCE(cloudsync_schema(), current_schema()) "
+    "AND constraint_name LIKE '%%_pkey';";
 
 const char * const SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK =
-    "DELETE FROM %s_cloudsync "
+    "DELETE FROM %s "
     "WHERE (col_name != '%s' OR (col_name = '%s' AND col_version %% 2 != 0)) "
     "AND NOT EXISTS ("
     "SELECT 1 FROM %s "
-    "WHERE %s_cloudsync.pk = cloudsync_pk_encode(%s) LIMIT 1"
+    "WHERE %s.pk = cloudsync_pk_encode(%s) LIMIT 1"
     ");";
 
 const char * const SQL_PRAGMA_TABLEINFO_PK_COLLIST =
     "SELECT string_agg(quote_ident(column_name), ',') "
     "FROM information_schema.key_column_usage "
-    "WHERE table_name = '%s' AND constraint_name LIKE '%%_pkey';";
+    "WHERE table_name = '%s' AND table_schema = COALESCE(cloudsync_schema(), current_schema()) "
+    "AND constraint_name LIKE '%%_pkey';";
 
 const char * const SQL_PRAGMA_TABLEINFO_PK_DECODE_SELECTLIST =
     "SELECT string_agg("
     "'cloudsync_pk_decode(pk, ' || ordinal_position || ') AS ' || quote_ident(column_name), ',' ORDER BY ordinal_position"
     ") "
     "FROM information_schema.key_column_usage "
-    "WHERE table_name = '%s' AND constraint_name LIKE '%%_pkey';";
+    "WHERE table_name = '%s' AND table_schema = COALESCE(cloudsync_schema(), current_schema()) "
+    "AND constraint_name LIKE '%%_pkey';";
 
 const char * const SQL_CLOUDSYNC_INSERT_MISSING_PKS_FROM_BASE_EXCEPT_SYNC =
     "SELECT cloudsync_insert('%s', %s) "
-    "FROM (SELECT %s FROM %s EXCEPT SELECT %s FROM %s_cloudsync);";
+    "FROM (SELECT %s FROM %s EXCEPT SELECT %s FROM %s);";
 
 const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL =
     "WITH _cstemp1 AS (SELECT cloudsync_pk_encode(%s) AS pk FROM %s) "
     "SELECT _cstemp1.pk FROM _cstemp1 "
     "WHERE NOT EXISTS ("
-    "SELECT 1 FROM %s_cloudsync _cstemp2 "
+    "SELECT 1 FROM %s _cstemp2 "
     "WHERE _cstemp2.pk = _cstemp1.pk AND _cstemp2.col_name = $1"
     ");";
