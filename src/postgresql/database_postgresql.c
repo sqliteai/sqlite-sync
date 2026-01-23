@@ -300,7 +300,7 @@ int database_select1_value (cloudsync_context *data, const char *sql, char **ptr
     
     // init values and sanity check expected_type
     if (ptr_value) *ptr_value = NULL;
-    *int_value = 0;
+    if (int_value) *int_value = 0;
     if (expected_type != DBTYPE_INTEGER && expected_type != DBTYPE_TEXT && expected_type != DBTYPE_BLOB) {
         return cloudsync_set_error(data, "Invalid expected_type", DBRES_MISUSE);
     }
@@ -356,18 +356,20 @@ int database_select1_value (cloudsync_context *data, const char *sql, char **ptr
                 goto cleanup;
         }
     } else if (expected_type == DBTYPE_TEXT) {
-        text *txt = DatumGetTextP(datum);
-        int len = VARSIZE(txt) - VARHDRSZ;
-        if (len > 0) {
+        char *val = SPI_getvalue(tuple, SPI_tuptable->tupdesc, 1);
+        if (val) {
+            size_t len = strlen(val);
             char *ptr = cloudsync_memory_alloc(len + 1);
             if (!ptr) {
+                pfree(val);
                 rc = cloudsync_set_error(data, "Memory allocation failed", DBRES_NOMEM);
                 goto cleanup;
             }
-            memcpy(ptr, VARDATA(txt), len);
+            memcpy(ptr, val, len);
             ptr[len] = '\0';
-            *ptr_value = ptr;
-            *int_value = len;
+            if (ptr_value) *ptr_value = ptr;
+            if (int_value) *int_value = (int64_t)len;
+            pfree(val);
         }
     } else if (expected_type == DBTYPE_BLOB) {
         bytea *ba = DatumGetByteaP(datum);
