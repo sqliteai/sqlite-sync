@@ -1,7 +1,9 @@
-name: build, test and release sqlite-sync
+## DELETE before merge to main branch
+name: build node and expo package for sqlite-sync (pg-extension)
 on:
   push:
-  workflow_dispatch:
+    branches:
+        - wip-pg-extension
 
 permissions:
   contents: write
@@ -12,7 +14,7 @@ jobs:
   build:
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container && matrix.container || '' }}
-    name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }} build${{ matrix.arch != 'arm64-v8a' && matrix.arch != 'armeabi-v7a' && matrix.name != 'ios-sim' && matrix.name != 'ios' && matrix.name != 'apple-xcframework' && matrix.name != 'android-aar' && ( matrix.name != 'macos' || matrix.arch != 'x86_64' ) && ' + test' || ''}}
+    name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }} build
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -31,9 +33,6 @@ jobs:
           - os: ubuntu-22.04-arm
             arch: arm64
             name: linux-musl
-          - os: macos-15
-            name: macos
-            make: COVERAGE=ON
           - os: macos-15
             arch: x86_64
             name: macos
@@ -57,40 +56,17 @@ jobs:
             arch: x86_64
             name: android
             make: PLATFORM=android ARCH=x86_64
-            sqlite-amalgamation-zip: https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
-          - os: macos-15
-            name: ios
-            make: PLATFORM=ios
-          - os: macos-15
-            name: ios-sim
-            make: PLATFORM=ios-sim
           - os: macos-15
             name: apple-xcframework
             make: xcframework
-          - os: ubuntu-22.04
-            name: android-aar
-            make: aar
 
     defaults:
       run:
         shell: ${{ matrix.container && 'sh' || 'bash' }}
 
-    env:
-      CONNECTION_STRING: ${{ secrets.CONNECTION_STRING }}
-      CONNECTION_STRING_OFFLINE_PROJECT: ${{ secrets.CONNECTION_STRING_OFFLINE_PROJECT }}
-      APIKEY: ${{ secrets.APIKEY }}
-      WEBLITE: ${{ secrets.WEBLITE }}
-
     steps:
 
       - uses: actions/checkout@v4.2.2
-
-      - name: android setup java
-        if: matrix.name == 'android-aar'
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
 
       - uses: msys2/setup-msys2@v2.27.0
         if: matrix.name == 'windows'
@@ -117,10 +93,6 @@ jobs:
             --platform linux/arm64 \
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
-            -e CONNECTION_STRING="${{ env.CONNECTION_STRING }}" \
-            -e CONNECTION_STRING_OFFLINE_PROJECT="${{ env.CONNECTION_STRING_OFFLINE_PROJECT }}" \
-            -e APIKEY="${{ env.APIKEY }}" \
-            -e WEBLITE="${{ env.WEBLITE }}" \
             alpine:latest \
             tail -f /dev/null
           docker exec alpine sh -c "apk update && apk add --no-cache gcc make curl sqlite openssl-dev musl-dev linux-headers"
@@ -166,59 +138,6 @@ jobs:
           rm certificate.p12
           security delete-keychain build.keychain
 
-      - name: android setup test environment
-        if: matrix.name == 'android' && matrix.arch != 'arm64-v8a' && matrix.arch != 'armeabi-v7a'
-        run: |
-
-          echo "::group::enable kvm group perms"
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          echo "::endgroup::"
-
-          echo "::group::download and build sqlite3 without SQLITE_OMIT_LOAD_EXTENSION"
-          curl -O ${{ matrix.sqlite-amalgamation-zip }}
-          unzip sqlite-amalgamation-*.zip
-          export ${{ matrix.make }}
-          $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.arch }}-linux-android26-clang sqlite-amalgamation-*/shell.c sqlite-amalgamation-*/sqlite3.c -o sqlite3 -ldl
-          # remove unused folders to save up space
-          rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-* openssl
-          echo "::endgroup::"
-
-          echo "::group::prepare the test script"
-          make test PLATFORM=$PLATFORM ARCH=$ARCH || echo "It should fail. Running remaining commands in the emulator"
-          cat > commands.sh << EOF
-            mv -f /data/local/tmp/sqlite3 /system/xbin
-            cd /data/local/tmp
-            export CONNECTION_STRING="$CONNECTION_STRING"
-            export CONNECTION_STRING_OFFLINE_PROJECT="$CONNECTION_STRING_OFFLINE_PROJECT"
-            export APIKEY="$APIKEY"
-            export WEBLITE="$WEBLITE"
-            $(make test PLATFORM=$PLATFORM ARCH=$ARCH -n)
-          EOF
-          echo "::endgroup::"
-
-      - name: android test sqlite-sync
-        if: matrix.name == 'android' && matrix.arch != 'arm64-v8a' && matrix.arch != 'armeabi-v7a'
-        uses: reactivecircus/android-emulator-runner@v2.34.0
-        with:
-          api-level: 26
-          arch: ${{ matrix.arch }}
-          script: |
-            adb root
-            adb remount
-            adb push ${{ github.workspace }}/. /data/local/tmp/
-            adb shell "sh /data/local/tmp/commands.sh"
-
-      - name: test sqlite-sync
-        if: contains(matrix.name, 'linux') || matrix.name == 'windows' || ( matrix.name == 'macos' && matrix.arch != 'x86_64' )
-        run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make test ${{ matrix.make && matrix.make || ''}}
-
-      - uses: actions/upload-pages-artifact@v3.0.1
-        if: matrix.name == 'macos' && !matrix.arch
-        with:
-          path: coverage
-
       - uses: actions/upload-artifact@v4.6.2
         if: always()
         with:
@@ -230,7 +149,6 @@ jobs:
     runs-on: ubuntu-22.04
     name: release
     needs: build
-    if: github.ref == 'refs/heads/main'
 
     env:
       GH_TOKEN: ${{ github.token }}
@@ -243,121 +161,9 @@ jobs:
         with:
           path: artifacts
 
-      - name: setup GitHub Pages
-        uses: actions/configure-pages@v5
-
-      - name: deploy coverage to GitHub Pages
-        uses: actions/deploy-pages@v4.0.5
-
-      - name: zip artifacts
-        run: |
-          VERSION=$(make version)
-          for folder in "artifacts"/*; do
-            if [ -d "$folder" ]; then
-              name=$(basename "$folder")
-              if [[ "$name" != "github-pages" ]]; then
-                if [[ "$name" != "cloudsync-apple-xcframework" && "$name" != "cloudsync-android-aar" ]]; then
-                  tar -czf "${name}-${VERSION}.tar.gz" -C "$folder" .
-                fi
-                if [[ "$name" != "cloudsync-android-aar" ]]; then
-                  (cd "$folder" && zip -rq "../../${name}-${VERSION}.zip" .)
-                else
-                  cp "$folder"/*.aar "${name}-${VERSION}.aar"
-                fi
-              fi
-            fi
-          done
-
       - name: release tag version from cloudsync.h
         id: tag
-        run: |
-          VERSION=$(make version)
-          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            LATEST_RELEASE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/latest)
-            LATEST=$(echo "$LATEST_RELEASE" | jq -r '.name')
-            # Check artifact sizes against previous release
-            if [ -n "$LATEST" ] && [ "$LATEST" != "null" ]; then
-              echo "Checking artifact sizes against previous release: $LATEST"
-              FAILED=0
-              for artifact in cloudsync-*-${VERSION}.*; do
-                if [ ! -f "$artifact" ]; then
-                  continue
-                fi
-                # Get current artifact size
-                NEW_SIZE=$(stat -c%s "$artifact" 2>/dev/null || stat -f%z "$artifact")
-                # Get artifact name for previous release
-                ARTIFACT_NAME=$(echo "$artifact" | sed "s/${VERSION}/${LATEST}/")
-                # Get previous artifact size from GitHub API
-                OLD_SIZE=$(echo "$LATEST_RELEASE" | jq -r ".assets[] | select(.name == \"$(basename "$ARTIFACT_NAME")\") | .size")
-                if [ -z "$OLD_SIZE" ] || [ "$OLD_SIZE" = "null" ]; then
-                  echo "⚠️  Previous artifact not found: $(basename "$ARTIFACT_NAME"), skipping comparison"
-                  continue
-                fi
-                # Calculate percentage increase
-                INCREASE=$(awk "BEGIN {printf \"%.2f\", (($NEW_SIZE - $OLD_SIZE) / $OLD_SIZE) * 100}")
-                echo "📦 $artifact: $OLD_SIZE → $NEW_SIZE bytes (${INCREASE}% change)"
-                # Check if increase is more than 5%
-                if (( $(echo "$INCREASE > 5" | bc -l) )); then
-                  if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-                    echo "⚠️  WARNING: $artifact size increased by ${INCREASE}% (limit: 5%)"
-                  else
-                    echo "❌ ERROR: $artifact size increased by ${INCREASE}% (limit: 5%)"
-                    FAILED=1
-                  fi
-                fi
-              done
-              if [ $FAILED -eq 1 ]; then
-                echo ""
-                echo "❌ One or more artifacts exceeded the 5% size increase limit"
-                exit 1
-              fi
-              echo "✅ All artifacts within 5% size increase limit"
-            fi
-
-            if [[ "$VERSION" != "$LATEST" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-              echo "version=$VERSION" >> $GITHUB_OUTPUT
-            else
-              echo "::warning file=src/cloudsync.h::To release a new version, please update the CLOUDSYNC_VERSION in src/cloudsync.h to be different than the latest $LATEST"
-            fi
-            exit 0
-          fi
-          echo "❌ CLOUDSYNC_VERSION not found in cloudsync.h"
-          exit 1
-
-      - uses: actions/checkout@v4.2.2
-        if: steps.tag.outputs.version != ''
-        with:
-          repository: sqliteai/sqlite-wasm
-          path: sqlite-wasm
-          submodules: recursive
-          token: ${{ secrets.PAT }}
-
-      - name: release sqlite-wasm
-        if: steps.tag.outputs.version != ''
-        run: |
-          cd sqlite-wasm
-          git config --global user.email "$GITHUB_ACTOR@users.noreply.github.com"
-          git config --global user.name "$GITHUB_ACTOR"
-          cd modules/sqlite-sync
-          git checkout ${{ github.sha }}
-          cd ../..
-          git add modules/sqlite-sync
-          PKG=sqlite-wasm/package.json
-          TMP=sqlite-wasm/package.tmp.json
-          jq --arg version "$(cat modules/sqlite/VERSION)-sync.$(cd modules/sqlite-sync && make version)-vector.$(cd modules/sqlite-vector && make version)" '.version = $version' "$PKG" > "$TMP" && mv "$TMP" "$PKG"
-          git add "$PKG"
-          git commit -m "Bump sqlite-sync version to ${{ steps.tag.outputs.version }}"
-          git push origin main
-          
-      - uses: actions/setup-java@v4
-        if: steps.tag.outputs.version != ''
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: release android aar to maven central
-        if: steps.tag.outputs.version != ''
-        run: cd packages/android && ./gradlew publishAggregationToCentralPortal -PSIGNING_KEY="${{ secrets.SIGNING_KEY }}" -PSIGNING_PASSWORD="${{ secrets.SIGNING_PASSWORD }}" -PSONATYPE_USERNAME="${{ secrets.MAVEN_CENTRAL_USERNAME }}" -PSONATYPE_PASSWORD="${{ secrets.MAVEN_CENTRAL_TOKEN }}" -PVERSION="${{ steps.tag.outputs.version }}" -PAAR_PATH="../../artifacts/cloudsync-android-aar/cloudsync.aar"
+        run: echo "version=$(make version)" >> $GITHUB_OUTPUT
 
       - uses: actions/setup-node@v4
         if: steps.tag.outputs.version != ''
@@ -404,7 +210,7 @@ jobs:
             platform_name=$(basename "$platform_dir")
             echo "  Publishing @sqliteai/sqlite-sync-${platform_name}..."
             cd "$platform_dir"
-            npm publish --provenance --access public
+            npm publish --provenance --access public --tag pg
             cd ..
             echo "  ✓ Published @sqliteai/sqlite-sync-${platform_name}"
           done
@@ -412,7 +218,7 @@ jobs:
 
           # Publish main package
           echo "Publishing main package to npm..."
-          npm publish --provenance --access public
+          npm publish --provenance --access public --tag pg
           echo "✓ Published @sqliteai/sqlite-sync@${{ steps.tag.outputs.version }}"
 
           echo ""
@@ -432,26 +238,5 @@ jobs:
 
           echo "Publishing @sqliteai/sqlite-sync-expo to npm..."
           cd expo-package
-          npm publish --provenance --access public
+          npm publish --provenance --access public --tag pg
           echo "✓ Published @sqliteai/sqlite-sync-expo@${{ steps.tag.outputs.version }}"
-
-      - uses: softprops/action-gh-release@v2.2.1
-        if: steps.tag.outputs.version != ''
-        with:
-          body: |
-            # Packages
-
-            [**Node**](https://www.npmjs.com/package/@sqliteai/sqlite-sync): `npm install @sqliteai/sqlite-sync`
-            [**WASM**](https://www.npmjs.com/package/@sqliteai/sqlite-wasm): `npm install @sqliteai/sqlite-wasm`
-            [**Expo**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo): `npm install @sqliteai/sqlite-sync-expo`
-            [**Android**](https://central.sonatype.com/artifact/ai.sqlite/sync): `ai.sqlite:sync:${{ steps.tag.outputs.version }}`
-            [**Swift**](https://github.com/sqliteai/sqlite-sync#swift-package): [Installation Guide](https://github.com/sqliteai/sqlite-sync#swift-package)
-
-            ---
-
-          generate_release_notes: true
-          tag_name: ${{ steps.tag.outputs.version }}
-          files: |
-            cloudsync-*-${{ steps.tag.outputs.version }}.*
-            CloudSync-*-${{ steps.tag.outputs.version }}.*
-          make_latest: true
