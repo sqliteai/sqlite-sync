@@ -1,6 +1,11 @@
 -- '2 db roundtrip test'
 
 \echo '\nRunning two-db roundtrip test ...'
+\connect cloudsync_test_1
+SELECT encode(cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq), 'hex') AS payload_hex
+FROM cloudsync_changes
+WHERE site_id = cloudsync_siteid() \gset
+
 DROP DATABASE IF EXISTS cloudsync_test_2;
 CREATE DATABASE cloudsync_test_2;
 \connect cloudsync_test_2
