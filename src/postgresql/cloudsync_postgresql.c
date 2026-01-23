@@ -2025,17 +2025,21 @@ static char * build_union_sql (void) {
                              CLOUDSYNC_RLS_RESTRICTED_VALUE_BYTEA
                              );
             
-            pfree((void*)quoted_base_ident);
+            // Only free quoted identifiers if they're different from the input
+            // (quote_identifier returns input pointer if no quoting needed)
+            if (quoted_base_ident != base) pfree((void*)quoted_base_ident);
             pfree(joincond.data);
             pfree(caseexpr.data);
-            
+
             pfree(base);
-            
+            pfree(base_lit);
+
             pfree(quoted_base);
+            pfree(nsp_lit);
             pfree(nsp);
-            pfree((void *)quoted_nsp);
+            if (quoted_nsp != nsp) pfree((void *)quoted_nsp);
             pfree(rel);
-            pfree((void *)quoted_rel);
+            if (quoted_rel != rel) pfree((void *)quoted_rel);
         }
         if (nsp_list) pfree(nsp_list);
         if (rel_list) pfree(rel_list);
