@@ -563,6 +563,7 @@ void cloudsync_set_auxdata (cloudsync_context *data, void *xdata) {
 }
 
 void cloudsync_set_schema (cloudsync_context *data, const char *schema) {
+    if (data->current_schema == schema) return;
     if (data->current_schema) cloudsync_memory_free(data->current_schema);
     data->current_schema = NULL;
     if (schema) data->current_schema = cloudsync_string_dup_lowercase(schema);
