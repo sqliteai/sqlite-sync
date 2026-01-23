@@ -233,40 +233,6 @@ char *database_build_base_ref(const char *schema, const char *table_name) {
 
 // MARK: - HELPER FUNCTIONS -
 
-// TODO: is this really necessary? We now control the SQL statements and so we can use the Postgres style when needed
-// Convert SQLite-style ? placeholders to PostgreSQL-style $1, $2, etc.
-/*
-static char* convert_placeholders(const char *sql) {
-    if (!sql) {
-        return NULL;
-    }
-
-    // Count placeholders
-    int count = 0;
-    for (const char *p = sql; *p; p++) {
-        if (*p == '?') count++;
-    }
-
-    // Allocate new string (worst case: $999 for each ? = 4 chars vs 1)
-    size_t newlen = strlen(sql) + (count * 3) + 1;
-    char *newsql = cloudsync_memory_alloc(newlen);
-
-    // Convert
-    char *dst = newsql;
-    int param_num = 1;
-    for (const char *src = sql; *src; src++) {
-        if (*src == '?') {
-            dst += sprintf(dst, "$%d", param_num++);
-        } else {
-            *dst++ = *src;
-        }
-    }
-    *dst = '\0';
-
-    return newsql;
-}
- */
-
 // Map SPI result codes to DBRES
 static int map_spi_result (int rc) {
     switch (rc) {
@@ -521,7 +487,7 @@ cleanup:
     return rc;
 }
 
-bool database_system_exists (cloudsync_context *data, const char *name, const char *type) {
+static bool database_system_exists (cloudsync_context *data, const char *name, const char *type, bool force_public) {
       if (!name || !type) return false;
       cloudsync_reset_error(data);
 
@@ -529,7 +495,11 @@ bool database_system_exists (cloudsync_context *data, const char *name, const ch
       const char *query;
 
       if (strcmp(type, "table") == 0) {
-          query = "SELECT 1 FROM pg_tables WHERE schemaname = COALESCE(cloudsync_schema(), current_schema()) AND tablename = $1";
+          if (force_public) {
+              query = "SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = $1";
+          } else {
+              query = "SELECT 1 FROM pg_tables WHERE schemaname = COALESCE(cloudsync_schema(), current_schema()) AND tablename = $1";
+          }
       } else if (strcmp(type, "trigger") == 0) {
           query = "SELECT 1 FROM pg_trigger WHERE tgname = $1";
       } else {
@@ -833,11 +803,15 @@ bool database_in_transaction (cloudsync_context *data) {
 }
 
 bool database_table_exists (cloudsync_context *data, const char *name) {
-    return database_system_exists(data, name, "table");
+    return database_system_exists(data, name, "table", false);
+}
+
+bool database_internal_table_exists (cloudsync_context *data, const char *name) {
+    return database_system_exists(data, name, "table", true);
 }
 
 bool database_trigger_exists (cloudsync_context *data, const char *name) {
-    return database_system_exists(data, name, "trigger");
+    return database_system_exists(data, name, "trigger", false);
 }
 
 // MARK: - SCHEMA INFO -

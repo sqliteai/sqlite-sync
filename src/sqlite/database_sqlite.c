@@ -396,6 +396,10 @@ bool database_table_exists (cloudsync_context *data, const char *name) {
     return database_system_exists(data, name, "table");
 }
 
+bool database_internal_table_exists (cloudsync_context *data, const char *name) {
+    return database_table_exists(data, name);
+}
+
 bool database_trigger_exists (cloudsync_context *data, const char *name) {
     return database_system_exists(data, name, "trigger");
 }

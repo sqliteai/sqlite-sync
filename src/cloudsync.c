@@ -1470,7 +1470,7 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
 // MARK: - Private -
 
 bool cloudsync_config_exists (cloudsync_context *data) {
-    return database_table_exists(data, CLOUDSYNC_SITEID_NAME) == true;
+    return database_internal_table_exists(data, CLOUDSYNC_SITEID_NAME) == true;
 }
 
 cloudsync_context *cloudsync_context_create (void *db) {
@@ -1518,7 +1518,7 @@ const char *cloudsync_context_init (cloudsync_context *data) {
     // The data->site_id value could exists while settings tables don't exists if the
     // cloudsync_context_init was previously called in init transaction that was rolled back
     // because of an error during the init process.
-    if (data->site_id[0] == 0 || !database_table_exists(data, CLOUDSYNC_SITEID_NAME)) {
+    if (data->site_id[0] == 0 || !database_internal_table_exists(data, CLOUDSYNC_SITEID_NAME)) {
         if (dbutils_settings_init(data) != DBRES_OK) return NULL;
         if (cloudsync_add_dbvms(data) != DBRES_OK) return NULL;
         if (cloudsync_load_siteid(data) != DBRES_OK) return NULL;
@@ -2595,7 +2595,7 @@ int cloudsync_cleanup (cloudsync_context *data, const char *table_name) {
         cloudsync_reset_siteid(data);
         dbutils_settings_cleanup(data);
     } else {
-        if (database_table_exists(data, CLOUDSYNC_TABLE_SETTINGS_NAME) == true) {
+        if (database_internal_table_exists(data, CLOUDSYNC_TABLE_SETTINGS_NAME) == true) {
             cloudsync_update_schema_hash(data);
         }
     }

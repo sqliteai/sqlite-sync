@@ -1520,7 +1520,7 @@ Datum pg_cloudsync_set_schema (PG_FUNCTION_ARGS) {
     // Only persist if settings table exists (it may not exist before cloudsync_init).
     int spi_rc = SPI_connect();
     if (spi_rc == SPI_OK_CONNECT) {
-        if (database_table_exists(data, "cloudsync_settings")) {
+        if (database_internal_table_exists(data, CLOUDSYNC_SETTINGS_NAME)) {
             dbutils_settings_set_key_value(data, "schema", schema);
         }
         SPI_finish();

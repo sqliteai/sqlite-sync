@@ -394,7 +394,7 @@ int dbutils_settings_init (cloudsync_context *data) {
         
     // check if cloudsync_settings table exists
     int rc = DBRES_OK;
-    bool settings_exists = database_table_exists(data, CLOUDSYNC_SETTINGS_NAME);
+    bool settings_exists = database_internal_table_exists(data, CLOUDSYNC_SETTINGS_NAME);
     if (settings_exists == false) {
         DEBUG_SETTINGS("cloudsync_settings does not exist (creating a new one)");
         
@@ -414,7 +414,7 @@ int dbutils_settings_init (cloudsync_context *data) {
         if (rc != DBRES_OK) return rc;
     }
     
-    if (database_table_exists(data, CLOUDSYNC_SITEID_NAME) == false) {
+    if (database_internal_table_exists(data, CLOUDSYNC_SITEID_NAME) == false) {
         DEBUG_SETTINGS("cloudsync_site_id does not exist (creating a new one)");
         
         // create table and fill-in initial data
@@ -436,7 +436,7 @@ int dbutils_settings_init (cloudsync_context *data) {
     }
     
     // check if cloudsync_table_settings table exists
-    if (database_table_exists(data, CLOUDSYNC_TABLE_SETTINGS_NAME) == false) {
+    if (database_internal_table_exists(data, CLOUDSYNC_TABLE_SETTINGS_NAME) == false) {
         DEBUG_SETTINGS("cloudsync_table_settings does not exist (creating a new one)");
         
         rc = database_exec(data, SQL_CREATE_TABLE_SETTINGS_TABLE);
@@ -444,7 +444,7 @@ int dbutils_settings_init (cloudsync_context *data) {
     }
     
     // check if cloudsync_settings table exists
-    bool schema_versions_exists = database_table_exists(data, CLOUDSYNC_SCHEMA_VERSIONS_NAME);
+    bool schema_versions_exists = database_internal_table_exists(data, CLOUDSYNC_SCHEMA_VERSIONS_NAME);
     if (schema_versions_exists == false) {
         DEBUG_SETTINGS("cloudsync_schema_versions does not exist (creating a new one)");
         
