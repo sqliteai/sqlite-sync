@@ -840,6 +840,7 @@ int database_count_pk (cloudsync_context *data, const char *table_name, bool not
     const char *sql =
             "SELECT COUNT(*) FROM information_schema.table_constraints tc "
             "JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
+            "  AND tc.table_schema = kcu.table_schema "
             "WHERE tc.table_name = $1 AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
             "AND tc.constraint_type = 'PRIMARY KEY'";
 
@@ -854,6 +855,7 @@ int database_count_nonpk (cloudsync_context *data, const char *table_name) {
             "AND c.column_name NOT IN ("
             "  SELECT kcu.column_name FROM information_schema.table_constraints tc "
             "  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
+            "    AND tc.table_schema = kcu.table_schema "
             "  WHERE tc.table_name = $1 AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
             "  AND tc.constraint_type = 'PRIMARY KEY'"
             ")";
@@ -883,6 +885,7 @@ int database_count_notnull_without_default (cloudsync_context *data, const char 
               "AND c.column_name NOT IN ("
               "  SELECT kcu.column_name FROM information_schema.table_constraints tc "
               "  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
+              "    AND tc.table_schema = kcu.table_schema "
               "  WHERE tc.table_name = $1 AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
               "  AND tc.constraint_type = 'PRIMARY KEY'"
               ")";
@@ -966,6 +969,7 @@ int database_create_insert_trigger (cloudsync_context *data, const char *table_n
              "FROM information_schema.table_constraints tc "
              "JOIN information_schema.key_column_usage kcu "
              "  ON tc.constraint_name = kcu.constraint_name "
+             "  AND tc.table_schema = kcu.table_schema "
              "WHERE tc.table_name = '%s' AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
              "AND tc.constraint_type = 'PRIMARY KEY';",
              table_name);
@@ -1068,6 +1072,7 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
            "FROM information_schema.table_constraints tc "
            "JOIN information_schema.key_column_usage kcu "
            "  ON tc.constraint_name = kcu.constraint_name "
+           "  AND tc.table_schema = kcu.table_schema "
            "WHERE tc.table_name = '%s' AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
            "AND tc.constraint_type = 'PRIMARY KEY';",
            table_name, table_name);
@@ -1093,6 +1098,7 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
            "  SELECT 1 FROM information_schema.table_constraints tc "
            "  JOIN information_schema.key_column_usage kcu "
            "    ON tc.constraint_name = kcu.constraint_name "
+           "    AND tc.table_schema = kcu.table_schema "
            "  WHERE tc.table_name = c.table_name "
            "  AND tc.table_schema = c.table_schema "
            "  AND tc.constraint_type = 'PRIMARY KEY' "
@@ -1205,6 +1211,7 @@ int database_create_delete_trigger (cloudsync_context *data, const char *table_n
              "FROM information_schema.table_constraints tc "
              "JOIN information_schema.key_column_usage kcu "
              "  ON tc.constraint_name = kcu.constraint_name "
+             "  AND tc.table_schema = kcu.table_schema "
              "WHERE tc.table_name = '%s' AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
              "AND tc.constraint_type = 'PRIMARY KEY';",
              table_name);
@@ -1413,6 +1420,7 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
     const char *sql =
             "SELECT kcu.column_name FROM information_schema.table_constraints tc "
             "JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
+            "  AND tc.table_schema = kcu.table_schema "
             "WHERE tc.table_name = $1 AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
             "AND tc.constraint_type = 'PRIMARY KEY' "
             "ORDER BY kcu.ordinal_position";

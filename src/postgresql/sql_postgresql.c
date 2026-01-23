@@ -343,6 +343,7 @@ const char * const SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID =
     "AND c.column_name NOT IN ("
     "  SELECT kcu.column_name FROM information_schema.table_constraints tc "
     "  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
+    "    AND tc.table_schema = kcu.table_schema "
     "  WHERE tc.table_name = '%s' AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
     "  AND tc.constraint_type = 'PRIMARY KEY'"
     ") "
