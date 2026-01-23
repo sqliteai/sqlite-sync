@@ -24,7 +24,7 @@ const PLATFORMS = [
     cpu: ['arm64'],
     description: 'SQLite Sync extension for macOS ARM64 (Apple Silicon)',
     binaryName: 'cloudsync.dylib',
-    artifactFolder: 'cloudsync-macos',
+    artifactFolder: 'cloudsync-macos-arm64',
   },
   {
     name: 'darwin-x86_64',
@@ -32,7 +32,7 @@ const PLATFORMS = [
     cpu: ['x64', 'ia32'],
     description: 'SQLite Sync extension for macOS x86_64 (Intel)',
     binaryName: 'cloudsync.dylib',
-    artifactFolder: 'cloudsync-macos',
+    artifactFolder: 'cloudsync-macos-x86_64',
   },
   {
     name: 'linux-arm64',
