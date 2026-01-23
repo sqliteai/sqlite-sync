@@ -184,8 +184,8 @@ jobs:
           echo "Updating versions to ${{ steps.tag.outputs.version }}..."
 
           # Update package.json
-          jq --arg version "${{ steps.tag.outputs.version }}" \
-            '.version = $version | .optionalDependencies = (.optionalDependencies | with_entries(.value = $version))' \
+          jq --arg version "${{ steps.tag.outputs.version }}" --arg versionpg "pg" \
+            '.version = $version | .optionalDependencies = (.optionalDependencies | with_entries(.value = $versionpg))' \
             package.json > package.tmp.json && mv package.tmp.json package.json
 
           echo "✓ Updated package.json to version ${{ steps.tag.outputs.version }}"
