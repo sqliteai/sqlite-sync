@@ -58,3 +58,7 @@ The warning was not tied to the `cloudsync_changes` view itself, but to **nested
 - the server (PG17) reported unclosed relation resources at statement end.
 
 By switching to `cloudsync_changes_apply(...)` and tightening SPI tuptable cleanup, we removed the warning from the payload-apply path while leaving manual insert behavior unchanged.
+
+## Next TODO
+- Add SPI instrumentation (DEBUG1 logs before/after SPI_execute* and after SPI_freetuptable/SPI_finish) along the payload-apply → view-insert → trigger path, then rerun the instrumented smoke test to pinpoint exactly where the warning is emitted.
+- Note: We inspected the payload-apply → INSERT INTO cloudsync_changes → trigger call chain and did not find any missing SPI_freetuptable() or SPI_finish() calls in that path.
