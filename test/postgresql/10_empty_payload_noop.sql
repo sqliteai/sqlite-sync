@@ -4,7 +4,8 @@
 -- 2) Attempt to encode/apply empty payloads
 -- 3) Verify data unchanged and hashes match
 
-\echo '\nRunning empty payload + no-op merge test ...'
+\set testid '10'
+
 \connect postgres
 \ir helper_psql_conn_setup.sql
 DROP DATABASE IF EXISTS cloudsync_test_a;
@@ -199,8 +200,8 @@ FROM smoke_tbl \gset
 
 SELECT (:'smoke_hash_a' = :'smoke_hash_b' AND :'smoke_hash_a' = :'smoke_hash_c') AS multi_db_roundtrip_ok \gset
 \if :multi_db_roundtrip_ok
-\echo '[PASS] Empty payload + no-op merge'
+\echo [PASS] (:testid) Empty payload + no-op merge
 \else
-\echo '[FAIL] Empty payload + no-op merge'
+\echo [FAIL] (:testid) Empty payload + no-op merge
 SELECT (:fail::int + 1) AS fail \gset
 \endif

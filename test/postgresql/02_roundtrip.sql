@@ -1,7 +1,9 @@
 -- '2 db roundtrip test'
 
-\echo '\nRunning two-db roundtrip test ...'
+\set testid '02'
+
 \connect cloudsync_test_1
+\ir helper_psql_conn_setup.sql
 SELECT encode(cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq), 'hex') AS payload_hex
 FROM cloudsync_changes
 WHERE site_id = cloudsync_siteid() \gset
@@ -19,8 +21,8 @@ SELECT md5(COALESCE(string_agg(id || ':' || COALESCE(val, ''), ',' ORDER BY id),
 FROM smoke_tbl \gset
 SELECT (:'smoke_hash' = :'smoke_hash_b') AS payload_roundtrip_ok \gset
 \if :payload_roundtrip_ok
-\echo '[PASS] Test payload roundtrip to another database'
+\echo [PASS] (:testid) Test payload roundtrip to another database
 \else
-\echo '[FAIL] Test payload roundtrip to another database'
+\echo [FAIL] (:testid) Test payload roundtrip to another database
 SELECT (:fail::int + 1) AS fail \gset
 \endif

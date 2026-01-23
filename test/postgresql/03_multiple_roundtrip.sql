@@ -1,6 +1,7 @@
 -- 'Test multi-db roundtrip with concurrent updates'
 
-\echo '\nRunning multi-db roundtrip with concurrent updates ...'
+\set testid '03' 
+
 \connect postgres
 \ir helper_psql_conn_setup.sql
 DROP DATABASE IF EXISTS cloudsync_test_a;
@@ -285,8 +286,8 @@ FROM smoke_tbl \gset
 
 SELECT (:'smoke_hash_a' = :'smoke_hash_b' AND :'smoke_hash_a' = :'smoke_hash_c') AS multi_db_roundtrip_ok \gset
 \if :multi_db_roundtrip_ok
-\echo '[PASS] Test multi-db roundtrip with concurrent updates'
+\echo [PASS] (:testid) Test multi-db roundtrip with concurrent updates
 \else
-\echo '[FAIL] Test multi-db roundtrip with concurrent updates'
+\echo [FAIL] (:testid) Test multi-db roundtrip with concurrent updates
 SELECT (:fail::int + 1) AS fail \gset
 \endif

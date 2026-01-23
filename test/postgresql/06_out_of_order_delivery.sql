@@ -4,7 +4,8 @@
 --   - Applies round3 before round2 on C, while A/B apply round2 then round3
 --   - Verifies convergence across all three DBs
 
-\echo '\nRunning out-of-order payload delivery across multiple DBs test ...'
+\set testid '06'
+
 \connect postgres
 \ir helper_psql_conn_setup.sql
 DROP DATABASE IF EXISTS cloudsync_test_a;
@@ -271,8 +272,8 @@ FROM smoke_tbl \gset
 
 SELECT (:'smoke_hash_a' = :'smoke_hash_b' AND :'smoke_hash_a' = :'smoke_hash_c') AS multi_db_roundtrip_ok \gset
 \if :multi_db_roundtrip_ok
-\echo '[PASS] Test out-of-order payload delivery'
+\echo [PASS] (:testid) Test out-of-order payload delivery
 \else
-\echo '[FAIL] Test out-of-order payload delivery'
+\echo [FAIL] (:testid) Test out-of-order payload delivery
 SELECT (:fail::int + 1) AS fail \gset
 \endif

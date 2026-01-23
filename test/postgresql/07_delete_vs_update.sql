@@ -4,7 +4,8 @@
 -- 2) B deletes id1 while C updates id1, then sync
 -- 3) A updates id1 after merge, then sync
 
-\echo '\nRunning concurrent delete vs update test ...'
+\set testid '07'
+
 \connect postgres
 \ir helper_psql_conn_setup.sql
 DROP DATABASE IF EXISTS cloudsync_test_a;
@@ -273,8 +274,8 @@ FROM smoke_tbl \gset
 
 SELECT (:'smoke_hash_a' = :'smoke_hash_b' AND :'smoke_hash_a' = :'smoke_hash_c') AS multi_db_roundtrip_ok \gset
 \if :multi_db_roundtrip_ok
-\echo '[PASS] Concurrent delete vs update'
+\echo [PASS] (:testid) Concurrent delete vs update
 \else
-\echo '[FAIL] Concurrent delete vs update'
+\echo [FAIL] (:testid) Concurrent delete vs update
 SELECT (:fail::int + 1) AS fail \gset
 \endif

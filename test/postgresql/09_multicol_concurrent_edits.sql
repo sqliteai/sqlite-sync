@@ -4,7 +4,8 @@
 -- 2) B updates col_a while C updates col_b concurrently
 -- 3) Sync and verify both columns are preserved on all DBs
 
-\echo '\nRunning multi-column concurrent edits test ...'
+\set testid '09'
+
 \connect postgres
 \ir helper_psql_conn_setup.sql
 DROP DATABASE IF EXISTS cloudsync_test_a;
@@ -200,8 +201,8 @@ FROM smoke_tbl \gset
 
 SELECT (:'smoke_hash_a' = :'smoke_hash_b' AND :'smoke_hash_a' = :'smoke_hash_c') AS multi_db_roundtrip_ok \gset
 \if :multi_db_roundtrip_ok
-\echo '[PASS] Multi-column concurrent edits'
+\echo [PASS] (:testid) Multi-column concurrent edits
 \else
-\echo '[FAIL] Multi-column concurrent edits'
+\echo [FAIL] (:testid) Multi-column concurrent edits
 SELECT (:fail::int + 1) AS fail \gset
 \endif

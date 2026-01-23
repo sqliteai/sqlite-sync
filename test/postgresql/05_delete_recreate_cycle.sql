@@ -7,7 +7,8 @@
 --   6. C reinserts with another value
 
 
-\echo '\nRunning delete/recreate/update/delete/reinsert cycle across multiple DBs ...'
+\set testid '05'
+
 \connect postgres
 \ir helper_psql_conn_setup.sql
 DROP DATABASE IF EXISTS cloudsync_test_a;
@@ -767,8 +768,8 @@ FROM smoke_tbl \gset
 
 SELECT (:'smoke_hash_a' = :'smoke_hash_b' AND :'smoke_hash_a' = :'smoke_hash_c') AS multi_db_roundtrip_ok \gset
 \if :multi_db_roundtrip_ok
-\echo '[PASS] Test delete/recreate/update/delete/reinsert cycle'
+\echo [PASS] (:testid) Test delete/recreate/update/delete/reinsert cycle
 \else
-\echo '[FAIL] Test delete/recreate/update/delete/reinsert cycle'
+\echo [FAIL] (:testid) Test delete/recreate/update/delete/reinsert cycle
 SELECT (:fail::int + 1) AS fail \gset
 \endif

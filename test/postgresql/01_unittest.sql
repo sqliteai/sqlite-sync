@@ -1,6 +1,7 @@
 -- 'Unittest'
 
-\echo '\nRunning unittest ...'
+\set testid '01'
+
 \connect postgres
 \ir helper_psql_conn_setup.sql
 
@@ -16,14 +17,14 @@ CREATE EXTENSION IF NOT EXISTS cloudsync;
 
 -- 'Test version visibility'
 SELECT cloudsync_version() AS version \gset
-\echo [PASS] Test cloudsync_version: :version
+\echo [PASS] (:testid) Test cloudsync_version: :version
 
 -- 'Test uuid generation'
 SELECT (length(cloudsync_uuid()) > 0) AS uuid_ok \gset
 \if :uuid_ok
-\echo '[PASS] Test uuid generation'
+\echo [PASS] (:testid) Test uuid generation
 \else
-\echo '[FAIL] Test uuid generation'
+\echo [FAIL] (:testid) Test uuid generation
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -31,9 +32,9 @@ SELECT (:fail::int + 1) AS fail \gset
 SELECT cloudsync_cleanup('smoke_tbl') AS _cleanup_ok \gset
 SELECT (cloudsync_is_sync('smoke_tbl') = false) AS init_cleanup_ok \gset
 \if :init_cleanup_ok
-\echo '[PASS] Test init cleanup'
+\echo [PASS] (:testid) Test init cleanup
 \else
-\echo '[FAIL] Test init cleanup'
+\echo [FAIL] (:testid) Test init cleanup
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 DROP TABLE IF EXISTS smoke_tbl;
@@ -41,9 +42,9 @@ CREATE TABLE smoke_tbl (id TEXT PRIMARY KEY, val TEXT);
 SELECT cloudsync_init('smoke_tbl', 'CLS', true) AS _init_site_id \gset
 SELECT (to_regclass('public.smoke_tbl_cloudsync') IS NOT NULL) AS init_create_ok \gset
 \if :init_create_ok
-\echo '[PASS] Test init create'
+\echo [PASS] (:testid) Test init create
 \else
-\echo '[FAIL] Test init create'
+\echo [FAIL] (:testid) Test init create
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -53,16 +54,15 @@ DROP TABLE IF EXISTS public.repeated_table;
 DROP TABLE IF EXISTS test_schema.repeated_table;
 CREATE TABLE public.repeated_table (id TEXT PRIMARY KEY, data TEXT);
 CREATE TABLE test_schema.repeated_table (id TEXT PRIMARY KEY, data TEXT);
-\echo '[INFO] Created repeated_table in both public and test_schema'
 
 -- 'Test init on table that exists in multiple schemas (default: public)'
 SELECT cloudsync_cleanup('repeated_table') AS _cleanup_repeated \gset
 SELECT cloudsync_init('repeated_table', 'CLS', true) AS _init_repeated_public \gset
 SELECT (to_regclass('public.repeated_table_cloudsync') IS NOT NULL) AS init_repeated_public_ok \gset
 \if :init_repeated_public_ok
-\echo '[PASS] Test init on repeated_table in public schema'
+\echo [PASS] (:testid) Test init on repeated_table in public schema
 \else
-\echo '[FAIL] Test init on repeated_table in public schema'
+\echo [FAIL] (:testid) Test init on repeated_table in public schema
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -74,9 +74,9 @@ FROM public.repeated_table_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'repeated_id1']::text[])
   AND col_name = 'data' \gset
 \if :insert_repeated_public_ok
-\echo '[PASS] Test insert metadata on repeated_table in public'
+\echo [PASS] (:testid) Test insert metadata on repeated_table in public
 \else
-\echo '[FAIL] Test insert metadata on repeated_table in public'
+\echo [FAIL] (:testid) Test insert metadata on repeated_table in public
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -88,9 +88,9 @@ SELECT COUNT(*) AS changes_meta_repeated_count
 FROM public.repeated_table_cloudsync \gset
 SELECT (:changes_view_repeated_count::int = :changes_meta_repeated_count::int) AS changes_read_repeated_ok \gset
 \if :changes_read_repeated_ok
-\echo '[PASS] Test cloudsync_changes view read for public.repeated_table'
+\echo [PASS] (:testid) Test cloudsync_changes view read for public.repeated_table
 \else
-\echo '[FAIL] Test cloudsync_changes view read for public.repeated_table'
+\echo [FAIL] (:testid) Test cloudsync_changes view read for public.repeated_table
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -113,9 +113,9 @@ SELECT (COUNT(*) = 1) AS changes_write_repeated_ok
 FROM public.repeated_table
 WHERE id = :'repeated_id2' AND data = 'public_write' \gset
 \if :changes_write_repeated_ok
-\echo '[PASS] Test cloudsync_changes view write for public.repeated_table'
+\echo [PASS] (:testid) Test cloudsync_changes view write for public.repeated_table
 \else
-\echo '[FAIL] Test cloudsync_changes view write for public.repeated_table'
+\echo [FAIL] (:testid) Test cloudsync_changes view write for public.repeated_table
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -123,9 +123,9 @@ SELECT (:fail::int + 1) AS fail \gset
 SELECT cloudsync_cleanup('repeated_table') AS _cleanup_repeated2 \gset
 SELECT (to_regclass('public.repeated_table_cloudsync') IS NULL) AS cleanup_repeated_ok \gset
 \if :cleanup_repeated_ok
-\echo '[PASS] Test cleanup on repeated_table'
+\echo [PASS] (:testid) Test cleanup on repeated_table
 \else
-\echo '[FAIL] Test cleanup on repeated_table'
+\echo [FAIL] (:testid) Test cleanup on repeated_table
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -134,18 +134,18 @@ SELECT cloudsync_set_schema('test_schema') AS _set_schema \gset
 SELECT cloudsync_init('repeated_table', 'CLS', true) AS _init_repeated_test_schema \gset
 SELECT (to_regclass('test_schema.repeated_table_cloudsync') IS NOT NULL) AS init_repeated_test_schema_ok \gset
 \if :init_repeated_test_schema_ok
-\echo '[PASS] Test init on repeated_table in test_schema'
+\echo [PASS] (:testid) Test init on repeated_table in test_schema
 \else
-\echo '[FAIL] Test init on repeated_table in test_schema'
+\echo [FAIL] (:testid) Test init on repeated_table in test_schema
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
 -- 'Test that public.repeated_table_cloudsync was not recreated'
 SELECT (to_regclass('public.repeated_table_cloudsync') IS NULL) AS public_still_clean_ok \gset
 \if :public_still_clean_ok
-\echo '[PASS] Test public.repeated_table_cloudsync still cleaned up'
+\echo [PASS] (:testid) Test public.repeated_table_cloudsync still cleaned up
 \else
-\echo '[FAIL] Test public.repeated_table_cloudsync should not exist'
+\echo [FAIL] (:testid) Test public.repeated_table_cloudsync should not exist
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -157,9 +157,9 @@ FROM test_schema.repeated_table_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'repeated_id3']::text[])
   AND col_name = 'data' \gset
 \if :insert_repeated_test_schema_ok
-\echo '[PASS] Test insert metadata on repeated_table in test_schema'
+\echo [PASS] (:testid) Test insert metadata on repeated_table in test_schema
 \else
-\echo '[FAIL] Test insert metadata on repeated_table in test_schema'
+\echo [FAIL] (:testid) Test insert metadata on repeated_table in test_schema
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -171,9 +171,9 @@ SELECT COUNT(*) AS changes_meta_test_schema_count
 FROM test_schema.repeated_table_cloudsync \gset
 SELECT (:changes_view_test_schema_count::int = :changes_meta_test_schema_count::int) AS changes_read_test_schema_ok \gset
 \if :changes_read_test_schema_ok
-\echo '[PASS] Test cloudsync_changes view read for test_schema.repeated_table'
+\echo [PASS] (:testid) Test cloudsync_changes view read for test_schema.repeated_table
 \else
-\echo '[FAIL] Test cloudsync_changes view read for test_schema.repeated_table'
+\echo [FAIL] (:testid) Test cloudsync_changes view read for test_schema.repeated_table
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -196,9 +196,9 @@ SELECT (COUNT(*) = 1) AS changes_write_test_schema_ok
 FROM test_schema.repeated_table
 WHERE id = :'repeated_id4' AND data = 'testschema_write' \gset
 \if :changes_write_test_schema_ok
-\echo '[PASS] Test cloudsync_changes view write for test_schema.repeated_table'
+\echo [PASS] (:testid) Test cloudsync_changes view write for test_schema.repeated_table
 \else
-\echo '[FAIL] Test cloudsync_changes view write for test_schema.repeated_table'
+\echo [FAIL] (:testid) Test cloudsync_changes view write for test_schema.repeated_table
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -206,9 +206,9 @@ SELECT (:fail::int + 1) AS fail \gset
 SELECT cloudsync_cleanup('repeated_table') AS _cleanup_repeated3 \gset
 SELECT (to_regclass('test_schema.repeated_table_cloudsync') IS NULL) AS cleanup_repeated3_ok \gset
 \if :cleanup_repeated3_ok
-\echo '[PASS] Test cleanup on repeated_table on test_schema'
+\echo [PASS] (:testid) Test cleanup on repeated_table on test_schema
 \else
-\echo '[FAIL] Test cleanup on repeated_table on test_schema'
+\echo [FAIL] (:testid) Test cleanup on repeated_table on test_schema
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -217,9 +217,9 @@ SELECT cloudsync_set_schema('public') AS _reset_schema \gset
 SELECT current_schema() AS current_schema_after_reset \gset
 SELECT (:'current_schema_after_reset' = 'public') AS schema_reset_ok \gset
 \if :schema_reset_ok
-\echo '[PASS] Test schema reset to public'
+\echo [PASS] (:testid) Test schema reset to public
 \else
-\echo '[FAIL] Test schema reset to public'
+\echo [FAIL] (:testid) Test schema reset to public
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -231,9 +231,9 @@ FROM smoke_tbl_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id']::text[])
   AND col_name = 'val' \gset
 \if :insert_meta_ok
-\echo '[PASS] Test insert metadata row creation'
+\echo [PASS] (:testid) Test insert metadata row creation
 \else
-\echo '[FAIL] Test insert metadata row creation'
+\echo [FAIL] (:testid) Test insert metadata row creation
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -243,9 +243,9 @@ FROM smoke_tbl_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id']::text[])
   AND col_name = 'val' \gset
 \if :insert_meta_fields_ok
-\echo '[PASS] Test insert metadata fields'
+\echo [PASS] (:testid) Test insert metadata fields
 \else
-\echo '[FAIL] Test insert metadata fields'
+\echo [FAIL] (:testid) Test insert metadata fields
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -261,9 +261,9 @@ WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id']::text[])
   AND col_name = 'val' \gset
 SELECT (:val_ver_after::bigint > :val_ver_before::bigint) AS update_val_ok \gset
 \if :update_val_ok
-\echo '[PASS] Test update val only'
+\echo [PASS] (:testid) Test update val only
 \else
-\echo '[FAIL] Test update val only'
+\echo [FAIL] (:testid) Test update val only
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -275,9 +275,9 @@ FROM smoke_tbl_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id']::text[])
   AND col_name = '__[RIP]__' \gset
 \if :update_id_old_tombstone_ok
-\echo '[PASS] Test update id only (old tombstone)'
+\echo [PASS] (:testid) Test update id only (old tombstone)
 \else
-\echo '[FAIL] Test update id only (old tombstone)'
+\echo [FAIL] (:testid) Test update id only (old tombstone)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 SELECT (COUNT(*) = 0) AS update_id_old_val_gone_ok
@@ -285,9 +285,9 @@ FROM smoke_tbl_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id']::text[])
   AND col_name = 'val' \gset
 \if :update_id_old_val_gone_ok
-\echo '[PASS] Test update id only (old val gone)'
+\echo [PASS] (:testid) Test update id only (old val gone)
 \else
-\echo '[FAIL] Test update id only (old val gone)'
+\echo [FAIL] (:testid) Test update id only (old val gone)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 SELECT (COUNT(*) = 1) AS update_id_new_val_ok
@@ -295,9 +295,9 @@ FROM smoke_tbl_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id2']::text[])
   AND col_name = 'val' \gset
 \if :update_id_new_val_ok
-\echo '[PASS] Test update id only (new val)'
+\echo [PASS] (:testid) Test update id only (new val)
 \else
-\echo '[FAIL] Test update id only (new val)'
+\echo [FAIL] (:testid) Test update id only (new val)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 SELECT (COUNT(*) = 1) AS update_id_new_tombstone_ok
@@ -305,9 +305,9 @@ FROM smoke_tbl_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id2']::text[])
   AND col_name = '__[RIP]__' \gset
 \if :update_id_new_tombstone_ok
-\echo '[PASS] Test update id only (new tombstone)'
+\echo [PASS] (:testid) Test update id only (new tombstone)
 \else
-\echo '[FAIL] Test update id only (new tombstone)'
+\echo [FAIL] (:testid) Test update id only (new tombstone)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -319,9 +319,9 @@ FROM smoke_tbl_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id2']::text[])
   AND col_name = '__[RIP]__' \gset
 \if :update_both_old_tombstone_ok
-\echo '[PASS] Test update id and val (old tombstone)'
+\echo [PASS] (:testid) Test update id and val (old tombstone)
 \else
-\echo '[FAIL] Test update id and val (old tombstone)'
+\echo [FAIL] (:testid) Test update id and val (old tombstone)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 SELECT (COUNT(*) = 0) AS update_both_old_val_gone_ok
@@ -329,9 +329,9 @@ FROM smoke_tbl_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id2']::text[])
   AND col_name = 'val' \gset
 \if :update_both_old_val_gone_ok
-\echo '[PASS] Test update id and val (old val gone)'
+\echo [PASS] (:testid) Test update id and val (old val gone)
 \else
-\echo '[FAIL] Test update id and val (old val gone)'
+\echo [FAIL] (:testid) Test update id and val (old val gone)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 SELECT (COUNT(*) = 1) AS update_both_new_val_ok
@@ -339,9 +339,9 @@ FROM smoke_tbl_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id3']::text[])
   AND col_name = 'val' \gset
 \if :update_both_new_val_ok
-\echo '[PASS] Test update id and val (new val)'
+\echo [PASS] (:testid) Test update id and val (new val)
 \else
-\echo '[FAIL] Test update id and val (new val)'
+\echo [FAIL] (:testid) Test update id and val (new val)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 SELECT (COUNT(*) = 1) AS update_both_new_tombstone_ok
@@ -349,9 +349,9 @@ FROM smoke_tbl_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id3']::text[])
   AND col_name = '__[RIP]__' \gset
 \if :update_both_new_tombstone_ok
-\echo '[PASS] Test update id and val (new tombstone)'
+\echo [PASS] (:testid) Test update id and val (new tombstone)
 \else
-\echo '[FAIL] Test update id and val (new tombstone)'
+\echo [FAIL] (:testid) Test update id and val (new tombstone)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -362,9 +362,9 @@ FROM smoke_tbl_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id3']::text[])
   AND col_name = '__[RIP]__' \gset
 \if :delete_meta_ok
-\echo '[PASS] Test delete metadata tombstone'
+\echo [PASS] (:testid) Test delete metadata tombstone
 \else
-\echo '[FAIL] Test delete metadata tombstone'
+\echo [FAIL] (:testid) Test delete metadata tombstone
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -374,9 +374,9 @@ FROM smoke_tbl_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id3']::text[])
   AND col_name = '__[RIP]__' \gset
 \if :delete_meta_fields_ok
-\echo '[PASS] Test delete metadata fields'
+\echo [PASS] (:testid) Test delete metadata fields
 \else
-\echo '[FAIL] Test delete metadata fields'
+\echo [FAIL] (:testid) Test delete metadata fields
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -386,9 +386,9 @@ FROM smoke_tbl_cloudsync
 WHERE pk = cloudsync_pk_encode(VARIADIC ARRAY[:'smoke_id3']::text[])
   AND col_name != '__[RIP]__' \gset
 \if :delete_meta_only_ok
-\echo '[PASS] Test delete removes non-tombstone metadata'
+\echo [PASS] (:testid) Test delete removes non-tombstone metadata
 \else
-\echo '[FAIL] Test delete removes non-tombstone metadata'
+\echo [FAIL] (:testid) Test delete removes non-tombstone metadata
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -411,9 +411,9 @@ SELECT (COUNT(*) = 1) AS changes_write_row_ok
 FROM smoke_tbl
 WHERE id = :'smoke_id4' AND val = 'change_write' \gset
 \if :changes_write_row_ok
-\echo '[PASS] Test cloudsync_changes view write'
+\echo [PASS] (:testid) Test cloudsync_changes view write
 \else
-\echo '[FAIL] Test cloudsync_changes view write'
+\echo [FAIL] (:testid) Test cloudsync_changes view write
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -425,29 +425,29 @@ SELECT COUNT(*) AS changes_meta_count
 FROM smoke_tbl_cloudsync \gset
 SELECT (:changes_view_count::int = :changes_meta_count::int) AS changes_read_ok \gset
 \if :changes_read_ok
-\echo '[PASS] Test cloudsync_changes view read'
+\echo [PASS] (:testid) Test cloudsync_changes view read
 \else
-\echo '[FAIL] Test cloudsync_changes view read'
+\echo [FAIL] (:testid) Test cloudsync_changes view read
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
 -- 'Test site id visibility'
 SELECT cloudsync_siteid() AS site_id \gset
-\echo [PASS] Test site id visibility :site_id
+\echo [PASS] (:testid) Test site id visibility :site_id
 
 -- 'Test site id encoding'
 SELECT (length(encode(cloudsync_siteid()::bytea, 'hex')) > 0) AS sid_ok \gset
 \if :sid_ok
-\echo '[PASS] Test site id encoding'
+\echo [PASS] (:testid) Test site id encoding
 \else
-\echo '[FAIL] Test site id encoding'
+\echo [FAIL] (:testid) Test site id encoding
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
 -- 'Test double init no-op'
 SELECT cloudsync_init('smoke_tbl', 'CLS', true) AS _init_site_id2 \gset
 SELECT cloudsync_init('smoke_tbl', 'CLS', true) AS _init_site_id3 \gset
-\echo '[PASS] Test double init no-op'
+\echo [PASS] (:testid) Test double init no-op
 
 -- 'Test payload encode signature'
 SELECT md5(COALESCE(string_agg(id || ':' || COALESCE(val, ''), ',' ORDER BY id), '')) AS smoke_hash
@@ -457,8 +457,8 @@ FROM cloudsync_changes
 WHERE site_id = cloudsync_siteid() \gset
 SELECT (length(:'payload_hex') > 0 AND substring(:'payload_hex' from 1 for 8) = '434c5359') AS payload_sig_ok \gset
 \if :payload_sig_ok
-\echo '[PASS] Test payload encode signature'
+\echo [PASS] (:testid) Test payload encode signature
 \else
-\echo '[FAIL] Test payload encode signature'
+\echo [FAIL] (:testid) Test payload encode signature
 SELECT (:fail::int + 1) AS fail \gset
 \endif

@@ -5,13 +5,12 @@
 \echo 'Running smoke_test...'
 
 \ir helper_psql_conn_setup.sql
-\set ON_ERROR_STOP off
+-- \set ON_ERROR_STOP on
 \set fail 0
 
 \ir 01_unittest.sql
 \ir 02_roundtrip.sql
 \ir 03_multiple_roundtrip.sql
-\ir 04_colversion_skew.sql
 \ir 04_colversion_skew.sql
 \ir 05_delete_recreate_cycle.sql
 \ir 06_out_of_order_delivery.sql

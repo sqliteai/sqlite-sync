@@ -2,7 +2,8 @@
 --   - concurrent update pattern where A/B/C perform 2/1/3 updates respectively on id1 before syncing. 
 --   - It follows the same apply order as the existing 3‑DB test and verifies final convergence across all three databases
 
-\echo '\nRunning multi-db roundtrip with skewed col_version updates ...'
+\set testid '04'
+
 \connect postgres
 \ir helper_psql_conn_setup.sql
 DROP DATABASE IF EXISTS cloudsync_test_a;
@@ -308,8 +309,8 @@ FROM smoke_tbl \gset
 
 SELECT (:'smoke_hash_a' = :'smoke_hash_b' AND :'smoke_hash_a' = :'smoke_hash_c') AS multi_db_roundtrip_ok \gset
 \if :multi_db_roundtrip_ok
-\echo '[PASS] Test multi-db roundtrip with skewed col_version updates'
+\echo [PASS] (:testid) Test multi-db roundtrip with skewed col_version updates
 \else
-\echo '[FAIL] Test multi-db roundtrip with skewed col_version updates'
+\echo [FAIL] (:testid) Test multi-db roundtrip with skewed col_version updates
 SELECT (:fail::int + 1) AS fail \gset
 \endif
