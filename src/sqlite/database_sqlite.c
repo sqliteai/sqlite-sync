@@ -176,6 +176,28 @@ char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, 
     return cloudsync_memory_mprintf(SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL, table_name, except_col);
 }
 
+char *sql_build_tableinfo_list_nonpk_name_cid (cloudsync_context *data, const char *table_name, const char *schema) {
+    return cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID, table_name, table_name);
+}
+
+char *sql_build_delete_cols_not_in_schema_or_pkcol (cloudsync_context *data, const char *table_name, const char *schema, const char *tombstone) {
+    return cloudsync_memory_mprintf(SQL_CLOUDSYNC_DELETE_COLS_NOT_IN_SCHEMA_OR_PKCOL, table_name, table_name, tombstone);
+}
+
+char *sql_build_pk_qualified_collist (cloudsync_context *data, const char *table_name, const char *schema) {
+    char buffer[1024];
+    char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
+    return cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_QUALIFIED_COLLIST_FMT, singlequote_escaped_table_name, singlequote_escaped_table_name);
+}
+
+char *sql_build_pk_collist (cloudsync_context *data, const char *table_name, const char *schema) {
+    return cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_COLLIST, table_name);
+}
+
+char *sql_build_pk_decode_selectlist (cloudsync_context *data, const char *table_name, const char *schema) {
+    return cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_DECODE_SELECTLIST, table_name);
+}
+
 // MARK: - PRIVATE -
 
 static int database_select1_value (cloudsync_context *data, const char *sql, char **ptr_value, int64_t *int_value, DBTYPE expected_type) {
@@ -704,6 +726,14 @@ int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
     rc = database_exec(data, sql);
     if (rc == SQLITE_OK && hash) *hash = h;
     return rc;
+}
+
+char *database_current_schema (cloudsync_context *data) {
+    return NULL;
+}
+
+char *database_default_schema (cloudsync_context *data) {
+    return NULL;
 }
 
 // MARK: - VM -

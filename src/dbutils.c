@@ -7,6 +7,7 @@
 
 #include <stdlib.h>
 #include <inttypes.h>
+#include <string.h>
 
 #include "sql.h"
 #include "utils.h"
@@ -358,8 +359,28 @@ int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values,
         if (strcmp(key, "algo")!=0) continue;
         
         table_algo algo = cloudsync_algo_from_name(value);
-        if (database_create_triggers(data, table_name, algo) != DBRES_OK) return DBRES_MISUSE;
-        if (table_add_to_context(data, algo, table_name) == false) return DBRES_MISUSE;
+        char schema[512];
+        schema[0] = '\0';
+        int schema_rc = dbutils_table_settings_get_value(data, table_name, "*", CLOUDSYNC_KEY_SCHEMA, schema, sizeof(schema));
+        if (schema_rc != DBRES_OK || schema[0] == '\0') {
+            char *current_schema = database_current_schema(data);
+            if (current_schema && current_schema[0] != '\0') {
+                strncpy(schema, current_schema, sizeof(schema) - 1);
+                schema[sizeof(schema) - 1] = '\0';
+                dbutils_table_settings_set_key_value(data, table_name, "*", CLOUDSYNC_KEY_SCHEMA, schema);
+            }
+            if (current_schema) cloudsync_memory_free(current_schema);
+        }
+
+        const char *table_ref = table_name;
+        char qualified[1024];
+        if (schema[0] != '\0') {
+            snprintf(qualified, sizeof(qualified), "%s.%s", schema, table_name);
+            table_ref = qualified;
+        }
+
+        if (database_create_triggers(data, table_ref, algo) != DBRES_OK) return DBRES_MISUSE;
+        if (table_add_to_context(data, algo, table_ref) == false) return DBRES_MISUSE;
         
         DEBUG_SETTINGS("load tbl_name: %s value: %s", key, value);
     }

@@ -125,9 +125,9 @@ const char * const SQL_SITEID_GETSET_ROWID_BY_SITEID =
 const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_ROWID =
     "SELECT string_agg(quote_ident(column_name), ',' ORDER BY ordinal_position) "
     "FROM information_schema.columns "
-    "WHERE table_name = $1 AND column_name NOT IN ("
+    "WHERE table_schema = $2 AND table_name = $1 AND column_name NOT IN ("
     "SELECT column_name FROM information_schema.key_column_usage "
-    "WHERE table_name = $1 AND constraint_name LIKE '%_pkey'"
+    "WHERE table_schema = $2 AND table_name = $1 AND constraint_name LIKE '%_pkey'"
     ");";  // TODO: build full SELECT ... WHERE ctid=? analog with ordered columns like SQLite
 
 const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_PK =
@@ -296,16 +296,16 @@ const char * const SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL =
 const char * const SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL =
     "WITH moved AS ("
     "  SELECT col_name "
-    "  FROM \"%s_cloudsync\" WHERE pk = $3 AND col_name != '%s'"
+    "  FROM %s_cloudsync WHERE pk = $3 AND col_name != '%s'"
     "), "
     "upserted AS ("
-    "  INSERT INTO \"%s_cloudsync\" (pk, col_name, col_version, db_version, seq, site_id) "
+    "  INSERT INTO %s_cloudsync (pk, col_name, col_version, db_version, seq, site_id) "
     "  SELECT $1, col_name, 1, $2, cloudsync_seq(), 0 "
     "  FROM moved "
     "  ON CONFLICT (pk, col_name) DO UPDATE SET "
     "  col_version = 1, db_version = $2, seq = cloudsync_seq(), site_id = 0"
     ") "
-    "DELETE FROM \"%s_cloudsync\" WHERE pk = $3 AND col_name != '%s';";
+    "DELETE FROM %s_cloudsync WHERE pk = $3 AND col_name != '%s';";
 
 const char * const SQL_CLOUDSYNC_GET_COL_VERSION_OR_ROW_EXISTS =
     "SELECT COALESCE("
@@ -338,11 +338,11 @@ const char * const SQL_CLOUDSYNC_SELECT_SITE_ID_BY_PK_COL =
 const char * const SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID =
     "SELECT c.column_name, c.ordinal_position "
     "FROM information_schema.columns c "
-    "WHERE c.table_name = '%s' "
+    "WHERE c.table_schema = '%s' AND c.table_name = '%s' "
     "AND c.column_name NOT IN ("
     "  SELECT kcu.column_name FROM information_schema.table_constraints tc "
     "  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
-    "  WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY'"
+    "  WHERE tc.table_schema = '%s' AND tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY'"
     ") "
     "ORDER BY ordinal_position;";
 
@@ -351,14 +351,14 @@ const char * const SQL_DROP_CLOUDSYNC_TABLE =
 
 const char * const SQL_CLOUDSYNC_DELETE_COLS_NOT_IN_SCHEMA_OR_PKCOL =
     "DELETE FROM %s_cloudsync WHERE col_name NOT IN ("
-    "SELECT column_name FROM information_schema.columns WHERE table_name = '%s' "
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = '%s' AND table_name = '%s' "
     "UNION SELECT '%s'"
     ");";
 
 const char * const SQL_PRAGMA_TABLEINFO_PK_QUALIFIED_COLLIST_FMT =
     "SELECT string_agg(quote_ident(column_name), ',' ORDER BY ordinal_position) "
     "FROM information_schema.key_column_usage "
-    "WHERE table_name = '%s' AND constraint_name LIKE '%%_pkey';";
+    "WHERE table_schema = '%s' AND table_name = '%s' AND constraint_name LIKE '%%_pkey';";
 
 const char * const SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK =
     "DELETE FROM %s_cloudsync "
@@ -371,14 +371,14 @@ const char * const SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK =
 const char * const SQL_PRAGMA_TABLEINFO_PK_COLLIST =
     "SELECT string_agg(quote_ident(column_name), ',') "
     "FROM information_schema.key_column_usage "
-    "WHERE table_name = '%s' AND constraint_name LIKE '%%_pkey';";
+    "WHERE table_schema = '%s' AND table_name = '%s' AND constraint_name LIKE '%%_pkey';";
 
 const char * const SQL_PRAGMA_TABLEINFO_PK_DECODE_SELECTLIST =
     "SELECT string_agg("
     "'cloudsync_pk_decode(pk, ' || ordinal_position || ') AS ' || quote_ident(column_name), ',' ORDER BY ordinal_position"
     ") "
     "FROM information_schema.key_column_usage "
-    "WHERE table_name = '%s' AND constraint_name LIKE '%%_pkey';";
+    "WHERE table_schema = '%s' AND table_name = '%s' AND constraint_name LIKE '%%_pkey';";
 
 const char * const SQL_CLOUDSYNC_INSERT_MISSING_PKS_FROM_BASE_EXCEPT_SYNC =
     "SELECT cloudsync_insert('%s', %s) "

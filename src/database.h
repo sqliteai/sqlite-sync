@@ -82,6 +82,8 @@ int64_t  database_schema_version (cloudsync_context *data);
 uint64_t database_schema_hash (cloudsync_context *data);
 bool     database_check_schema_hash (cloudsync_context *data, uint64_t hash);
 int      database_update_schema_hash (cloudsync_context *data, uint64_t *hash);
+char    *database_current_schema (cloudsync_context *data);
+char    *database_default_schema (cloudsync_context *data);
 
 int database_begin_savepoint (cloudsync_context *data, const char *savepoint_name);
 int database_commit_savepoint (cloudsync_context *data, const char *savepoint_name);
@@ -143,6 +145,11 @@ char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_nam
 char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_name, const char *colname);
 char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_name, const char *colname);
 char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, const char *table_name, const char *except_col);
+char *sql_build_tableinfo_list_nonpk_name_cid (cloudsync_context *data, const char *table_name, const char *schema);
+char *sql_build_delete_cols_not_in_schema_or_pkcol (cloudsync_context *data, const char *table_name, const char *schema, const char *tombstone);
+char *sql_build_pk_qualified_collist (cloudsync_context *data, const char *table_name, const char *schema);
+char *sql_build_pk_collist (cloudsync_context *data, const char *table_name, const char *schema);
+char *sql_build_pk_decode_selectlist (cloudsync_context *data, const char *table_name, const char *schema);
 
 // USED ONLY by SQLite Cloud to implement RLS
 typedef struct cloudsync_pk_decode_bind_context cloudsync_pk_decode_bind_context;

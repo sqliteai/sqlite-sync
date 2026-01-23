@@ -9,6 +9,7 @@ CREATE DATABASE cloudsync_test_1;
 
 \connect cloudsync_test_1
 \ir helper_psql_conn_setup.sql
+-- SET search_path TO public;
 
 -- Reset extension and install
 -- DROP EXTENSION IF EXISTS cloudsync CASCADE;
@@ -46,6 +47,65 @@ SELECT (to_regclass('public.smoke_tbl_cloudsync') IS NOT NULL) AS init_create_ok
 \echo '[FAIL] Test init create'
 SELECT (:fail::int + 1) AS fail \gset
 \endif
+
+-- -- 'Test schema-qualified init and cleanup'
+-- DROP SCHEMA IF EXISTS smoke_test_schema CASCADE;
+CREATE SCHEMA smoke_test_schema;
+-- DROP TABLE IF EXISTS smoke_tbl_2;
+-- CREATE TABLE smoke_tbl_2 (id TEXT PRIMARY KEY, val TEXT);
+-- DROP TABLE IF EXISTS smoke_test_schema.smoke_tbl_2;
+-- CREATE TABLE smoke_test_schema.smoke_tbl_2 (id TEXT PRIMARY KEY, val TEXT);
+
+-- SELECT cloudsync_init('smoke_tbl_2') AS _init_smoke_tbl_2 \gset
+-- SELECT (to_regclass('public.smoke_tbl_2_cloudsync') IS NOT NULL) AS init_public_schema_ok \gset
+-- \if :init_public_schema_ok
+-- \echo '[PASS] Test init default schema'
+-- \else
+-- \echo '[FAIL] Test init default schema'
+-- SELECT (:fail::int + 1) AS fail \gset
+-- \endif
+-- SELECT cloudsync_cleanup('smoke_tbl_2') AS _cleanup_smoke_tbl_2 \gset
+-- SELECT (to_regclass('public.smoke_tbl_2_cloudsync') IS NULL) AS cleanup_public_schema_ok \gset
+-- \if :cleanup_public_schema_ok
+-- \echo '[PASS] Test cleanup default schema'
+-- \else
+-- \echo '[FAIL] Test cleanup default schema'
+-- SELECT (:fail::int + 1) AS fail \gset
+-- \endif
+
+-- SELECT cloudsync_init('public.smoke_tbl_2') AS _init_public_smoke_tbl_2 \gset
+-- SELECT cloudsync_init('smoke_test_schema.smoke_tbl_2') AS _init_schema_smoke_tbl_2 \gset
+-- SELECT (to_regclass('public.smoke_tbl_2_cloudsync') IS NOT NULL) AS init_public_schema_qualified_ok \gset
+-- SELECT (to_regclass('smoke_test_schema.smoke_tbl_2_cloudsync') IS NOT NULL) AS init_custom_schema_qualified_ok \gset
+-- \if :init_public_schema_qualified_ok
+-- \echo '[PASS] Test init qualified public schema'
+-- \else
+-- \echo '[FAIL] Test init qualified public schema'
+-- SELECT (:fail::int + 1) AS fail \gset
+-- \endif
+-- \if :init_custom_schema_qualified_ok
+-- \echo '[PASS] Test init qualified custom schema'
+-- \else
+-- \echo '[FAIL] Test init qualified custom schema'
+-- SELECT (:fail::int + 1) AS fail \gset
+-- \endif
+
+-- SELECT cloudsync_cleanup('public.smoke_tbl_2') AS _cleanup_public_smoke_tbl_2 \gset
+-- SELECT cloudsync_cleanup('smoke_test_schema.smoke_tbl_2') AS _cleanup_schema_smoke_tbl_2 \gset
+-- SELECT (to_regclass('public.smoke_tbl_2_cloudsync') IS NULL) AS cleanup_public_schema_qualified_ok \gset
+-- SELECT (to_regclass('smoke_test_schema.smoke_tbl_2_cloudsync') IS NULL) AS cleanup_custom_schema_qualified_ok \gset
+-- \if :cleanup_public_schema_qualified_ok
+-- \echo '[PASS] Test cleanup qualified public schema'
+-- \else
+-- \echo '[FAIL] Test cleanup qualified public schema'
+-- SELECT (:fail::int + 1) AS fail \gset
+-- \endif
+-- \if :cleanup_custom_schema_qualified_ok
+-- \echo '[PASS] Test cleanup qualified custom schema'
+-- \else
+-- \echo '[FAIL] Test cleanup qualified custom schema'
+-- SELECT (:fail::int + 1) AS fail \gset
+-- \endif
 
 -- 'Test insert metadata row creation'
 SELECT cloudsync_uuid() AS smoke_id \gset

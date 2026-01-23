@@ -145,6 +145,8 @@ struct cloudsync_context {
 struct cloudsync_table_context {
     table_algo  algo;                           // CRDT algoritm associated to the table
     char        *name;                          // table name
+    char        *schema;                        // optional schema name (PostgreSQL)
+    char        *sql_name;                      // schema-qualified table name if available
     char        **col_name;                     // array of column names
     dbvm_t      **col_merge_stmt;               // array of merge insert stmt (indexed by col_name)
     dbvm_t      **col_value_stmt;               // array of column value stmt (indexed by col_name)
@@ -188,6 +190,69 @@ struct cloudsync_payload_context {
     uint64_t    nrows;
     uint16_t    ncols;
 };
+
+static int table_parse_name (cloudsync_context *data, const char *input, char **schema_out, char **table_out) {
+    if (!schema_out || !table_out) return DBRES_MISUSE;
+    *schema_out = NULL;
+    *table_out = NULL;
+
+    if (!input) return DBRES_ERROR;
+
+    const char *dot = strchr(input, '.');
+    if (dot) {
+        size_t schema_len = (size_t)(dot - input);
+        const char *table_part = dot + 1;
+        if (schema_len == 0 || table_part[0] == '\0') return DBRES_ERROR;
+
+        *schema_out = cloudsync_string_ndup_lowercase(input, schema_len);
+        *table_out = cloudsync_string_dup_lowercase(table_part);
+    } else {
+        *table_out = cloudsync_string_dup_lowercase(input);
+        char *schema = database_current_schema(data);
+        if (schema) {
+            *schema_out = cloudsync_string_dup_lowercase(schema);
+            cloudsync_memory_free(schema);
+        } else {
+            *schema_out = database_default_schema(data);
+        }
+    }
+
+    if (!*table_out) {
+        if (*schema_out) cloudsync_memory_free(*schema_out);
+        *schema_out = NULL;
+        return DBRES_NOMEM;
+    }
+
+    return DBRES_OK;
+}
+
+static const char *table_sql_name (cloudsync_table_context *table) {
+    return (table && table->sql_name) ? table->sql_name : (table ? table->name : NULL);
+}
+
+static bool table_name_matches (cloudsync_context *data, cloudsync_table_context *table, const char *input) {
+    if (!table || !input || !table->name) return false;
+
+    const char *dot = strchr(input, '.');
+    if (dot) {
+        size_t schema_len = (size_t)(dot - input);
+        const char *table_part = dot + 1;
+        if (schema_len == 0 || table_part[0] == '\0') return false;
+        if (!table->schema) return false;
+        return (strncasecmp(table->schema, input, schema_len) == 0 &&
+                table->schema[schema_len] == '\0' &&
+                strcasecmp(table->name, table_part) == 0);
+    }
+
+    if (strcasecmp(table->name, input) != 0) return false;
+    if (!table->schema) return true;
+
+    char *schema = database_current_schema(data);
+    if (!schema) return true;
+    bool match = (strcasecmp(table->schema, schema) == 0);
+    cloudsync_memory_free(schema);
+    return match;
+}
 
 #ifdef _MSC_VER
     #pragma pack(push, 1) // For MSVC: pack struct with 1-byte alignment
@@ -563,12 +628,12 @@ void table_pknames_free (char **names, int nrows) {
 char *table_build_mergedelete_sql (cloudsync_table_context *table) {
     #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
     if (table->rowid_only) {
-        char *sql = memory_mprintf(SQL_DELETE_ROW_BY_ROWID, table->name);
+        char *sql = memory_mprintf(SQL_DELETE_ROW_BY_ROWID, table_sql_name(table));
         return sql;
     }
     #endif
 
-    return sql_build_delete_by_pk(table->context, table->name);
+    return sql_build_delete_by_pk(table->context, table_sql_name(table));
 }
 
 char *table_build_mergeinsert_sql (cloudsync_table_context *table, const char *colname) {
@@ -578,10 +643,10 @@ char *table_build_mergeinsert_sql (cloudsync_table_context *table, const char *c
     if (table->rowid_only) {
         if (colname == NULL) {
             // INSERT OR IGNORE INTO customers (first_name,last_name) VALUES (?,?);
-            sql = memory_mprintf(SQL_INSERT_ROWID_IGNORE, table->name);
+            sql = memory_mprintf(SQL_INSERT_ROWID_IGNORE, table_sql_name(table));
         } else {
             // INSERT INTO customers (first_name,last_name,age) VALUES (?,?,?) ON CONFLICT DO UPDATE SET age=?;
-            sql = memory_mprintf(SQL_UPSERT_ROWID_AND_COL_BY_ROWID, table->name, colname, colname);
+            sql = memory_mprintf(SQL_UPSERT_ROWID_AND_COL_BY_ROWID, table_sql_name(table), colname, colname);
         }
         return sql;
     }
@@ -589,9 +654,9 @@ char *table_build_mergeinsert_sql (cloudsync_table_context *table, const char *c
     
     if (colname == NULL) {
         // is sentinel insert
-        sql = sql_build_insert_pk_ignore(table->context, table->name);
+        sql = sql_build_insert_pk_ignore(table->context, table_sql_name(table));
     } else {
-        sql = sql_build_upsert_pk_and_col(table->context, table->name, colname);
+        sql = sql_build_upsert_pk_and_col(table->context, table_sql_name(table), colname);
     }
     return sql;
 }
@@ -600,16 +665,16 @@ char *table_build_value_sql (cloudsync_table_context *table, const char *colname
     #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
     if (table->rowid_only) {
         char *colnamequote = "\"";
-        char *sql = memory_mprintf(SQL_SELECT_COLS_BY_ROWID_FMT, colnamequote, colname, colnamequote, table->name);
+        char *sql = memory_mprintf(SQL_SELECT_COLS_BY_ROWID_FMT, colnamequote, colname, colnamequote, table_sql_name(table));
         return sql;
     }
     #endif
         
     // SELECT age FROM customers WHERE first_name=? AND last_name=?;
-    return sql_build_select_cols_by_pk(table->context, table->name, colname);
+    return sql_build_select_cols_by_pk(table->context, table_sql_name(table), colname);
 }
     
-cloudsync_table_context *table_create (cloudsync_context *data, const char *name, table_algo algo) {
+cloudsync_table_context *table_create (cloudsync_context *data, const char *name, const char *schema, table_algo algo) {
     DEBUG_DBFUNCTION("table_create %s", name);
     
     cloudsync_table_context *table = (cloudsync_table_context *)cloudsync_memory_zeroalloc(sizeof(cloudsync_table_context));
@@ -621,6 +686,21 @@ cloudsync_table_context *table_create (cloudsync_context *data, const char *name
     if (!table->name) {
         cloudsync_memory_free(table);
         return NULL;
+    }
+    if (schema && schema[0] != '\0') {
+        table->schema = cloudsync_string_dup_lowercase(schema);
+        if (!table->schema) {
+            cloudsync_memory_free(table->name);
+            cloudsync_memory_free(table);
+            return NULL;
+        }
+        table->sql_name = cloudsync_memory_mprintf("%s.%s", table->schema, table->name);
+        if (!table->sql_name) {
+            cloudsync_memory_free(table->schema);
+            cloudsync_memory_free(table->name);
+            cloudsync_memory_free(table);
+            return NULL;
+        }
     }
     table->enabled = true;
         
@@ -655,6 +735,8 @@ void table_free (cloudsync_table_context *table) {
         }
     }
     
+    if (table->sql_name) cloudsync_memory_free(table->sql_name);
+    if (table->schema) cloudsync_memory_free(table->schema);
     if (table->name) cloudsync_memory_free(table->name);
     if (table->pk_name) table_pknames_free(table->pk_name, table->npks);
     if (table->meta_pkexists_stmt) databasevm_finalize(table->meta_pkexists_stmt);
@@ -681,6 +763,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     int rc = DBRES_OK;
     char *sql = NULL;
     cloudsync_context *data = table->context;
+    const char *sql_name = table_sql_name(table);
     
     // META TABLE statements
     
@@ -689,7 +772,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     // precompile the pk exists statement
     // we do not need an index on the pk column because it is already covered by the fact that it is part of the prikeys
     // EXPLAIN QUERY PLAN reports: SEARCH table_name USING PRIMARY KEY (pk=?)
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_ROW_EXISTS_BY_PK, table->name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_ROW_EXISTS_BY_PK, sql_name);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_pkexists_stmt: %s", sql);
     
@@ -698,7 +781,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // precompile the update local sentinel statement
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_UPDATE_COL_BUMP_VERSION, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_UPDATE_COL_BUMP_VERSION, sql_name, CLOUDSYNC_TOMBSTONE_VALUE);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_sentinel_update_stmt: %s", sql);
     
@@ -707,7 +790,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // precompile the insert local sentinel statement
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_UPSERT_COL_INIT_OR_BUMP_VERSION, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_UPSERT_COL_INIT_OR_BUMP_VERSION, sql_name, CLOUDSYNC_TOMBSTONE_VALUE);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_sentinel_insert_stmt: %s", sql);
     
@@ -716,7 +799,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
 
     // precompile the insert/update local row statement
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_UPSERT_RAW_COLVERSION, table->name, table->name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_UPSERT_RAW_COLVERSION, sql_name, sql_name);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_row_insert_update_stmt: %s", sql);
     
@@ -725,7 +808,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // precompile the delete rows from meta
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL, sql_name, CLOUDSYNC_TOMBSTONE_VALUE);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_row_drop_stmt: %s", sql);
     
@@ -735,7 +818,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     
     // precompile the update rows from meta when pk changes
     // see https://github.com/sqliteai/sqlite-sync/blob/main/docs/PriKey.md for more details
-    sql = sql_build_rekey_pk_and_reset_version_except_col(data, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+    sql = sql_build_rekey_pk_and_reset_version_except_col(data, sql_name, CLOUDSYNC_TOMBSTONE_VALUE);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_update_move_stmt: %s", sql);
     
@@ -744,7 +827,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // local cl
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_GET_COL_VERSION_OR_ROW_EXISTS, table->name, CLOUDSYNC_TOMBSTONE_VALUE, table->name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_GET_COL_VERSION_OR_ROW_EXISTS, sql_name, CLOUDSYNC_TOMBSTONE_VALUE, sql_name);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_local_cl_stmt: %s", sql);
     
@@ -753,7 +836,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // rowid of the last inserted/updated row in the meta table
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_INSERT_RETURN_CHANGE_ID, table->name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_INSERT_RETURN_CHANGE_ID, sql_name);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_winner_clock_stmt: %s", sql);
     
@@ -761,7 +844,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL, sql_name, CLOUDSYNC_TOMBSTONE_VALUE);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_merge_delete_drop: %s", sql);
     
@@ -770,7 +853,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // zero clock
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_TOMBSTONE_PK_EXCEPT_COL, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_TOMBSTONE_PK_EXCEPT_COL, sql_name, CLOUDSYNC_TOMBSTONE_VALUE);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_zero_clock_stmt: %s", sql);
     
@@ -779,7 +862,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // col_version
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_SELECT_COL_VERSION_BY_PK_COL, table->name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_SELECT_COL_VERSION_BY_PK_COL, sql_name);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_col_version_stmt: %s", sql);
     
@@ -788,7 +871,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // site_id
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_SELECT_SITE_ID_BY_PK_COL, table->name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_SELECT_SITE_ID_BY_PK_COL, sql_name);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_site_id_stmt: %s", sql);
     
@@ -800,7 +883,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
 
     // precompile the get column value statement
     if (ncols > 0) {
-        sql = sql_build_select_nonpk_by_pk(data, table->name);
+        sql = sql_build_select_nonpk_by_pk(data, sql_name);
         if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
         DEBUG_SQL("real_col_values_stmt: %s", sql);
         
@@ -834,7 +917,7 @@ cloudsync_table_context *table_lookup (cloudsync_context *data, const char *tabl
     DEBUG_DBFUNCTION("table_lookup %s", table_name);
     
     for (int i=0; i<data->tables_count; ++i) {
-        if ((strcasecmp(data->tables[i]->name, table_name) == 0)) return data->tables[i];
+        if (table_name_matches(data, data->tables[i], table_name)) return data->tables[i];
     }
     
     return NULL;
@@ -862,7 +945,7 @@ int table_remove (cloudsync_context *data, cloudsync_table_context *table) {
         cloudsync_table_context *t = data->tables[i];
         
         // pointer compare is fastest but fallback to strcasecmp if not same pointer
-        if ((t == table) || ((strcasecmp(t->name, table_name) == 0))) {
+        if ((t == table) || (table_name_matches(data, t, table_name))) {
             int last = data->tables_count - 1;
             data->tables[i] = data->tables[last];   // move last into the hole (keeps array dense)
             data->tables[last] = NULL;              // NULLify tail (as an extra security measure)
@@ -929,16 +1012,28 @@ bool table_add_to_context (cloudsync_context *data, table_algo algo, const char 
     // check if table is already in the global context and in that case just return
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (table) return true;
+
+    char *schema = NULL;
+    char *base_name = NULL;
+    if (table_parse_name(data, table_name, &schema, &base_name) != DBRES_OK) {
+        if (schema) cloudsync_memory_free(schema);
+        if (base_name) cloudsync_memory_free(base_name);
+        return false;
+    }
     
     // check for space availability
     if (!table_ensure_capacity(data)) return false;
     
     // setup a new table
-    table = table_create(data, table_name, algo);
+    table = table_create(data, base_name, schema, algo);
+    if (schema) cloudsync_memory_free(schema);
+    if (base_name) cloudsync_memory_free(base_name);
     if (!table) return false;
     
+    const char *sql_name = table_sql_name(table);
+
     // fill remaining metadata in the table
-    int count = database_count_pk(data, table_name, false);
+    int count = database_count_pk(data, sql_name, false);
     if (count < 0) {cloudsync_set_dberror(data); goto abort_add_table;}
     table->npks = count;
     if (table->npks == 0) {
@@ -950,7 +1045,7 @@ bool table_add_to_context (cloudsync_context *data, table_algo algo, const char 
         #endif
     }
     
-    int ncols = database_count_nonpk(data, table_name);
+    int ncols = database_count_nonpk(data, sql_name);
     if (count < 0) {cloudsync_set_dberror(data); goto abort_add_table;}
     int rc = table_add_stmts(table, ncols);
     if (rc != DBRES_OK) goto abort_add_table;
@@ -969,7 +1064,7 @@ bool table_add_to_context (cloudsync_context *data, table_algo algo, const char 
         table->col_value_stmt = (dbvm_t **)cloudsync_memory_alloc((uint64_t)(sizeof(void *) * ncols));
         if (!table->col_value_stmt) goto abort_add_table;
         
-        char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID, table_name, table_name);
+        char *sql = sql_build_tableinfo_list_nonpk_name_cid(data, table->name, table->schema);
         if (!sql) goto abort_add_table;
         rc = database_exec_callback(data, sql, table_add_to_context_cb, (void *)table);
         cloudsync_memory_free(sql);
@@ -1562,7 +1657,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     // retrieve primary key(s)
     char **names = NULL;
     int nrows = 0;
-    rc = database_pk_names(data, table_name, &names, &nrows);
+    rc = database_pk_names(data, table_sql_name(table), &names, &nrows);
     if (rc != DBRES_OK) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to get primary keys for table %s", table_name);
@@ -1579,7 +1674,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     }
     
     // drop original triggers
-    database_delete_triggers(data, table_name);
+    database_delete_triggers(data, table_sql_name(table));
     if (rc != DBRES_OK) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to delete triggers for table %s in cloudsync_begin_alter.", table_name);
@@ -1608,7 +1703,8 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
     // retrieve primary keys (to check is they changed)
     char **result = NULL;
     int nrows = 0;
-    int rc = database_pk_names (data, table->name, &result, &nrows);
+    const char *sql_name = table_sql_name(table);
+    int rc = database_pk_names (data, sql_name, &result, &nrows);
     if (rc != DBRES_OK || nrows == 0) {
         if (nrows == 0) rc = DBRES_MISUSE;
         goto finalize;
@@ -1627,7 +1723,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
     
     if (pk_diff) {
         // drop meta-table, it will be recreated
-        char *sql = cloudsync_memory_mprintf(SQL_DROP_CLOUDSYNC_TABLE, table->name);
+        char *sql = cloudsync_memory_mprintf(SQL_DROP_CLOUDSYNC_TABLE, sql_name);
         rc = database_exec(data, sql);
         cloudsync_memory_free(sql);
         if (rc != DBRES_OK) {
@@ -1637,7 +1733,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
     } else {
         // compact meta-table
         // delete entries for removed columns
-        char *sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_DELETE_COLS_NOT_IN_SCHEMA_OR_PKCOL, table->name, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+        char *sql = sql_build_delete_cols_not_in_schema_or_pkcol(data, table->name, table->schema, CLOUDSYNC_TOMBSTONE_VALUE);
         rc = database_exec(data, sql);
         cloudsync_memory_free(sql);
         if (rc != DBRES_OK) {
@@ -1645,9 +1741,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
             goto finalize;
         }
         
-        char buffer[1024];
-        char *singlequote_escaped_table_name = sql_escape_name(table->name, buffer, sizeof(buffer));
-        sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_QUALIFIED_COLLIST_FMT, singlequote_escaped_table_name, singlequote_escaped_table_name);
+        sql = sql_build_pk_qualified_collist(data, table->name, table->schema);
         if (!sql) {rc = DBRES_NOMEM; goto finalize;}
         
         char *pkclause = NULL;
@@ -1657,7 +1751,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
         char *pkvalues = (pkclause) ? pkclause : "rowid";
         
         // delete entries related to rows that no longer exist in the original table, but preserve tombstone
-        sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK, table->name, CLOUDSYNC_TOMBSTONE_VALUE, CLOUDSYNC_TOMBSTONE_VALUE, table->name, table->name, pkvalues);
+        sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK, sql_name, CLOUDSYNC_TOMBSTONE_VALUE, CLOUDSYNC_TOMBSTONE_VALUE, sql_name, sql_name, pkvalues);
         rc = database_exec(data, sql);
         if (pkclause) cloudsync_memory_free(pkclause);
         cloudsync_memory_free(sql);
@@ -1730,25 +1824,26 @@ rollback_finalize_alter:
 int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name) {
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) return DBRES_ERROR;
+    const char *sql_name = table_sql_name(table);
     
     dbvm_t *vm = NULL;
     int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
     char *pkdecode = NULL;
     
-    char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_COLLIST, table_name);
+    char *sql = sql_build_pk_collist(data, table->name, table->schema);
     char *pkclause_identifiers = NULL;
     int rc = database_select_text(data, sql, &pkclause_identifiers);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
     char *pkvalues_identifiers = (pkclause_identifiers) ? pkclause_identifiers : "rowid";
     
-    sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_DECODE_SELECTLIST, table_name);
+    sql = sql_build_pk_decode_selectlist(data, table->name, table->schema);
     rc = database_select_text(data, sql, &pkdecode);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
     char *pkdecodeval = (pkdecode) ? pkdecode : "cloudsync_pk_decode(pk, 1) AS rowid";
      
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_INSERT_MISSING_PKS_FROM_BASE_EXCEPT_SYNC, table_name, pkvalues_identifiers, pkvalues_identifiers, table_name, pkdecodeval, table_name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_INSERT_MISSING_PKS_FROM_BASE_EXCEPT_SYNC, sql_name, pkvalues_identifiers, pkvalues_identifiers, sql_name, pkdecodeval, sql_name);
     rc = database_exec(data, sql);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
@@ -1758,7 +1853,7 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     // The new query does 1 encode per source row and one indexed NOT-EXISTS probe.
     // The old plan does many decodes per candidate and can’t use an index to rule out matches quickly—so it burns CPU and I/O.
     
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL, pkvalues_identifiers, table_name, table_name);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL, pkvalues_identifiers, sql_name, sql_name);
     rc = databasevm_prepare(data, sql, (void **)&vm, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
@@ -2460,22 +2555,44 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
         return cloudsync_set_error(data, buffer, DBRES_ERROR);
     }
     
+    int rc = DBRES_OK;
+    char *schema = NULL;
+    char *base_name = NULL;
+    char *sql_name = NULL;
+    int parse_rc = table_parse_name(data, name, &schema, &base_name);
+    if (parse_rc != DBRES_OK) {
+        rc = cloudsync_set_error(data, "Unable to parse table name", DBRES_ERROR);
+        goto cleanup;
+    }
+
+    if (schema) {
+        sql_name = cloudsync_memory_mprintf("%s.%s", schema, base_name);
+    } else {
+        sql_name = cloudsync_string_dup(base_name);
+    }
+    if (!sql_name) {
+        rc = cloudsync_set_error(data, "Unable to allocate table name", DBRES_NOMEM);
+        goto cleanup;
+    }
+
     // check if table exists
-    if (database_table_exists(data, name) == false) {
+    if (database_table_exists(data, sql_name) == false) {
         snprintf(buffer, sizeof(buffer), "Table %s does not exist", name);
-        return cloudsync_set_error(data, buffer, DBRES_ERROR);
+        rc = cloudsync_set_error(data, buffer, DBRES_ERROR);
+        goto cleanup;
     }
     
     // no more than 128 columns can be used as a composite primary key (SQLite hard limit)
-    int npri_keys = database_count_pk(data, name, false);
-    if (npri_keys < 0) return cloudsync_set_dberror(data);
-    if (npri_keys > 128) return cloudsync_set_error(data, "No more than 128 columns can be used to form a composite primary key", DBRES_ERROR);
+    int npri_keys = database_count_pk(data, sql_name, false);
+    if (npri_keys < 0) {rc = cloudsync_set_dberror(data); goto cleanup;}
+    if (npri_keys > 128) {rc = cloudsync_set_error(data, "No more than 128 columns can be used to form a composite primary key", DBRES_ERROR); goto cleanup;}
     
     #if CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
     // if count == 0 means that rowid will be used as primary key (BTW: very bad choice for the user)
     if (npri_keys == 0) {
         snprintf(buffer, sizeof(buffer), "Rowid only tables are not supported, all primary keys must be explicitly set and declared as NOT NULL (table %s)", name);
-        return cloudsync_set_error(data, buffer, DBRES_ERROR);
+        rc = cloudsync_set_error(data, buffer, DBRES_ERROR);
+        goto cleanup;
     }
     #endif
         
@@ -2484,11 +2601,12 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
             // the affinity of a column is determined by the declared type of the column,
             // according to the following rules in the order shown:
             // 1. If the declared type contains the string "INT" then it is assigned INTEGER affinity.
-            int npri_keys_int = database_count_int_pk(data, name);
-            if (npri_keys_int < 0) return cloudsync_set_dberror(data);
+            int npri_keys_int = database_count_int_pk(data, sql_name);
+            if (npri_keys_int < 0) {rc = cloudsync_set_dberror(data); goto cleanup;}
             if (npri_keys == npri_keys_int) {
                 snprintf(buffer, sizeof(buffer), "Table %s uses a single-column INTEGER primary key. For CRDT replication, primary keys must be globally unique. Consider using a TEXT primary key with UUIDs or ULID to avoid conflicts across nodes. If you understand the risk and still want to use this INTEGER primary key, set the third argument of the cloudsync_init function to 1 to skip this check.", name);
-                return cloudsync_set_error(data, buffer, DBRES_ERROR);
+                rc = cloudsync_set_error(data, buffer, DBRES_ERROR);
+                goto cleanup;
             }
             
         }
@@ -2496,24 +2614,30 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
         
     // if user declared explicit primary key(s) then make sure they are all declared as NOT NULL
     if (npri_keys > 0) {
-        int npri_keys_notnull = database_count_pk(data, name, true);
-        if (npri_keys_notnull < 0) return cloudsync_set_dberror(data);
+        int npri_keys_notnull = database_count_pk(data, sql_name, true);
+        if (npri_keys_notnull < 0) {rc = cloudsync_set_dberror(data); goto cleanup;}
         if (npri_keys != npri_keys_notnull) {
             snprintf(buffer, sizeof(buffer), "All primary keys must be explicitly declared as NOT NULL (table %s)", name);
-            return cloudsync_set_error(data, buffer, DBRES_ERROR);
+            rc = cloudsync_set_error(data, buffer, DBRES_ERROR);
+            goto cleanup;
         }
     }
     
     // check for columns declared as NOT NULL without a DEFAULT value.
     // Otherwise, col_merge_stmt would fail if changes to other columns are inserted first.
-    int n_notnull_nodefault = database_count_notnull_without_default(data, name);
-    if (n_notnull_nodefault < 0) return cloudsync_set_dberror(data);
+    int n_notnull_nodefault = database_count_notnull_without_default(data, sql_name);
+    if (n_notnull_nodefault < 0) {rc = cloudsync_set_dberror(data); goto cleanup;}
     if (n_notnull_nodefault > 0) {
         snprintf(buffer, sizeof(buffer), "All non-primary key columns declared as NOT NULL must have a DEFAULT value. (table %s)", name);
-        return cloudsync_set_error(data, buffer, DBRES_ERROR);
+        rc = cloudsync_set_error(data, buffer, DBRES_ERROR);
+        goto cleanup;
     }
-    
-    return DBRES_OK;
+
+cleanup:
+    if (schema) cloudsync_memory_free(schema);
+    if (base_name) cloudsync_memory_free(base_name);
+    if (sql_name) cloudsync_memory_free(sql_name);
+    return rc;
 }
 
 int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context *table) {
@@ -2521,7 +2645,8 @@ int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context
     
     // drop meta-table
     const char *table_name = table->name;
-    char *sql = cloudsync_memory_mprintf(SQL_DROP_CLOUDSYNC_TABLE, table_name);
+    const char *sql_name = table_sql_name(table);
+    char *sql = cloudsync_memory_mprintf(SQL_DROP_CLOUDSYNC_TABLE, sql_name);
     int rc = database_exec(data, sql);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) {
@@ -2531,7 +2656,7 @@ int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context
     }
     
     // drop original triggers
-    database_delete_triggers(data, table_name);
+    database_delete_triggers(data, sql_name);
     if (rc != DBRES_OK) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to delete triggers for table %s", table_name);
@@ -2617,6 +2742,25 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     if (cloudsync_context_init(data) == NULL) {
         return cloudsync_set_error(data, "Unable to initialize cloudsync context", DBRES_MISUSE);
     }
+
+    char *schema = NULL;
+    char *base_name = NULL;
+    char *sql_name = NULL;
+    if (table_parse_name(data, table_name, &schema, &base_name) != DBRES_OK) {
+        if (schema) cloudsync_memory_free(schema);
+        if (base_name) cloudsync_memory_free(base_name);
+        return cloudsync_set_error(data, "Unable to parse table name", DBRES_ERROR);
+    }
+    if (schema) {
+        sql_name = cloudsync_memory_mprintf("%s.%s", schema, base_name);
+    } else {
+        sql_name = cloudsync_string_dup(base_name);
+    }
+    if (!sql_name) {
+        if (schema) cloudsync_memory_free(schema);
+        if (base_name) cloudsync_memory_free(base_name);
+        return cloudsync_set_error(data, "Unable to allocate table name", DBRES_NOMEM);
+    }
     
     // sanity check algo name (if exists)
     table_algo algo_new = table_algo_none;
@@ -2626,11 +2770,12 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     if (algo_new == table_algo_none) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unknown CRDT algorithm name %s", algo_name);
-        return cloudsync_set_error(data, buffer, DBRES_ERROR);
+        rc = cloudsync_set_error(data, buffer, DBRES_ERROR);
+        goto cleanup;
     }
     
     // check if table name was already augmented
-    table_algo algo_current = dbutils_table_settings_get_algo(data, table_name);
+    table_algo algo_current = dbutils_table_settings_get_algo(data, base_name);
     
     // sanity check algorithm
     if ((algo_new == algo_current) && (algo_current != table_algo_none)) {
@@ -2643,10 +2788,14 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
         algo_new = algo_current;
     } else if ((algo_new != table_algo_none) && (algo_current == table_algo_none)) {
         // write table algo name in settings
-        dbutils_table_settings_set_key_value(data, table_name, "*", "algo", algo_name);
+        dbutils_table_settings_set_key_value(data, base_name, "*", "algo", algo_name);
     } else {
-        // error condition
-        return cloudsync_set_error(data, "The function cloudsync_cleanup(table) must be called before changing a table algorithm", DBRES_MISUSE);
+        rc = cloudsync_set_error(data, "The function cloudsync_cleanup(table) must be called before changing a table algorithm", DBRES_MISUSE);
+        goto cleanup;
+    }
+
+    if (schema && schema[0] != '\0') {
+        dbutils_table_settings_set_key_value(data, base_name, "*", CLOUDSYNC_KEY_SCHEMA, schema);
     }
     
     // Run the following function even if table was already augmented.
@@ -2657,28 +2806,42 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     // cloudsync_sync_table_key(data, table_name, "*", CLOUDSYNC_KEY_ALGO, crdt_algo_name(algo_new));
     
     // check triggers
-    rc = database_create_triggers(data, table_name, algo_new);
-    if (rc != DBRES_OK) return cloudsync_set_error(data, "An error occurred while creating triggers", DBRES_MISUSE);
+    rc = database_create_triggers(data, sql_name, algo_new);
+    if (rc != DBRES_OK) {
+        rc = cloudsync_set_error(data, "An error occurred while creating triggers", DBRES_MISUSE);
+        goto cleanup;
+    }
     
     // check meta-table
-    rc = database_create_metatable(data, table_name);
-    if (rc != DBRES_OK) return cloudsync_set_error(data, "An error occurred while creating metatable", DBRES_MISUSE);
+    rc = database_create_metatable(data, sql_name);
+    if (rc != DBRES_OK) {
+        rc = cloudsync_set_error(data, "An error occurred while creating metatable", DBRES_MISUSE);
+        goto cleanup;
+    }
     
     // add prepared statements
     if (cloudsync_add_dbvms(data) != DBRES_OK) {
-        return cloudsync_set_error(data, "An error occurred while trying to compile prepared SQL statements", DBRES_MISUSE);
+        rc = cloudsync_set_error(data, "An error occurred while trying to compile prepared SQL statements", DBRES_MISUSE);
+        goto cleanup;
     }
     
     // add table to in-memory data context
-    if (table_add_to_context(data, algo_new, table_name) == false) {
+    if (table_add_to_context(data, algo_new, sql_name) == false) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "An error occurred while adding %s table information to global context", table_name);
-        return cloudsync_set_error(data, buffer, DBRES_MISUSE);
+        rc = cloudsync_set_error(data, buffer, DBRES_MISUSE);
+        goto cleanup;
     }
     
-    if (cloudsync_refill_metatable(data, table_name) != DBRES_OK) {
-        return cloudsync_set_error(data, "An error occurred while trying to fill the augmented table", DBRES_MISUSE);
+    if (cloudsync_refill_metatable(data, sql_name) != DBRES_OK) {
+        rc = cloudsync_set_error(data, "An error occurred while trying to fill the augmented table", DBRES_MISUSE);
+        goto cleanup;
     }
-        
-    return DBRES_OK;
+    
+cleanup:
+    if (schema) cloudsync_memory_free(schema);
+    if (base_name) cloudsync_memory_free(base_name);
+    if (sql_name) cloudsync_memory_free(sql_name);
+    
+    return (rc == DBRES_OK) ? DBRES_OK : rc;
 }

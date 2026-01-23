@@ -137,6 +137,50 @@ char *sql_escape_name (const char *name, char *buffer, size_t bsize) {
     return buffer;
 }
 
+static void split_schema_table (const char *input, char *schema, size_t schema_len, char *table, size_t table_len) {
+    if (schema && schema_len > 0) schema[0] = '\0';
+    if (table && table_len > 0) table[0] = '\0';
+    if (!input) return;
+
+    const char *dot = strchr(input, '.');
+    if (dot) {
+        size_t s_len = (size_t)(dot - input);
+        size_t t_len = strlen(dot + 1);
+        if (schema && schema_len > 0) {
+            size_t copy_len = (s_len < schema_len - 1) ? s_len : (schema_len - 1);
+            memcpy(schema, input, copy_len);
+            schema[copy_len] = '\0';
+        }
+        if (table && table_len > 0) {
+            size_t copy_len = (t_len < table_len - 1) ? t_len : (table_len - 1);
+            memcpy(table, dot + 1, copy_len);
+            table[copy_len] = '\0';
+        }
+    } else {
+        if (table && table_len > 0) {
+            size_t t_len = strlen(input);
+            size_t copy_len = (t_len < table_len - 1) ? t_len : (table_len - 1);
+            memcpy(table, input, copy_len);
+            table[copy_len] = '\0';
+        }
+    }
+}
+
+static void format_qualified_name (const char *schema, const char *name, char *buffer, size_t bsize) {
+    char esc_schema[512];
+    char esc_name[512];
+    if (!name || !buffer || bsize == 0) return;
+
+    if (schema && schema[0] != '\0') {
+        sql_escape_name(schema, esc_schema, sizeof(esc_schema));
+        sql_escape_name(name, esc_name, sizeof(esc_name));
+        snprintf(buffer, bsize, "\"%s\".\"%s\"", esc_schema, esc_name);
+    } else {
+        sql_escape_name(name, esc_name, sizeof(esc_name));
+        snprintf(buffer, bsize, "\"%s\"", esc_name);
+    }
+}
+
 char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_name) {
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_NONPK_COLS_BY_PK, table_name);
     if (!sql) return NULL;
@@ -194,10 +238,79 @@ char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_na
 
 char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, const char *table_name, const char *except_col) {
     UNUSED_PARAMETER(data);
-    char escaped[512];
-    sql_escape_name(table_name, escaped, sizeof(escaped));
-    
-    return cloudsync_memory_mprintf(SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL, escaped, except_col, escaped, escaped, except_col);
+    return cloudsync_memory_mprintf(SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL, table_name, except_col, table_name, table_name, except_col);
+}
+
+char *sql_build_tableinfo_list_nonpk_name_cid (cloudsync_context *data, const char *table_name, const char *schema) {
+    char *schema_dynamic = NULL;
+    const char *schema_use = schema;
+    if (!schema_use || schema_use[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema_use = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID, schema_use, table_name, schema_use, table_name);
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+    return sql;
+}
+
+char *sql_build_delete_cols_not_in_schema_or_pkcol (cloudsync_context *data, const char *table_name, const char *schema, const char *tombstone) {
+    char *schema_dynamic = NULL;
+    const char *schema_use = schema;
+    if (!schema_use || schema_use[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema_use = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    char qualified[1024];
+    if (schema_use && schema_use[0] != '\0') {
+        snprintf(qualified, sizeof(qualified), "%s.%s", schema_use, table_name);
+    } else {
+        snprintf(qualified, sizeof(qualified), "%s", table_name);
+    }
+
+    char *sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_DELETE_COLS_NOT_IN_SCHEMA_OR_PKCOL, qualified, schema_use, table_name, tombstone);
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+    return sql;
+}
+
+char *sql_build_pk_qualified_collist (cloudsync_context *data, const char *table_name, const char *schema) {
+    char *schema_dynamic = NULL;
+    const char *schema_use = schema;
+    if (!schema_use || schema_use[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema_use = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_QUALIFIED_COLLIST_FMT, schema_use, table_name);
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+    return sql;
+}
+
+char *sql_build_pk_collist (cloudsync_context *data, const char *table_name, const char *schema) {
+    char *schema_dynamic = NULL;
+    const char *schema_use = schema;
+    if (!schema_use || schema_use[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema_use = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_COLLIST, schema_use, table_name);
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+    return sql;
+}
+
+char *sql_build_pk_decode_selectlist (cloudsync_context *data, const char *table_name, const char *schema) {
+    char *schema_dynamic = NULL;
+    const char *schema_use = schema;
+    if (!schema_use || schema_use[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema_use = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_DECODE_SELECTLIST, schema_use, table_name);
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+    return sql;
 }
 
 // MARK: - HELPER FUNCTIONS -
@@ -500,7 +613,7 @@ bool database_system_exists (cloudsync_context *data, const char *name, const ch
       const char *query;
 
       if (strcmp(type, "table") == 0) {
-          query = "SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = $1";
+          query = "SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = $2";
       } else if (strcmp(type, "trigger") == 0) {
           query = "SELECT 1 FROM pg_trigger WHERE tgname = $1";
       } else {
@@ -509,14 +622,39 @@ bool database_system_exists (cloudsync_context *data, const char *name, const ch
 
       PG_TRY();
       {
-          Oid argtypes[1] = {TEXTOID};
-          Datum values[1] = {CStringGetTextDatum(name)};
-          char nulls[1] = { ' ' };
-          
-          int rc = SPI_execute_with_args(query, 1, argtypes, values, nulls, true, 0);
-          exists = (rc >= 0 && SPI_processed > 0);
+          Oid argtypes[2] = {TEXTOID, TEXTOID};
+          Datum values[2];
+          char nulls[2] = { ' ', ' ' };
+
+          int rc = 0;
+          if (strcmp(type, "table") == 0) {
+              char schema_buf[512];
+              char table_buf[512];
+              split_schema_table(name, schema_buf, sizeof(schema_buf), table_buf, sizeof(table_buf));
+
+              char *schema_dynamic = NULL;
+              const char *schema = schema_buf;
+              if (schema_buf[0] == '\0') {
+                  schema_dynamic = database_current_schema(data);
+                  schema = schema_dynamic ? schema_dynamic : "public";
+              }
+
+              values[0] = CStringGetTextDatum(schema);
+              values[1] = CStringGetTextDatum(table_buf);
+
+              rc = SPI_execute_with_args(query, 2, argtypes, values, nulls, true, 0);
+              exists = (rc >= 0 && SPI_processed > 0);
+              if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+          } else {
+              values[0] = CStringGetTextDatum(name);
+              rc = SPI_execute_with_args(query, 1, argtypes, values, nulls, true, 0);
+              exists = (rc >= 0 && SPI_processed > 0);
+          }
           if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
           pfree(DatumGetPointer(values[0]));
+          if (strcmp(type, "table") == 0) {
+              pfree(DatumGetPointer(values[1]));
+          }
       }
       PG_CATCH();
       {
@@ -831,26 +969,72 @@ static int64_t database_count_bind (cloudsync_context *data, const char *sql, co
     return count;
 }
 
+static int64_t database_count_bind_schema (cloudsync_context *data, const char *sql, const char *table_name, const char *schema) {
+    Oid argtypes[2] = { TEXTOID, TEXTOID };
+    Datum values[2] = { CStringGetTextDatum(table_name), CStringGetTextDatum(schema) };
+    char nulls[2] = { ' ', ' ' };
+
+    int64_t count = 0;
+    int rc = SPI_execute_with_args(sql, 2, argtypes, values, nulls, true, 0);
+    if (rc >= 0 && SPI_processed > 0 && SPI_tuptable) {
+        bool isnull;
+        Datum d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
+        if (!isnull) count = DatumGetInt64(d);
+    }
+
+    if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
+    pfree(DatumGetPointer(values[0]));
+    pfree(DatumGetPointer(values[1]));
+    return count;
+}
+
 int database_count_pk (cloudsync_context *data, const char *table_name, bool not_null) {
+    UNUSED_PARAMETER(not_null);
     const char *sql =
             "SELECT COUNT(*) FROM information_schema.table_constraints tc "
             "JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
-            "WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY'";
-    
-    return (int)database_count_bind(data, sql, table_name);
+            "WHERE tc.table_name = $1 AND tc.table_schema = $2 AND tc.constraint_type = 'PRIMARY KEY'";
+
+    char schema_buf[512];
+    char table_buf[512];
+    split_schema_table(table_name, schema_buf, sizeof(schema_buf), table_buf, sizeof(table_buf));
+
+    char *schema_dynamic = NULL;
+    const char *schema = schema_buf;
+    if (schema_buf[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    int count = (int)database_count_bind_schema(data, sql, table_buf, schema);
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+    return count;
 }
 
 int database_count_nonpk (cloudsync_context *data, const char *table_name) {
     const char *sql =
             "SELECT COUNT(*) FROM information_schema.columns c "
-            "WHERE c.table_name = $1 "
+            "WHERE c.table_name = $1 AND c.table_schema = $2 "
             "AND c.column_name NOT IN ("
             "  SELECT kcu.column_name FROM information_schema.table_constraints tc "
             "  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
-            "  WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY'"
+            "  WHERE tc.table_name = $1 AND tc.table_schema = $2 AND tc.constraint_type = 'PRIMARY KEY'"
             ")";
-    
-    return (int)database_count_bind(data, sql, table_name);
+
+    char schema_buf[512];
+    char table_buf[512];
+    split_schema_table(table_name, schema_buf, sizeof(schema_buf), table_buf, sizeof(table_buf));
+
+    char *schema_dynamic = NULL;
+    const char *schema = schema_buf;
+    if (schema_buf[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    int count = (int)database_count_bind_schema(data, sql, table_buf, schema);
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+    return count;
 }
 
 int database_count_int_pk (cloudsync_context *data, const char *table_name) {
@@ -858,25 +1042,51 @@ int database_count_int_pk (cloudsync_context *data, const char *table_name) {
               "SELECT COUNT(*) FROM information_schema.columns c "
               "JOIN information_schema.key_column_usage kcu ON c.column_name = kcu.column_name "
               "JOIN information_schema.table_constraints tc ON kcu.constraint_name = tc.constraint_name "
-              "WHERE c.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY' "
+              "WHERE c.table_name = $1 AND c.table_schema = $2 AND tc.constraint_type = 'PRIMARY KEY' "
               "AND c.data_type IN ('smallint', 'integer', 'bigint')";
-    
-    return (int)database_count_bind(data, sql, table_name);
+
+    char schema_buf[512];
+    char table_buf[512];
+    split_schema_table(table_name, schema_buf, sizeof(schema_buf), table_buf, sizeof(table_buf));
+
+    char *schema_dynamic = NULL;
+    const char *schema = schema_buf;
+    if (schema_buf[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    int count = (int)database_count_bind_schema(data, sql, table_buf, schema);
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+    return count;
 }
 
 int database_count_notnull_without_default (cloudsync_context *data, const char *table_name) {
     const char *sql =
               "SELECT COUNT(*) FROM information_schema.columns c "
-              "WHERE c.table_name = $1 "
+              "WHERE c.table_name = $1 AND c.table_schema = $2 "
               "AND c.is_nullable = 'NO' "
               "AND c.column_default IS NULL "
               "AND c.column_name NOT IN ("
               "  SELECT kcu.column_name FROM information_schema.table_constraints tc "
               "  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
-              "  WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY'"
+              "  WHERE tc.table_name = $1 AND tc.table_schema = $2 AND tc.constraint_type = 'PRIMARY KEY'"
               ")";
-    
-    return (int)database_count_bind(data, sql, table_name);
+
+    char schema_buf[512];
+    char table_buf[512];
+    split_schema_table(table_name, schema_buf, sizeof(schema_buf), table_buf, sizeof(table_buf));
+
+    char *schema_dynamic = NULL;
+    const char *schema = schema_buf;
+    if (schema_buf[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    int count = (int)database_count_bind_schema(data, sql, table_buf, schema);
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+    return count;
 }
 
 /*
@@ -897,9 +1107,34 @@ int database_create_metatable (cloudsync_context *data, const char *table_name) 
     char sql[2048];
     int rc;
 
+    char schema_buf[512];
+    char table_buf[512];
+    split_schema_table(table_name, schema_buf, sizeof(schema_buf), table_buf, sizeof(table_buf));
+
+    char *schema_dynamic = NULL;
+    const char *schema = schema_buf;
+    if (schema_buf[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    char meta_name[1024];
+    snprintf(meta_name, sizeof(meta_name), "%s_cloudsync", table_buf);
+    char meta_ident[2048];
+    if (schema && schema[0] != '\0') {
+        snprintf(meta_ident, sizeof(meta_ident), "%s.%s", schema, meta_name);
+    } else {
+        snprintf(meta_ident, sizeof(meta_ident), "%s", meta_name);
+    }
+
+    char idx_name[1024];
+    snprintf(idx_name, sizeof(idx_name), "%s_cloudsync_db_version_idx", table_buf);
+    char idx_ident[2048];
+    snprintf(idx_ident, sizeof(idx_ident), "%s", idx_name);
+
     // Create the metadata table
     snprintf(sql, sizeof(sql),
-             "CREATE TABLE IF NOT EXISTS \"%s_cloudsync\" ("
+             "CREATE TABLE IF NOT EXISTS %s ("
              "pk BYTEA NOT NULL,"
              "col_name TEXT NOT NULL,"
              "col_version BIGINT,"
@@ -908,16 +1143,17 @@ int database_create_metatable (cloudsync_context *data, const char *table_name) 
              "site_id BIGINT NOT NULL DEFAULT 0,"
              "PRIMARY KEY (pk, col_name)"
              ");",
-             table_name);
+             meta_ident);
 
     rc = database_exec(data, sql);
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
     if (rc != DBRES_OK) return rc;
 
     // Create indices for performance
     snprintf(sql, sizeof(sql),
-             "CREATE INDEX IF NOT EXISTS \"%s_cloudsync_db_version_idx\" "
-             "ON \"%s_cloudsync\" (db_version);",
-             table_name, table_name);
+             "CREATE INDEX IF NOT EXISTS %s "
+             "ON %s (db_version);",
+             idx_ident, meta_ident);
 
     rc = database_exec(data, sql);
     return rc;
@@ -930,27 +1166,55 @@ int database_create_insert_trigger (cloudsync_context *data, const char *table_n
 
     char trigger_name[1024];
     char func_name[1024];
-    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_insert_%s", table_name);
-    snprintf(func_name, sizeof(func_name), "cloudsync_after_insert_%s_fn", table_name);
+    char schema_buf[512];
+    char table_buf[512];
+    split_schema_table(table_name, schema_buf, sizeof(schema_buf), table_buf, sizeof(table_buf));
 
-    if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
+    char *schema_dynamic = NULL;
+    const char *schema = schema_buf;
+    if (schema_buf[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_insert_%s", table_buf);
+    snprintf(func_name, sizeof(func_name), "cloudsync_after_insert_%s_fn", table_buf);
+
+    if (database_trigger_exists(data, trigger_name)) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return DBRES_OK;
+    }
 
     char sql[2048];
     snprintf(sql, sizeof(sql),
              "SELECT string_agg('NEW.' || quote_ident(kcu.column_name), ',' ORDER BY kcu.ordinal_position) "
              "FROM information_schema.table_constraints tc "
              "JOIN information_schema.key_column_usage kcu "
-             "  ON tc.constraint_name = kcu.constraint_name "
-             "WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY';",
-             table_name);
+              "  ON tc.constraint_name = kcu.constraint_name "
+             "WHERE tc.table_schema = '%s' AND tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY';",
+             schema, table_buf);
 
     char *pk_list = NULL;
     int rc = database_select_text(data, sql, &pk_list);
-    if (rc != DBRES_OK) return rc;
+    if (rc != DBRES_OK) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return rc;
+    }
     if (!pk_list || pk_list[0] == '\0') {
         if (pk_list) cloudsync_memory_free(pk_list);
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
         return cloudsync_set_error(data, "No primary key columns found for table", DBRES_ERROR);
     }
+
+    char table_ref[1024];
+    if (schema && schema[0] != '\0') {
+        snprintf(table_ref, sizeof(table_ref), "%s.%s", schema, table_buf);
+    } else {
+        snprintf(table_ref, sizeof(table_ref), "%s", table_buf);
+    }
+
+    char func_ident[1024];
+    format_qualified_name(schema, func_name, func_ident, sizeof(func_ident));
 
     char *sql2 = cloudsync_memory_mprintf(
         "CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$ "
@@ -960,22 +1224,38 @@ int database_create_insert_trigger (cloudsync_context *data, const char *table_n
         "  RETURN NEW; "
         "END; "
         "$$ LANGUAGE plpgsql;",
-        func_name, table_name, table_name, pk_list);
+        func_ident, table_ref, table_ref, pk_list);
     cloudsync_memory_free(pk_list);
-    if (!sql2) return DBRES_NOMEM;
+    if (!sql2) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return DBRES_NOMEM;
+    }
 
     rc = database_exec(data, sql2);
     cloudsync_memory_free(sql2);
-    if (rc != DBRES_OK) return rc;
+    if (rc != DBRES_OK) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return rc;
+    }
+
+    char table_ident[2048];
+    format_qualified_name(schema, table_buf, table_ident, sizeof(table_ident));
+
+    char trigger_ident[1024];
+    format_qualified_name(NULL, trigger_name, trigger_ident, sizeof(trigger_ident));
 
     sql2 = cloudsync_memory_mprintf(
-        "CREATE TRIGGER %s AFTER INSERT ON \"%s\" %s "
+        "CREATE TRIGGER %s AFTER INSERT ON %s %s "
         "EXECUTE FUNCTION %s();",
-        trigger_name, table_name, trigger_when ? trigger_when : "", func_name);
-    if (!sql2) return DBRES_NOMEM;
+        trigger_ident, table_ident, trigger_when ? trigger_when : "", func_ident);
+    if (!sql2) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return DBRES_NOMEM;
+    }
 
     rc = database_exec(data, sql2);
     cloudsync_memory_free(sql2);
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
     return rc;
 }
 
@@ -984,10 +1264,27 @@ int database_create_update_trigger_gos (cloudsync_context *data, const char *tab
 
     char trigger_name[1024];
     char func_name[1024];
-    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_update_%s", table_name);
-    snprintf(func_name, sizeof(func_name), "cloudsync_before_update_%s_fn", table_name);
+    char schema_buf[512];
+    char table_buf[512];
+    split_schema_table(table_name, schema_buf, sizeof(schema_buf), table_buf, sizeof(table_buf));
 
-    if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
+    char *schema_dynamic = NULL;
+    const char *schema = schema_buf;
+    if (schema_buf[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_update_%s", table_buf);
+    snprintf(func_name, sizeof(func_name), "cloudsync_before_update_%s_fn", table_buf);
+
+    if (database_trigger_exists(data, trigger_name)) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return DBRES_OK;
+    }
+
+    char func_ident[1024];
+    format_qualified_name(schema, func_name, func_ident, sizeof(func_ident));
 
     char *sql = cloudsync_memory_mprintf(
         "CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$ "
@@ -995,22 +1292,45 @@ int database_create_update_trigger_gos (cloudsync_context *data, const char *tab
         "  RAISE EXCEPTION 'Error: UPDATE operation is not allowed on table %s.'; "
         "END; "
         "$$ LANGUAGE plpgsql;",
-        func_name, table_name);
-    if (!sql) return DBRES_NOMEM;
+        func_ident, table_buf);
+    if (!sql) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return DBRES_NOMEM;
+    }
 
     int rc = database_exec(data, sql);
     cloudsync_memory_free(sql);
-    if (rc != DBRES_OK) return rc;
+    if (rc != DBRES_OK) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return rc;
+    }
+
+    char table_ident[2048];
+    format_qualified_name(schema, table_buf, table_ident, sizeof(table_ident));
+
+    char trigger_ident[1024];
+    format_qualified_name(NULL, trigger_name, trigger_ident, sizeof(trigger_ident));
+
+    char table_ref[1024];
+    if (schema && schema[0] != '\0') {
+        snprintf(table_ref, sizeof(table_ref), "%s.%s", schema, table_buf);
+    } else {
+        snprintf(table_ref, sizeof(table_ref), "%s", table_buf);
+    }
 
     sql = cloudsync_memory_mprintf(
-        "CREATE TRIGGER %s BEFORE UPDATE ON \"%s\" "
+        "CREATE TRIGGER %s BEFORE UPDATE ON %s "
         "FOR EACH ROW WHEN (cloudsync_is_enabled('%s') = true) "
         "EXECUTE FUNCTION %s();",
-        trigger_name, table_name, table_name, func_name);
-    if (!sql) return DBRES_NOMEM;
+        trigger_ident, table_ident, table_ref, func_ident);
+    if (!sql) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return DBRES_NOMEM;
+    }
 
     rc = database_exec(data, sql);
     cloudsync_memory_free(sql);
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
     return rc;
 }
 
@@ -1019,8 +1339,19 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
 
     char trigger_name[1024];
     char func_name[1024];
-    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_update_%s", table_name);
-    snprintf(func_name, sizeof(func_name), "cloudsync_after_update_%s_fn", table_name);
+    char schema_buf[512];
+    char table_buf[512];
+    split_schema_table(table_name, schema_buf, sizeof(schema_buf), table_buf, sizeof(table_buf));
+
+    char *schema_dynamic = NULL;
+    const char *schema = schema_buf;
+    if (schema_buf[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_update_%s", table_buf);
+    snprintf(func_name, sizeof(func_name), "cloudsync_after_update_%s_fn", table_buf);
 
     if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
 
@@ -1034,14 +1365,18 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
            "FROM information_schema.table_constraints tc "
            "JOIN information_schema.key_column_usage kcu "
            "  ON tc.constraint_name = kcu.constraint_name "
-           "WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY';",
-           table_name, table_name);
+           "WHERE tc.table_schema = '%s' AND tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY';",
+           table_buf, schema, table_buf);
 
     char *pk_values_list = NULL;
     int rc = database_select_text(data, sql, &pk_values_list);
-    if (rc != DBRES_OK) return rc;
+    if (rc != DBRES_OK) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return rc;
+    }
     if (!pk_values_list || pk_values_list[0] == '\0') {
         if (pk_values_list) cloudsync_memory_free(pk_values_list);
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
         return cloudsync_set_error(data, "No primary key columns found for table", DBRES_ERROR);
     }
 
@@ -1052,21 +1387,22 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
            "  ', ' ORDER BY c.ordinal_position"
            ") "
            "FROM information_schema.columns c "
-           "WHERE c.table_name = '%s' "
+           "WHERE c.table_schema = '%s' AND c.table_name = '%s' "
            "AND NOT EXISTS ("
            "  SELECT 1 FROM information_schema.table_constraints tc "
            "  JOIN information_schema.key_column_usage kcu "
            "    ON tc.constraint_name = kcu.constraint_name "
-           "  WHERE tc.table_name = c.table_name "
+           "  WHERE tc.table_schema = c.table_schema AND tc.table_name = c.table_name "
            "  AND tc.constraint_type = 'PRIMARY KEY' "
            "  AND kcu.column_name = c.column_name"
            ");",
-           table_name, table_name);
+           table_buf, schema, table_buf);
 
     char *col_values_list = NULL;
     rc = database_select_text(data, sql, &col_values_list);
     if (rc != DBRES_OK) {
         if (pk_values_list) cloudsync_memory_free(pk_values_list);
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
         return rc;
     }
 
@@ -1079,7 +1415,20 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
 
     if (pk_values_list) cloudsync_memory_free(pk_values_list);
     if (col_values_list) cloudsync_memory_free(col_values_list);
-    if (!values_query) return DBRES_NOMEM;
+    if (!values_query) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return DBRES_NOMEM;
+    }
+
+    char table_ref[1024];
+    if (schema && schema[0] != '\0') {
+        snprintf(table_ref, sizeof(table_ref), "%s.%s", schema, table_buf);
+    } else {
+        snprintf(table_ref, sizeof(table_ref), "%s", table_buf);
+    }
+
+    char func_ident[1024];
+    format_qualified_name(schema, func_name, func_ident, sizeof(func_ident));
 
     char *sql2 = cloudsync_memory_mprintf(
         "CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$ "
@@ -1090,22 +1439,38 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
         "  RETURN NEW; "
         "END; "
         "$$ LANGUAGE plpgsql;",
-        func_name, table_name, values_query);
+        func_ident, table_ref, values_query);
     cloudsync_memory_free(values_query);
-    if (!sql2) return DBRES_NOMEM;
+    if (!sql2) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return DBRES_NOMEM;
+    }
 
     rc = database_exec(data, sql2);
     cloudsync_memory_free(sql2);
-    if (rc != DBRES_OK) return rc;
+    if (rc != DBRES_OK) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return rc;
+    }
+
+    char table_ident[2048];
+    format_qualified_name(schema, table_buf, table_ident, sizeof(table_ident));
+
+    char trigger_ident[1024];
+    format_qualified_name(NULL, trigger_name, trigger_ident, sizeof(trigger_ident));
 
     sql2 = cloudsync_memory_mprintf(
-        "CREATE TRIGGER %s AFTER UPDATE ON \"%s\" %s "
+        "CREATE TRIGGER %s AFTER UPDATE ON %s %s "
         "EXECUTE FUNCTION %s();",
-        trigger_name, table_name, trigger_when ? trigger_when : "", func_name);
-    if (!sql2) return DBRES_NOMEM;
+        trigger_ident, table_ident, trigger_when ? trigger_when : "", func_ident);
+    if (!sql2) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return DBRES_NOMEM;
+    }
 
     rc = database_exec(data, sql2);
     cloudsync_memory_free(sql2);
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
     return rc;
 }
 
@@ -1114,10 +1479,27 @@ int database_create_delete_trigger_gos (cloudsync_context *data, const char *tab
 
     char trigger_name[1024];
     char func_name[1024];
-    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_delete_%s", table_name);
-    snprintf(func_name, sizeof(func_name), "cloudsync_before_delete_%s_fn", table_name);
+    char schema_buf[512];
+    char table_buf[512];
+    split_schema_table(table_name, schema_buf, sizeof(schema_buf), table_buf, sizeof(table_buf));
 
-    if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
+    char *schema_dynamic = NULL;
+    const char *schema = schema_buf;
+    if (schema_buf[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_delete_%s", table_buf);
+    snprintf(func_name, sizeof(func_name), "cloudsync_before_delete_%s_fn", table_buf);
+
+    if (database_trigger_exists(data, trigger_name)) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return DBRES_OK;
+    }
+
+    char func_ident[1024];
+    format_qualified_name(schema, func_name, func_ident, sizeof(func_ident));
 
     char *sql = cloudsync_memory_mprintf(
         "CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$ "
@@ -1125,22 +1507,45 @@ int database_create_delete_trigger_gos (cloudsync_context *data, const char *tab
         "  RAISE EXCEPTION 'Error: DELETE operation is not allowed on table %s.'; "
         "END; "
         "$$ LANGUAGE plpgsql;",
-        func_name, table_name);
-    if (!sql) return DBRES_NOMEM;
+        func_ident, table_buf);
+    if (!sql) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return DBRES_NOMEM;
+    }
 
     int rc = database_exec(data, sql);
     cloudsync_memory_free(sql);
-    if (rc != DBRES_OK) return rc;
+    if (rc != DBRES_OK) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return rc;
+    }
+
+    char table_ident[2048];
+    format_qualified_name(schema, table_buf, table_ident, sizeof(table_ident));
+
+    char trigger_ident[1024];
+    format_qualified_name(NULL, trigger_name, trigger_ident, sizeof(trigger_ident));
+
+    char table_ref[1024];
+    if (schema && schema[0] != '\0') {
+        snprintf(table_ref, sizeof(table_ref), "%s.%s", schema, table_buf);
+    } else {
+        snprintf(table_ref, sizeof(table_ref), "%s", table_buf);
+    }
 
     sql = cloudsync_memory_mprintf(
-        "CREATE TRIGGER %s BEFORE DELETE ON \"%s\" "
+        "CREATE TRIGGER %s BEFORE DELETE ON %s "
         "FOR EACH ROW WHEN (cloudsync_is_enabled('%s') = true) "
         "EXECUTE FUNCTION %s();",
-        trigger_name, table_name, table_name, func_name);
-    if (!sql) return DBRES_NOMEM;
+        trigger_ident, table_ident, table_ref, func_ident);
+    if (!sql) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return DBRES_NOMEM;
+    }
 
     rc = database_exec(data, sql);
     cloudsync_memory_free(sql);
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
     return rc;
 }
 
@@ -1149,27 +1554,55 @@ int database_create_delete_trigger (cloudsync_context *data, const char *table_n
 
     char trigger_name[1024];
     char func_name[1024];
-    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_delete_%s", table_name);
-    snprintf(func_name, sizeof(func_name), "cloudsync_after_delete_%s_fn", table_name);
+    char schema_buf[512];
+    char table_buf[512];
+    split_schema_table(table_name, schema_buf, sizeof(schema_buf), table_buf, sizeof(table_buf));
 
-    if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
+    char *schema_dynamic = NULL;
+    const char *schema = schema_buf;
+    if (schema_buf[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_delete_%s", table_buf);
+    snprintf(func_name, sizeof(func_name), "cloudsync_after_delete_%s_fn", table_buf);
+
+    if (database_trigger_exists(data, trigger_name)) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return DBRES_OK;
+    }
 
     char sql[2048];
     snprintf(sql, sizeof(sql),
              "SELECT string_agg('OLD.' || quote_ident(kcu.column_name), ',' ORDER BY kcu.ordinal_position) "
              "FROM information_schema.table_constraints tc "
              "JOIN information_schema.key_column_usage kcu "
-             "  ON tc.constraint_name = kcu.constraint_name "
-             "WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY';",
-             table_name);
+              "  ON tc.constraint_name = kcu.constraint_name "
+             "WHERE tc.table_schema = '%s' AND tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY';",
+             schema, table_buf);
 
     char *pk_list = NULL;
     int rc = database_select_text(data, sql, &pk_list);
-    if (rc != DBRES_OK) return rc;
+    if (rc != DBRES_OK) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return rc;
+    }
     if (!pk_list || pk_list[0] == '\0') {
         if (pk_list) cloudsync_memory_free(pk_list);
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
         return cloudsync_set_error(data, "No primary key columns found for table", DBRES_ERROR);
     }
+
+    char table_ref[1024];
+    if (schema && schema[0] != '\0') {
+        snprintf(table_ref, sizeof(table_ref), "%s.%s", schema, table_buf);
+    } else {
+        snprintf(table_ref, sizeof(table_ref), "%s", table_buf);
+    }
+
+    char func_ident[1024];
+    format_qualified_name(schema, func_name, func_ident, sizeof(func_ident));
 
     char *sql2 = cloudsync_memory_mprintf(
         "CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$ "
@@ -1179,22 +1612,38 @@ int database_create_delete_trigger (cloudsync_context *data, const char *table_n
         "  RETURN OLD; "
         "END; "
         "$$ LANGUAGE plpgsql;",
-        func_name, table_name, table_name, pk_list);
+        func_ident, table_ref, table_ref, pk_list);
     cloudsync_memory_free(pk_list);
-    if (!sql2) return DBRES_NOMEM;
+    if (!sql2) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return DBRES_NOMEM;
+    }
 
     rc = database_exec(data, sql2);
     cloudsync_memory_free(sql2);
-    if (rc != DBRES_OK) return rc;
+    if (rc != DBRES_OK) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return rc;
+    }
+
+    char table_ident[2048];
+    format_qualified_name(schema, table_buf, table_ident, sizeof(table_ident));
+
+    char trigger_ident[1024];
+    format_qualified_name(NULL, trigger_name, trigger_ident, sizeof(trigger_ident));
 
     sql2 = cloudsync_memory_mprintf(
-        "CREATE TRIGGER %s AFTER DELETE ON \"%s\" %s "
+        "CREATE TRIGGER %s AFTER DELETE ON %s %s "
         "EXECUTE FUNCTION %s();",
-        trigger_name, table_name, trigger_when ? trigger_when : "", func_name);
-    if (!sql2) return DBRES_NOMEM;
+        trigger_ident, table_ident, trigger_when ? trigger_when : "", func_ident);
+    if (!sql2) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return DBRES_NOMEM;
+    }
 
     rc = database_exec(data, sql2);
     cloudsync_memory_free(sql2);
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
     return rc;
 }
 
@@ -1202,19 +1651,43 @@ int database_create_triggers (cloudsync_context *data, const char *table_name, t
     if (!table_name) return DBRES_MISUSE;
 
     char trigger_when[1024];
+    char schema_buf[512];
+    char table_buf[512];
+    split_schema_table(table_name, schema_buf, sizeof(schema_buf), table_buf, sizeof(table_buf));
+
+    char *schema_dynamic = NULL;
+    const char *schema = schema_buf;
+    if (schema_buf[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    char table_ref[1024];
+    if (schema && schema[0] != '\0') {
+        snprintf(table_ref, sizeof(table_ref), "%s.%s", schema, table_buf);
+    } else {
+        snprintf(table_ref, sizeof(table_ref), "%s", table_buf);
+    }
+
     snprintf(trigger_when, sizeof(trigger_when),
              "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false)",
-             table_name);
+             table_ref);
 
     int rc = database_create_insert_trigger(data, table_name, trigger_when);
-    if (rc != DBRES_OK) return rc;
+    if (rc != DBRES_OK) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return rc;
+    }
 
     if (algo == table_algo_crdt_gos) {
         rc = database_create_update_trigger_gos(data, table_name);
     } else {
         rc = database_create_update_trigger(data, table_name, trigger_when);
     }
-    if (rc != DBRES_OK) return rc;
+    if (rc != DBRES_OK) {
+        if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
+        return rc;
+    }
 
     if (algo == table_algo_crdt_gos) {
         rc = database_create_delete_trigger_gos(data, table_name);
@@ -1222,62 +1695,108 @@ int database_create_triggers (cloudsync_context *data, const char *table_name, t
         rc = database_create_delete_trigger(data, table_name, trigger_when);
     }
 
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
     return rc;
 }
 
 int database_delete_triggers (cloudsync_context *data, const char *table) {
     char sql[1024];
 
+    char schema_buf[512];
+    char table_buf[512];
+    split_schema_table(table, schema_buf, sizeof(schema_buf), table_buf, sizeof(table_buf));
+
+    char *schema_dynamic = NULL;
+    const char *schema = schema_buf;
+    if (schema_buf[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    char table_ident[2048];
+    format_qualified_name(schema, table_buf, table_ident, sizeof(table_ident));
+
+    char trigger_name[1024];
+    char trigger_ident[1024];
+    char func_name[1024];
+    char func_ident[1024];
+
     snprintf(sql, sizeof(sql),
-             "DROP TRIGGER IF EXISTS \"cloudsync_after_insert_%s\" ON \"%s\";",
-             table, table);
+             "DROP TRIGGER IF EXISTS %s ON %s;",
+             ({ snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_insert_%s", table_buf);
+                format_qualified_name(NULL, trigger_name, trigger_ident, sizeof(trigger_ident));
+                trigger_ident; }),
+             table_ident);
     database_exec(data, sql);
 
     snprintf(sql, sizeof(sql),
-             "DROP FUNCTION IF EXISTS cloudsync_after_insert_%s_fn() CASCADE;",
-             table);
+             "DROP FUNCTION IF EXISTS %s() CASCADE;",
+             ({ snprintf(func_name, sizeof(func_name), "cloudsync_after_insert_%s_fn", table_buf);
+                format_qualified_name(schema, func_name, func_ident, sizeof(func_ident));
+                func_ident; }));
     database_exec(data, sql);
 
     snprintf(sql, sizeof(sql),
-             "DROP TRIGGER IF EXISTS \"cloudsync_after_update_%s\" ON \"%s\";",
-             table, table);
+             "DROP TRIGGER IF EXISTS %s ON %s;",
+             ({ snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_update_%s", table_buf);
+                format_qualified_name(NULL, trigger_name, trigger_ident, sizeof(trigger_ident));
+                trigger_ident; }),
+             table_ident);
     database_exec(data, sql);
 
     snprintf(sql, sizeof(sql),
-             "DROP TRIGGER IF EXISTS \"cloudsync_before_update_%s\" ON \"%s\";",
-             table, table);
+             "DROP TRIGGER IF EXISTS %s ON %s;",
+             ({ snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_update_%s", table_buf);
+                format_qualified_name(NULL, trigger_name, trigger_ident, sizeof(trigger_ident));
+                trigger_ident; }),
+             table_ident);
     database_exec(data, sql);
 
     snprintf(sql, sizeof(sql),
-             "DROP FUNCTION IF EXISTS cloudsync_after_update_%s_fn() CASCADE;",
-             table);
+             "DROP FUNCTION IF EXISTS %s() CASCADE;",
+             ({ snprintf(func_name, sizeof(func_name), "cloudsync_after_update_%s_fn", table_buf);
+                format_qualified_name(schema, func_name, func_ident, sizeof(func_ident));
+                func_ident; }));
     database_exec(data, sql);
 
     snprintf(sql, sizeof(sql),
-             "DROP FUNCTION IF EXISTS cloudsync_before_update_%s_fn() CASCADE;",
-             table);
+             "DROP FUNCTION IF EXISTS %s() CASCADE;",
+             ({ snprintf(func_name, sizeof(func_name), "cloudsync_before_update_%s_fn", table_buf);
+                format_qualified_name(schema, func_name, func_ident, sizeof(func_ident));
+                func_ident; }));
     database_exec(data, sql);
 
     snprintf(sql, sizeof(sql),
-             "DROP TRIGGER IF EXISTS \"cloudsync_after_delete_%s\" ON \"%s\";",
-             table, table);
+             "DROP TRIGGER IF EXISTS %s ON %s;",
+             ({ snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_delete_%s", table_buf);
+                format_qualified_name(NULL, trigger_name, trigger_ident, sizeof(trigger_ident));
+                trigger_ident; }),
+             table_ident);
     database_exec(data, sql);
 
     snprintf(sql, sizeof(sql),
-             "DROP TRIGGER IF EXISTS \"cloudsync_before_delete_%s\" ON \"%s\";",
-             table, table);
+             "DROP TRIGGER IF EXISTS %s ON %s;",
+             ({ snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_delete_%s", table_buf);
+                format_qualified_name(NULL, trigger_name, trigger_ident, sizeof(trigger_ident));
+                trigger_ident; }),
+             table_ident);
     database_exec(data, sql);
 
     snprintf(sql, sizeof(sql),
-             "DROP FUNCTION IF EXISTS cloudsync_after_delete_%s_fn() CASCADE;",
-             table);
+             "DROP FUNCTION IF EXISTS %s() CASCADE;",
+             ({ snprintf(func_name, sizeof(func_name), "cloudsync_after_delete_%s_fn", table_buf);
+                format_qualified_name(schema, func_name, func_ident, sizeof(func_ident));
+                func_ident; }));
     database_exec(data, sql);
 
     snprintf(sql, sizeof(sql),
-             "DROP FUNCTION IF EXISTS cloudsync_before_delete_%s_fn() CASCADE;",
-             table);
+             "DROP FUNCTION IF EXISTS %s() CASCADE;",
+             ({ snprintf(func_name, sizeof(func_name), "cloudsync_before_delete_%s_fn", table_buf);
+                format_qualified_name(schema, func_name, func_ident, sizeof(func_ident));
+                func_ident; }));
     database_exec(data, sql);
 
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
     return DBRES_OK;
 }
 
@@ -1347,6 +1866,16 @@ int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
     return cloudsync_set_error(data, "database_update_schema_hash error 2", DBRES_ERROR);
 }
 
+char *database_current_schema (cloudsync_context *data) {
+    char *schema = NULL;
+    int rc = database_select_text(data, "SELECT current_schema();", &schema);
+    return (rc == DBRES_OK) ? schema : NULL;
+}
+
+char *database_default_schema (cloudsync_context *data) {
+    return cloudsync_string_dup_lowercase("public");
+}
+
 // MARK: - PRIMARY KEY -
 
 int database_pk_rowid (cloudsync_context *data, const char *table_name, char ***names, int *count) {
@@ -1361,15 +1890,28 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
     const char *sql =
             "SELECT kcu.column_name FROM information_schema.table_constraints tc "
             "JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
-            "WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY' "
+            "WHERE tc.table_name = $1 AND tc.table_schema = $2 AND tc.constraint_type = 'PRIMARY KEY' "
             "ORDER BY kcu.ordinal_position";
     
-    Oid argtypes[1] = { TEXTOID };
-    Datum values[1] = { CStringGetTextDatum(table_name) };
-    char nulls[1] = { ' ' };
+    char schema_buf[512];
+    char table_buf[512];
+    split_schema_table(table_name, schema_buf, sizeof(schema_buf), table_buf, sizeof(table_buf));
+
+    char *schema_dynamic = NULL;
+    const char *schema = schema_buf;
+    if (schema_buf[0] == '\0') {
+        schema_dynamic = database_current_schema(data);
+        schema = schema_dynamic ? schema_dynamic : "public";
+    }
+
+    Oid argtypes[2] = { TEXTOID, TEXTOID };
+    Datum values[2] = { CStringGetTextDatum(table_buf), CStringGetTextDatum(schema) };
+    char nulls[2] = { ' ', ' ' };
     
-    int rc = SPI_execute_with_args(sql, 1, argtypes, values, nulls, true, 0);
+    int rc = SPI_execute_with_args(sql, 2, argtypes, values, nulls, true, 0);
     pfree(DatumGetPointer(values[0]));
+    pfree(DatumGetPointer(values[1]));
+    if (schema_dynamic) cloudsync_memory_free(schema_dynamic);
     
     if (rc < 0 || SPI_processed == 0) {
         *names = NULL;
