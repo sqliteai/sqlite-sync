@@ -1726,7 +1726,15 @@ void databasevm_reset (dbvm_t *vm) {
         SPI_tuptable = NULL;
     }
     stmt->executed_nonselect = false;
-    databasevm_clear_bindings(vm);
+
+    // Reset parameter values but keep the plan, types, and nparams intact.
+    // The prepared plan can be reused with new values of the same types,
+    // avoiding the cost of re-planning on every iteration.
+    if (stmt->bind_mcxt) MemoryContextReset(stmt->bind_mcxt);
+    for (int i = 0; i < stmt->nparams; i++) {
+        stmt->values[i] = (Datum) 0;
+        stmt->nulls[i] = 'n';
+    }
 }
 
 void databasevm_clear_bindings (dbvm_t *vm) {
