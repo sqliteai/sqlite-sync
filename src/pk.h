@@ -23,6 +23,6 @@ int    pk_decode (char *buffer, size_t blen, int count, size_t *seek, int skip_d
 int    pk_decode_bind_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval);
 int    pk_decode_print_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval);
 size_t pk_encode_size (dbvalue_t **argv, int argc, int reserved, int skip_idx);
-uint64_t pk_checksum (const char *buffer, int blen);
+uint64_t pk_checksum (const char *buffer, size_t blen);
 
 #endif

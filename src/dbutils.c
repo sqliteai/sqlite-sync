@@ -165,23 +165,22 @@ finalize_get_value:
 }
 
 int dbutils_settings_set_key_value (cloudsync_context *data, const char *key, const char *value) {
+    if (!key) return DBRES_MISUSE;
     DEBUG_SETTINGS("dbutils_settings_set_key_value key: %s value: %s", key, value);
-    
+
     int rc = DBRES_OK;
-    if (key && value) {
+    if (value) {
         const char *values[] = {key, value};
         DBTYPE types[] = {DBTYPE_TEXT, DBTYPE_TEXT};
         int lens[] = {-1, -1};
         rc = database_write(data, SQL_SETTINGS_SET_KEY_VALUE_REPLACE, values, types, lens, 2);
-    }
-    
-    if (value == NULL) {
+    } else {
         const char *values[] = {key};
         DBTYPE types[] = {DBTYPE_TEXT};
         int lens[] = {-1};
         rc = database_write(data, SQL_SETTINGS_SET_KEY_VALUE_DELETE, values, types, lens, 1);
     }
-    
+
     if (rc == DBRES_OK && data) cloudsync_sync_key(data, key, value);
     return rc;
 }
@@ -336,34 +335,34 @@ table_algo dbutils_table_settings_get_algo (cloudsync_context *data, const char 
 
 int dbutils_settings_load_callback (void *xdata, int ncols, char **values, char **names) {
     cloudsync_context *data = (cloudsync_context *)xdata;
-    
-    for (int i=0; i<ncols; i+=2) {
+
+    for (int i=0; i+1<ncols; i+=2) {
         const char *key = values[i];
         const char *value = values[i+1];
         cloudsync_sync_key(data, key, value);
         DEBUG_SETTINGS("key: %s value: %s", key, value);
     }
-    
+
     return 0;
 }
 
 int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values, char **names) {
     cloudsync_context *data = (cloudsync_context *)xdata;
 
-    for (int i=0; i<ncols; i+=4) {
+    for (int i=0; i+3<ncols; i+=4) {
         const char *table_name = values[i];
         // const char *col_name = values[i+1];
         const char *key = values[i+2];
         const char *value = values[i+3];
         if (strcmp(key, "algo")!=0) continue;
-        
+
         table_algo algo = cloudsync_algo_from_name(value);
         if (database_create_triggers(data, table_name, algo) != DBRES_OK) return DBRES_MISUSE;
         if (table_add_to_context(data, algo, table_name) == false) return DBRES_MISUSE;
-        
+
         DEBUG_SETTINGS("load tbl_name: %s value: %s", key, value);
     }
-    
+
     return 0;
 }
 

@@ -50,8 +50,8 @@
 #define CLOUDSYNC_MIN_DB_VERSION                0
 
 #define CLOUDSYNC_PAYLOAD_SKIP_SCHEMA_HASH_CHECK        1
-#define CLOUDSYNC_PAYLOAD_MINBUF_SIZE                   512*1024
-#define CLOUDSYNC_PAYLOAD_SIGNATURE                     'CLSY'
+#define CLOUDSYNC_PAYLOAD_MINBUF_SIZE                   (512*1024)
+#define CLOUDSYNC_PAYLOAD_SIGNATURE                     0x434C5359  /* 'C','L','S','Y' */
 #define CLOUDSYNC_PAYLOAD_VERSION_ORIGNAL               1
 #define CLOUDSYNC_PAYLOAD_VERSION_1                     CLOUDSYNC_PAYLOAD_VERSION_ORIGNAL
 #define CLOUDSYNC_PAYLOAD_VERSION_2                     2
@@ -978,7 +978,7 @@ bool table_add_to_context (cloudsync_context *data, table_algo algo, const char 
     }
     
     int ncols = database_count_nonpk(data, table_name);
-    if (count < 0) {cloudsync_set_dberror(data); goto abort_add_table;}
+    if (ncols < 0) {cloudsync_set_dberror(data); goto abort_add_table;}
     int rc = table_add_stmts(table, ncols);
     if (rc != DBRES_OK) goto abort_add_table;
     
@@ -1508,6 +1508,9 @@ void cloudsync_context_free (void *ctx) {
     DEBUG_SETTINGS("cloudsync_context_free %p", data);
     if (!data) return;
 
+    // free all table contexts and prepared statements
+    cloudsync_terminate(data);
+
     cloudsync_memory_free(data->tables);
     cloudsync_memory_free(data);
 }
@@ -1615,7 +1618,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     }
     
     // drop original triggers
-    database_delete_triggers(data, table_name);
+    rc = database_delete_triggers(data, table_name);
     if (rc != DBRES_OK) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to delete triggers for table %s in cloudsync_begin_alter.", table_name);
@@ -2075,7 +2078,7 @@ int cloudsync_payload_encode_step (cloudsync_payload_context *payload, cloudsync
     char *buffer = payload->buffer + payload->bused;
     size_t bsize = payload->balloc - payload->bused;
     char *p = pk_encode((dbvalue_t **)argv, argc, buffer, false, &bsize, data->skip_decode_idx);
-    if (!p) cloudsync_set_error(data, "An error occurred while encoding payload", DBRES_ERROR);
+    if (!p) return cloudsync_set_error(data, "An error occurred while encoding payload", DBRES_ERROR);
     
     // update buffer
     payload->bused += breq;
@@ -2224,6 +2227,9 @@ static int cloudsync_payload_decode_callback (void *xdata, int index, int type, 
 // #ifndef CLOUDSYNC_OMIT_RLS_VALIDATION
 
 int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int blen, int *pnrows) {
+    // sanity check
+    if (blen < (int)sizeof(cloudsync_payload_header)) return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid payload length", DBRES_MISUSE);
+    
     // decode header
     cloudsync_payload_header header;
     memcpy(&header, payload, sizeof(cloudsync_payload_header));
@@ -2250,30 +2256,30 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     }
     
     const char *buffer = payload + sizeof(cloudsync_payload_header);
-    blen -= sizeof(cloudsync_payload_header);
-    
+    size_t buf_len = (size_t)blen - sizeof(cloudsync_payload_header);
+
     // sanity check checksum (only if version is >= 2)
     if (header.version >= CLOUDSYNC_PAYLOAD_MIN_VERSION_WITH_CHECKSUM) {
-        uint64_t checksum = pk_checksum(buffer, blen);
+        uint64_t checksum = pk_checksum(buffer, buf_len);
         if (cloudsync_payload_checksum_verify(&header, checksum) == false) {
             return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid checksum", DBRES_MISUSE);
         }
     }
-    
+
     // check if payload is compressed
     char *clone = NULL;
     if (header.expanded_size != 0) {
         clone = (char *)cloudsync_memory_alloc(header.expanded_size);
         if (!clone) return cloudsync_set_error(data, "Unable to allocate memory to uncompress payload", DBRES_NOMEM);
-        
-        uint32_t rc = LZ4_decompress_safe(buffer, clone, blen, header.expanded_size);
-        if (rc <= 0 || rc != header.expanded_size) {
+
+        int lz4_rc = LZ4_decompress_safe(buffer, clone, (int)buf_len, (int)header.expanded_size);
+        if (lz4_rc <= 0 || (uint32_t)lz4_rc != header.expanded_size) {
             if (clone) cloudsync_memory_free(clone);
             return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to decompress BLOB", DBRES_MISUSE);
         }
-        
+
         buffer = (const char *)clone;
-        blen = header.expanded_size;
+        buf_len = (size_t)header.expanded_size;
     }
     
     // precompile the insert statement
@@ -2298,7 +2304,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     
     for (uint32_t i=0; i<nrows; ++i) {
         size_t seek = 0;
-        int res = pk_decode((char *)buffer, blen, ncols, &seek, data->skip_decode_idx, cloudsync_payload_decode_callback, &decoded_context);
+        int res = pk_decode((char *)buffer, buf_len, ncols, &seek, data->skip_decode_idx, cloudsync_payload_decode_callback, &decoded_context);
         if (res == -1) {
             if (in_savepoint) database_rollback_savepoint(data, "cloudsync_payload_apply");
             rc = DBRES_ERROR;
@@ -2356,7 +2362,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         }
         
         buffer += seek;
-        blen -= seek;
+        buf_len -= seek;
         dbvm_reset(vm);
     }
     
@@ -2424,7 +2430,7 @@ int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size,
     if (rc != DBRES_OK) return rc;
     
     // exit if there is no data to send
-    if (blob == NULL || blob_size == 0) return DBRES_OK;
+    if (blob == NULL || *blob_size == 0) return DBRES_OK;
     return rc;
 }
 
@@ -2567,7 +2573,7 @@ int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context
     }
     
     // drop original triggers
-    database_delete_triggers(data, table_name);
+    rc = database_delete_triggers(data, table_name);
     if (rc != DBRES_OK) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to delete triggers for table %s", table_name);
@@ -2664,6 +2670,13 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     if (algo_new == table_algo_none) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unknown CRDT algorithm name %s", algo_name);
+        return cloudsync_set_error(data, buffer, DBRES_ERROR);
+    }
+
+    // DWS and AWS algorithms are not yet implemented in the merge logic
+    if (algo_new == table_algo_crdt_dws || algo_new == table_algo_crdt_aws) {
+        char buffer[1024];
+        snprintf(buffer, sizeof(buffer), "CRDT algorithm %s is not yet supported", algo_name);
         return cloudsync_set_error(data, buffer, DBRES_ERROR);
     }
     

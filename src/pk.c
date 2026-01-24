@@ -144,14 +144,14 @@ int pk_decode_print_callback (void *xdata, int index, int type, int64_t ival, do
     return DBRES_OK;
 }
 
-uint64_t pk_checksum (const char *buffer, int blen) {
+uint64_t pk_checksum (const char *buffer, size_t blen) {
     const uint8_t *p = (const uint8_t *)buffer;
-        uint64_t h = 14695981039346656037ULL;
-        for (int i = 0; i < blen; i++) {
-            h ^= p[i];
-            h *= 1099511628211ULL;
-        }
-        return h;
+    uint64_t h = 14695981039346656037ULL;
+    for (size_t i = 0; i < blen; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
 }
 
 // MARK: - Decoding -
