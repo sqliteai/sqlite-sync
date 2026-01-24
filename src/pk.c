@@ -224,13 +224,19 @@ int pk_decode (char *buffer, size_t blen, int count, size_t *seek, int skip_deco
         // skip_decode wants the raw encoded slice (type_byte + optional len/int + payload)
         // we still must parse with the *raw* type to know how much to skip
         bool skip_decode = ((skip_decode_idx >= 0) && (i == (size_t)skip_decode_idx));
+        size_t initial_bseek = bseek - 1; // points to type_byte
 
         switch (raw_type) {
             case DATABASE_TYPE_MAX_NEGATIVE_INTEGER: {
                 // must not carry length bits
                 if (nbytes != 0) return -1;
-                int64_t value = INT64_MIN;
-                if (cb) if (cb(xdata, (int)i, DBTYPE_INTEGER, value, 0.0, NULL) != DBRES_OK) return -1;
+                if (skip_decode) {
+                    size_t slice_len = bseek - initial_bseek;
+                    if (cb) if (cb(xdata, (int)i, DBTYPE_BLOB, (int64_t)slice_len, 0.0, (char *)(buffer + initial_bseek)) != DBRES_OK) return -1;
+                } else {
+                    int64_t value = INT64_MIN;
+                    if (cb) if (cb(xdata, (int)i, DBTYPE_INTEGER, value, 0.0, NULL) != DBRES_OK) return -1;
+                }
             }
                 break;
                 
@@ -240,9 +246,15 @@ int pk_decode (char *buffer, size_t blen, int count, size_t *seek, int skip_deco
                 if (nbytes < 1 || nbytes > 8) return -1;
                 uint64_t u = 0;
                 if (!pk_decode_uint64(ubuf, blen, &bseek, nbytes, &u)) return -1;
-                int64_t value = (int64_t)u;
-                if (raw_type == DATABASE_TYPE_NEGATIVE_INTEGER) value = -value;
-                if (cb) if (cb(xdata, (int)i, DBTYPE_INTEGER, value, 0.0, NULL) != DBRES_OK) return -1;
+                
+                if (skip_decode) {
+                    size_t slice_len = bseek - initial_bseek;
+                    if (cb) if (cb(xdata, (int)i, DBTYPE_BLOB, (int64_t)slice_len, 0.0, (char *)(buffer + initial_bseek)) != DBRES_OK) return -1;
+                } else {
+                    int64_t value = (int64_t)u;
+                    if (raw_type == DATABASE_TYPE_NEGATIVE_INTEGER) value = -value;
+                    if (cb) if (cb(xdata, (int)i, DBTYPE_INTEGER, value, 0.0, NULL) != DBRES_OK) return -1;
+                }
             }
                 break;
                 
@@ -252,8 +264,14 @@ int pk_decode (char *buffer, size_t blen, int count, size_t *seek, int skip_deco
                 if (nbytes != 0) return -1;
                 double value = 0.0;
                 if (!pk_decode_double(ubuf, blen, &bseek, &value)) return -1;
-                if (raw_type == DATABASE_TYPE_NEGATIVE_FLOAT) value = -value;
-                if (cb) if (cb(xdata, (int)i, DBTYPE_FLOAT, 0, value, NULL) != DBRES_OK) return -1;
+                
+                if (skip_decode) {
+                    size_t slice_len = bseek - initial_bseek;
+                    if (cb) if (cb(xdata, (int)i, DBTYPE_BLOB, (int64_t)slice_len, 0.0, (char *)(buffer + initial_bseek)) != DBRES_OK) return -1;
+                } else {
+                    if (raw_type == DATABASE_TYPE_NEGATIVE_FLOAT) value = -value;
+                    if (cb) if (cb(xdata, (int)i, DBTYPE_FLOAT, 0, value, NULL) != DBRES_OK) return -1;
+                }
             }
                 break;
                 
@@ -261,7 +279,6 @@ int pk_decode (char *buffer, size_t blen, int count, size_t *seek, int skip_deco
             case DBTYPE_BLOB: {
                 // validate nbytes for length field
                 if (nbytes < 1 || nbytes > 8) return -1;
-                size_t initial_bseek = bseek - 1; // points to type_byte
                 uint64_t ulen = 0;
                 if (!pk_decode_uint64(ubuf, blen, &bseek, nbytes, &ulen)) return -1;
                 
@@ -283,7 +300,12 @@ int pk_decode (char *buffer, size_t blen, int count, size_t *seek, int skip_deco
                 
             case DBTYPE_NULL: {
                 if (nbytes != 0) return -1;
-                if (cb) if (cb(xdata, (int)i, DBTYPE_NULL, 0, 0.0, NULL) != DBRES_OK) return -1;
+                if (skip_decode) {
+                    size_t slice_len = bseek - initial_bseek;
+                    if (cb) if (cb(xdata, (int)i, DBTYPE_BLOB, (int64_t)slice_len, 0.0, (char *)(buffer + initial_bseek)) != DBRES_OK) return -1;
+                } else {
+                    if (cb) if (cb(xdata, (int)i, DBTYPE_NULL, 0, 0.0, NULL) != DBRES_OK) return -1;
+                }
             }
                 break;
             
