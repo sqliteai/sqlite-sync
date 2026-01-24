@@ -22,6 +22,7 @@
 #define CLOUDSYNC_KEY_CHECK_SEQ             "check_seq"
 #define CLOUDSYNC_KEY_SEND_DBVERSION        "send_dbversion"
 #define CLOUDSYNC_KEY_SEND_SEQ              "send_seq"
+#define CLOUDSYNC_KEY_SCHEMA                "schema"
 #define CLOUDSYNC_KEY_DEBUG                 "debug"
 #define CLOUDSYNC_KEY_ALGO                  "algo"
 

@@ -1544,7 +1544,7 @@ void cloudsync_sync_key (cloudsync_context *data, const char *key, const char *v
         return;
     }
 
-    if (strcmp(key, "schema") == 0) {
+    if (strcmp(key, CLOUDSYNC_KEY_SCHEMA) == 0) {
         cloudsync_set_schema(data, value);
         return;
     }
