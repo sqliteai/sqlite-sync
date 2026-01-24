@@ -860,8 +860,10 @@ cleanup:
 cloudsync_table_context *table_lookup (cloudsync_context *data, const char *table_name) {
     DEBUG_DBFUNCTION("table_lookup %s", table_name);
     
-    for (int i=0; i<data->tables_count; ++i) {
-        if ((strcasecmp(data->tables[i]->name, table_name) == 0)) return data->tables[i];
+    if (table_name) {
+        for (int i=0; i<data->tables_count; ++i) {
+            if ((strcasecmp(data->tables[i]->name, table_name) == 0)) return data->tables[i];
+        }
     }
     
     return NULL;

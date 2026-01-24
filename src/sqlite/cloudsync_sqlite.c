@@ -199,6 +199,10 @@ void dbsync_col_value (sqlite3_context *context, int argc, sqlite3_value **argv)
     
     // retrieve column name
     const char *col_name = (const char *)database_value_text(argv[1]);
+    if (!col_name) {
+        dbsync_set_error(context, "Column name cannot be NULL");
+        return;
+    }
     
     // check for special tombstone value
     if (strcmp(col_name, CLOUDSYNC_TOMBSTONE_VALUE) == 0) {

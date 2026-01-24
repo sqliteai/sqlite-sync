@@ -54,12 +54,18 @@ int dbutils_value_compare (dbvalue_t *lvalue, dbvalue_t *rvalue) {
         case DBTYPE_TEXT: {
             const char *l_text = database_value_text(lvalue);
             const char *r_text = database_value_text(rvalue);
+            if (l_text == NULL && r_text == NULL) return 0;
+            if (l_text == NULL && r_text != NULL) return -1;
+            if (l_text != NULL && r_text == NULL) return 1;
             return strcmp((const char *)l_text, (const char *)r_text);
         } break;
             
         case DBTYPE_BLOB: {
             const void *l_blob = database_value_blob(lvalue);
             const void *r_blob = database_value_blob(rvalue);
+            if (l_blob == NULL && r_blob == NULL) return 0;
+            if (l_blob == NULL && r_blob != NULL) return -1;
+            if (l_blob != NULL && r_blob == NULL) return 1;
             int l_size = database_value_bytes(lvalue);
             int r_size = database_value_bytes(rvalue);
             int cmp = memcmp(l_blob, r_blob, (l_size < r_size) ? l_size : r_size);

@@ -2203,7 +2203,7 @@ int64_t database_value_int (dbvalue_t *value) {
 
 const char *database_value_text (dbvalue_t *value) {
     pgvalue_t *v = (pgvalue_t *)value;
-    if (!v || v->isnull) return "";
+    if (!v || v->isnull) return NULL;
 
     if (!v->cstring) {
         PG_TRY();
