@@ -1393,13 +1393,13 @@ int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
     char sql[1024];
     snprintf(sql, sizeof(sql),
              "INSERT INTO cloudsync_schema_versions (hash, seq) "
-             "VALUES (%" PRId64 ", COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
+             "VALUES (%" PRIu64 ", COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
              "ON CONFLICT(hash) DO UPDATE SET "
              "seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);",
              h);
     rc = database_exec(data, sql);
     if (rc == DBRES_OK && hash) {
-        *hash = h;
+        if (hash) *hash = h;
         return rc;
     } 
 
@@ -1537,11 +1537,11 @@ int databasevm_step0 (pg_stmt_t *stmt) {
         
         stmt->plan = SPI_prepare(stmt->sql, stmt->nparams, stmt->types);
         if (stmt->plan == NULL) {
-            int err = cloudsync_set_error(data, "Unable to prepare SQL statement", DBRES_ERROR);
-            return err;
+            rc = cloudsync_set_error(data, "Unable to prepare SQL statement", DBRES_ERROR);
+        } else {
+            SPI_keepplan(stmt->plan);
+            stmt->plan_is_prepared = true;
         }
-        SPI_keepplan(stmt->plan);
-        stmt->plan_is_prepared = true;
     }
     PG_CATCH();
     {
@@ -1762,7 +1762,7 @@ const char *databasevm_sql (dbvm_t *vm) {
     if (!vm) return NULL;
 
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
-    return stmt->sql;
+    return (char *)stmt->sql;
 }
 
 // MARK: - BINDING -
@@ -2408,6 +2408,7 @@ char *dbmem_mprintf (const char *format, ...) {
 
     // Allocate buffer and format string
     char *result = (char*)malloc(len + 1);
+    if (!result) {va_end(args); return NULL;}
     vsnprintf(result, len + 1, format, args);
 
     va_end(args);
@@ -2427,6 +2428,7 @@ char *dbmem_vmprintf (const char *format, va_list list) {
 
     // Allocate buffer and format string
     char *result = (char*)malloc(len + 1);
+    if (!result) return NULL;
     vsnprintf(result, len + 1, format, list);
 
     return result;

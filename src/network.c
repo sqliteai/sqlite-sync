@@ -482,6 +482,7 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     #endif
     
     conn_string_https = cloudsync_string_replace_prefix(conn_string, "sqlitecloud://", "https://");
+    if (!conn_string_https) goto finalize;
     
     #ifndef SQLITE_WASM_EXTRA_INIT
     // set URL: https://UUID.g5.sqlite.cloud:443/chinook.sqlite?apikey=hWDanFolRT9WDK0p54lufNrIyfgLZgtMw6tb6fbPmpo
@@ -794,7 +795,7 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     }
     
     char json_payload[2024];
-    snprintf(json_payload, sizeof(json_payload), "{\"url\":\"%s\", \"dbVersionMin\":%d, \"dbVersionMax\":%d}", s3_url, db_version, new_db_version);
+    snprintf(json_payload, sizeof(json_payload), "{\"url\":\"%s\", \"dbVersionMin\":%d, \"dbVersionMax\":%lld}", s3_url, db_version, (long long)new_db_version);
     
     // free res
     network_result_cleanup(&res);
@@ -840,7 +841,7 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows) {
     if (seq<0) {sqlite3_result_error(context, "Unable to retrieve seq.", -1); return -1;}
 
     char json_payload[2024];
-    snprintf(json_payload, sizeof(json_payload), "{\"dbVersion\":%d, \"seq\":%d}", db_version, seq);
+    snprintf(json_payload, sizeof(json_payload), "{\"dbVersion\":%lld, \"seq\":%d}", (long long)db_version, seq);
 
     // http://uuid.g5.sqlite.cloud/v2/cloudsync/{dbname}/{site_id}/check
     NETWORK_RESULT result = network_receive_buffer(netdata, netdata->check_endpoint, netdata->authentication, true, true, json_payload, CLOUDSYNC_HEADER_SQLITECLOUD);
@@ -1001,7 +1002,7 @@ finalize:
 // MARK: -
 
 int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
-    const int DEFAULT_FLAGS = SQLITE_UTF8 | SQLITE_INNOCUOUS | SQLITE_DETERMINISTIC;
+    const int DEFAULT_FLAGS = SQLITE_UTF8 | SQLITE_INNOCUOUS;
     int rc = SQLITE_OK;
     
     rc = sqlite3_create_function(db, "cloudsync_network_init", 1, DEFAULT_FLAGS, ctx, cloudsync_network_init, NULL, NULL);

@@ -290,11 +290,12 @@ int dbsync_pk_decode_set_result_callback (void *xdata, int index, int type, int6
 
 
 void dbsync_pk_decode (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    const char *pk = (const char *)database_value_text(argv[0]);
+    const char *pk = (const char *)database_value_blob(argv[0]);
+    int pk_len = database_value_bytes(argv[0]);
     int i = (int)database_value_int(argv[1]);
     
     cloudsync_pk_decode_context xdata = {.context = context, .index = i};
-    pk_decode_prikey((char *)pk, strlen(pk), dbsync_pk_decode_set_result_callback, &xdata);
+    pk_decode_prikey((char *)pk, (size_t)pk_len, dbsync_pk_decode_set_result_callback, &xdata);
 }
 
 // MARK: -
@@ -452,8 +453,8 @@ int dbsync_update_payload_append (cloudsync_update_payload *payload, sqlite3_val
     bool v3_can_be_null = (database_value_type(v3) == SQLITE_NULL);
     
     if ((payload->table_name == NULL) && (!v1_can_be_null)) return SQLITE_NOMEM;
-    if ((payload->old_values[index] == NULL) && (!v2_can_be_null)) return SQLITE_NOMEM;
-    if ((payload->new_values[index] == NULL) && (!v3_can_be_null)) return SQLITE_NOMEM;
+    if ((payload->new_values[index] == NULL) && (!v2_can_be_null)) return SQLITE_NOMEM;
+    if ((payload->old_values[index] == NULL) && (!v3_can_be_null)) return SQLITE_NOMEM;
     
     return SQLITE_OK;
 }
@@ -655,7 +656,7 @@ void dbsync_init (sqlite3_context *context, const char *table, const char *algo,
     // returns site_id as TEXT
     char buffer[UUID_STR_MAXLEN];
     cloudsync_uuid_v7_stringify(cloudsync_siteid(data), buffer, false);
-    sqlite3_result_text(context, buffer, -1, NULL);
+    sqlite3_result_text(context, buffer, -1, SQLITE_TRANSIENT);
 }
 
 void dbsync_init3 (sqlite3_context *context, int argc, sqlite3_value **argv) {

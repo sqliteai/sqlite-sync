@@ -630,6 +630,7 @@ int database_create_triggers (cloudsync_context *data, const char *table_name, t
     // UPDATE TRIGGER
     if (algo == table_algo_crdt_gos) rc = database_create_update_trigger_gos(data, table_name);
     else rc = database_create_update_trigger(data, table_name, trigger_when);
+    if (rc != SQLITE_OK) return rc;
     
     // DELETE TRIGGER
     if (algo == table_algo_crdt_gos) rc = database_create_delete_trigger_gos(data, table_name);
@@ -668,7 +669,7 @@ int database_delete_triggers (cloudsync_context *data, const char *table) {
     if (rc != SQLITE_OK) goto finalize;
     
 finalize:
-    if (rc != SQLITE_OK) DEBUG_ALWAYS("dbutils_delete_triggers error %s (%s)", database_errmsg(cloudsync_db(data)), sql);
+    if (rc != SQLITE_OK) DEBUG_ALWAYS("dbutils_delete_triggers error %s (%s)", database_errmsg(data), sql);
     return rc;
 }
 
@@ -694,7 +695,7 @@ bool database_check_schema_hash (cloudsync_context *data, uint64_t hash) {
     // the idea is to allow changes on stale peers and to be able to apply these changes on peers with newer schema,
     // but it requires alter table operation on augmented tables only add new columns and never drop columns for backward compatibility
     char sql[1024];
-    snprintf(sql, sizeof(sql), "SELECT 1 FROM cloudsync_schema_versions WHERE hash = (%" PRId64 ")", hash);
+    snprintf(sql, sizeof(sql), "SELECT 1 FROM cloudsync_schema_versions WHERE hash = (%" PRIu64 ")", hash);
     
     int64_t value = 0;
     database_select_int(data, sql, &value);
@@ -717,7 +718,7 @@ int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
     
     char sql[1024];
     snprintf(sql, sizeof(sql), "INSERT INTO cloudsync_schema_versions (hash, seq) "
-                               "VALUES (%" PRId64 ", COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
+                               "VALUES (%" PRIu64 ", COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
                                "ON CONFLICT(hash) DO UPDATE SET "
                                "seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);", h);
     rc = database_exec(data, sql);
@@ -748,7 +749,9 @@ void databasevm_clear_bindings (dbvm_t *vm) {
 }
 
 const char *databasevm_sql (dbvm_t *vm) {
-    return sqlite3_expanded_sql((sqlite3_stmt *)vm);
+    return sqlite3_sql((sqlite3_stmt *)vm);
+    // the following allocates memory that needs to be freed
+    // return sqlite3_expanded_sql((sqlite3_stmt *)vm);
 }
 
 static int database_pk_rowid (sqlite3 *db, const char *table_name, char ***names, int *count) {
@@ -762,8 +765,9 @@ static int database_pk_rowid (sqlite3 *db, const char *table_name, char ***names
     
     if (rc == SQLITE_OK) {
         char **r = (char**)cloudsync_memory_alloc(sizeof(char*));
-        if (!r) return SQLITE_NOMEM;
+        if (!r) {rc = SQLITE_NOMEM; goto cleanup;}
         r[0] = cloudsync_string_dup("rowid");
+        if (!r[0]) {cloudsync_memory_free(r); rc = SQLITE_NOMEM; goto cleanup;}
         *names = r;
         *count = 1;
     } else {
@@ -805,21 +809,28 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
     if (rc != SQLITE_OK) goto cleanup;
     
     // allocate array
-    char **r = (char**)cloudsync_memory_alloc(sizeof(char*) * rows);
+    char **r = (char**)cloudsync_memory_zeroalloc(sizeof(char*) * rows);
     if (!r) {rc = SQLITE_NOMEM; goto cleanup;}
     
     int i = 0;
     while ((rc = sqlite3_step(vm)) == SQLITE_ROW) {
         const char *txt = (const char*)sqlite3_column_text(vm, 0);
-        if (!txt) {rc = SQLITE_ERROR; goto cleanup;}
+        if (!txt) {rc = SQLITE_ERROR; goto cleanup_r;}
         r[i] = cloudsync_string_dup(txt);
-        if (!r[i]) { rc = SQLITE_NOMEM; goto cleanup;}
+        if (!r[i]) { rc = SQLITE_NOMEM; goto cleanup_r;}
         i++;
     }
     if (rc == SQLITE_DONE) rc = SQLITE_OK;
     
     *names = r;
     *count = rows;
+    goto cleanup;
+    
+cleanup_r:
+    for (int j = 0; j < i; j++) {
+        if (r[j]) cloudsync_memory_free(r[j]);
+    }
+    cloudsync_memory_free(r);
     
 cleanup:
     if (vm) sqlite3_finalize(vm);
