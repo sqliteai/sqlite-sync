@@ -26,6 +26,8 @@ extern "C" {
 #define CLOUDSYNC_DISABLE_ROWIDONLY_TABLES      1
 #define CLOUDSYNC_DEFAULT_ALGO                  "cls"
 
+#define CLOUDSYNC_CHANGES_NCOLS                 9
+
 typedef enum {
     CLOUDSYNC_PAYLOAD_APPLY_WILL_APPLY          = 1,
     CLOUDSYNC_PAYLOAD_APPLY_DID_APPLY           = 2,

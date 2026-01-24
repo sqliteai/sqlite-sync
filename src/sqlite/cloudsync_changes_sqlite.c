@@ -296,7 +296,7 @@ int cloudsync_changesvtab_best_index (sqlite3_vtab *vtab, sqlite3_index_info *id
         int idx = constraint->iColumn;
         uint8_t op = constraint->op;
         
-        const char *colname = (idx >= 0 && idx < 9) ? COLNAME_FROM_INDEX(idx) : "rowid";
+        const char *colname = (idx >= 0 && idx < CLOUDSYNC_CHANGES_NCOLS) ? COLNAME_FROM_INDEX(idx) : "rowid";
         const char *opname = vtab_opname_from_value(op);
         if (!opname) continue;
         
@@ -330,7 +330,7 @@ int cloudsync_changesvtab_best_index (sqlite3_vtab *vtab, sqlite3_index_info *id
         if (i > 0) sindex += snprintf(s+sindex, slen-sindex, ", ");
         
         int idx = orderby->iColumn;
-        const char *colname = (idx >= 0 && idx < 9) ? COLNAME_FROM_INDEX(idx) : "rowid";
+        const char *colname = (idx >= 0 && idx < CLOUDSYNC_CHANGES_NCOLS) ? COLNAME_FROM_INDEX(idx) : "rowid";
         if (!vtab_colname_is_legal(colname)) orderconsumed = 0;
         
         sindex += snprintf(s+sindex, slen-sindex, "%s %s", colname, orderby->desc ? " DESC" : " ASC");
