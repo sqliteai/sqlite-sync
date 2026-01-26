@@ -1,4 +1,5 @@
 -- 'Test multi-table multi-db roundtrip'
+-- simulate the sport tracker app from examples
 -- Steps:
 -- 1) Create three databases, initialize users/activities/workouts and cloudsync
 -- 2) Round 1: seed base data on A and sync to B/C
@@ -9,7 +10,9 @@
 \set testid '11'
 
 -- Step 1: setup databases and schema
--- \echo '[STEP 1] Setup databases and schema'
+\if :{?DEBUG_MERGE}
+\echo '[STEP 1] Setup databases and schema'
+\endif
 \connect postgres
 \ir helper_psql_conn_setup.sql
 DROP DATABASE IF EXISTS cloudsync_test_a;
@@ -122,7 +125,9 @@ SELECT cloudsync_init('activities', 'CLS', true) AS _init_activities_c \gset
 SELECT cloudsync_init('workouts', 'CLS', true) AS _init_workouts_c \gset
 
 -- Step 2: Round 1 seed base data on A, sync to B/C
--- \echo '[STEP 2] Round 1 seed base data on A, sync to B/C'
+\if :{?DEBUG_MERGE}
+\echo '[STEP 2] Round 1 seed base data on A, sync to B/C'
+\endif
 \connect cloudsync_test_a
 \if :{?DEBUG_MERGE}
 \echo '[INFO] cloudsync_test_a INSERT users u1=alice'
@@ -277,7 +282,9 @@ SELECT * FROM workouts ORDER BY id;
 \endif
 
 -- Step 3: Round 2 concurrent updates and inserts across nodes
+\if :{?DEBUG_MERGE}
 \echo '[STEP 3] Round 2 concurrent updates and inserts across nodes'
+\endif
 \connect cloudsync_test_a
 \if :{?DEBUG_MERGE}
 \echo '[INFO] cloudsync_test_a UPDATE users u1=alice_a2'
@@ -460,7 +467,9 @@ SELECT * FROM workouts ORDER BY id;
 \endif
 
 -- Step 4: Round 3 more concurrent edits
+\if :{?DEBUG_MERGE}
 \echo '[STEP 4] Round 3 more concurrent edits'
+\endif
 \connect cloudsync_test_a
 \if :{?DEBUG_MERGE}
 \echo '[INFO] cloudsync_test_a UPDATE workouts w2 completed=1'
@@ -617,7 +626,9 @@ SELECT * FROM workouts ORDER BY id;
 \endif
 
 -- Step 5: final consistency check across all three databases
+\if :{?DEBUG_MERGE}
 \echo '[STEP 5] Final consistency check across all three databases'
+\endif
 \connect cloudsync_test_a
 SELECT md5(COALESCE(string_agg(id || ':' || name, ',' ORDER BY id), '')) AS users_hash_a
 FROM users \gset
@@ -674,24 +685,24 @@ FROM workouts \gset
 
 SELECT (:'users_hash_a' = :'users_hash_b' AND :'users_hash_a' = :'users_hash_c') AS users_ok \gset
 \if :users_ok
-\echo '[PASS] Multi-table users convergence'
+\echo [PASS] (:testid) Multi-table users convergence
 \else
-\echo '[FAIL] Multi-table users convergence'
+\echo [FAIL] (:testid) Multi-table users convergence
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
 SELECT (:'activities_hash_a' = :'activities_hash_b' AND :'activities_hash_a' = :'activities_hash_c') AS activities_ok \gset
 \if :activities_ok
-\echo '[PASS] Multi-table activities convergence'
+\echo [PASS] (:testid) Multi-table activities convergence
 \else
-\echo '[FAIL] Multi-table activities convergence'
+\echo [FAIL] (:testid) Multi-table activities convergence
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
 SELECT (:'workouts_hash_a' = :'workouts_hash_b' AND :'workouts_hash_a' = :'workouts_hash_c') AS workouts_ok \gset
 \if :workouts_ok
-\echo '[PASS] Multi-table workouts convergence'
+\echo [PASS] (:testid) Multi-table workouts convergence
 \else
-\echo '[FAIL] Multi-table workouts convergence'
+\echo [FAIL] (:testid) Multi-table workouts convergence
 SELECT (:fail::int + 1) AS fail \gset
 \endif
