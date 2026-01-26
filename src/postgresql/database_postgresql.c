@@ -1071,8 +1071,8 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
     char sql[2048];
     snprintf(sql, sizeof(sql),
            "SELECT string_agg("
-           "  '(''%s'', NEW.' || quote_ident(kcu.column_name) || ', OLD.' || "
-           "quote_ident(kcu.column_name) || ')', "
+           "  '(''%s'', NEW.' || quote_ident(kcu.column_name) || '::text, OLD.' || "
+           "quote_ident(kcu.column_name) || '::text)', "
            "  ', ' ORDER BY kcu.ordinal_position"
            ") "
            "FROM information_schema.table_constraints tc "
@@ -1093,8 +1093,8 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
 
     snprintf(sql, sizeof(sql),
            "SELECT string_agg("
-           "  '(''%s'', NEW.' || quote_ident(c.column_name) || ', OLD.' || "
-           "quote_ident(c.column_name) || ')', "
+           "  '(''%s'', NEW.' || quote_ident(c.column_name) || '::text, OLD.' || "
+           "quote_ident(c.column_name) || '::text)', "
            "  ', ' ORDER BY c.ordinal_position"
            ") "
            "FROM information_schema.columns c "
