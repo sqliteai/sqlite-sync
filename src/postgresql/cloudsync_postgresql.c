@@ -2175,6 +2175,10 @@ Datum cloudsync_changes_select(PG_FUNCTION_ARGS) {
             SPI_finish();
             st->spi_connected = false;
 
+            // SPI operations may leave us in multi_call_memory_ctx
+            // Must switch to a safe context before SRF_RETURN_DONE deletes it
+            MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+
             SRF_RETURN_DONE(funcctx);
         }
         
@@ -2198,6 +2202,10 @@ Datum cloudsync_changes_select(PG_FUNCTION_ARGS) {
     }
     PG_CATCH();
     {
+        // Switch to function's context (safe, won't be deleted)
+        // Avoids assertion if we're currently in multi_call_memory_ctx
+        MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+
         if (st_local && st_local->portal) {
             SPI_cursor_close(st_local->portal);
             st_local->portal = NULL;
@@ -2211,7 +2219,7 @@ Datum cloudsync_changes_select(PG_FUNCTION_ARGS) {
             SPI_finish();
             spi_connected_local = false;
         }
-        
+
         PG_RE_THROW();
     }
     PG_END_TRY();
