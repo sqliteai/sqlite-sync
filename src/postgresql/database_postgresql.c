@@ -1374,7 +1374,7 @@ uint64_t database_schema_hash (cloudsync_context *data) {
 
 bool database_check_schema_hash (cloudsync_context *data, uint64_t hash) {
     char sql[1024];
-    snprintf(sql, sizeof(sql), "SELECT 1 FROM cloudsync_schema_versions WHERE hash = %" PRIu64, hash);
+    snprintf(sql, sizeof(sql), "SELECT 1 FROM cloudsync_schema_versions WHERE hash = %" PRId64, (int64_t)hash);
 
     int64_t value = 0;
     database_select_int(data, sql, &value);
@@ -1399,10 +1399,10 @@ int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
     char sql[1024];
     snprintf(sql, sizeof(sql),
              "INSERT INTO cloudsync_schema_versions (hash, seq) "
-             "VALUES (%" PRIu64 ", COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
+             "VALUES (%" PRId64 ", COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
              "ON CONFLICT(hash) DO UPDATE SET "
              "seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);",
-             h);
+             (int64_t)h);
     rc = database_exec(data, sql);
     if (rc == DBRES_OK && hash) {
         if (hash) *hash = h;
@@ -1541,9 +1541,9 @@ int databasevm_step0 (pg_stmt_t *stmt) {
 
     PG_TRY();
     {
-        if (!stmt || !stmt->sql) {
+        if (!stmt->sql) {
             ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-                errmsg("databasevm_step0 invalid stmt or sql pointer")));
+                errmsg("databasevm_step0 invalid sql pointer")));
         }
 
         stmt->plan = SPI_prepare(stmt->sql, stmt->nparams, stmt->types);
@@ -1682,8 +1682,13 @@ int databasevm_step (dbvm_t *vm) {
                 }
 
                 // Execute once (non-row-returning or cursor open failed).
-                if (stmt->nparams == 0) SPI_execute_plan(stmt->plan, NULL, NULL, false, 0);
-                else SPI_execute_plan(stmt->plan, stmt->values, stmt->nulls, false, 0);
+                int spi_rc;
+                if (stmt->nparams == 0) spi_rc = SPI_execute_plan(stmt->plan, NULL, NULL, false, 0);
+                else spi_rc = SPI_execute_plan(stmt->plan, stmt->values, stmt->nulls, false, 0);
+                if (spi_rc < 0) {
+                    rc = cloudsync_set_error(data, "SPI_execute_plan failed", DBRES_ERROR);
+                    break;
+                }
                 if (SPI_tuptable) {
                     SPI_freetuptable(SPI_tuptable);
                     SPI_tuptable = NULL;
@@ -1776,24 +1781,9 @@ void databasevm_clear_bindings (dbvm_t *vm) {
     if (!vm) return;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
 
-    clear_fetch_batch(stmt);
-    close_portal(stmt);
-    if (SPI_tuptable) {
-        SPI_freetuptable(SPI_tuptable);
-        SPI_tuptable = NULL;
-    }
-    
-    if (stmt->plan_is_prepared && stmt->plan) {
-        SPI_freeplan(stmt->plan);
-        stmt->plan = NULL;
-        stmt->plan_is_prepared = false;
-    }
-    
-    // DO NOT call clear_fetch_batch() - not related to bindings
-    // DO NOT call close_portal() - not related to bindings
-    // DO NOT free the plan - clearing bindings != destroying prepared statement
-
-    // Only clear the bound parameter values
+    // Only clear the bound parameter values.
+    // Do NOT close portals, free fetch batches, or free the plan —
+    // those are execution state, not bindings.
     if (stmt->bind_mcxt) MemoryContextReset(stmt->bind_mcxt);
     stmt->nparams = 0;
 
