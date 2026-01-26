@@ -508,12 +508,13 @@ static bool database_system_exists (cloudsync_context *data, const char *name, c
           return false;
       }
 
+      MemoryContext oldcontext = CurrentMemoryContext;
       PG_TRY();
       {
           Oid argtypes[1] = {TEXTOID};
           Datum values[1] = {CStringGetTextDatum(name)};
           char nulls[1] = { ' ' };
-          
+
           int rc = SPI_execute_with_args(query, 1, argtypes, values, nulls, true, 0);
           exists = (rc >= 0 && SPI_processed > 0);
           if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
@@ -521,6 +522,7 @@ static bool database_system_exists (cloudsync_context *data, const char *name, c
       }
       PG_CATCH();
       {
+          MemoryContextSwitchTo(oldcontext);
           ErrorData *edata = CopyErrorData();
           cloudsync_set_error(data, edata->message, DBRES_ERROR);
           FreeErrorData(edata);
@@ -538,9 +540,10 @@ static bool database_system_exists (cloudsync_context *data, const char *name, c
 int database_exec (cloudsync_context *data, const char *sql) {
     if (!sql) return cloudsync_set_error(data, "SQL statement is NULL", DBRES_ERROR);
     cloudsync_reset_error(data);
-    
+
     int rc;
     bool is_error = false;
+    MemoryContext oldcontext = CurrentMemoryContext;
     PG_TRY();
     {
         rc = SPI_execute(sql, false, 0);
@@ -550,6 +553,7 @@ int database_exec (cloudsync_context *data, const char *sql) {
     }
     PG_CATCH();
     {
+        MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
         rc = cloudsync_set_error(data, edata->message, DBRES_ERROR);
         FreeErrorData(edata);
@@ -578,12 +582,14 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
 
     int rc;
     bool is_error = false;
+    MemoryContext oldcontext = CurrentMemoryContext;
     PG_TRY();
     {
         rc = SPI_execute(sql, true, 0);
     }
     PG_CATCH();
     {
+        MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
         rc = cloudsync_set_error(data, edata->message, DBRES_ERROR);
         FreeErrorData(edata);
@@ -1488,8 +1494,9 @@ int databasevm_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, i
     pg_stmt_t *stmt = (pg_stmt_t *)cloudsync_memory_zeroalloc(sizeof(pg_stmt_t));
     if (!stmt) return cloudsync_set_error(data, "Not enough memory to allocate a dbvm_t struct", DBRES_NOMEM);
     stmt->data = data;
-    
+
     int rc = DBRES_OK;
+    MemoryContext oldcontext = CurrentMemoryContext;
     PG_TRY();
     {
         MemoryContext parent = (flags & DBFLAG_PERSISTENT) ? TopMemoryContext : CurrentMemoryContext;
@@ -1500,13 +1507,14 @@ int databasevm_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, i
         }
         stmt->bind_mcxt = AllocSetContextCreate(stmt->stmt_mcxt, "cloudsync binds", ALLOCSET_DEFAULT_SIZES);
         stmt->row_mcxt = AllocSetContextCreate(stmt->stmt_mcxt, "cloudsync row", ALLOCSET_DEFAULT_SIZES);
-        
+
         MemoryContext old = MemoryContextSwitchTo(stmt->stmt_mcxt);
         stmt->sql = pstrdup(sql);
         MemoryContextSwitchTo(old);
     }
     PG_CATCH();
     {
+        MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
         rc = cloudsync_set_error(data, edata->message, DBRES_ERROR);
         FreeErrorData(edata);
@@ -1526,33 +1534,52 @@ int databasevm_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, i
 
 int databasevm_step0 (pg_stmt_t *stmt) {
     cloudsync_context *data = stmt->data;
+    if (!data) return DBRES_ERROR;
+
     int rc = DBRES_OK;
-    
-    // prepare plan
+    MemoryContext oldcontext = CurrentMemoryContext;
+
     PG_TRY();
     {
         if (!stmt || !stmt->sql) {
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("databasevm_step0 invalid stmt or sql pointer")));
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                errmsg("databasevm_step0 invalid stmt or sql pointer")));
         }
-        
+
         stmt->plan = SPI_prepare(stmt->sql, stmt->nparams, stmt->types);
         if (stmt->plan == NULL) {
-            rc = cloudsync_set_error(data, "Unable to prepare SQL statement", DBRES_ERROR);
-        } else {
-            SPI_keepplan(stmt->plan);
-            stmt->plan_is_prepared = true;
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                errmsg("Unable to prepare SQL statement")));
         }
+        
+        SPI_keepplan(stmt->plan);
+        stmt->plan_is_prepared = true;
     }
     PG_CATCH();
     {
+        // Switch to safe context for CopyErrorData (can't be ErrorContext)
+        MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
-        int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        rc = cloudsync_set_error(data, edata->message, DBRES_ERROR);
         FreeErrorData(edata);
         FlushErrorState();
-        rc = err;
+
+        // Clean up partially prepared plan if needed
+        if (stmt->plan != NULL && !stmt->plan_is_prepared) {
+            PG_TRY();
+            {
+                SPI_freeplan(stmt->plan);
+            }
+            PG_CATCH();
+            {
+                FlushErrorState();  // Swallow errors during cleanup
+            }
+            PG_END_TRY();
+            stmt->plan = NULL;
+        }
     }
     PG_END_TRY();
-    
+
     return rc;
 }
 
@@ -1568,8 +1595,9 @@ int databasevm_step (dbvm_t *vm) {
         if (rc != DBRES_OK) return rc;
     }
     if (!stmt->plan_is_prepared || !stmt->plan) return DBRES_ERROR;
-    
+
     int rc = DBRES_DONE;
+    MemoryContext oldcontext = CurrentMemoryContext;
     PG_TRY();
     {
         do {
@@ -1671,6 +1699,7 @@ int databasevm_step (dbvm_t *vm) {
     }
     PG_CATCH();
     {
+        MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
         int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
         FreeErrorData(edata);
@@ -1719,12 +1748,18 @@ void databasevm_finalize (dbvm_t *vm) {
 void databasevm_reset (dbvm_t *vm) {
     if (!vm) return;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
+
+    // Close any open cursor and clear fetched data
     clear_fetch_batch(stmt);
     close_portal(stmt);
+
+    // Clear global SPI tuple table if any
     if (SPI_tuptable) {
         SPI_freetuptable(SPI_tuptable);
         SPI_tuptable = NULL;
     }
+
+    // Reset execution state
     stmt->executed_nonselect = false;
 
     // Reset parameter values but keep the plan, types, and nparams intact.
@@ -1740,7 +1775,7 @@ void databasevm_reset (dbvm_t *vm) {
 void databasevm_clear_bindings (dbvm_t *vm) {
     if (!vm) return;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
-    
+
     clear_fetch_batch(stmt);
     close_portal(stmt);
     if (SPI_tuptable) {
@@ -1754,11 +1789,15 @@ void databasevm_clear_bindings (dbvm_t *vm) {
         stmt->plan_is_prepared = false;
     }
     
+    // DO NOT call clear_fetch_batch() - not related to bindings
+    // DO NOT call close_portal() - not related to bindings
+    // DO NOT free the plan - clearing bindings != destroying prepared statement
+
+    // Only clear the bound parameter values
     if (stmt->bind_mcxt) MemoryContextReset(stmt->bind_mcxt);
     stmt->nparams = 0;
-    stmt->executed_nonselect = false;
-    
-    // initialize static array of params
+
+    // Reset params array to defaults
     for (int i = 0; i < MAX_PARAMS; i++) {
         stmt->types[i] = UNKNOWNOID;
         stmt->values[i] = (Datum) 0;
@@ -2288,22 +2327,24 @@ static int database_refresh_snapshot (void) {
     if (!IsTransactionState()) {
         return DBRES_OK;  // Not in transaction, nothing to do
     }
-    
+
+    MemoryContext oldcontext = CurrentMemoryContext;
     PG_TRY();
     {
         CommandCounterIncrement();
-        
+
         // Pop existing snapshot if any
         if (ActiveSnapshotSet()) {
             PopActiveSnapshot();
         }
-        
+
         // Push fresh snapshot
         PushActiveSnapshot(GetTransactionSnapshot());
     }
     PG_CATCH();
     {
         // Snapshot refresh failed - log warning but don't fail operation
+        MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
         elog(WARNING, "refresh_snapshot_after_command failed: %s", edata->message);
         FreeErrorData(edata);
@@ -2319,12 +2360,14 @@ int database_begin_savepoint (cloudsync_context *data, const char *savepoint_nam
     cloudsync_reset_error(data);
     int rc = DBRES_OK;
 
+    MemoryContext oldcontext = CurrentMemoryContext;
     PG_TRY();
     {
         BeginInternalSubTransaction(NULL);
     }
     PG_CATCH();
     {
+        MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
         rc = cloudsync_set_error(data, edata->message, DBRES_ERROR);
         FreeErrorData(edata);
@@ -2339,6 +2382,7 @@ int database_commit_savepoint (cloudsync_context *data, const char *savepoint_na
     cloudsync_reset_error(data);
     int rc = DBRES_OK;
 
+    MemoryContext oldcontext = CurrentMemoryContext;
     PG_TRY();
     {
         ReleaseCurrentSubTransaction();
@@ -2346,6 +2390,7 @@ int database_commit_savepoint (cloudsync_context *data, const char *savepoint_na
     }
     PG_CATCH();
     {
+        MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
         cloudsync_set_error(data, edata->message, DBRES_ERROR);
         FreeErrorData(edata);
@@ -2360,7 +2405,8 @@ int database_commit_savepoint (cloudsync_context *data, const char *savepoint_na
 int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_name) {
     cloudsync_reset_error(data);
     int rc = DBRES_OK;
-    
+
+    MemoryContext oldcontext = CurrentMemoryContext;
     PG_TRY();
     {
         RollbackAndReleaseCurrentSubTransaction();
@@ -2368,6 +2414,7 @@ int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_
     }
     PG_CATCH();
     {
+        MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
         cloudsync_set_error(data, edata->message, DBRES_ERROR);
         FreeErrorData(edata);

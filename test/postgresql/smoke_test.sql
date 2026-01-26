@@ -18,6 +18,7 @@
 \ir 08_resurrect_delayed_delete.sql
 \ir 09_multicol_concurrent_edits.sql
 \ir 10_empty_payload_noop.sql
+-- \ir 11_multi_table_rounds.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'
