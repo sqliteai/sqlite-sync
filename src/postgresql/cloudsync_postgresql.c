@@ -304,7 +304,8 @@ static bytea *cloudsync_init_internal (cloudsync_context *data, const char *tabl
         cloudsync_update_schema_hash(data);
 
         // Build site_id as bytea to return
-        result = (bytea *)palloc(UUID_LEN + VARHDRSZ);
+        // Use SPI_palloc so the allocation survives SPI_finish
+        result = (bytea *)SPI_palloc(UUID_LEN + VARHDRSZ);
         SET_VARSIZE(result, UUID_LEN + VARHDRSZ);
         memcpy(VARDATA(result), cloudsync_siteid(data), UUID_LEN);
 
