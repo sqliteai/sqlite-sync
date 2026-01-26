@@ -1,11 +1,15 @@
 import { resolve } from 'node:path';
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import {
   getCurrentPlatform,
   getPlatformPackageName,
   getBinaryName,
   type Platform
 } from './platform.js';
+
+// Create a require function that works in both CommonJS and ESM
+const require = createRequire(import.meta.url);
 
 /**
  * Error thrown when the SQLite Sync extension cannot be found
@@ -25,8 +29,6 @@ function tryLoadPlatformPackage(): string | null {
   try {
     const packageName = getPlatformPackageName();
 
-    // Try to dynamically import the platform package
-    // This works in both CommonJS and ESM
     const platformPackage = require(packageName);
 
     if (platformPackage?.path && typeof platformPackage.path === 'string') {
