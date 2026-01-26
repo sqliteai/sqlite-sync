@@ -1341,7 +1341,8 @@ Datum cloudsync_update_transfn (PG_FUNCTION_ARGS) {
     }
 
     MemoryContext old_ctx = MemoryContextSwitchTo(allocContext);
-    MemoryContextStats(allocContext);
+    // debug code
+    // MemoryContextStats(allocContext);
     pgvalue_t *table_name = pgvalue_create(table_datum, table_type, -1, fcinfo->fncollation, table_null);
     pgvalue_t *new_value = pgvalue_create(new_datum, new_type, -1, fcinfo->fncollation, new_null);
     pgvalue_t *old_value = pgvalue_create(old_datum, old_type, -1, fcinfo->fncollation, old_null);
@@ -2037,10 +2038,12 @@ static char * build_union_sql (void) {
 
             pfree(quoted_base);
             pfree(nsp_lit);
+            bool nsp_was_quoted = (quoted_nsp != nsp);
             pfree(nsp);
-            if (quoted_nsp != nsp) pfree((void *)quoted_nsp);
+            if (nsp_was_quoted) pfree((void *)quoted_nsp);
+            bool rel_was_quoted = (quoted_rel != rel);
             pfree(rel);
-            if (quoted_rel != rel) pfree((void *)quoted_rel);
+            if (rel_was_quoted) pfree((void *)quoted_rel);
         }
         if (nsp_list) pfree(nsp_list);
         if (rel_list) pfree(rel_list);

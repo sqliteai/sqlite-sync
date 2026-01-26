@@ -222,13 +222,25 @@ char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, 
 }
 
 char *database_build_meta_ref(const char *schema, const char *table_name) {
-    if (schema) return cloudsync_memory_mprintf("\"%s\".\"%s_cloudsync\"", schema, table_name);
-    return cloudsync_memory_mprintf("\"%s_cloudsync\"", table_name);
+    char escaped_table[512];
+    sql_escape_name(table_name, escaped_table, sizeof(escaped_table));
+    if (schema) {
+        char escaped_schema[512];
+        sql_escape_name(schema, escaped_schema, sizeof(escaped_schema));
+        return cloudsync_memory_mprintf("\"%s\".\"%s_cloudsync\"", escaped_schema, escaped_table);
+    }
+    return cloudsync_memory_mprintf("\"%s_cloudsync\"", escaped_table);
 }
 
 char *database_build_base_ref(const char *schema, const char *table_name) {
-    if (schema) return cloudsync_memory_mprintf("\"%s\".\"%s\"", schema, table_name);
-    return cloudsync_memory_mprintf("\"%s\"", table_name);
+    char escaped_table[512];
+    sql_escape_name(table_name, escaped_table, sizeof(escaped_table));
+    if (schema) {
+        char escaped_schema[512];
+        sql_escape_name(schema, escaped_schema, sizeof(escaped_schema));
+        return cloudsync_memory_mprintf("\"%s\".\"%s\"", escaped_schema, escaped_table);
+    }
+    return cloudsync_memory_mprintf("\"%s\"", escaped_table);
 }
 
 // MARK: - HELPER FUNCTIONS -
@@ -381,8 +393,8 @@ int database_select1_value (cloudsync_context *data, const char *sql, char **ptr
                 goto cleanup;
             }
             memcpy(ptr, VARDATA(ba), len);
-            *ptr_value = ptr;
-            *int_value = len;
+            if (ptr_value) *ptr_value = ptr;
+            if (int_value) *int_value = len;
         }
     }
 
@@ -404,16 +416,16 @@ int database_select3_values (cloudsync_context *data, const char *sql, char **va
 
     int rc = SPI_execute(sql, true, 0);
     if (rc < 0) {
-        rc = cloudsync_set_error(data, "SPI_execute failed in database_select3_values", DBRES_ERROR);;
+        rc = cloudsync_set_error(data, "SPI_execute failed in database_select3_values", DBRES_ERROR);
         goto cleanup;
     }
 
     if (!SPI_tuptable || !SPI_tuptable->tupdesc) {
-        rc = cloudsync_set_error(data, "No result table in database_select3_values", DBRES_ERROR);;
+        rc = cloudsync_set_error(data, "No result table in database_select3_values", DBRES_ERROR);
         goto cleanup;
     }
     if (SPI_tuptable->tupdesc->natts < 3) {
-        rc = cloudsync_set_error(data, "Result has fewer than 3 columns in database_select3_values", DBRES_ERROR);;
+        rc = cloudsync_set_error(data, "Result has fewer than 3 columns in database_select3_values", DBRES_ERROR);
         goto cleanup;
     }
     if (SPI_processed == 0) {
@@ -964,8 +976,10 @@ int database_create_insert_trigger (cloudsync_context *data, const char *table_n
 
     char trigger_name[1024];
     char func_name[1024];
-    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_insert_%s", table_name);
-    snprintf(func_name, sizeof(func_name), "cloudsync_after_insert_%s_fn", table_name);
+    char escaped_tbl[512];
+    sql_escape_name(table_name, escaped_tbl, sizeof(escaped_tbl));
+    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_insert_%s", escaped_tbl);
+    snprintf(func_name, sizeof(func_name), "cloudsync_after_insert_%s_fn", escaped_tbl);
 
     if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
 
@@ -989,7 +1003,7 @@ int database_create_insert_trigger (cloudsync_context *data, const char *table_n
     }
 
     char *sql2 = cloudsync_memory_mprintf(
-        "CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$ "
+        "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $$ "
         "BEGIN "
         "  IF cloudsync_is_sync('%s') THEN RETURN NEW; END IF; "
         "  PERFORM cloudsync_insert('%s', VARIADIC ARRAY[%s]); "
@@ -1008,8 +1022,8 @@ int database_create_insert_trigger (cloudsync_context *data, const char *table_n
     if (!base_ref) return DBRES_NOMEM;
 
     sql2 = cloudsync_memory_mprintf(
-        "CREATE TRIGGER %s AFTER INSERT ON %s %s "
-        "EXECUTE FUNCTION %s();",
+        "CREATE TRIGGER \"%s\" AFTER INSERT ON %s %s "
+        "EXECUTE FUNCTION \"%s\"();",
         trigger_name, base_ref, trigger_when ? trigger_when : "", func_name);
     cloudsync_memory_free(base_ref);
     if (!sql2) return DBRES_NOMEM;
@@ -1024,13 +1038,15 @@ int database_create_update_trigger_gos (cloudsync_context *data, const char *tab
 
     char trigger_name[1024];
     char func_name[1024];
-    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_update_%s", table_name);
-    snprintf(func_name, sizeof(func_name), "cloudsync_before_update_%s_fn", table_name);
+    char escaped_tbl[512];
+    sql_escape_name(table_name, escaped_tbl, sizeof(escaped_tbl));
+    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_update_%s", escaped_tbl);
+    snprintf(func_name, sizeof(func_name), "cloudsync_before_update_%s_fn", escaped_tbl);
 
     if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
 
     char *sql = cloudsync_memory_mprintf(
-        "CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$ "
+        "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $$ "
         "BEGIN "
         "  RAISE EXCEPTION 'Error: UPDATE operation is not allowed on table %s.'; "
         "END; "
@@ -1046,9 +1062,9 @@ int database_create_update_trigger_gos (cloudsync_context *data, const char *tab
     if (!base_ref) return DBRES_NOMEM;
 
     sql = cloudsync_memory_mprintf(
-        "CREATE TRIGGER %s BEFORE UPDATE ON %s "
+        "CREATE TRIGGER \"%s\" BEFORE UPDATE ON %s "
         "FOR EACH ROW WHEN (cloudsync_is_enabled('%s') = true) "
-        "EXECUTE FUNCTION %s();",
+        "EXECUTE FUNCTION \"%s\"();",
         trigger_name, base_ref, table_name, func_name);
     cloudsync_memory_free(base_ref);
     if (!sql) return DBRES_NOMEM;
@@ -1063,8 +1079,10 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
 
     char trigger_name[1024];
     char func_name[1024];
-    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_update_%s", table_name);
-    snprintf(func_name, sizeof(func_name), "cloudsync_after_update_%s_fn", table_name);
+    char escaped_tbl[512];
+    sql_escape_name(table_name, escaped_tbl, sizeof(escaped_tbl));
+    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_update_%s", escaped_tbl);
+    snprintf(func_name, sizeof(func_name), "cloudsync_after_update_%s_fn", escaped_tbl);
 
     if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
 
@@ -1131,7 +1149,7 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
     if (!values_query) return DBRES_NOMEM;
 
     char *sql2 = cloudsync_memory_mprintf(
-        "CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$ "
+        "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $$ "
         "BEGIN "
         "  IF cloudsync_is_sync('%s') THEN RETURN NEW; END IF; "
         "  PERFORM cloudsync_update(table_name, new_value, old_value) "
@@ -1151,8 +1169,8 @@ int database_create_update_trigger (cloudsync_context *data, const char *table_n
     if (!base_ref) return DBRES_NOMEM;
 
     sql2 = cloudsync_memory_mprintf(
-        "CREATE TRIGGER %s AFTER UPDATE ON %s %s "
-        "EXECUTE FUNCTION %s();",
+        "CREATE TRIGGER \"%s\" AFTER UPDATE ON %s %s "
+        "EXECUTE FUNCTION \"%s\"();",
         trigger_name, base_ref, trigger_when ? trigger_when : "", func_name);
     cloudsync_memory_free(base_ref);
     if (!sql2) return DBRES_NOMEM;
@@ -1167,13 +1185,15 @@ int database_create_delete_trigger_gos (cloudsync_context *data, const char *tab
 
     char trigger_name[1024];
     char func_name[1024];
-    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_delete_%s", table_name);
-    snprintf(func_name, sizeof(func_name), "cloudsync_before_delete_%s_fn", table_name);
+    char escaped_tbl[512];
+    sql_escape_name(table_name, escaped_tbl, sizeof(escaped_tbl));
+    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_delete_%s", escaped_tbl);
+    snprintf(func_name, sizeof(func_name), "cloudsync_before_delete_%s_fn", escaped_tbl);
 
     if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
 
     char *sql = cloudsync_memory_mprintf(
-        "CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$ "
+        "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $$ "
         "BEGIN "
         "  RAISE EXCEPTION 'Error: DELETE operation is not allowed on table %s.'; "
         "END; "
@@ -1189,9 +1209,9 @@ int database_create_delete_trigger_gos (cloudsync_context *data, const char *tab
     if (!base_ref) return DBRES_NOMEM;
 
     sql = cloudsync_memory_mprintf(
-        "CREATE TRIGGER %s BEFORE DELETE ON %s "
+        "CREATE TRIGGER \"%s\" BEFORE DELETE ON %s "
         "FOR EACH ROW WHEN (cloudsync_is_enabled('%s') = true) "
-        "EXECUTE FUNCTION %s();",
+        "EXECUTE FUNCTION \"%s\"();",
         trigger_name, base_ref, table_name, func_name);
     cloudsync_memory_free(base_ref);
     if (!sql) return DBRES_NOMEM;
@@ -1206,8 +1226,10 @@ int database_create_delete_trigger (cloudsync_context *data, const char *table_n
 
     char trigger_name[1024];
     char func_name[1024];
-    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_delete_%s", table_name);
-    snprintf(func_name, sizeof(func_name), "cloudsync_after_delete_%s_fn", table_name);
+    char escaped_tbl[512];
+    sql_escape_name(table_name, escaped_tbl, sizeof(escaped_tbl));
+    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_delete_%s", escaped_tbl);
+    snprintf(func_name, sizeof(func_name), "cloudsync_after_delete_%s_fn", escaped_tbl);
 
     if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
 
@@ -1231,7 +1253,7 @@ int database_create_delete_trigger (cloudsync_context *data, const char *table_n
     }
 
     char *sql2 = cloudsync_memory_mprintf(
-        "CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$ "
+        "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $$ "
         "BEGIN "
         "  IF cloudsync_is_sync('%s') THEN RETURN OLD; END IF; "
         "  PERFORM cloudsync_delete('%s', VARIADIC ARRAY[%s]); "
@@ -1250,8 +1272,8 @@ int database_create_delete_trigger (cloudsync_context *data, const char *table_n
     if (!base_ref) return DBRES_NOMEM;
 
     sql2 = cloudsync_memory_mprintf(
-        "CREATE TRIGGER %s AFTER DELETE ON %s %s "
-        "EXECUTE FUNCTION %s();",
+        "CREATE TRIGGER \"%s\" AFTER DELETE ON %s %s "
+        "EXECUTE FUNCTION \"%s\"();",
         trigger_name, base_ref, trigger_when ? trigger_when : "", func_name);
     cloudsync_memory_free(base_ref);
     if (!sql2) return DBRES_NOMEM;
@@ -1292,54 +1314,57 @@ int database_delete_triggers (cloudsync_context *data, const char *table) {
     char *base_ref = database_build_base_ref(cloudsync_schema(data), table);
     if (!base_ref) return DBRES_NOMEM;
 
+    char escaped_tbl[512];
+    sql_escape_name(table, escaped_tbl, sizeof(escaped_tbl));
+
     char *sql = cloudsync_memory_mprintf(
              "DROP TRIGGER IF EXISTS \"cloudsync_after_insert_%s\" ON %s;",
-             table, base_ref);
+             escaped_tbl, base_ref);
     if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
     sql = cloudsync_memory_mprintf(
-             "DROP FUNCTION IF EXISTS cloudsync_after_insert_%s_fn() CASCADE;",
-             table);
+             "DROP FUNCTION IF EXISTS \"cloudsync_after_insert_%s_fn\"() CASCADE;",
+             escaped_tbl);
     if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
     sql = cloudsync_memory_mprintf(
              "DROP TRIGGER IF EXISTS \"cloudsync_after_update_%s\" ON %s;",
-             table, base_ref);
+             escaped_tbl, base_ref);
     if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
     sql = cloudsync_memory_mprintf(
              "DROP TRIGGER IF EXISTS \"cloudsync_before_update_%s\" ON %s;",
-             table, base_ref);
+             escaped_tbl, base_ref);
     if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
     sql = cloudsync_memory_mprintf(
-             "DROP FUNCTION IF EXISTS cloudsync_after_update_%s_fn() CASCADE;",
-             table);
+             "DROP FUNCTION IF EXISTS \"cloudsync_after_update_%s_fn\"() CASCADE;",
+             escaped_tbl);
     if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
     sql = cloudsync_memory_mprintf(
-             "DROP FUNCTION IF EXISTS cloudsync_before_update_%s_fn() CASCADE;",
-             table);
+             "DROP FUNCTION IF EXISTS \"cloudsync_before_update_%s_fn\"() CASCADE;",
+             escaped_tbl);
     if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
     sql = cloudsync_memory_mprintf(
              "DROP TRIGGER IF EXISTS \"cloudsync_after_delete_%s\" ON %s;",
-             table, base_ref);
+             escaped_tbl, base_ref);
     if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
     sql = cloudsync_memory_mprintf(
              "DROP TRIGGER IF EXISTS \"cloudsync_before_delete_%s\" ON %s;",
-             table, base_ref);
+             escaped_tbl, base_ref);
     if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
     sql = cloudsync_memory_mprintf(
-             "DROP FUNCTION IF EXISTS cloudsync_after_delete_%s_fn() CASCADE;",
-             table);
+             "DROP FUNCTION IF EXISTS \"cloudsync_after_delete_%s_fn\"() CASCADE;",
+             escaped_tbl);
     if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
     sql = cloudsync_memory_mprintf(
-             "DROP FUNCTION IF EXISTS cloudsync_before_delete_%s_fn() CASCADE;",
-             table);
+             "DROP FUNCTION IF EXISTS \"cloudsync_before_delete_%s_fn\"() CASCADE;",
+             escaped_tbl);
     if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
 
     cloudsync_memory_free(base_ref);
@@ -1404,7 +1429,7 @@ int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
              "seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);",
              (int64_t)h);
     rc = database_exec(data, sql);
-    if (rc == DBRES_OK && hash) {
+    if (rc == DBRES_OK) {
         if (hash) *hash = h;
         return rc;
     } 
@@ -1893,7 +1918,7 @@ int databasevm_bind_text (dbvm_t *vm, int index, const char *value, int size) {
     
     // validate size fits Size and won't overflow
     if (size < 0) size = (int)strlen(value);
-    if (size > (uint64) (MaxAllocSize - VARHDRSZ)) return DBRES_NOMEM;
+    if ((Size)size > MaxAllocSize - VARHDRSZ) return DBRES_NOMEM;
     
     int idx = index - 1;
     if (idx >= MAX_PARAMS) return DBRES_ERROR;
@@ -1971,7 +1996,7 @@ Datum database_column_datum (dbvm_t *vm, int index) {
     if (!vm) return (Datum)0;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return (Datum)0;
-    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return (Datum)0;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return (Datum)0;
     
     bool isnull = true;
     Datum d = get_datum(stmt, index, &isnull, NULL);
@@ -1982,7 +2007,7 @@ const void *database_column_blob (dbvm_t *vm, int index) {
     if (!vm) return NULL;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return NULL;
-    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return NULL;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return NULL;
 
     bool isnull = true;
     Datum d = get_datum(stmt, index, &isnull, NULL);
@@ -2017,7 +2042,7 @@ double database_column_double (dbvm_t *vm, int index) {
     if (!vm) return 0.0;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return 0.0;
-    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return 0.0;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return 0.0;
 
     bool isnull = true;
     Oid type = 0;
@@ -2027,12 +2052,13 @@ double database_column_double (dbvm_t *vm, int index) {
     switch (type) {
         case FLOAT4OID: return (double)DatumGetFloat4(d);
         case FLOAT8OID: return (double)DatumGetFloat8(d);
+        case NUMERICOID: return DatumGetFloat8(DirectFunctionCall1(numeric_float8_no_overflow, d));
         case INT2OID: return (double)DatumGetInt16(d);
         case INT4OID: return (double)DatumGetInt32(d);
         case INT8OID: return (double)DatumGetInt64(d);
         case BOOLOID: return (double)DatumGetBool(d);
     }
-    
+
     return 0.0;
 }
 
@@ -2040,7 +2066,7 @@ int64_t database_column_int (dbvm_t *vm, int index) {
     if (!vm) return 0;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return 0;
-    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return 0;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return 0;
 
     bool isnull = true;
     Oid type = 0;
@@ -2063,7 +2089,7 @@ const char *database_column_text (dbvm_t *vm, int index) {
     if (!vm) return NULL;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return NULL;
-    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return NULL;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return NULL;
 
     bool isnull = true;
     Oid type = 0;
@@ -2088,7 +2114,7 @@ dbvalue_t *database_column_value (dbvm_t *vm, int index) {
     if (!vm) return NULL;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return NULL;
-    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return NULL;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return NULL;
     
     bool isnull = true;
     Oid type = 0;
@@ -2105,7 +2131,7 @@ int database_column_bytes (dbvm_t *vm, int index) {
     if (!vm) return 0;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return 0;
-    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return 0;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return 0;
 
     bool isnull = true;
     Oid type = 0;
@@ -2136,7 +2162,7 @@ int database_column_type (dbvm_t *vm, int index) {
     if (!vm) return DBTYPE_NULL;
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
     if (!stmt->last_tuptable || !stmt->current_tupdesc) return DBTYPE_NULL;
-    if (index < 0 || index >= stmt->current_tupdesc->natts || index >= MAX_PARAMS) return DBTYPE_NULL;
+    if (index < 0 || index >= stmt->current_tupdesc->natts) return DBTYPE_NULL;
     
     bool isnull = true;
     Oid type = 0;
@@ -2234,7 +2260,7 @@ const char *database_value_text (dbvalue_t *value) {
     pgvalue_t *v = (pgvalue_t *)value;
     if (!v || v->isnull) return NULL;
 
-    if (!v->cstring) {
+    if (!v->cstring && !v->owns_cstring) {
         PG_TRY();
         {
             if (pgvalue_is_text_type(v->typeid)) {
@@ -2251,10 +2277,13 @@ const char *database_value_text (dbvalue_t *value) {
         }
         PG_CATCH();
         {
-            // Handle conversion errors gracefully
+            MemoryContextSwitchTo(CurrentMemoryContext);
+            ErrorData *edata = CopyErrorData();
+            elog(WARNING, "database_value_text: conversion failed for type %u: %s", v->typeid, edata->message);
+            FreeErrorData(edata);
             FlushErrorState();
             v->cstring = NULL;
-            v->owns_cstring = true;
+            v->owns_cstring = true;  // prevents retry of failed conversion
         }
         PG_END_TRY();
     }
