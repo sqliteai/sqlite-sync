@@ -934,24 +934,21 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
     int nrows, ncols;
     rc = sqlite3_get_table(db, sql, &result, &nrows, &ncols, NULL);
     if (rc != SQLITE_OK) {
-        errmsg = cloudsync_memory_mprintf("Unable to get current cloudsync configuration. %s", sqlite3_errmsg(db));
+        errmsg = cloudsync_memory_mprintf("Unable to get current cloudsync configuration %s", sqlite3_errmsg(db));
         goto finalize;
     }
     
     // run everything in a savepoint
     rc = database_begin_savepoint(data, "cloudsync_logout_savepoint;");
     if (rc != SQLITE_OK) {
-        errmsg = cloudsync_memory_mprintf("Unable to create cloudsync_logout savepoint. %s", sqlite3_errmsg(db));
+        errmsg = cloudsync_memory_mprintf("Unable to create cloudsync_logout savepoint %s", cloudsync_errmsg(data));
         goto finalize;
     }
     savepoint_created = true;
 
-    // TODO: is it right to use the tables in cloudsync_context?
-    // What happen if another connection later augmented another table not originally loaded in this cloudsync_context?
-    // disable cloudsync for all the previously enabled tables: cloudsync_cleanup('*')
     rc = cloudsync_cleanup_all(data);
     if (rc != SQLITE_OK) {
-        errmsg = cloudsync_memory_mprintf("Unable to cleanup current cloudsync configuration. %s", sqlite3_errmsg(db));
+        errmsg = cloudsync_memory_mprintf("Unable to cleanup current database %s", cloudsync_errmsg(data));
         goto finalize;
     }
     

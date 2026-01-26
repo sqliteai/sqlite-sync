@@ -73,6 +73,7 @@ int  database_create_metatable (cloudsync_context *data, const char *table_name)
 int  database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo);
 int  database_delete_triggers (cloudsync_context *data, const char *table_name);
 int  database_pk_names (cloudsync_context *data, const char *table_name, char ***names, int *count);
+int  database_cleanup (cloudsync_context *data);
 
 int database_count_pk (cloudsync_context *data, const char *table_name, bool not_null);
 int database_count_nonpk (cloudsync_context *data, const char *table_name);

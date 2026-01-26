@@ -808,6 +808,11 @@ int database_select_blob_2int (cloudsync_context *data, const char *sql, char **
     return database_select3_values(data, sql, value, len, value2, value3);
 }
 
+int database_cleanup (cloudsync_context *data) {
+    // NOOP
+    return DBRES_OK;
+}
+
 // MARK: - STATUS -
 int database_errcode (cloudsync_context *data) {
     return cloudsync_errcode(data);

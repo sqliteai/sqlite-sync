@@ -451,6 +451,30 @@ int database_count_notnull_without_default (cloudsync_context *data, const char 
     return (int)count;
 }
 
+int database_cleanup (cloudsync_context *data) {
+    char *sql = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'cloudsync_%' AND name NOT LIKE '%_cloudsync';";
+    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
+    
+    char **result = NULL;
+    char *errmsg = NULL;
+    int nrows, ncols;
+    int rc = sqlite3_get_table(db, sql, &result, &nrows, &ncols, &errmsg);
+    if (rc != SQLITE_OK) {
+        cloudsync_set_error(data, (errmsg) ? errmsg : "Error retrieving augmented tables", rc);
+        goto exit_cleanup;
+    }
+    
+    for (int i = ncols; i < nrows+ncols; i+=ncols) {
+        int rc2 = cloudsync_cleanup(data, result[i]);
+        if (rc2 != SQLITE_OK) {rc = rc2; goto exit_cleanup;}
+    }
+    
+exit_cleanup:
+    if (result) sqlite3_free_table(result);
+    if (errmsg) sqlite3_free(errmsg);
+    return rc;
+}
+
 // MARK: - TRIGGERS and META -
 
 int database_create_metatable (cloudsync_context *data, const char *table_name) {

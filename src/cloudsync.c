@@ -2613,18 +2613,7 @@ int cloudsync_cleanup (cloudsync_context *data, const char *table_name) {
 }
 
 int cloudsync_cleanup_all (cloudsync_context *data) {
-    // cleanup all tables in the data context
-    while (data->tables_count > 0) {
-        cloudsync_table_context *t = data->tables[data->tables_count - 1];
-        table_remove(data, t);
-        table_free(t);
-    }
-    
-    // cleanup database
-    cloudsync_reset_siteid(data);
-    dbutils_settings_cleanup(data);
-    
-    return DBRES_OK;
+    return database_cleanup(data);
 }
 
 int cloudsync_terminate (cloudsync_context *data) {
