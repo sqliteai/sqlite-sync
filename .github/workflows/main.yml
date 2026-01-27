@@ -230,7 +230,7 @@ jobs:
     runs-on: ubuntu-22.04
     name: release
     needs: build
-    if: false #github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main'
 
     env:
       GH_TOKEN: ${{ github.token }}
@@ -347,8 +347,8 @@ jobs:
           TMP=sqlite-wasm/package.tmp.json
           jq --arg version "$(cat modules/sqlite/VERSION)-sync.$(cd modules/sqlite-sync && make version)-vector.$(cd modules/sqlite-vector && make version)" '.version = $version' "$PKG" > "$TMP" && mv "$TMP" "$PKG"
           git add "$PKG"
-          git commit -m "Bump sqlite-sync version to ${{ steps.tag.outputs.version }}"
-          git push origin main
+          git commit -m "Bump sqlite-sync-dev version to ${{ steps.tag.outputs.version }}"
+          git push origin dev
           
       - uses: actions/setup-java@v4
         if: steps.tag.outputs.version != ''
@@ -380,7 +380,7 @@ jobs:
 
           # Update package.json
           jq --arg version "${{ steps.tag.outputs.version }}" \
-            '.version = $version | .optionalDependencies = (.optionalDependencies | with_entries(.value = $version))' \
+            '.version = $version | .optionalDependencies = (.optionalDependencies | with_entries(.value = "dev"))' \
             package.json > package.tmp.json && mv package.tmp.json package.json
 
           echo "✓ Updated package.json to version ${{ steps.tag.outputs.version }}"
@@ -405,7 +405,7 @@ jobs:
             platform_name=$(basename "$platform_dir")
             echo "  Publishing @sqliteai/sqlite-sync-${platform_name}..."
             cd "$platform_dir"
-            npm publish --provenance --access public --tag latest
+            npm publish --provenance --access public --tag dev
             cd ..
             echo "  ✓ Published @sqliteai/sqlite-sync-${platform_name}"
           done
@@ -413,7 +413,7 @@ jobs:
 
           # Publish main package
           echo "Publishing main package to npm..."
-          npm publish --provenance --access public --tag latest
+          npm publish --provenance --access public --tag dev
           echo "✓ Published @sqliteai/sqlite-sync@${{ steps.tag.outputs.version }}"
 
           echo ""
@@ -433,7 +433,7 @@ jobs:
 
           echo "Publishing @sqliteai/sqlite-sync-expo to npm..."
           cd expo-package
-          npm publish --provenance --access public --tag latest
+          npm publish --provenance --access public --tag dev
           echo "✓ Published @sqliteai/sqlite-sync-expo@${{ steps.tag.outputs.version }}"
 
       - uses: softprops/action-gh-release@v2.2.1
@@ -442,11 +442,11 @@ jobs:
           body: |
             # Packages
 
-            [**Node**](https://www.npmjs.com/package/@sqliteai/sqlite-sync): `npm install @sqliteai/sqlite-sync`
-            [**WASM**](https://www.npmjs.com/package/@sqliteai/sqlite-wasm): `npm install @sqliteai/sqlite-wasm`
-            [**Expo**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo): `npm install @sqliteai/sqlite-sync-expo`
-            [**Android**](https://central.sonatype.com/artifact/ai.sqlite/sync): `ai.sqlite:sync:${{ steps.tag.outputs.version }}`
-            [**Swift**](https://github.com/sqliteai/sqlite-sync#swift-package): [Installation Guide](https://github.com/sqliteai/sqlite-sync#swift-package)
+            [**Node**](https://www.npmjs.com/package/@sqliteai/sqlite-sync): `npm install @sqliteai/sqlite-sync@dev`
+            [**WASM**](https://www.npmjs.com/package/@sqliteai/sqlite-wasm): `npm install @sqliteai/sqlite-wasm@dev`
+            [**Expo**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo): `npm install @sqliteai/sqlite-sync-expo@dev`
+            [**Android**](https://central.sonatype.com/artifact/ai.sqlite/sync-dev): `ai.sqlite:sync-dev:${{ steps.tag.outputs.version }}`
+            [**Swift**](https://github.com/sqliteai/sqlite-sync-dev#swift-package): [Installation Guide](https://github.com/sqliteai/sqlite-sync-dev#swift-package)
 
             ---
 
