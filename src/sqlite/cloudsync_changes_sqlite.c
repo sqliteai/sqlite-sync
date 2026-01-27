@@ -1,5 +1,5 @@
 //
-//  vtab.c
+//  cloudsync_changes_sqlite.c
 //  cloudsync
 //
 //  Created by Marco Bambini on 23/09/24.
@@ -7,10 +7,10 @@
 
 #include <stdio.h>
 #include <string.h>
-#include "vtab.h"
-#include "utils.h"
-#include "dbutils.h"
-#include "cloudsync.h"
+
+#include "cloudsync_changes_sqlite.h"
+#include "../utils.h"
+#include "../dbutils.h"
 
 #ifndef SQLITE_CORE
 SQLITE_EXTENSION_INIT3
@@ -19,7 +19,7 @@ SQLITE_EXTENSION_INIT3
 typedef struct cloudsync_changes_vtab {
     sqlite3_vtab            base;       // base class, must be first
     sqlite3                 *db;
-    void                    *aux;
+    cloudsync_context       *data;
 } cloudsync_changes_vtab;
 
 typedef struct cloudsync_changes_cursor {
@@ -49,7 +49,18 @@ bool force_vtab_filter_abort = false;
 
 // MARK: -
 
-const char *opname_from_value (int value) {
+int vtab_set_error (sqlite3_vtab *vtab, const char *format, ...) {
+    va_list arg;
+    va_start (arg, format);
+    char *err = sqlite3_vmprintf(format, arg);
+    va_end (arg);
+    
+    if (vtab->zErrMsg) sqlite3_free(vtab->zErrMsg);
+    vtab->zErrMsg = err;
+    return SQLITE_ERROR;
+}
+
+const char *vtab_opname_from_value (int value) {
     switch (value) {
         case SQLITE_INDEX_CONSTRAINT_EQ: return "=";
         case SQLITE_INDEX_CONSTRAINT_GT: return ">";
@@ -79,7 +90,7 @@ const char *opname_from_value (int value) {
     return NULL;
 }
 
-int colname_is_legal (const char *name) {
+int vtab_colname_is_legal (const char *name) {
     int count = sizeof(cloudsync_changes_columns) / sizeof (char *);
     
     for (int i=0; i<count; ++i) {
@@ -88,7 +99,7 @@ int colname_is_legal (const char *name) {
     return 0;
 }
 
-char *build_changes_sql (sqlite3 *db, const char *idxs) {
+char *vtab_build_changes_sql (cloudsync_context *data, const char *idxs) {
     DEBUG_VTAB("build_changes_sql");
     
     /*
@@ -177,11 +188,12 @@ char *build_changes_sql (sqlite3 *db, const char *idxs) {
     memcpy(sql, query, query_len);
     memcpy(sql + (query_len), idxs, idx_len);
     memcpy(sql + (query_len + idx_len), final_query, final_query_len+1);
-        
-    char *value = dbutils_text_select(db, sql);
+    
+    char *value = NULL;
+    int rc = database_select_text(data, sql, &value);
     cloudsync_memory_free(sql);
     
-    return value;
+    return (rc == DBRES_OK) ? value : NULL;
 }
 
 // MARK: -
@@ -199,7 +211,7 @@ int cloudsync_changesvtab_connect (sqlite3 *db, void *aux, int argc, const char 
         
         memset(vnew, 0, sizeof(cloudsync_changes_vtab));
         vnew->db = db;
-        vnew->aux = aux;
+        vnew->data = aux;
         
         *vtab = (sqlite3_vtab *)vnew;
     }
@@ -284,8 +296,8 @@ int cloudsync_changesvtab_best_index (sqlite3_vtab *vtab, sqlite3_index_info *id
         int idx = constraint->iColumn;
         uint8_t op = constraint->op;
         
-        const char *colname = (idx > 0) ? COLNAME_FROM_INDEX(idx) : "rowid";
-        const char *opname = opname_from_value(op);
+        const char *colname = (idx >= 0 && idx < CLOUDSYNC_CHANGES_NCOLS) ? COLNAME_FROM_INDEX(idx) : "rowid";
+        const char *opname = vtab_opname_from_value(op);
         if (!opname) continue;
         
         // build next constraint
@@ -318,8 +330,8 @@ int cloudsync_changesvtab_best_index (sqlite3_vtab *vtab, sqlite3_index_info *id
         if (i > 0) sindex += snprintf(s+sindex, slen-sindex, ", ");
         
         int idx = orderby->iColumn;
-        const char *colname = COLNAME_FROM_INDEX(idx);
-        if (!colname_is_legal(colname)) orderconsumed = 0;
+        const char *colname = (idx >= 0 && idx < CLOUDSYNC_CHANGES_NCOLS) ? COLNAME_FROM_INDEX(idx) : "rowid";
+        if (!vtab_colname_is_legal(colname)) orderconsumed = 0;
         
         sindex += snprintf(s+sindex, slen-sindex, "%s %s", colname, orderby->desc ? " DESC" : " ASC");
     }
@@ -385,8 +397,9 @@ int cloudsync_changesvtab_filter (sqlite3_vtab_cursor *cursor, int idxn, const c
     DEBUG_VTAB("cloudsync_changesvtab_filter");
     
     cloudsync_changes_cursor *c = (cloudsync_changes_cursor *)cursor;
+    cloudsync_context *data = c->vtab->data;
     sqlite3 *db = c->vtab->db;
-    char *sql = build_changes_sql(db, idxs);
+    char *sql = vtab_build_changes_sql(data, idxs);
     if (sql == NULL) return SQLITE_NOMEM;
     
     // the xFilter method may be called multiple times on the same sqlite3_vtab_cursor*
@@ -472,38 +485,93 @@ int cloudsync_changesvtab_rowid (sqlite3_vtab_cursor *cursor, sqlite3_int64 *row
     return SQLITE_OK;
 }
 
+int cloudsync_changesvtab_insert_gos (sqlite3_vtab *vtab, cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, const char *insert_name, sqlite3_value *insert_value, sqlite3_int64 insert_col_version, sqlite3_int64 insert_db_version, const char *insert_site_id, int insert_site_id_len, sqlite3_int64 insert_seq, int64_t *rowid) {
+    DEBUG_VTAB("cloudsync_changesvtab_insert_gos");
+    
+    // Grow-Only Set (GOS) Algorithm: Only insertions are allowed, deletions and updates are prevented from a trigger.
+    int rc = merge_insert_col(data, table, insert_pk, insert_pk_len, insert_name, insert_value, (int64_t)insert_col_version, (int64_t)insert_db_version, insert_site_id, insert_site_id_len, (int64_t)insert_seq, rowid);
+    
+    if (rc != SQLITE_OK) {
+        vtab_set_error(vtab, "%s", cloudsync_errmsg(data));
+    }
+    
+    return rc;
+}
+
+int cloudsync_changesvtab_insert (sqlite3_vtab *vtab, int argc, sqlite3_value **argv, sqlite3_int64 *rowid) {
+    DEBUG_VTAB("cloudsync_changesvtab_insert");
+    
+    // this function performs the merging logic for an insert in a cloud-synchronized table. It handles
+    // different scenarios including conflicts, causal lengths, delete operations, and resurrecting rows
+    // based on the incoming data (from remote nodes or clients) and the local database state
+
+    // this function handles different CRDT algorithms (GOS, DWS, AWS, and CLS).
+    // the merging strategy is determined based on the table->algo value.
+    
+    // meta table declaration:
+    // tbl TEXT NOT NULL, pk BLOB NOT NULL, col_name TEXT NOT NULL,"
+    // "col_value ANY, col_version INTEGER NOT NULL, db_version INTEGER NOT NULL,"
+    // "site_id BLOB NOT NULL, cl INTEGER NOT NULL, seq INTEGER NOT NULL
+    
+    // meta information to retrieve from arguments:
+    // argv[0] -> table name (TEXT)
+    // argv[1] -> primary key (BLOB)
+    // argv[2] -> column name (TEXT or NULL if sentinel)
+    // argv[3] -> column value (ANY)
+    // argv[4] -> column version (INTEGER)
+    // argv[5] -> database version (INTEGER)
+    // argv[6] -> site ID (BLOB, identifies the origin of the update)
+    // argv[7] -> causal length (INTEGER, tracks the order of operations)
+    // argv[8] -> sequence number (INTEGER, unique per operation)
+    
+    // extract table name
+    const char *insert_tbl = (const char *)sqlite3_value_text(argv[0]);
+    
+    // lookup table
+    cloudsync_context *data = (cloudsync_context *)(((cloudsync_changes_vtab *)vtab)->data);
+    cloudsync_table_context *table = table_lookup(data, insert_tbl);
+    if (!table) return vtab_set_error(vtab, "Unable to find table %s,", insert_tbl);
+    
+    // extract the remaining fields from the input values
+    const char *insert_pk = (const char *)sqlite3_value_blob(argv[1]);
+    int insert_pk_len = sqlite3_value_bytes(argv[1]);
+    const char *insert_name = (sqlite3_value_type(argv[2]) == SQLITE_NULL) ? CLOUDSYNC_TOMBSTONE_VALUE : (const char *)sqlite3_value_text(argv[2]);
+    sqlite3_value *insert_value = argv[3];
+    int64_t insert_col_version = (int64_t)sqlite3_value_int(argv[4]);
+    int64_t insert_db_version = (int64_t)sqlite3_value_int(argv[5]);
+    const char *insert_site_id = (const char *)sqlite3_value_blob(argv[6]);
+    int insert_site_id_len = sqlite3_value_bytes(argv[6]);
+    int64_t insert_cl = (int64_t)sqlite3_value_int(argv[7]);
+    int64_t insert_seq = (int64_t)sqlite3_value_int(argv[8]);
+    
+    // perform different logic for each different table algorithm
+    if (table_algo_isgos(table)) return cloudsync_changesvtab_insert_gos(vtab, data, table, insert_pk, insert_pk_len, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, (int64_t *)rowid);
+    
+    int rc = merge_insert (data, table, insert_pk, insert_pk_len, insert_cl, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, (int64_t *)rowid);
+    if (rc != SQLITE_OK) {
+        return vtab_set_error(vtab, "%s", cloudsync_errmsg(data));
+    }
+    
+    return SQLITE_OK;
+}
+
 int cloudsync_changesvtab_update (sqlite3_vtab *vtab, int argc, sqlite3_value **argv, sqlite3_int64 *rowid) {
     DEBUG_VTAB("cloudsync_changesvtab_update");
     
     // only INSERT statements are allowed
     bool is_insert = (argc > 1 && sqlite3_value_type(argv[0]) == SQLITE_NULL);
     if (!is_insert) {
-        cloudsync_vtab_set_error(vtab, "Only INSERT and SELECT statements are allowed against the cloudsync_changes table");
+        vtab_set_error(vtab, "Only INSERT and SELECT statements are allowed against the cloudsync_changes table");
         return SQLITE_MISUSE;
     }
     
     // argv[0] is set only in case of DELETE statement (it contains the rowid of a row in the virtual table to be deleted)
     // argv[1] is the rowid of a new row to be inserted into the virtual table (always NULL in our case)
     // so reduce the number of meaningful arguments by 2
-    return cloudsync_merge_insert(vtab, argc-2, &argv[2], rowid);
+    return cloudsync_changesvtab_insert(vtab, argc-2, &argv[2], rowid);
 }
 
 // MARK: -
-
-cloudsync_context *cloudsync_vtab_get_context (sqlite3_vtab *vtab) {
-    return (cloudsync_context *)(((cloudsync_changes_vtab *)vtab)->aux);
-}
-
-int cloudsync_vtab_set_error (sqlite3_vtab *vtab, const char *format, ...) {
-    va_list arg;
-    va_start (arg, format);
-    char *err = cloudsync_memory_vmprintf(format, arg);
-    va_end (arg);
-    
-    if (vtab->zErrMsg) cloudsync_memory_free(vtab->zErrMsg);
-    vtab->zErrMsg = err;
-    return SQLITE_ERROR;
-}
 
 int cloudsync_vtab_register_changes (sqlite3 *db, cloudsync_context *xdata) {
     static sqlite3_module cloudsync_changes_module = {

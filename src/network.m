@@ -60,10 +60,11 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     char *site_id = network_data_get_siteid(data);
     char *port_or_default = (port && strcmp(port.UTF8String, "8860") != 0) ? (char *)port.UTF8String : CLOUDSYNC_DEFAULT_ENDPOINT_PORT;
     
-    NSString *check_endpoint = [NSString stringWithFormat:@"%s://%s:%s/%s%s/%s", scheme.UTF8String, host.UTF8String, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database.UTF8String, site_id];
-    NSString *upload_endpoint = [NSString stringWithFormat: @"%s://%s:%s/%s%s/%s/%s", scheme.UTF8String, host.UTF8String, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database.UTF8String, site_id, CLOUDSYNC_ENDPOINT_UPLOAD];
-    
-    return network_data_set_endpoints(data, (char *)authentication.UTF8String, (char *)check_endpoint.UTF8String, (char *)upload_endpoint.UTF8String, true);
+    NSString *check_endpoint = [NSString stringWithFormat:@"%s://%s:%s/%s%s/%s/%s", scheme.UTF8String, host.UTF8String, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database.UTF8String, site_id, CLOUDSYNC_ENDPOINT_CHECK];
+    NSString *upload_endpoint = [NSString stringWithFormat:@"%s://%s:%s/%s%s/%s/%s", scheme.UTF8String, host.UTF8String, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database.UTF8String, site_id, CLOUDSYNC_ENDPOINT_UPLOAD];
+    NSString *apply_endpoint = [NSString stringWithFormat:@"%s://%s:%s/%s%s/%s/%s", scheme.UTF8String, host.UTF8String, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database.UTF8String, site_id, CLOUDSYNC_ENDPOINT_APPLY];
+
+    return network_data_set_endpoints(data, (char *)authentication.UTF8String, (char *)check_endpoint.UTF8String, (char *)upload_endpoint.UTF8String, (char *)apply_endpoint.UTF8String);
 }
 
 bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size) {
@@ -91,7 +92,7 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
     NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
 
     NSURLSessionDataTask *task = [session dataTaskWithRequest:request
-                                            completionHandler:^(NSData * _Nullable data,
+                                            completionHandler:^(NSData * _Nullable responseBody,
                                                                 NSURLResponse * _Nullable response,
                                                                 NSError * _Nullable error) {
         if (!error && [response isKindOfClass:[NSHTTPURLResponse class]]) {
@@ -103,6 +104,7 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
 
     [task resume];
     dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+    [session finishTasksAndInvalidate];
 
     return success;
 }
@@ -153,9 +155,10 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
 
     dispatch_semaphore_t sema = dispatch_semaphore_create(0);
 
-    NSURLSession *session = [NSURLSession sharedSession];
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        responseData = data;
+    NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *responseBody, NSURLResponse *response, NSError *error) {
+        responseData = responseBody;
         if (error) {
             responseError = [error localizedDescription];
             errorCode = [error code];
@@ -168,6 +171,7 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
 
     [task resume];
     dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+    [session finishTasksAndInvalidate];
 
     if (!responseError && (statusCode >= 200 && statusCode < 300)) {
         // check if OK should be returned
@@ -180,6 +184,10 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
         result.code = CLOUDSYNC_NETWORK_BUFFER;
         if (zero_terminated) {
             NSString *utf8String = [[NSString alloc] initWithData:responseData encoding:NSUTF8StringEncoding];
+            if (!utf8String) {
+                NSString *msg = @"Response is not valid UTF-8";
+                return (NETWORK_RESULT){CLOUDSYNC_NETWORK_ERROR, (char *)msg.UTF8String, 0, (void *)CFBridgingRetain(msg), network_buffer_cleanup};
+            }
             result.buffer = (char *)utf8String.UTF8String;
             result.xdata = (void *)CFBridgingRetain(utf8String);
         } else {

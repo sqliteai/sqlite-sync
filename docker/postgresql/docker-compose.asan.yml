@@ -1,0 +1,8 @@
+services:
+  postgres:
+    build:
+      args:
+        ENABLE_ASAN: "1"
+    environment:
+      LD_PRELOAD: /usr/lib/aarch64-linux-gnu/libasan.so.8
+      ASAN_OPTIONS: detect_leaks=0,abort_on_error=1,allocator_may_return_null=1

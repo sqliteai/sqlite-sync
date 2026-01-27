@@ -1,0 +1,17 @@
+{
+  "name": "cloudsync-postgres-dev",
+  "dockerComposeFile": [
+    "../docker/postgresql/docker-compose.debug.yml"
+  ],
+  "service": "postgres",
+  "workspaceFolder": "/tmp/cloudsync",
+  "overrideCommand": false,
+  "postStartCommand": "pg_isready -U postgres",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools"
+      ]
+    }
+  }
+}

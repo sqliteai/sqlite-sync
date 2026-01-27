@@ -1,0 +1,96 @@
+# PostgreSQL Docker image with CloudSync extension (debug build)
+FROM postgres:17
+
+# Enable ASAN build flags when requested (used by docker-compose.asan.yml).
+ARG ENABLE_ASAN=0
+
+# Install build dependencies and debug symbols
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    gnupg \
+    wget \
+    && . /etc/os-release \
+    && echo "deb http://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+    && echo "deb-src http://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg-src.list \
+    && wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg \
+    && echo "deb http://deb.debian.org/debian-debug ${VERSION_CODENAME}-debug main" > /etc/apt/sources.list.d/debian-debug.list \
+    && echo "deb-src http://deb.debian.org/debian ${VERSION_CODENAME} main" > /etc/apt/sources.list.d/debian-src.list \
+    && apt-get update && apt-get install -y \
+    build-essential \
+    bison \
+    dpkg-dev \
+    flex \
+    gdb \
+    libicu-dev \
+    libreadline-dev \
+    libasan8 \
+    libssl-dev \
+    postgresql-server-dev-17 \
+    postgresql-17-dbgsym \
+    git \
+    make \
+    zlib1g-dev \
+    && apt-get source postgresql-17 \
+    && mkdir -p /usr/src/postgresql-17 \
+    && srcdir="$(find . -maxdepth 1 -type d -name 'postgresql-17*' | head -n 1)" \
+    && if [ -n "$srcdir" ]; then cp -a "$srcdir"/. /usr/src/postgresql-17/; fi \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create directory for extension source
+WORKDIR /tmp/cloudsync
+
+# Build PostgreSQL from source without optimizations for better gdb visibility
+RUN set -eux; \
+    cd /usr/src/postgresql-17; \
+    ./configure --enable-debug --enable-cassert --without-icu CFLAGS="-O0 -g3 -fno-omit-frame-pointer"; \
+    make -j"$(nproc)"; \
+    make install
+
+ENV PATH="/usr/local/pgsql/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/pgsql/lib:${LD_LIBRARY_PATH}"
+
+# Copy entire source tree (needed for includes and makefiles)
+COPY src/ ./src/
+COPY docker/ ./docker/
+COPY Makefile .
+
+# Build and install the CloudSync extension with debug flags
+RUN set -eux; \
+    ASAN_CFLAGS=""; \
+    ASAN_LDFLAGS=""; \
+    if [ "${ENABLE_ASAN}" = "1" ]; then \
+        ASAN_CFLAGS="-fsanitize=address"; \
+        ASAN_LDFLAGS="-fsanitize=address"; \
+    fi; \
+    make postgres-build PG_DEBUG=1 \
+    PG_CFLAGS="-fPIC -Wall -Wextra -Wno-unused-parameter -std=c11 -g -O0 -fno-omit-frame-pointer ${ASAN_CFLAGS}" \
+    PG_LDFLAGS="-shared ${ASAN_LDFLAGS}" \
+    PG_CPPFLAGS="-I$(pg_config --includedir-server) -Isrc -Isrc/postgresql -DCLOUDSYNC_POSTGRESQL_BUILD -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE" && \
+    make postgres-install PG_DEBUG=1 \
+    PG_CFLAGS="-fPIC -Wall -Wextra -Wno-unused-parameter -std=c11 -g -O0 -fno-omit-frame-pointer ${ASAN_CFLAGS}" \
+    PG_LDFLAGS="-shared ${ASAN_LDFLAGS}" \
+    PG_CPPFLAGS="-I$(pg_config --includedir-server) -Isrc -Isrc/postgresql -DCLOUDSYNC_POSTGRESQL_BUILD -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE" && \
+    make postgres-clean
+
+# Verify installation
+RUN echo "Verifying CloudSync extension installation..." && \
+    ls -la $(pg_config --pkglibdir)/cloudsync.so && \
+    ls -la $(pg_config --sharedir)/extension/cloudsync* && \
+    echo "CloudSync extension installed successfully"
+
+# Set default PostgreSQL credentials
+ENV POSTGRES_PASSWORD=postgres
+ENV POSTGRES_DB=cloudsync_test
+
+# Expose PostgreSQL port
+EXPOSE 5432
+
+# Copy initialization script (creates CloudSync metadata tables)
+COPY docker/postgresql/init.sql /docker-entrypoint-initdb.d/
+
+# Return to root directory
+WORKDIR /
+
+# Add label with extension version
+LABEL org.sqliteai.cloudsync.version="1.0" \
+      org.sqliteai.cloudsync.description="PostgreSQL with CloudSync CRDT extension (debug)"

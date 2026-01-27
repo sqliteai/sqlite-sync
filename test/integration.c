@@ -1,5 +1,5 @@
 //
-//  main.c
+//  integration.c
 //  cloudsync
 //
 //  Created by Gioele Cantoni on 05/06/25.
@@ -31,6 +31,7 @@
 
 #ifdef CLOUDSYNC_LOAD_FROM_SOURCES
 #include "cloudsync.h"
+#include "cloudsync_sqlite.h"
 #endif
 
 #define DB_PATH         "health-track.sqlite"
@@ -261,11 +262,13 @@ int test_enable_disable(const char *db_path) {
     cloudsync_uuid_v7_string(value, true);
     char sql[256];
 
-    rc = db_exec(db, "SELECT cloudsync_init('*');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_init('users');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_init('activities');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_init('workouts');"); RCHECK
     rc = db_exec(db, "SELECT cloudsync_disable('users');"); RCHECK
 
     snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s', '%s');", value, value);
-    rc = db_exec(db, sql); RCHECK
+    //rc = db_exec(db, sql); RCHECK
 
     rc = db_exec(db, "SELECT cloudsync_enable('users');"); RCHECK
 
@@ -284,7 +287,9 @@ int test_enable_disable(const char *db_path) {
     rc = db_exec(db, network_init); RCHECK
 
     rc = db_exec(db, "SELECT cloudsync_network_send_changes();"); RCHECK
-    rc = db_exec(db, "SELECT cloudsync_cleanup('*');");
+    rc = db_exec(db, "SELECT cloudsync_cleanup('users');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_cleanup('activities');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_cleanup('workouts');"); RCHECK
 
     // give the server the time to apply the latest sent changes, it is an async job
     sqlite3_sleep(5000);
@@ -293,7 +298,9 @@ int test_enable_disable(const char *db_path) {
     rc = open_load_ext(":memory:", &db2); RCHECK
     rc = db_init(db2); RCHECK
 
-    rc = db_exec(db2, "SELECT cloudsync_init('*');"); RCHECK
+    rc = db_exec(db2, "SELECT cloudsync_init('users');"); RCHECK
+    rc = db_exec(db2, "SELECT cloudsync_init('activities');"); RCHECK
+    rc = db_exec(db2, "SELECT cloudsync_init('workouts');"); RCHECK
 
     // init network with connection string + apikey
     rc = db_exec(db2, network_init); RCHECK

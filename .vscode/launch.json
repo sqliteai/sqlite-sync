@@ -1,0 +1,37 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attach to Postgres (gdb)",
+      "type": "cppdbg",
+      "request": "attach",
+      "program": "/usr/lib/postgresql/17/bin/postgres",
+      "processId": "${command:pickProcess}",
+      "MIMode": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb",
+      "stopAtEntry": false,
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        },
+        {
+          "description": "Add PostgreSQL source dir",
+          "text": "dir /usr/src/postgresql-17/src",
+          "ignoreFailures": true
+        },
+        {
+          "description": "Map Postgres build paths to source",
+          "text": "set substitute-path /build/src /usr/src/postgresql-17/src",
+          "ignoreFailures": true
+        },
+        {
+          "description": "Map Postgres build paths (relative) to source",
+          "text": "set substitute-path ./build/src /usr/src/postgresql-17/src",
+          "ignoreFailures": true
+        }
+      ]
+    }
+  ]
+}

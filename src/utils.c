@@ -33,15 +33,11 @@
 #include <sys/types.h>
 #endif
 
-#ifndef SQLITE_CORE
-SQLITE_EXTENSION_INIT3
-#endif
-
 #define FNV_OFFSET_BASIS    0xcbf29ce484222325ULL
 #define FNV_PRIME           0x100000001b3ULL
 #define HASH_CHAR(_c)       do { h ^= (uint8_t)(_c); h *= FNV_PRIME; h_final = h;} while (0)
 
-// MARK: UUIDv7 -
+// MARK: - UUIDv7 -
 
 /*
     UUIDv7 is a 128-bit unique identifier like it's older siblings, such as the widely used UUIDv4.
@@ -113,15 +109,17 @@ char *cloudsync_uuid_v7_stringify (uint8_t uuid[UUID_LEN], char value[UUID_STR_M
 
 char *cloudsync_uuid_v7_string (char value[UUID_STR_MAXLEN], bool dash_format) {
     uint8_t uuid[UUID_LEN];
-    if (cloudsync_uuid_v7(uuid) != 0) return NULL;
     
+    if (cloudsync_uuid_v7(uuid) != 0) return NULL;
     return cloudsync_uuid_v7_stringify(uuid, value, dash_format);
 }
 
 int cloudsync_uuid_v7_compare (uint8_t value1[UUID_LEN], uint8_t value2[UUID_LEN]) {
     // reconstruct the timestamp by reversing the bit shifts and combining the bytes
-    uint64_t t1 = ((uint64_t)value1[0] << 40) | ((uint64_t)value1[1] << 32) | ((uint64_t)value1[2] << 24) | ((uint64_t)value1[3] << 16) | ((uint64_t)value1[4] << 8)  | ((uint64_t)value1[5]);
-    uint64_t t2 = ((uint64_t)value2[0] << 40) | ((uint64_t)value2[1] << 32) | ((uint64_t)value2[2] << 24) | ((uint64_t)value2[3] << 16) | ((uint64_t)value2[4] << 8)  | ((uint64_t)value2[5]);
+    uint64_t t1 =   ((uint64_t)value1[0] << 40) | ((uint64_t)value1[1] << 32) | ((uint64_t)value1[2] << 24) |
+                    ((uint64_t)value1[3] << 16) | ((uint64_t)value1[4] << 8)  | ((uint64_t)value1[5]);
+    uint64_t t2 =   ((uint64_t)value2[0] << 40) | ((uint64_t)value2[1] << 32) | ((uint64_t)value2[2] << 24) |
+                    ((uint64_t)value2[3] << 16) | ((uint64_t)value2[4] << 8)  | ((uint64_t)value2[5]);
     
     if (t1 == t2) return memcmp(value1, value2, UUID_LEN);
     return (t1 > t2) ? 1 : -1;
@@ -129,24 +127,16 @@ int cloudsync_uuid_v7_compare (uint8_t value1[UUID_LEN], uint8_t value2[UUID_LEN
 
 // MARK: - General -
 
-void *cloudsync_memory_zeroalloc (uint64_t size) {
-    void *ptr = (void *)cloudsync_memory_alloc((sqlite3_uint64)size);
-    if (!ptr) return NULL;
-    
-    memset(ptr, 0, (size_t)size);
-    return ptr;
-}
-
-char *cloudsync_string_ndup (const char *str, size_t len, bool lowercase) {
+char *cloudsync_string_ndup_v2 (const char *str, size_t len, bool lowercase) {
     if (str == NULL) return NULL;
     
-    char *s = (char *)cloudsync_memory_alloc((sqlite3_uint64)(len + 1));
+    char *s = (char *)cloudsync_memory_alloc((uint64_t)(len + 1));
     if (!s) return NULL;
     
     if (lowercase) {
         // convert each character to lowercase and copy it to the new string
         for (size_t i = 0; i < len; i++) {
-            s[i] = tolower(str[i]);
+            s[i] = (char)tolower(str[i]);
         }
     } else {
         memcpy(s, str, len);
@@ -158,35 +148,42 @@ char *cloudsync_string_ndup (const char *str, size_t len, bool lowercase) {
     return s;
 }
 
-char *cloudsync_string_dup (const char *str, bool lowercase) {
-    if (str == NULL) return NULL;
-    
-    size_t len = strlen(str);
-    return cloudsync_string_ndup(str, len, lowercase);
+char *cloudsync_string_ndup (const char *str, size_t len) {
+    return cloudsync_string_ndup_v2(str, len, false);
+}
+
+char *cloudsync_string_ndup_lowercase (const char *str, size_t len) {
+    return cloudsync_string_ndup_v2(str, len, true);
+}
+
+char *cloudsync_string_dup (const char *str) {
+    return cloudsync_string_ndup_v2(str, (str) ? strlen(str) : 0, false);
+}
+
+char *cloudsync_string_dup_lowercase (const char *str) {
+    return cloudsync_string_ndup_v2(str, (str) ? strlen(str) : 0, true);
 }
 
 int cloudsync_blob_compare(const char *blob1, size_t size1, const char *blob2, size_t size2) {
-    if (size1 != size2) {
-        return (int)(size1 - size2); // Blobs are different if sizes are different
-    }
-    return memcmp(blob1, blob2, size1); // Use memcmp for byte-by-byte comparison
+    if (size1 != size2) return (int)(size1 - size2); // blobs are different if sizes are different
+    return memcmp(blob1, blob2, size1); // use memcmp for byte-by-byte comparison
 }
 
-void cloudsync_rowid_decode (sqlite3_int64 rowid, sqlite3_int64 *db_version, sqlite3_int64 *seq) {
+void cloudsync_rowid_decode (int64_t rowid, int64_t *db_version, int64_t *seq) {
     // use unsigned 64-bit integer for intermediate calculations
     // when db_version is large enough, it can cause overflow, leading to negative values
     // to handle this correctly, we need to ensure the calculations are done in an unsigned 64-bit integer context
-    // before converting back to sqlite3_int64 as needed
+    // before converting back to int64_t as needed
     uint64_t urowid = (uint64_t)rowid;
     
     // define the bit mask for seq (30 bits)
     const uint64_t SEQ_MASK = 0x3FFFFFFF; // (2^30 - 1)
 
     // extract seq by masking the lower 30 bits
-    *seq = (sqlite3_int64)(urowid & SEQ_MASK);
+    *seq = (int64_t)(urowid & SEQ_MASK);
 
     // extract db_version by shifting 30 bits to the right
-    *db_version = (sqlite3_int64)(urowid >> 30);
+    *db_version = (int64_t)(urowid >> 30);
 }
 
 char *cloudsync_string_replace_prefix(const char *input, char *prefix, char *replacement) {
@@ -196,13 +193,13 @@ char *cloudsync_string_replace_prefix(const char *input, char *prefix, char *rep
     size_t replacement_len = strlen(replacement);
 
     if (strncmp(input, prefix, prefix_len) == 0) {
-        // Allocate memory for new string
+        // allocate memory for new string
         size_t input_len = strlen(input);
         size_t new_len = input_len - prefix_len + replacement_len;
         char *result = cloudsync_memory_alloc(new_len + 1); // +1 for null terminator
         if (!result) return NULL;
 
-        // Copy replacement and the rest of the input string
+        // copy replacement and the rest of the input string
         strcpy(result, replacement);
         strcpy(result + replacement_len, input + prefix_len);
         return result;
@@ -213,7 +210,7 @@ char *cloudsync_string_replace_prefix(const char *input, char *prefix, char *rep
 }
 
 /*
- Compute a normalized hash of a SQLite CREATE TABLE statement.
+ Compute a normalized hash of a CREATE TABLE statement.
  
  * Normalization:
   * - Skips comments (-- and / * )
@@ -322,7 +319,7 @@ static bool cloudsync_file_read_all (int fd, char *buf, size_t n) {
     return true;
 }
 
-char *cloudsync_file_read (const char *path, sqlite3_int64 *len) {
+char *cloudsync_file_read (const char *path, int64_t *len) {
     int fd = -1;
     char *buffer = NULL;
 
@@ -408,31 +405,6 @@ bool cloudsync_file_write (const char *path, const char *buffer, size_t len) {
 }
 
 #endif
-
-// MARK: - CRDT algos -
-
-table_algo crdt_algo_from_name (const char *algo_name) {
-    if (algo_name == NULL) return table_algo_none;
-    
-    if ((strcasecmp(algo_name, "CausalLengthSet") == 0) || (strcasecmp(algo_name, "cls") == 0)) return table_algo_crdt_cls;
-    if ((strcasecmp(algo_name, "GrowOnlySet") == 0) || (strcasecmp(algo_name, "gos") == 0)) return table_algo_crdt_gos;
-    if ((strcasecmp(algo_name, "DeleteWinsSet") == 0) || (strcasecmp(algo_name, "dws") == 0)) return table_algo_crdt_dws;
-    if ((strcasecmp(algo_name, "AddWinsSet") == 0) || (strcasecmp(algo_name, "aws") == 0)) return table_algo_crdt_aws;
-    
-    // if nothing is found
-    return table_algo_none;
-}
-
-const char *crdt_algo_name (table_algo algo) {
-    switch (algo) {
-        case table_algo_crdt_cls: return "cls";
-        case table_algo_crdt_gos: return "gos";
-        case table_algo_crdt_dws: return "dws";
-        case table_algo_crdt_aws: return "aws";
-        case table_algo_none: return NULL;
-    }
-    return NULL;
-}
 
 // MARK: - Memory Debugger -
 
@@ -620,10 +592,10 @@ void memdebug_finalize (void) {
     }
 }
 
-void *memdebug_alloc (sqlite3_uint64 size) {
-    void *ptr = sqlite3_malloc64(size);
+void *memdebug_alloc (uint64_t size) {
+    void *ptr = dbmem_alloc(size);
     if (!ptr) {
-        BUILD_ERROR("Unable to allocated a block of %lld bytes", size);
+        BUILD_ERROR("Unable to allocated a block of %" PRIu64" bytes", size);
         BUILD_STACK(n, stack);
         memdebug_report(current_error, stack, n, NULL);
         return NULL;
@@ -632,7 +604,15 @@ void *memdebug_alloc (sqlite3_uint64 size) {
     return ptr;
 }
 
-void *memdebug_realloc (void *ptr, sqlite3_uint64 new_size) {
+void *memdebug_zeroalloc (uint64_t size) {
+    void *ptr = memdebug_alloc(size);
+    if (!ptr) return NULL;
+    
+    memset(ptr, 0, (size_t)size);
+    return ptr;
+}
+
+void *memdebug_realloc (void *ptr, uint64_t new_size) {
     if (!ptr) return memdebug_alloc(new_size);
     
     mem_slot *slot = _ptr_lookup(ptr);
@@ -644,9 +624,9 @@ void *memdebug_realloc (void *ptr, sqlite3_uint64 new_size) {
     }
     
     void *back_ptr = ptr;
-    void *new_ptr = sqlite3_realloc64(ptr, new_size);
+    void *new_ptr = dbmem_realloc(ptr, new_size);
     if (!new_ptr) {
-        BUILD_ERROR("Unable to reallocate a block of %lld bytes.", new_size);
+        BUILD_ERROR("Unable to reallocate a block of %" PRIu64 " bytes.", new_size);
         BUILD_STACK(n, stack);
         memdebug_report(current_error, stack, n, slot);
         return NULL;
@@ -657,15 +637,15 @@ void *memdebug_realloc (void *ptr, sqlite3_uint64 new_size) {
 }
 
 char *memdebug_vmprintf (const char *format, va_list list) {
-    char *ptr = sqlite3_vmprintf(format, list);
+    char *ptr = dbmem_vmprintf(format, list);
     if (!ptr) {
-        BUILD_ERROR("Unable to allocated for sqlite3_vmprintf with format %s", format);
+        BUILD_ERROR("Unable to allocated for dbmem_vmprintf with format %s", format);
         BUILD_STACK(n, stack);
         memdebug_report(current_error, stack, n, NULL);
         return NULL;
     }
     
-    _ptr_add(ptr, sqlite3_msize(ptr));
+    _ptr_add(ptr, dbmem_size(ptr));
     return ptr;
 }
 
@@ -680,8 +660,8 @@ char *memdebug_mprintf(const char *format, ...) {
     return z;
 }
 
-sqlite3_uint64 memdebug_msize (void *ptr) {
-    return sqlite3_msize(ptr);
+uint64_t memdebug_msize (void *ptr) {
+    return dbmem_size(ptr);
 }
 
 void memdebug_free (void *ptr) {
@@ -709,7 +689,7 @@ void memdebug_free (void *ptr) {
     }
     
     _ptr_remove(ptr);
-    sqlite3_free(ptr);
+    dbmem_free(ptr);
 }
 
 #endif

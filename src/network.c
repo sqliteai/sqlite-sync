@@ -8,10 +8,12 @@
 #ifndef CLOUDSYNC_OMIT_NETWORK
 
 #include <stdint.h>
+#include <inttypes.h>
+
 #include "network.h"
-#include "dbutils.h"
 #include "utils.h"
-#include "cloudsync_private.h"
+#include "dbutils.h"
+#include "cloudsync.h"
 #include "network_private.h"
 
 #ifndef SQLITE_WASM_EXTRA_INIT
@@ -47,6 +49,7 @@ struct network_data {
     char        *authentication; // apikey or token
     char        *check_endpoint;
     char        *upload_endpoint;
+    char        *apply_endpoint;
 };
 
 typedef struct {
@@ -77,25 +80,54 @@ char *network_data_get_siteid (network_data *data) {
     return data->site_id;
 }
 
-bool network_data_set_endpoints (network_data *data, char *auth, char *check, char *upload, bool duplicate) {
-    if (duplicate) {
-        // auth is optional
-        char *s1 = (auth) ? cloudsync_string_dup(auth, false) : NULL;
-        if (auth && !s1) return false;
-        char *s2 = cloudsync_string_dup(check, false);
-        if (!s2) {if (auth && s1) sqlite3_free(s1); return false;}
-        char *s3 = cloudsync_string_dup(upload, false);
-        if (!s3) {if (auth && s1) sqlite3_free(s1); sqlite3_free(s2); return false;}
+bool network_data_set_endpoints (network_data *data, char *auth, char *check, char *upload, char *apply) {
+    // sanity check
+    if (!check || !upload) return false;
+    
+    // always free previous owned pointers
+    if (data->authentication) cloudsync_memory_free(data->authentication);
+    if (data->check_endpoint) cloudsync_memory_free(data->check_endpoint);
+    if (data->upload_endpoint) cloudsync_memory_free(data->upload_endpoint);
+    if (data->apply_endpoint) cloudsync_memory_free(data->apply_endpoint);
 
-        auth = s1;
-        check = s2;
-        upload = s3;
+    // clear pointers
+    data->authentication = NULL;
+    data->check_endpoint = NULL;
+    data->upload_endpoint = NULL;
+    data->apply_endpoint = NULL;
+
+    // make a copy of the new endpoints
+    char *auth_copy = NULL;
+    char *check_copy = NULL;
+    char *upload_copy = NULL;
+    char *apply_copy = NULL;
+
+    // auth is optional
+    if (auth) {
+        auth_copy = cloudsync_string_dup(auth);
+        if (!auth_copy) goto abort_endpoints;
     }
+    check_copy = cloudsync_string_dup(check);
+    if (!check_copy) goto abort_endpoints;
+    
+    upload_copy = cloudsync_string_dup(upload);
+    if (!upload_copy) goto abort_endpoints;
+    
+    apply_copy = cloudsync_string_dup(apply);
+    if (!apply_copy) goto abort_endpoints;
 
-    data->authentication = auth;
-    data->check_endpoint = check;
-    data->upload_endpoint = upload;
+    data->authentication = auth_copy;
+    data->check_endpoint = check_copy;
+    data->upload_endpoint = upload_copy;
+    data->apply_endpoint = apply_copy;
     return true;
+    
+abort_endpoints:
+    if (auth_copy) cloudsync_memory_free(auth_copy);
+    if (check_copy) cloudsync_memory_free(check_copy);
+    if (upload_copy) cloudsync_memory_free(upload_copy);
+    if (apply_copy) cloudsync_memory_free(apply_copy);
+    return false;
 }
 
 void network_data_free (network_data *data) {
@@ -104,6 +136,7 @@ void network_data_free (network_data *data) {
     if (data->authentication) cloudsync_memory_free(data->authentication);
     if (data->check_endpoint) cloudsync_memory_free(data->check_endpoint);
     if (data->upload_endpoint) cloudsync_memory_free(data->upload_endpoint);
+    if (data->apply_endpoint) cloudsync_memory_free(data->apply_endpoint);
     cloudsync_memory_free(data);
 }
 
@@ -132,7 +165,7 @@ static size_t network_receive_callback (void *ptr, size_t size, size_t nmemb, vo
     size_t ptr_size = (size*nmemb);
     if (data->zero_term) ptr_size += 1;
     
-    if (network_buffer_check(data, ptr_size) == false) return -1;
+    if (network_buffer_check(data, ptr_size) == false) return CURL_WRITEFUNC_ERROR;
     memcpy(data->buffer+data->bused, ptr, size*nmemb);
     data->bused += size*nmemb;
     if (data->zero_term) data->buffer[data->bused] = 0;
@@ -166,17 +199,26 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &pem_blob);
     #endif
     
-    if (custom_header) headers = curl_slist_append(headers, custom_header);
+    if (custom_header) {
+        struct curl_slist *tmp = curl_slist_append(headers, custom_header);
+        if (!tmp) {rc = CURLE_OUT_OF_MEMORY; goto cleanup;}
+        headers = tmp;
+    }
 
+    if (json_payload) {
+        struct curl_slist *tmp = curl_slist_append(headers, "Content-Type: application/json");
+        if (!tmp) {rc = CURLE_OUT_OF_MEMORY; goto cleanup;}
+        headers = tmp;
+    }
     if (authentication) {
         char auth_header[CLOUDSYNC_SESSION_TOKEN_MAXSIZE];
         snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", authentication);
-        headers = curl_slist_append(headers, auth_header);
-        
-        if (json_payload) headers = curl_slist_append(headers, "Content-Type: application/json");
+        struct curl_slist *tmp = curl_slist_append(headers, auth_header);
+        if (!tmp) {rc = CURLE_OUT_OF_MEMORY; goto cleanup;}
+        headers = tmp;
     }
     
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    if (headers) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     
     network_buffer netdata = {NULL, 0, 0, (zero_terminated) ? 1 : 0};
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &netdata);
@@ -214,14 +256,14 @@ cleanup:
         result.blen = blen;
     } else {
         result.code = CLOUDSYNC_NETWORK_ERROR;
-        result.buffer = buffer ? buffer : (errbuf[0]) ? cloudsync_string_dup(errbuf, false) : NULL;
+        result.buffer = buffer ? buffer : (errbuf[0]) ? cloudsync_string_dup(errbuf) : NULL;
         result.blen = buffer ? blen : rc;
     }
     
     return result;
 }
 
-static size_t network_read_callback(char *buffer, size_t size, size_t nitems, void *userdata) {
+static size_t network_read_callback (char *buffer, size_t size, size_t nitems, void *userdata) {
     network_read_data *rd = (network_read_data *)userdata;
     size_t max_read = size * nitems;
     size_t bytes_left = rd->size - rd->read_pos;
@@ -235,11 +277,11 @@ static size_t network_read_callback(char *buffer, size_t size, size_t nitems, vo
     return to_copy;
 }
 
-bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size) {
+bool network_send_buffer (network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size) {
     struct curl_slist *headers = NULL;
-    curl_mime *mime = NULL;
     bool result = false;
     char errbuf[CURL_ERROR_SIZE] = {0};
+    CURLcode rc = CURLE_OK;
 
     // init curl
     CURL *curl = curl_easy_init();
@@ -263,17 +305,23 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
     curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
     
     // type header
-    headers = curl_slist_append(headers, "Accept: text/plain");
+    struct curl_slist *tmp = curl_slist_append(headers, "Accept: text/plain");
+    if (!tmp) {rc = CURLE_OUT_OF_MEMORY; goto cleanup;}
+    headers = tmp;
     
     if (authentication) {
         // init authorization header
         char auth_header[CLOUDSYNC_SESSION_TOKEN_MAXSIZE];
-        snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", data->authentication);
-        headers = curl_slist_append(headers, auth_header);
+        snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", authentication);
+        struct curl_slist *tmp = curl_slist_append(headers, auth_header);
+        if (!tmp) {rc = CURLE_OUT_OF_MEMORY; goto cleanup;}
+        headers = tmp;
     }
     
     // Set headers if needed (S3 pre-signed URLs usually do not require additional headers)
-    headers = curl_slist_append(headers, "Content-Type: application/octet-stream");
+    tmp = curl_slist_append(headers, "Content-Type: application/octet-stream");
+    if (!tmp) {rc = CURLE_OUT_OF_MEMORY; goto cleanup;}
+    headers = tmp;
     
     if (!headers) goto cleanup;
     if (curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers) != CURLE_OK) goto cleanup;
@@ -297,11 +345,10 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
     // curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
     
     // perform the upload
-    CURLcode rc = curl_easy_perform(curl);
+    rc = curl_easy_perform(curl);
     if (rc == CURLE_OK) result = true;
        
 cleanup:
-    if (mime) curl_mime_free(mime);
     if (curl) curl_easy_cleanup(curl);
     if (headers) curl_slist_free_all(headers);
     return result;
@@ -329,33 +376,34 @@ int network_set_sqlite_result (sqlite3_context *context, NETWORK_RESULT *result)
             rc = (int)result->blen;
             break;
     }
-    
     return rc;
 }
 
-int network_download_changes (sqlite3_context *context, const char *download_url) {
+int network_download_changes (sqlite3_context *context, const char *download_url, int *pnrows) {
     DEBUG_FUNCTION("network_download_changes");
     
-    network_data *data = (network_data *)cloudsync_get_auxdata(context);
-    if (!data) {
-        sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    network_data *netdata = (network_data *)cloudsync_auxdata(data);
+    if (!netdata) {
+        sqlite3_result_error(context, "Unable to retrieve network CloudSync context.", -1);
         return -1;
     }
     
-    NETWORK_RESULT result = network_receive_buffer(data, download_url, NULL, false, false, NULL, NULL);
+    NETWORK_RESULT result = network_receive_buffer(netdata, download_url, NULL, false, false, NULL, NULL);
     
     int rc = SQLITE_OK;
     if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
-        rc = cloudsync_payload_apply(context, result.buffer, (int)result.blen);
+        rc = cloudsync_payload_apply(data, result.buffer, (int)result.blen, pnrows);
     } else {
         rc = network_set_sqlite_result(context, &result);
+        if (pnrows) *pnrows = 0;
     }
     network_result_cleanup(&result);
     
     return rc;
 }
 
-char *network_authentication_token(const char *key, const char *value) {
+char *network_authentication_token (const char *key, const char *value) {
     size_t len = strlen(key) + strlen(value) + 64;
     char *buffer = cloudsync_memory_zeroalloc(len);
     if (!buffer) return NULL;
@@ -363,11 +411,10 @@ char *network_authentication_token(const char *key, const char *value) {
     // build new token
     // we don't need a prefix because the token alreay include a prefix "sqa_"
     snprintf(buffer, len, "%s", value);
-    
     return buffer;
 }
 
-int network_extract_query_param(const char *query, const char *key, char *output, size_t output_size) {
+int network_extract_query_param (const char *query, const char *key, char *output, size_t output_size) {
     if (!query || !key || !output || output_size == 0) {
         return -1; // Invalid input
     }
@@ -424,7 +471,8 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     char *authentication = NULL;
     char *check_endpoint = NULL;
     char *upload_endpoint = NULL;
-    
+    char *apply_endpoint = NULL;
+
     char *conn_string_https = NULL;
     
     #ifndef SQLITE_WASM_EXTRA_INIT
@@ -434,6 +482,7 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     #endif
     
     conn_string_https = cloudsync_string_replace_prefix(conn_string, "sqlitecloud://", "https://");
+    if (!conn_string_https) goto finalize;
     
     #ifndef SQLITE_WASM_EXTRA_INIT
     // set URL: https://UUID.g5.sqlite.cloud:443/chinook.sqlite?apikey=hWDanFolRT9WDK0p54lufNrIyfgLZgtMw6tb6fbPmpo
@@ -493,7 +542,7 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     #endif
     
     if (query != NULL) {
-        char value[MAX_QUERY_VALUE_LEN];
+        char value[CLOUDSYNC_SESSION_TOKEN_MAXSIZE];
         if (!authentication && network_extract_query_param(query, "apikey", value, sizeof(value)) == 0) {
             authentication = network_authentication_token("apikey", value);
         }
@@ -505,11 +554,14 @@ bool network_compute_endpoints (sqlite3_context *context, network_data *data, co
     size_t requested = strlen(scheme) + strlen(host) + strlen(port_or_default) + strlen(CLOUDSYNC_ENDPOINT_PREFIX) + strlen(database) + 64;
     check_endpoint = (char *)cloudsync_memory_zeroalloc(requested);
     upload_endpoint = (char *)cloudsync_memory_zeroalloc(requested);
-    if ((!upload_endpoint) || (!check_endpoint)) goto finalize;
-    
-    snprintf(check_endpoint, requested, "%s://%s:%s/%s%s/%s", scheme, host, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database, data->site_id);
+    apply_endpoint = (char *)cloudsync_memory_zeroalloc(requested);
+
+    if ((!upload_endpoint) || (!check_endpoint) || (!apply_endpoint)) goto finalize;
+
+    snprintf(check_endpoint, requested, "%s://%s:%s/%s%s/%s/%s", scheme, host, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database, data->site_id, CLOUDSYNC_ENDPOINT_CHECK);
     snprintf(upload_endpoint, requested, "%s://%s:%s/%s%s/%s/%s", scheme, host, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database, data->site_id, CLOUDSYNC_ENDPOINT_UPLOAD);
-    
+    snprintf(apply_endpoint, requested, "%s://%s:%s/%s%s/%s/%s", scheme, host, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database, data->site_id, CLOUDSYNC_ENDPOINT_APPLY);
+
     result = true;
     
 finalize:
@@ -527,6 +579,7 @@ finalize:
         if (authentication) cloudsync_memory_free(authentication);
         if (check_endpoint) cloudsync_memory_free(check_endpoint);
         if (upload_endpoint) cloudsync_memory_free(upload_endpoint);
+        if (apply_endpoint) cloudsync_memory_free(apply_endpoint);
     }
         
     if (result) {
@@ -540,6 +593,9 @@ finalize:
         
         if (data->upload_endpoint) cloudsync_memory_free(data->upload_endpoint);
         data->upload_endpoint = upload_endpoint;
+
+        if (data->apply_endpoint) cloudsync_memory_free(data->apply_endpoint);
+        data->apply_endpoint = apply_endpoint;
     }
     
     // cleanup memory
@@ -564,13 +620,14 @@ void network_result_to_sqlite_error (sqlite3_context *context, NETWORK_RESULT re
 
 // MARK: - Init / Cleanup -
 
-network_data *cloudsync_network_data(sqlite3_context *context) {
-    network_data *data = (network_data *)cloudsync_get_auxdata(context);
-    if (data) return data;
+network_data *cloudsync_network_data (sqlite3_context *context) {
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    network_data *netdata = (network_data *)cloudsync_auxdata(data);
+    if (netdata) return netdata;
     
-    data = (network_data *)cloudsync_memory_zeroalloc(sizeof(network_data));
-    if (data) cloudsync_set_auxdata(context, data);
-    return data;
+    netdata = (network_data *)cloudsync_memory_zeroalloc(sizeof(network_data));
+    if (netdata) cloudsync_set_auxdata(data, netdata);
+    return netdata;
 }
 
 void cloudsync_network_init (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -582,15 +639,16 @@ void cloudsync_network_init (sqlite3_context *context, int argc, sqlite3_value *
     
     // no real network operations here
     // just setup the network_data struct
-    network_data *data = cloudsync_network_data(context);
-    if (!data) goto abort_memory;
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    network_data *netdata = cloudsync_network_data(context);
+    if (!netdata) goto abort_memory;
     
     // init context
-    uint8_t *site_id = (uint8_t *)cloudsync_context_init(sqlite3_context_db_handle(context), NULL, context);
+    uint8_t *site_id = (uint8_t *)cloudsync_context_init(data);
     if (!site_id) goto abort_siteid;
     
     // save site_id string representation: 01957493c6c07e14803727e969f1d2cc
-    cloudsync_uuid_v7_stringify(site_id, data->site_id, false);
+    cloudsync_uuid_v7_stringify(site_id, netdata->site_id, false);
     
     // connection string is something like:
     // https://UUID.g5.sqlite.cloud:443/chinook.sqlite?apikey=hWDanFolRT9WDK0p54lufNrIyfgLZgtMw6tb6fbPmpo
@@ -600,41 +658,46 @@ void cloudsync_network_init (sqlite3_context *context, int argc, sqlite3_value *
     const char *connection_param = (const char *)sqlite3_value_text(argv[0]);
     
     // compute endpoints
-    if (network_compute_endpoints(context, data, connection_param) == false) {
+    if (network_compute_endpoints(context, netdata, connection_param) == false) {
         // error message/code already set inside network_compute_endpoints
         goto abort_cleanup;
     }
     
-    cloudsync_set_auxdata(context, data);
+    cloudsync_set_auxdata(data, netdata);
     sqlite3_result_int(context, SQLITE_OK);
     return;
     
 abort_memory:
-    dbutils_context_result_error(context, "Unable to allocate memory in cloudsync_network_init.");
+    sqlite3_result_error(context, "Unable to allocate memory in cloudsync_network_init.", -1);
     sqlite3_result_error_code(context, SQLITE_NOMEM);
     goto abort_cleanup;
     
 abort_siteid:
-    dbutils_context_result_error(context, "Unable to compute/retrieve site_id.");
+    sqlite3_result_error(context, "Unable to compute/retrieve site_id.", -1);
     sqlite3_result_error_code(context, SQLITE_MISUSE);
     goto abort_cleanup;
     
 abort_cleanup:
-    cloudsync_set_auxdata(context, NULL);
-    network_data_free(data);
+    cloudsync_set_auxdata(data, NULL);
+    network_data_free(netdata);
+}
+
+void cloudsync_network_cleanup_internal (sqlite3_context *context) {    
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    network_data *netdata = cloudsync_network_data(context);
+    cloudsync_set_auxdata(data, NULL);
+    network_data_free(netdata);
+    
+    #ifndef CLOUDSYNC_OMIT_CURL
+    curl_global_cleanup();
+    #endif
 }
 
 void cloudsync_network_cleanup (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_cleanup");
     
-    network_data *data = (network_data *)cloudsync_get_auxdata(context);
-    cloudsync_set_auxdata(context, NULL);
-    network_data_free(data);
+    cloudsync_network_cleanup_internal(context);
     sqlite3_result_int(context, SQLITE_OK);
-    
-    #ifndef CLOUDSYNC_OMIT_CURL
-    curl_global_cleanup();
-    #endif
 }
 
 // MARK: - Public -
@@ -673,35 +736,51 @@ void cloudsync_network_set_apikey (sqlite3_context *context, int argc, sqlite3_v
 
 void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, sqlite3_value **argv) {
     sqlite3 *db = sqlite3_context_db_handle(context);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     
-    char *sql = "SELECT max(db_version), hex(site_id) FROM cloudsync_changes WHERE site_id == (SELECT site_id FROM cloudsync_site_id WHERE rowid=0)";
-    int last_local_change = (int)dbutils_int_select(db, sql);
+    char *sql = "SELECT max(db_version) FROM cloudsync_changes WHERE site_id == (SELECT site_id FROM cloudsync_site_id WHERE rowid=0)";
+    int64_t last_local_change = 0;
+    int rc = database_select_int(data, sql, &last_local_change);
+    if (rc != DBRES_OK) {
+        sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+    
     if (last_local_change == 0) {
         sqlite3_result_int(context, 0);
         return;
     }
     
-    int sent_db_version = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_SEND_DBVERSION);
+    int sent_db_version = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_SEND_DBVERSION);
     sqlite3_result_int(context, (sent_db_version < last_local_change));
 }
 
 int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_send_changes");
     
-    network_data *data = (network_data *)cloudsync_get_auxdata(context);
-    if (!data) {sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1); return SQLITE_ERROR;}
+    // retrieve global context
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    
+    network_data *netdata = (network_data *)cloudsync_auxdata(data);
+    if (!netdata) {sqlite3_result_error(context, "Unable to retrieve CloudSync network context.", -1); return SQLITE_ERROR;}
     
     // retrieve payload
     char *blob = NULL;
     int blob_size = 0, db_version = 0, seq = 0;
-    sqlite3_int64 new_db_version = 0, new_seq = 0;
-    int rc = cloudsync_payload_get(context, &blob, &blob_size, &db_version, &seq, &new_db_version, &new_seq);
-    if (rc != SQLITE_OK) return rc;
-    
+    int64_t new_db_version = 0, new_seq = 0;
+    int rc = cloudsync_payload_get(data, &blob, &blob_size, &db_version, &seq, &new_db_version, &new_seq);
+    if (rc != SQLITE_OK) {
+        if (db_version < 0) sqlite3_result_error(context, "Unable to retrieve db_version.", -1);
+        else if (seq < 0) sqlite3_result_error(context, "Unable to retrieve seq.", -1);
+        else sqlite3_result_error(context, "Unable to retrieve changes in cloudsync_network_send_changes", -1);
+        return rc;
+    }
+        
     // exit if there is no data to send
     if (blob == NULL || blob_size == 0) return SQLITE_OK;
     
-    NETWORK_RESULT res = network_receive_buffer(data, data->upload_endpoint, data->authentication, true, false, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
+    NETWORK_RESULT res = network_receive_buffer(netdata, netdata->upload_endpoint, netdata->authentication, true, false, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
     if (res.code != CLOUDSYNC_NETWORK_BUFFER) {
         cloudsync_memory_free(blob);
         network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to receive upload URL");
@@ -710,7 +789,7 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     }
     
     const char *s3_url = res.buffer;
-    bool sent = network_send_buffer(data, s3_url, NULL, blob, blob_size);
+    bool sent = network_send_buffer(netdata, s3_url, NULL, blob, blob_size);
     cloudsync_memory_free(blob);
     if (sent == false) {
         network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to upload BLOB changes to remote host.");
@@ -719,13 +798,13 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     }
     
     char json_payload[2024];
-    snprintf(json_payload, sizeof(json_payload), "{\"url\":\"%s\"}", s3_url);
+    snprintf(json_payload, sizeof(json_payload), "{\"url\":\"%s\", \"dbVersionMin\":%d, \"dbVersionMax\":%lld}", s3_url, db_version, (long long)new_db_version);
     
     // free res
     network_result_cleanup(&res);
     
     // notify remote host that we succesfully uploaded changes
-    res = network_receive_buffer(data, data->upload_endpoint, data->authentication, true, true, json_payload, CLOUDSYNC_HEADER_SQLITECLOUD);
+    res = network_receive_buffer(netdata, netdata->apply_endpoint, netdata->authentication, true, true, json_payload, CLOUDSYNC_HEADER_SQLITECLOUD);
     if (res.code != CLOUDSYNC_NETWORK_OK) {
         network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to notify BLOB upload to remote host.");
         network_result_cleanup(&res);
@@ -734,14 +813,13 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     
     // update db_version and seq
     char buf[256];
-    sqlite3 *db = sqlite3_context_db_handle(context);
     if (new_db_version != db_version) {
-        snprintf(buf, sizeof(buf), "%lld", new_db_version);
-        dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
+        snprintf(buf, sizeof(buf), "%" PRId64, new_db_version);
+        dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
     }
     if (new_seq != seq) {
-        snprintf(buf, sizeof(buf), "%lld", new_seq);
-        dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_SEND_SEQ, buf);
+        snprintf(buf, sizeof(buf), "%" PRId64, new_seq);
+        dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_SEQ, buf);
     }
     
     network_result_cleanup(&res);
@@ -754,27 +832,25 @@ void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3
     cloudsync_network_send_changes_internal(context, argc, argv);
 }
 
-int cloudsync_network_check_internal(sqlite3_context *context) {
-    network_data *data = (network_data *)cloudsync_get_auxdata(context);
-    if (!data) {sqlite3_result_error(context, "Unable to retrieve CloudSync context.", -1); return -1;}
-     
-    sqlite3 *db = sqlite3_context_db_handle(context);
-    
-    int db_version = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_CHECK_DBVERSION);
+int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows) {
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    network_data *netdata = (network_data *)cloudsync_auxdata(data);
+    if (!netdata) {sqlite3_result_error(context, "Unable to retrieve CloudSync network context.", -1); return -1;}
+
+    int64_t db_version = dbutils_settings_get_int64_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION);
     if (db_version<0) {sqlite3_result_error(context, "Unable to retrieve db_version.", -1); return -1;}
 
-    int seq = dbutils_settings_get_int_value(db, CLOUDSYNC_KEY_CHECK_SEQ);
+    int seq = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_SEQ);
     if (seq<0) {sqlite3_result_error(context, "Unable to retrieve seq.", -1); return -1;}
 
-    // http://uuid.g5.sqlite.cloud/v1/cloudsync/{dbname}/{site_id}/{db_version}/{seq}/check
-    // the data->check_endpoint stops after {site_id}, just need to append /{db_version}/{seq}/check
-    char endpoint[2024];
-    snprintf(endpoint, sizeof(endpoint), "%s/%lld/%d/%s", data->check_endpoint, (long long)db_version, seq, CLOUDSYNC_ENDPOINT_CHECK);
-    
-    NETWORK_RESULT result = network_receive_buffer(data, endpoint, data->authentication, true, true, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
+    char json_payload[2024];
+    snprintf(json_payload, sizeof(json_payload), "{\"dbVersion\":%lld, \"seq\":%d}", (long long)db_version, seq);
+
+    // http://uuid.g5.sqlite.cloud/v2/cloudsync/{dbname}/{site_id}/check
+    NETWORK_RESULT result = network_receive_buffer(netdata, netdata->check_endpoint, netdata->authentication, true, true, json_payload, CLOUDSYNC_HEADER_SQLITECLOUD);
     int rc = SQLITE_OK;
     if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
-        rc = network_download_changes(context, result.buffer);
+        rc = network_download_changes(context, result.buffer, pnrows);
     } else {
         rc = network_set_sqlite_result(context, &result);
     }
@@ -791,8 +867,8 @@ void cloudsync_network_sync (sqlite3_context *context, int wait_ms, int max_retr
     int nrows = 0;
     while (ntries < max_retries) {
         if (ntries > 0) sqlite3_sleep(wait_ms);
-        nrows = cloudsync_network_check_internal(context);
-        if (nrows > 0) break;
+        rc = cloudsync_network_check_internal(context, &nrows);
+        if (rc == SQLITE_OK && nrows > 0) break;
         ntries++;
     }
     
@@ -820,18 +896,22 @@ void cloudsync_network_sync2 (sqlite3_context *context, int argc, sqlite3_value 
 void cloudsync_network_check_changes (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_check_changes");
     
-    cloudsync_network_check_internal(context);
+    int nrows = 0;
+    cloudsync_network_check_internal(context, &nrows);
+    
+    // returns number of applied rows
+    sqlite3_result_int(context, nrows);
 }
 
 void cloudsync_network_reset_sync_version (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_reset_sync_version");
     
-    sqlite3 *db = sqlite3_context_db_handle(context);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     char *buf = "0";
-    dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
-    dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_CHECK_SEQ, buf);
-    dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
-    dbutils_settings_set_key_value(db, context, CLOUDSYNC_KEY_SEND_SEQ, buf);
+    dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
+    dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_SEQ, buf);
+    dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
+    dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_SEQ, buf);
 }
 
 /**
@@ -841,9 +921,12 @@ void cloudsync_network_reset_sync_version (sqlite3_context *context, int argc, s
  * Warning: this function deletes all data from the tables. Use with caution.
  */
 void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    bool savepoint_created = false;
     bool completed = false;
     char *errmsg = NULL;
+    int rc = SQLITE_ERROR;
     sqlite3 *db = sqlite3_context_db_handle(context);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
 
     // if the network layer is enabled, remove the token or apikey
     sqlite3_exec(db, "SELECT cloudsync_network_set_token('');", NULL, NULL, NULL);
@@ -852,23 +935,23 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
     char *sql = "SELECT tbl_name, key, value FROM cloudsync_table_settings;";
     char **result = NULL;
     int nrows, ncols;
-    int rc = sqlite3_get_table(db, sql, &result, &nrows, &ncols, NULL);
+    rc = sqlite3_get_table(db, sql, &result, &nrows, &ncols, NULL);
     if (rc != SQLITE_OK) {
-        errmsg = cloudsync_memory_mprintf("Unable to get current cloudsync configuration. %s", sqlite3_errmsg(db));
+        errmsg = cloudsync_memory_mprintf("Unable to get current cloudsync configuration %s", sqlite3_errmsg(db));
         goto finalize;
     }
     
     // run everything in a savepoint
-    rc = sqlite3_exec(db, "SAVEPOINT cloudsync_logout_sp;", NULL, NULL, NULL);
+    rc = database_begin_savepoint(data, "cloudsync_logout_savepoint;");
     if (rc != SQLITE_OK) {
-        errmsg = cloudsync_memory_mprintf("Unable to create cloudsync_logout savepoint. %s", sqlite3_errmsg(db));
-        return;
+        errmsg = cloudsync_memory_mprintf("Unable to create cloudsync_logout savepoint %s", cloudsync_errmsg(data));
+        goto finalize;
     }
+    savepoint_created = true;
 
-    // disable cloudsync for all the previously enabled tables: cloudsync_cleanup('*')
-    rc = sqlite3_exec(db, "SELECT cloudsync_cleanup('*')", NULL, NULL, NULL);
+    rc = cloudsync_cleanup_all(data);
     if (rc != SQLITE_OK) {
-        errmsg = cloudsync_memory_mprintf("Unable to cleanup current cloudsync configuration. %s", sqlite3_errmsg(db));
+        errmsg = cloudsync_memory_mprintf("Unable to cleanup current database %s", cloudsync_errmsg(data));
         goto finalize;
     }
     
@@ -902,13 +985,14 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
         
 finalize:
     if (completed) {
-        sqlite3_exec(db, "RELEASE cloudsync_logout_sp;", NULL, NULL, NULL);
+        database_commit_savepoint(data, "cloudsync_logout_savepoint");
+        cloudsync_network_cleanup_internal(context);
+        sqlite3_result_int(context, SQLITE_OK);
     } else {
         // cleanup:
         // ROLLBACK TO command reverts the state of the database back to what it was just after the corresponding SAVEPOINT
         // then RELEASE to remove the SAVEPOINT from the transaction stack
-        sqlite3_exec(db, "ROLLBACK TO cloudsync_logout_sp;", NULL, NULL, NULL);
-        sqlite3_exec(db, "RELEASE cloudsync_logout_sp;", NULL, NULL, NULL);
+        if (savepoint_created) database_rollback_savepoint(data, "cloudsync_logout_savepoint");
         sqlite3_result_error(context, errmsg, -1);
         sqlite3_result_error_code(context, rc);
     }
@@ -919,41 +1003,48 @@ finalize:
 // MARK: -
 
 int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
+    const int DEFAULT_FLAGS = SQLITE_UTF8 | SQLITE_INNOCUOUS;
     int rc = SQLITE_OK;
     
-    rc = dbutils_register_function(db, "cloudsync_network_init", cloudsync_network_init, 1, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_init", 1, DEFAULT_FLAGS, ctx, cloudsync_network_init, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_create_function(db, "cloudsync_network_cleanup", 0, DEFAULT_FLAGS, ctx, cloudsync_network_cleanup, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_cleanup", cloudsync_network_cleanup, 0, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_set_token", 1, DEFAULT_FLAGS, ctx, cloudsync_network_set_token, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_set_token", cloudsync_network_set_token, 1, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_set_apikey", 1, DEFAULT_FLAGS, ctx, cloudsync_network_set_apikey, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_set_apikey", cloudsync_network_set_apikey, 1, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_has_unsent_changes", 0, DEFAULT_FLAGS, ctx, cloudsync_network_has_unsent_changes, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_has_unsent_changes", cloudsync_network_has_unsent_changes, 0, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_send_changes", 0, DEFAULT_FLAGS, ctx, cloudsync_network_send_changes, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_send_changes", cloudsync_network_send_changes, 0, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_check_changes", 0, DEFAULT_FLAGS, ctx, cloudsync_network_check_changes, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_check_changes", cloudsync_network_check_changes, 0, pzErrMsg, ctx, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
-    rc = dbutils_register_function(db, "cloudsync_network_sync", cloudsync_network_sync0, 0, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_sync", 0, DEFAULT_FLAGS, ctx, cloudsync_network_sync0, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = dbutils_register_function(db, "cloudsync_network_sync", cloudsync_network_sync2, 2, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_sync", 2, DEFAULT_FLAGS, ctx, cloudsync_network_sync2, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = dbutils_register_function(db, "cloudsync_network_reset_sync_version", cloudsync_network_reset_sync_version, 0, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_reset_sync_version", 0, DEFAULT_FLAGS, ctx, cloudsync_network_reset_sync_version, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbutils_register_function(db, "cloudsync_network_logout", cloudsync_network_logout, 0, pzErrMsg, ctx, NULL);
+    rc = sqlite3_create_function(db, "cloudsync_network_logout", 0, DEFAULT_FLAGS, ctx, cloudsync_network_logout, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
+    
+cleanup:
+    if ((rc != SQLITE_OK) && (pzErrMsg)) {
+        *pzErrMsg = sqlite3_mprintf("Error creating function in cloudsync_network_register: %s", sqlite3_errmsg(db));
+    }
     
     return rc;
 }
+
 #endif

@@ -8,23 +8,21 @@
 #ifndef __CLOUDSYNC_PK__
 #define __CLOUDSYNC_PK__
 
-#include <stdio.h>
 #include <stdint.h>
-#include <string.h>
+#include <stddef.h>
 #include <stdbool.h>
+#include "database.h"
 
-#ifndef SQLITE_CORE
-#include "sqlite3ext.h"
-#else
-#include "sqlite3.h"
-#endif
+typedef int (*pk_decode_callback) (void *xdata, int index, int type, int64_t ival, double dval, char *pval);
 
-char *pk_encode_prikey (sqlite3_value **argv, int argc, char *b, size_t *bsize);
-char *pk_encode (sqlite3_value **argv, int argc, char *b, bool is_prikey, size_t *bsize);
-int pk_decode_prikey (char *buffer, size_t blen, int (*cb) (void *xdata, int index, int type, int64_t ival, double dval, char *pval), void *xdata);
-int pk_decode(char *buffer, size_t blen, int count, size_t *seek, int (*cb) (void *xdata, int index, int type, int64_t ival, double dval, char *pval), void *xdata);
-int pk_decode_bind_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval);
-int pk_decode_print_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval);
-size_t pk_encode_size (sqlite3_value **argv, int argc, int reserved);
+char  *pk_encode_prikey (dbvalue_t **argv, int argc, char *b, size_t *bsize);
+char  *pk_encode_value (dbvalue_t *value, size_t *bsize);
+char  *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bsize, int skip_idx);
+int    pk_decode_prikey (char *buffer, size_t blen, pk_decode_callback cb, void *xdata);
+int    pk_decode (char *buffer, size_t blen, int count, size_t *seek, int skip_decode_idx, pk_decode_callback cb, void *xdata);
+int    pk_decode_bind_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval);
+int    pk_decode_print_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval);
+size_t pk_encode_size (dbvalue_t **argv, int argc, int reserved, int skip_idx);
+uint64_t pk_checksum (const char *buffer, size_t blen);
 
 #endif

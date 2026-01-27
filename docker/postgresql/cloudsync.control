@@ -1,0 +1,22 @@
+# CloudSync PostgreSQL Extension Control File
+
+# Extension name
+comment = 'CloudSync - CRDT-based multi-master database synchronization'
+
+# Default version
+default_version = '1.0'
+
+# Can be loaded into an existing database
+relocatable = true
+
+# Required PostgreSQL version
+requires = ''
+
+# Superuser privileges required for installation
+superuser = false
+
+# Modules to load
+module_pathname = '$libdir/cloudsync'
+
+# Trusted extension (can be installed by non-superusers)
+trusted = true

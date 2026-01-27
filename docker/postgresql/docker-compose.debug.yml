@@ -1,0 +1,58 @@
+services:
+  postgres:
+    build:
+      context: ../..
+      dockerfile: docker/postgresql/Dockerfile.debug-no-optimization
+    container_name: cloudsync-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: cloudsync_test
+    ports:
+      - "5432:5432"
+    ulimits:
+      core: -1
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+    volumes:
+      # Mount source code for development (allows quick rebuilds)
+      - ../../src:/tmp/cloudsync/src:ro
+      - ../../docker:/tmp/cloudsync/docker:ro
+      - ../../Makefile:/tmp/cloudsync/Makefile:ro
+      - ../../.vscode:/tmp/cloudsync/.vscode:ro
+      # Persist database data
+      - postgres_data:/var/lib/postgresql/data
+      # Mount init script
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Optional: pgAdmin for database management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: cloudsync-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@cloudsync.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    profiles:
+      - admin
+
+volumes:
+  postgres_data:
+  pgadmin_data:
+
+networks:
+  default:
+    name: cloudsync-network
