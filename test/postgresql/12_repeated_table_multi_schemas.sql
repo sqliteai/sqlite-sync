@@ -119,7 +119,7 @@ SELECT (:fail::int + 1) AS fail \gset
 \endif
 
 -- reset the current schema to check if the next connection load the correct configuration
---SELECT cloudsync_set_schema('public') AS _reset_schema \gset
+SELECT cloudsync_set_schema('public') AS _reset_schema \gset
 
 -- Reset the connection to test if if loads the correct configuration for the table on the correct schema
 \connect cloudsync_test_repeated

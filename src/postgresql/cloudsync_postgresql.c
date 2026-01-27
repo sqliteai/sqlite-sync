@@ -1118,7 +1118,7 @@ Datum cloudsync_insert (PG_FUNCTION_ARGS) {
         if (!table) {
             char meta_name[1024];
             snprintf(meta_name, sizeof(meta_name), "%s_cloudsync", table_name);
-            if (!database_table_exists(data, meta_name)) {
+            if (!database_table_exists(data, meta_name, cloudsync_schema(data))) {
                 ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Unable to retrieve table name %s in cloudsync_insert", table_name)));
             }
 
@@ -1212,7 +1212,7 @@ Datum cloudsync_delete (PG_FUNCTION_ARGS) {
         if (!table) {
             char meta_name[1024];
             snprintf(meta_name, sizeof(meta_name), "%s_cloudsync", table_name);
-            if (!database_table_exists(data, meta_name)) {
+            if (!database_table_exists(data, meta_name, cloudsync_schema(data))) {
                 ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Unable to retrieve table name %s in cloudsync_delete", table_name)));
             }
 
@@ -1403,7 +1403,7 @@ Datum cloudsync_update_finalfn (PG_FUNCTION_ARGS) {
         if (!table) {
             char meta_name[1024];
             snprintf(meta_name, sizeof(meta_name), "%s_cloudsync", table_name);
-            if (!database_table_exists(data, meta_name)) {
+            if (!database_table_exists(data, meta_name, cloudsync_schema(data))) {
                 ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("Unable to retrieve table name %s in cloudsync_update", table_name)));
             }
 
@@ -1535,6 +1535,23 @@ PG_FUNCTION_INFO_V1(pg_cloudsync_schema);
 Datum pg_cloudsync_schema (PG_FUNCTION_ARGS) {
     cloudsync_context *data = get_cloudsync_context();
     const char *schema = cloudsync_schema(data);
+
+    if (!schema) {
+        PG_RETURN_NULL();
+    }
+    
+    PG_RETURN_TEXT_P(cstring_to_text(schema));
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_table_schema);
+Datum pg_cloudsync_table_schema (PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0)) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name cannot be NULL")));
+    }
+
+    const char *table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    cloudsync_context *data = get_cloudsync_context();
+    const char *schema = cloudsync_table_schema(data, table_name);
 
     if (!schema) {
         PG_RETURN_NULL();

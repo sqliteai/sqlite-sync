@@ -176,6 +176,15 @@ void dbsync_schema (sqlite3_context *context, int argc, sqlite3_value **argv) {
     (schema) ? sqlite3_result_text(context, schema, -1, NULL) : sqlite3_result_null(context);
 }
 
+void dbsync_table_schema (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("dbsync_table_schema");
+    
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    const char *table_name = (const char *)database_value_text(argv[0]);
+    const char *schema = cloudsync_table_schema(data, table_name);
+    (schema) ? sqlite3_result_text(context, schema, -1, NULL) : sqlite3_result_null(context);
+}
+
 void dbsync_is_sync (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_is_sync");
     
@@ -966,6 +975,9 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     rc = dbsync_register_function(db, "cloudsync_schema", dbsync_schema, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
+    rc = dbsync_register_function(db, "cloudsync_table_schema", dbsync_table_schema, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
     rc = dbsync_register_function(db, "cloudsync_set_column", dbsync_set_column, 4, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     

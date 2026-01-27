@@ -271,3 +271,8 @@ RETURNS text
 AS 'MODULE_PATHNAME', 'pg_cloudsync_schema'
 LANGUAGE C VOLATILE;
 
+-- Get current schema name (if any)
+CREATE OR REPLACE FUNCTION cloudsync_table_schema(table_name text)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pg_cloudsync_table_schema'
+LANGUAGE C VOLATILE;

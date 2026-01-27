@@ -92,8 +92,7 @@ const char * const SQL_DBVERSION_BUILD_QUERY =
     "WITH table_names AS ("
     "SELECT quote_ident(schemaname) || '.' || quote_ident(tablename) as tbl_name "
     "FROM pg_tables "
-    "WHERE schemaname = COALESCE(cloudsync_schema(), current_schema()) "
-    "AND tablename LIKE '%_cloudsync'"
+    "WHERE tablename LIKE '%_cloudsync'"
     "), "
     "query_parts AS ("
     "SELECT tbl_name, "
@@ -339,12 +338,12 @@ const char * const SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID =
     "SELECT c.column_name, c.ordinal_position "
     "FROM information_schema.columns c "
     "WHERE c.table_name = '%s' "
-    "AND c.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
+    "AND c.table_schema = COALESCE(NULLIF('%s', ''), current_schema()) "
     "AND c.column_name NOT IN ("
     "  SELECT kcu.column_name FROM information_schema.table_constraints tc "
     "  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name "
     "    AND tc.table_schema = kcu.table_schema "
-    "  WHERE tc.table_name = '%s' AND tc.table_schema = COALESCE(cloudsync_schema(), current_schema()) "
+    "  WHERE tc.table_name = '%s' AND tc.table_schema = COALESCE(NULLIF('%s', ''), current_schema()) "
     "  AND tc.constraint_type = 'PRIMARY KEY'"
     ") "
     "ORDER BY ordinal_position;";
@@ -355,7 +354,7 @@ const char * const SQL_DROP_CLOUDSYNC_TABLE =
 const char * const SQL_CLOUDSYNC_DELETE_COLS_NOT_IN_SCHEMA_OR_PKCOL =
     "DELETE FROM %s WHERE col_name NOT IN ("
     "SELECT column_name FROM information_schema.columns WHERE table_name = '%s' "
-    "AND table_schema = COALESCE(cloudsync_schema(), current_schema()) "
+    "AND table_schema = COALESCE(NULLIF('%s', ''), current_schema()) "
     "UNION SELECT '%s'"
     ");";
 

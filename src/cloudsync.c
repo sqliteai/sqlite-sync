@@ -167,7 +167,7 @@ struct cloudsync_table_context {
     #endif
     
     char        **pk_name;                      // array of primary key names
-    
+
     // precompiled statements
     dbvm_t      *meta_pkexists_stmt;            // check if a primary key already exist in the augmented table
     dbvm_t      *meta_sentinel_update_stmt;     // update a local sentinel row
@@ -573,6 +573,13 @@ const char *cloudsync_schema (cloudsync_context *data) {
     return data->current_schema;
 }
 
+const char *cloudsync_table_schema (cloudsync_context *data, const char *table_name) {
+    cloudsync_table_context *table = table_lookup(data, table_name);
+    if (!table) return NULL;
+
+    return table->schema;
+}
+
 // MARK: - Table Utils -
 
 void table_pknames_free (char **names, int nrows) {
@@ -589,7 +596,7 @@ char *table_build_mergedelete_sql (cloudsync_table_context *table) {
     }
     #endif
 
-    return sql_build_delete_by_pk(table->context, table->name);
+    return sql_build_delete_by_pk(table->context, table->name, table->schema);
 }
 
 char *table_build_mergeinsert_sql (cloudsync_table_context *table, const char *colname) {
@@ -610,9 +617,9 @@ char *table_build_mergeinsert_sql (cloudsync_table_context *table, const char *c
     
     if (colname == NULL) {
         // is sentinel insert
-        sql = sql_build_insert_pk_ignore(table->context, table->name);
+        sql = sql_build_insert_pk_ignore(table->context, table->name, table->schema);
     } else {
-        sql = sql_build_upsert_pk_and_col(table->context, table->name, colname);
+        sql = sql_build_upsert_pk_and_col(table->context, table->name, colname, table->schema);
     }
     return sql;
 }
@@ -627,7 +634,7 @@ char *table_build_value_sql (cloudsync_table_context *table, const char *colname
     #endif
         
     // SELECT age FROM customers WHERE first_name=? AND last_name=?;
-    return sql_build_select_cols_by_pk(table->context, table->name, colname);
+    return sql_build_select_cols_by_pk(table->context, table->name, colname, table->schema);
 }
     
 cloudsync_table_context *table_create (cloudsync_context *data, const char *name, table_algo algo) {
@@ -639,7 +646,18 @@ cloudsync_table_context *table_create (cloudsync_context *data, const char *name
     table->context = data;
     table->algo = algo;
     table->name = cloudsync_string_dup_lowercase(name);
-    table->schema = (data->current_schema) ? cloudsync_string_dup(data->current_schema) : NULL;
+
+    // Detect schema from metadata table location. If metadata table doesn't
+    // exist yet (during initialization), fall back to cloudsync_schema() which
+    // returns the explicitly set schema or current_schema().
+    table->schema = database_table_schema(name);
+    if (!table->schema) {
+        const char *fallback_schema = cloudsync_schema(data);
+        if (fallback_schema) {
+            table->schema = cloudsync_string_dup(fallback_schema);
+        }
+    }
+
     if (!table->name) {
         cloudsync_memory_free(table);
         return NULL;
@@ -827,7 +845,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
 
     // precompile the get column value statement
     if (ncols > 0) {
-        sql = sql_build_select_nonpk_by_pk(data, table->name);
+        sql = sql_build_select_nonpk_by_pk(data, table->name, table->schema);
         if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
         DEBUG_SQL("real_col_values_stmt: %s", sql);
         
@@ -954,8 +972,14 @@ bool table_ensure_capacity (cloudsync_context *data) {
 
 bool table_add_to_context (cloudsync_context *data, table_algo algo, const char *table_name) {
     DEBUG_DBFUNCTION("cloudsync_context_add_table %s", table_name);
-    
-    // check if table is already in the global context and in that case just return
+
+    // Check if table already initialized in this connection's context.
+    // Note: This prevents same-connection duplicate initialization.
+    // SQLite clients cannot distinguish schemas, so having 'public.users'
+    // and 'auth.users' would cause sync ambiguity. Users should avoid
+    // initializing tables with the same name in different schemas.
+    // If two concurrent connections initialize tables with the same name
+    // in different schemas, the behavior is undefined.
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (table) return true;
     
@@ -967,7 +991,7 @@ bool table_add_to_context (cloudsync_context *data, table_algo algo, const char 
     if (!table) return false;
     
     // fill remaining metadata in the table
-    int count = database_count_pk(data, table_name, false);
+    int count = database_count_pk(data, table_name, false, table->schema);
     if (count < 0) {cloudsync_set_dberror(data); goto abort_add_table;}
     table->npks = count;
     if (table->npks == 0) {
@@ -979,7 +1003,7 @@ bool table_add_to_context (cloudsync_context *data, table_algo algo, const char 
         #endif
     }
     
-    int ncols = database_count_nonpk(data, table_name);
+    int ncols = database_count_nonpk(data, table_name, table->schema);
     if (ncols < 0) {cloudsync_set_dberror(data); goto abort_add_table;}
     int rc = table_add_stmts(table, ncols);
     if (rc != DBRES_OK) goto abort_add_table;
@@ -997,8 +1021,11 @@ bool table_add_to_context (cloudsync_context *data, table_algo algo, const char 
         
         table->col_value_stmt = (dbvm_t **)cloudsync_memory_alloc((uint64_t)(sizeof(void *) * ncols));
         if (!table->col_value_stmt) goto abort_add_table;
-        
-        char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID, table_name, table_name);
+
+        // Pass empty string when schema is NULL; SQL will fall back to current_schema()
+        const char *schema = table->schema ? table->schema : "";
+        char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID,
+                                              table_name, schema, table_name, schema);
         if (!sql) goto abort_add_table;
         rc = database_exec_callback(data, sql, table_add_to_context_cb, (void *)table);
         cloudsync_memory_free(sql);
@@ -1678,7 +1705,8 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
     } else {
         // compact meta-table
         // delete entries for removed columns
-        char *sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_DELETE_COLS_NOT_IN_SCHEMA_OR_PKCOL, table->meta_ref, table->name, CLOUDSYNC_TOMBSTONE_VALUE);
+        const char *schema = table->schema ? table->schema : "";
+        char *sql = sql_build_delete_cols_not_in_schema_query(schema, table->name, table->meta_ref, CLOUDSYNC_TOMBSTONE_VALUE);
         rc = database_exec(data, sql);
         cloudsync_memory_free(sql);
         if (rc != DBRES_OK) {
@@ -1688,7 +1716,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
         
         char buffer[1024];
         char *singlequote_escaped_table_name = sql_escape_name(table->name, buffer, sizeof(buffer));
-        sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_QUALIFIED_COLLIST_FMT, singlequote_escaped_table_name, singlequote_escaped_table_name);
+        sql = sql_build_pk_qualified_collist_query(schema, singlequote_escaped_table_name);
         if (!sql) {rc = DBRES_NOMEM; goto finalize;}
         
         char *pkclause = NULL;
@@ -1775,15 +1803,16 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     dbvm_t *vm = NULL;
     int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
     char *pkdecode = NULL;
-    
-    char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_COLLIST, table_name);
+
+    const char *schema = table->schema ? table->schema : "";
+    char *sql = sql_build_pk_collist_query(schema, table_name);
     char *pkclause_identifiers = NULL;
     int rc = database_select_text(data, sql, &pkclause_identifiers);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
     char *pkvalues_identifiers = (pkclause_identifiers) ? pkclause_identifiers : "rowid";
-    
-    sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_PK_DECODE_SELECTLIST, table_name);
+
+    sql = sql_build_pk_decode_selectlist_query(schema, table_name);
     rc = database_select_text(data, sql, &pkdecode);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
@@ -2504,14 +2533,18 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
         return cloudsync_set_error(data, buffer, DBRES_ERROR);
     }
     
+    // check if already initialized
+    cloudsync_table_context *table = table_lookup(data, name);
+    if (table) return DBRES_OK;
+    
     // check if table exists
-    if (database_table_exists(data, name) == false) {
+    if (database_table_exists(data, name, cloudsync_schema(data)) == false) {
         snprintf(buffer, sizeof(buffer), "Table %s does not exist", name);
         return cloudsync_set_error(data, buffer, DBRES_ERROR);
     }
     
     // no more than 128 columns can be used as a composite primary key (SQLite hard limit)
-    int npri_keys = database_count_pk(data, name, false);
+    int npri_keys = database_count_pk(data, name, false, cloudsync_schema(data));
     if (npri_keys < 0) return cloudsync_set_dberror(data);
     if (npri_keys > 128) return cloudsync_set_error(data, "No more than 128 columns can be used to form a composite primary key", DBRES_ERROR);
     
@@ -2528,7 +2561,7 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
             // the affinity of a column is determined by the declared type of the column,
             // according to the following rules in the order shown:
             // 1. If the declared type contains the string "INT" then it is assigned INTEGER affinity.
-            int npri_keys_int = database_count_int_pk(data, name);
+            int npri_keys_int = database_count_int_pk(data, name, cloudsync_schema(data));
             if (npri_keys_int < 0) return cloudsync_set_dberror(data);
             if (npri_keys == npri_keys_int) {
                 snprintf(buffer, sizeof(buffer), "Table %s uses a single-column INTEGER primary key. For CRDT replication, primary keys must be globally unique. Consider using a TEXT primary key with UUIDs or ULID to avoid conflicts across nodes. If you understand the risk and still want to use this INTEGER primary key, set the third argument of the cloudsync_init function to 1 to skip this check.", name);
@@ -2540,7 +2573,7 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
         
     // if user declared explicit primary key(s) then make sure they are all declared as NOT NULL
     if (npri_keys > 0) {
-        int npri_keys_notnull = database_count_pk(data, name, true);
+        int npri_keys_notnull = database_count_pk(data, name, true, cloudsync_schema(data));
         if (npri_keys_notnull < 0) return cloudsync_set_dberror(data);
         if (npri_keys != npri_keys_notnull) {
             snprintf(buffer, sizeof(buffer), "All primary keys must be explicitly declared as NOT NULL (table %s)", name);
@@ -2550,7 +2583,7 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
     
     // check for columns declared as NOT NULL without a DEFAULT value.
     // Otherwise, col_merge_stmt would fail if changes to other columns are inserted first.
-    int n_notnull_nodefault = database_count_notnull_without_default(data, name);
+    int n_notnull_nodefault = database_count_notnull_without_default(data, name, cloudsync_schema(data));
     if (n_notnull_nodefault < 0) return cloudsync_set_dberror(data);
     if (n_notnull_nodefault > 0) {
         snprintf(buffer, sizeof(buffer), "All non-primary key columns declared as NOT NULL must have a DEFAULT value. (table %s)", name);

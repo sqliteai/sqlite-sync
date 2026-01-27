@@ -66,7 +66,7 @@ int  database_select_text (cloudsync_context *data, const char *sql, char **valu
 int  database_select_blob (cloudsync_context *data, const char *sql, char **value, int64_t *value_len);
 int  database_select_blob_2int (cloudsync_context *data, const char *sql, char **value, int64_t *value_len, int64_t *value2, int64_t *value3);
 int  database_write (cloudsync_context *data, const char *sql, const char **values, DBTYPE types[], int lens[], int count);
-bool database_table_exists (cloudsync_context *data, const char *table_name);
+bool database_table_exists (cloudsync_context *data, const char *table_name, const char *schema);
 bool database_internal_table_exists (cloudsync_context *data, const char *name);
 bool database_trigger_exists (cloudsync_context *data, const char *table_name);
 int  database_create_metatable (cloudsync_context *data, const char *table_name);
@@ -75,10 +75,10 @@ int  database_delete_triggers (cloudsync_context *data, const char *table_name);
 int  database_pk_names (cloudsync_context *data, const char *table_name, char ***names, int *count);
 int  database_cleanup (cloudsync_context *data);
 
-int database_count_pk (cloudsync_context *data, const char *table_name, bool not_null);
-int database_count_nonpk (cloudsync_context *data, const char *table_name);
-int database_count_int_pk (cloudsync_context *data, const char *table_name);
-int database_count_notnull_without_default (cloudsync_context *data, const char *table_name);
+int database_count_pk (cloudsync_context *data, const char *table_name, bool not_null, const char *schema);
+int database_count_nonpk (cloudsync_context *data, const char *table_name, const char *schema);
+int database_count_int_pk (cloudsync_context *data, const char *table_name, const char *schema);
+int database_count_notnull_without_default (cloudsync_context *data, const char *table_name, const char *schema);
 
 int64_t  database_schema_version (cloudsync_context *data);
 uint64_t database_schema_hash (cloudsync_context *data);
@@ -139,13 +139,18 @@ uint64_t dbmem_size (void *ptr);
 // SQL
 char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta);
 char *sql_escape_name (const char *name, char *buffer, size_t bsize);
-char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_name);
-char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name);
-char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_name);
-char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_name, const char *colname);
-char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_name, const char *colname);
+char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_name, const char *schema);
+char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name, const char *schema);
+char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_name, const char *schema);
+char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_name, const char *colname, const char *schema);
+char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_name, const char *colname, const char *schema);
 char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, const char *table_name, const char *except_col);
+char *sql_build_delete_cols_not_in_schema_query(const char *schema, const char *table_name, const char *meta_ref, const char *pkcol);
+char *sql_build_pk_collist_query(const char *schema, const char *table_name);
+char *sql_build_pk_decode_selectlist_query(const char *schema, const char *table_name);
+char *sql_build_pk_qualified_collist_query(const char *schema, const char *table_name);
 
+char *database_table_schema(const char *table_name);
 char *database_build_meta_ref(const char *schema, const char *table_name);
 char *database_build_base_ref(const char *schema, const char *table_name);
 

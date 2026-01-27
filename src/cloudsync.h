@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define CLOUDSYNC_VERSION                       "0.9.82"
+#define CLOUDSYNC_VERSION                       "0.9.83"
 #define CLOUDSYNC_MAX_TABLENAME_LEN             512
 
 #define CLOUDSYNC_VALUE_NOTSET                  -1
@@ -81,6 +81,7 @@ int cloudsync_commit_hook (void *ctx);
 void cloudsync_rollback_hook (void *ctx);
 void cloudsync_set_schema (cloudsync_context *data, const char *schema);
 const char *cloudsync_schema (cloudsync_context *data);
+const char *cloudsync_table_schema (cloudsync_context *data, const char *table_name);
 
 // Payload
 int    cloudsync_payload_apply (cloudsync_context *data, const char *payload, int blen, int *nrows);

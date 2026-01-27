@@ -19,6 +19,7 @@
 \ir 09_multicol_concurrent_edits.sql
 \ir 10_empty_payload_noop.sql
 \ir 11_multi_table_multi_columns_rounds.sql
+\ir 12_repeated_table_multi_schemas.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

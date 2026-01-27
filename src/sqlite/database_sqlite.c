@@ -45,7 +45,8 @@ char *sql_escape_name (const char *name, char *buffer, size_t bsize) {
     return sqlite3_snprintf((int)bsize, buffer, "%q", name);
 }
 
-char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_name) {
+char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_name, const char *schema) {
+    UNUSED_PARAMETER(schema);
     char *sql = NULL;
     
     /*
@@ -99,7 +100,8 @@ process_process:
     return (rc == DBRES_OK) ? query : NULL;
 }
 
-char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name) {
+char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name, const char *schema) {
+    UNUSED_PARAMETER(schema);
     char buffer[1024];
     char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_DELETE_ROW_BY_PK, table_name, singlequote_escaped_table_name);
@@ -112,7 +114,8 @@ char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name) {
     return (rc == DBRES_OK) ? query : NULL;
 }
 
-char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_name) {
+char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_name, const char *schema) {
+    UNUSED_PARAMETER(schema);
     char buffer[1024];
     char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_INSERT_PK_IGNORE, table_name, table_name, singlequote_escaped_table_name);
@@ -125,7 +128,8 @@ char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_nam
     return (rc == DBRES_OK) ? query : NULL;
 }
 
-char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_name, const char *colname) {
+char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_name, const char *colname, const char *schema) {
+    UNUSED_PARAMETER(schema);
     char buffer[1024];
     char buffer2[1024];
     char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
@@ -147,7 +151,8 @@ char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_na
     return (rc == DBRES_OK) ? query : NULL;
 }
 
-char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_name, const char *colname) {
+char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_name, const char *colname, const char *schema) {
+    UNUSED_PARAMETER(schema);
     char *colnamequote = "\"";
     char buffer[1024];
     char buffer2[1024];
@@ -181,6 +186,10 @@ char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, 
     return result;
 }
 
+char *database_table_schema(const char *table_name) {
+    return NULL;
+}
+
 char *database_build_meta_ref(const char *schema, const char *table_name) {
     // schema unused in SQLite
     return cloudsync_memory_mprintf("%s_cloudsync", table_name);
@@ -189,6 +198,47 @@ char *database_build_meta_ref(const char *schema, const char *table_name) {
 char *database_build_base_ref(const char *schema, const char *table_name) {
     // schema unused in SQLite
     return cloudsync_string_dup(table_name);
+}
+
+// SQLite version: schema parameter unused (SQLite has no schemas).
+char *sql_build_delete_cols_not_in_schema_query(const char *schema, const char *table_name, const char *meta_ref, const char *pkcol) {
+    UNUSED_PARAMETER(schema);
+    return cloudsync_memory_mprintf(
+        "DELETE FROM %s WHERE col_name NOT IN ("
+        "SELECT name FROM pragma_table_info('%s') "
+        "UNION SELECT '%s'"
+        ");",
+        meta_ref, table_name, pkcol
+    );
+}
+
+char *sql_build_pk_collist_query(const char *schema, const char *table_name) {
+    UNUSED_PARAMETER(schema);
+    return cloudsync_memory_mprintf(
+        "SELECT group_concat('\"' || format('%%w', name) || '\"', ',') "
+        "FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;",
+        table_name
+    );
+}
+
+char *sql_build_pk_decode_selectlist_query(const char *schema, const char *table_name) {
+    UNUSED_PARAMETER(schema);
+    return cloudsync_memory_mprintf(
+        "SELECT group_concat("
+        "'cloudsync_pk_decode(pk, ' || pk || ') AS ' || '\"' || format('%%w', name) || '\"', ','"
+        ") "
+        "FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk;",
+        table_name
+    );
+}
+
+char *sql_build_pk_qualified_collist_query(const char *schema, const char *table_name) {
+    UNUSED_PARAMETER(schema);
+    return cloudsync_memory_mprintf(
+        "SELECT group_concat('\"%w\".\"' || format('%%w', name) || '\"', ',') "
+        "FROM pragma_table_info('%s') WHERE pk>0 ORDER BY pk;",
+        table_name, table_name
+    );
 }
 
 // MARK: - PRIVATE -
@@ -392,19 +442,21 @@ bool database_in_transaction (cloudsync_context *data) {
     return in_transaction;
 }
 
-bool database_table_exists (cloudsync_context *data, const char *name) {
+bool database_table_exists (cloudsync_context *data, const char *name, const char *schema) {
+    UNUSED_PARAMETER(schema);
     return database_system_exists(data, name, "table");
 }
 
 bool database_internal_table_exists (cloudsync_context *data, const char *name) {
-    return database_table_exists(data, name);
+    return database_table_exists(data, name, NULL);
 }
 
 bool database_trigger_exists (cloudsync_context *data, const char *name) {
     return database_system_exists(data, name, "trigger");
 }
 
-int database_count_pk (cloudsync_context *data, const char *table_name, bool not_null) {
+int database_count_pk (cloudsync_context *data, const char *table_name, bool not_null, const char *schema) {
+    UNUSED_PARAMETER(schema);
     char buffer[1024];
     char *sql = NULL;
     
@@ -420,7 +472,8 @@ int database_count_pk (cloudsync_context *data, const char *table_name, bool not
     return (int)count;
 }
 
-int database_count_nonpk (cloudsync_context *data, const char *table_name) {
+int database_count_nonpk (cloudsync_context *data, const char *table_name, const char *schema) {
+    UNUSED_PARAMETER(schema);
     char buffer[1024];
     char *sql = NULL;
     
@@ -431,7 +484,8 @@ int database_count_nonpk (cloudsync_context *data, const char *table_name) {
     return (int)count;
 }
 
-int database_count_int_pk (cloudsync_context *data, const char *table_name) {
+int database_count_int_pk (cloudsync_context *data, const char *table_name, const char *schema) {
+    UNUSED_PARAMETER(schema);
     char buffer[1024];
     char *sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk=1 AND \"type\" LIKE '%%INT%%';", table_name);
     
@@ -441,7 +495,8 @@ int database_count_int_pk (cloudsync_context *data, const char *table_name) {
     return (int)count;
 }
 
-int database_count_notnull_without_default (cloudsync_context *data, const char *table_name) {
+int database_count_notnull_without_default (cloudsync_context *data, const char *table_name, const char *schema) {
+    UNUSED_PARAMETER(schema);
     char buffer[1024];
     char *sql = sqlite3_snprintf(sizeof(buffer), buffer, "SELECT count(*) FROM pragma_table_info('%q') WHERE pk=0 AND \"notnull\"=1 AND \"dflt_value\" IS NULL;", table_name);
     
