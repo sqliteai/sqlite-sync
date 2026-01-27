@@ -2,7 +2,7 @@ services:
   postgres:
     build:
       context: ../..
-      dockerfile: docker/postgresql/Dockerfile.debug
+      dockerfile: docker/postgresql/Dockerfile.debug-no-optimization
     container_name: cloudsync-postgres
     environment:
       POSTGRES_USER: postgres
