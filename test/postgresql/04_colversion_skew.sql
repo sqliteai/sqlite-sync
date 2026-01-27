@@ -3,31 +3,32 @@
 --   - It follows the same apply order as the existing 3‑DB test and verifies final convergence across all three databases
 
 \set testid '04'
+\ir helper_test_init.sql
 
 \connect postgres
 \ir helper_psql_conn_setup.sql
-DROP DATABASE IF EXISTS cloudsync_test_a;
-DROP DATABASE IF EXISTS cloudsync_test_b;
-DROP DATABASE IF EXISTS cloudsync_test_c;
-CREATE DATABASE cloudsync_test_a;
-CREATE DATABASE cloudsync_test_b;
-CREATE DATABASE cloudsync_test_c;
+DROP DATABASE IF EXISTS cloudsync_test_04_a;
+DROP DATABASE IF EXISTS cloudsync_test_04_b;
+DROP DATABASE IF EXISTS cloudsync_test_04_c;
+CREATE DATABASE cloudsync_test_04_a;
+CREATE DATABASE cloudsync_test_04_b;
+CREATE DATABASE cloudsync_test_04_c;
 
-\connect cloudsync_test_a
+\connect cloudsync_test_04_a
 \ir helper_psql_conn_setup.sql
 CREATE EXTENSION IF NOT EXISTS cloudsync;
 DROP TABLE IF EXISTS smoke_tbl;
 CREATE TABLE smoke_tbl (id TEXT PRIMARY KEY, val TEXT);
 SELECT cloudsync_init('smoke_tbl', 'CLS', true) AS _init_site_id_a \gset
 
-\connect cloudsync_test_b
+\connect cloudsync_test_04_b
 \ir helper_psql_conn_setup.sql
 CREATE EXTENSION IF NOT EXISTS cloudsync;
 DROP TABLE IF EXISTS smoke_tbl;
 CREATE TABLE smoke_tbl (id TEXT PRIMARY KEY, val TEXT);
 SELECT cloudsync_init('smoke_tbl', 'CLS', true) AS _init_site_id_b \gset
 
-\connect cloudsync_test_c
+\connect cloudsync_test_04_c
 \ir helper_psql_conn_setup.sql
 CREATE EXTENSION IF NOT EXISTS cloudsync;
 DROP TABLE IF EXISTS smoke_tbl;
@@ -35,9 +36,9 @@ CREATE TABLE smoke_tbl (id TEXT PRIMARY KEY, val TEXT);
 SELECT cloudsync_init('smoke_tbl', 'CLS', true) AS _init_site_id_c \gset
 
 -- Round 1: seed id1 on a single database, then sync
-\connect cloudsync_test_a
+\connect cloudsync_test_04_a
 \if :{?DEBUG_MERGE}
-\echo '[INFO] cloudsync_test_a INSERT id1=seed_a1'
+\echo '[INFO] cloudsync_test_04_a INSERT id1=seed_a1'
 \endif
 INSERT INTO smoke_tbl VALUES ('id1', 'seed_a1');
 SELECT CASE WHEN payload IS NULL OR octet_length(payload) = 0
@@ -51,7 +52,7 @@ FROM (
   WHERE site_id = cloudsync_siteid()
 ) AS p \gset
 
-\connect cloudsync_test_b
+\connect cloudsync_test_04_b
 SELECT CASE WHEN payload IS NULL OR octet_length(payload) = 0
             THEN ''
             ELSE '\x' || encode(payload, 'hex')
@@ -63,7 +64,7 @@ FROM (
   WHERE site_id = cloudsync_siteid()
 ) AS p \gset
 
-\connect cloudsync_test_c
+\connect cloudsync_test_04_c
 SELECT CASE WHEN payload IS NULL OR octet_length(payload) = 0
             THEN ''
             ELSE '\x' || encode(payload, 'hex')
@@ -76,9 +77,9 @@ FROM (
 ) AS p \gset
 
 -- Round 1 apply: fan-out changes
-\connect cloudsync_test_a
+\connect cloudsync_test_04_a
 \if :{?DEBUG_MERGE}
-\echo '[INFO] round1 before merge cloudsync_test_a smoke_tbl'
+\echo '[INFO] round1 before merge cloudsync_test_04_a smoke_tbl'
 SELECT * FROM smoke_tbl ORDER BY id;
 \endif
 \if :payload_b_r1_ok
@@ -98,13 +99,13 @@ SELECT cloudsync_payload_apply(decode(substr(:'payload_c_r1', 3), 'hex')) AS _ap
 SELECT 0 AS _apply_a_r1_c \gset
 \endif
 \if :{?DEBUG_MERGE}
-\echo '[INFO] round1 after merge cloudsync_test_a smoke_tbl'
+\echo '[INFO] round1 after merge cloudsync_test_04_a smoke_tbl'
 SELECT * FROM smoke_tbl ORDER BY id;
 \endif
 
-\connect cloudsync_test_b
+\connect cloudsync_test_04_b
 \if :{?DEBUG_MERGE}
-\echo '[INFO] round1 before merge cloudsync_test_b smoke_tbl'
+\echo '[INFO] round1 before merge cloudsync_test_04_b smoke_tbl'
 SELECT * FROM smoke_tbl ORDER BY id;
 \endif
 \if :payload_a_r1_ok
@@ -124,13 +125,13 @@ SELECT cloudsync_payload_apply(decode(substr(:'payload_c_r1', 3), 'hex')) AS _ap
 SELECT 0 AS _apply_b_r1_c \gset
 \endif
 \if :{?DEBUG_MERGE}
-\echo '[INFO] round1 after merge cloudsync_test_b smoke_tbl'
+\echo '[INFO] round1 after merge cloudsync_test_04_b smoke_tbl'
 SELECT * FROM smoke_tbl ORDER BY id;
 \endif
 
-\connect cloudsync_test_c
+\connect cloudsync_test_04_c
 \if :{?DEBUG_MERGE}
-\echo '[INFO] round1 before merge cloudsync_test_c smoke_tbl'
+\echo '[INFO] round1 before merge cloudsync_test_04_c smoke_tbl'
 SELECT * FROM smoke_tbl ORDER BY id;
 \endif
 \if :payload_a_r1_ok
@@ -150,18 +151,18 @@ SELECT cloudsync_payload_apply(decode(substr(:'payload_b_r1', 3), 'hex')) AS _ap
 SELECT 0 AS _apply_c_r1_b \gset
 \endif
 \if :{?DEBUG_MERGE}
-\echo '[INFO] round1 after merge cloudsync_test_c smoke_tbl'
+\echo '[INFO] round1 after merge cloudsync_test_04_c smoke_tbl'
 SELECT * FROM smoke_tbl ORDER BY id;
 \endif
 
 -- Round 2: skewed concurrent updates on id1
-\connect cloudsync_test_a
+\connect cloudsync_test_04_a
 \if :{?DEBUG_MERGE}
-\echo '[INFO] cloudsync_test_a UPDATE id1=a1_u1'
+\echo '[INFO] cloudsync_test_04_a UPDATE id1=a1_u1'
 \endif
 UPDATE smoke_tbl SET val = 'a1_u1' WHERE id = 'id1';
 \if :{?DEBUG_MERGE}
-\echo '[INFO] cloudsync_test_a UPDATE id1=a1_u2'
+\echo '[INFO] cloudsync_test_04_a UPDATE id1=a1_u2'
 \endif
 UPDATE smoke_tbl SET val = 'a1_u2' WHERE id = 'id1';
 SELECT CASE WHEN payload IS NULL OR octet_length(payload) = 0
@@ -175,9 +176,9 @@ FROM (
   WHERE site_id = cloudsync_siteid()
 ) AS p \gset
 
-\connect cloudsync_test_b
+\connect cloudsync_test_04_b
 \if :{?DEBUG_MERGE}
-\echo '[INFO] cloudsync_test_b UPDATE id1=b1_u1'
+\echo '[INFO] cloudsync_test_04_b UPDATE id1=b1_u1'
 \endif
 UPDATE smoke_tbl SET val = 'b1_u1' WHERE id = 'id1';
 SELECT CASE WHEN payload IS NULL OR octet_length(payload) = 0
@@ -191,17 +192,17 @@ FROM (
   WHERE site_id = cloudsync_siteid()
 ) AS p \gset
 
-\connect cloudsync_test_c
+\connect cloudsync_test_04_c
 \if :{?DEBUG_MERGE}
-\echo '[INFO] cloudsync_test_c UPDATE id1=c1_u1'
+\echo '[INFO] cloudsync_test_04_c UPDATE id1=c1_u1'
 \endif
 UPDATE smoke_tbl SET val = 'c1_u1' WHERE id = 'id1';
 \if :{?DEBUG_MERGE}
-\echo '[INFO] cloudsync_test_c UPDATE id1=c1_u2'
+\echo '[INFO] cloudsync_test_04_c UPDATE id1=c1_u2'
 \endif
 UPDATE smoke_tbl SET val = 'c1_u2' WHERE id = 'id1';
 \if :{?DEBUG_MERGE}
-\echo '[INFO] cloudsync_test_c UPDATE id1=c1_u3'
+\echo '[INFO] cloudsync_test_04_c UPDATE id1=c1_u3'
 \endif
 UPDATE smoke_tbl SET val = 'c1_u3' WHERE id = 'id1';
 SELECT CASE WHEN payload IS NULL OR octet_length(payload) = 0
@@ -216,9 +217,9 @@ FROM (
 ) AS p \gset
 
 -- Round 2 apply: fan-out changes
-\connect cloudsync_test_a
+\connect cloudsync_test_04_a
 \if :{?DEBUG_MERGE}
-\echo '[INFO] round2 before merge cloudsync_test_a smoke_tbl'
+\echo '[INFO] round2 before merge cloudsync_test_04_a smoke_tbl'
 SELECT * FROM smoke_tbl ORDER BY id;
 \endif
 \if :payload_b_r2_ok
@@ -238,13 +239,13 @@ SELECT cloudsync_payload_apply(decode(substr(:'payload_c_r2', 3), 'hex')) AS _ap
 SELECT 0 AS _apply_a_r2_c \gset
 \endif
 \if :{?DEBUG_MERGE}
-\echo '[INFO] round2 after merge cloudsync_test_a smoke_tbl'
+\echo '[INFO] round2 after merge cloudsync_test_04_a smoke_tbl'
 SELECT * FROM smoke_tbl ORDER BY id;
 \endif
 
-\connect cloudsync_test_b
+\connect cloudsync_test_04_b
 \if :{?DEBUG_MERGE}
-\echo '[INFO] round2 before merge cloudsync_test_b smoke_tbl'
+\echo '[INFO] round2 before merge cloudsync_test_04_b smoke_tbl'
 SELECT * FROM smoke_tbl ORDER BY id;
 \endif
 \if :payload_a_r2_ok
@@ -264,13 +265,13 @@ SELECT cloudsync_payload_apply(decode(substr(:'payload_c_r2', 3), 'hex')) AS _ap
 SELECT 0 AS _apply_b_r2_c \gset
 \endif
 \if :{?DEBUG_MERGE}
-\echo '[INFO] round2 after merge cloudsync_test_b smoke_tbl'
+\echo '[INFO] round2 after merge cloudsync_test_04_b smoke_tbl'
 SELECT * FROM smoke_tbl ORDER BY id;
 \endif
 
-\connect cloudsync_test_c
+\connect cloudsync_test_04_c
 \if :{?DEBUG_MERGE}
-\echo '[INFO] round2 before merge cloudsync_test_c smoke_tbl'
+\echo '[INFO] round2 before merge cloudsync_test_04_c smoke_tbl'
 SELECT * FROM smoke_tbl ORDER BY id;
 \endif
 \if :payload_a_r2_ok
@@ -290,20 +291,20 @@ SELECT cloudsync_payload_apply(decode(substr(:'payload_b_r2', 3), 'hex')) AS _ap
 SELECT 0 AS _apply_c_r2_b \gset
 \endif
 \if :{?DEBUG_MERGE}
-\echo '[INFO] round2 after merge cloudsync_test_c smoke_tbl'
+\echo '[INFO] round2 after merge cloudsync_test_04_c smoke_tbl'
 SELECT * FROM smoke_tbl ORDER BY id;
 \endif
 
 -- Final consistency check across all three databases
-\connect cloudsync_test_a
+\connect cloudsync_test_04_a
 SELECT md5(COALESCE(string_agg(id || ':' || COALESCE(val, ''), ',' ORDER BY id), '')) AS smoke_hash_a
 FROM smoke_tbl \gset
 
-\connect cloudsync_test_b
+\connect cloudsync_test_04_b
 SELECT md5(COALESCE(string_agg(id || ':' || COALESCE(val, ''), ',' ORDER BY id), '')) AS smoke_hash_b
 FROM smoke_tbl \gset
 
-\connect cloudsync_test_c
+\connect cloudsync_test_04_c
 SELECT md5(COALESCE(string_agg(id || ':' || COALESCE(val, ''), ',' ORDER BY id), '')) AS smoke_hash_c
 FROM smoke_tbl \gset
 
@@ -313,4 +314,12 @@ SELECT (:'smoke_hash_a' = :'smoke_hash_b' AND :'smoke_hash_a' = :'smoke_hash_c')
 \else
 \echo [FAIL] (:testid) Test multi-db roundtrip with skewed col_version updates
 SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- Cleanup: Drop test databases if not in DEBUG mode and no failures
+\ir helper_test_cleanup.sql
+\if :should_cleanup
+DROP DATABASE IF EXISTS cloudsync_test_04_a;
+DROP DATABASE IF EXISTS cloudsync_test_04_b;
+DROP DATABASE IF EXISTS cloudsync_test_04_c;
 \endif

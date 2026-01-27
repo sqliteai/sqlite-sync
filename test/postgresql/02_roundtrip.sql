@@ -1,6 +1,7 @@
 -- '2 db roundtrip test'
 
 \set testid '02'
+\ir helper_test_init.sql
 
 \connect cloudsync_test_1
 \ir helper_psql_conn_setup.sql
@@ -25,4 +26,13 @@ SELECT (:'smoke_hash' = :'smoke_hash_b') AS payload_roundtrip_ok \gset
 \else
 \echo [FAIL] (:testid) Test payload roundtrip to another database
 SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- Cleanup: Drop test databases if not in DEBUG mode and no failures
+\ir helper_test_cleanup.sql
+\if :should_cleanup
+DROP DATABASE IF EXISTS cloudsync_test_1;
+DROP DATABASE IF EXISTS cloudsync_test_2;
+\else
+\echo [INFO] !!!!!
 \endif

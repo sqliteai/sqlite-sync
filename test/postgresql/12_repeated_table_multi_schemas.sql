@@ -1,12 +1,13 @@
 \set testid '12'
+\ir helper_test_init.sql
 
 \connect postgres
 \ir helper_psql_conn_setup.sql
 
-DROP DATABASE IF EXISTS cloudsync_test_repeated;
-CREATE DATABASE cloudsync_test_repeated;
+DROP DATABASE IF EXISTS cloudsync_test_12;
+CREATE DATABASE cloudsync_test_12;
 
-\connect cloudsync_test_repeated
+\connect cloudsync_test_12
 \ir helper_psql_conn_setup.sql
 
 -- Reset extension and install
@@ -21,12 +22,20 @@ CREATE TABLE public.repeated_table (id TEXT PRIMARY KEY, data TEXT);
 CREATE TABLE test_schema.repeated_table (id TEXT PRIMARY KEY, data TEXT);
 
 -- Reset the connection to test if we load the configuration correctly
-\connect cloudsync_test_repeated
+\connect cloudsync_test_12
 \ir helper_psql_conn_setup.sql
 
 -- 'Test init on table that exists in multiple schemas (default: public)'
 SELECT cloudsync_cleanup('repeated_table') AS _cleanup_repeated \gset
 SELECT cloudsync_init('repeated_table', 'CLS', true) AS _init_repeated_public \gset
+SELECT cloudsync_table_schema('repeated_table') AS repeated_schema_public \gset
+SELECT (:'repeated_schema_public' = 'public') AS repeated_schema_public_ok \gset
+\if :repeated_schema_public_ok
+\echo [PASS] (:testid) Test cloudsync_table_schema returns public for repeated_table
+\else
+\echo [FAIL] (:testid) Test cloudsync_table_schema returns public for repeated_table
+SELECT (:fail::int + 1) AS fail \gset
+\endif
 SELECT (to_regclass('public.repeated_table_cloudsync') IS NOT NULL) AS init_repeated_public_ok \gset
 \if :init_repeated_public_ok
 \echo [PASS] (:testid) Test init on repeated_table in public schema
@@ -101,6 +110,14 @@ SELECT (:fail::int + 1) AS fail \gset
 -- 'Test cloudsync_set_schema and init on test_schema'
 SELECT cloudsync_set_schema('test_schema') AS _set_schema \gset
 SELECT cloudsync_init('repeated_table', 'CLS', true) AS _init_repeated_test_schema \gset
+SELECT cloudsync_table_schema('repeated_table') AS repeated_schema_test_schema \gset
+SELECT (:'repeated_schema_test_schema' = 'test_schema') AS repeated_schema_test_schema_ok \gset
+\if :repeated_schema_test_schema_ok
+\echo [PASS] (:testid) Test cloudsync_table_schema returns test_schema for repeated_table
+\else
+\echo [FAIL] (:testid) Test cloudsync_table_schema returns test_schema for repeated_table
+SELECT (:fail::int + 1) AS fail \gset
+\endif
 SELECT (to_regclass('test_schema.repeated_table_cloudsync') IS NOT NULL) AS init_repeated_test_schema_ok \gset
 \if :init_repeated_test_schema_ok
 \echo [PASS] (:testid) Test init on repeated_table in test_schema
@@ -122,7 +139,7 @@ SELECT (:fail::int + 1) AS fail \gset
 SELECT cloudsync_set_schema('public') AS _reset_schema \gset
 
 -- Reset the connection to test if if loads the correct configuration for the table on the correct schema
-\connect cloudsync_test_repeated
+\connect cloudsync_test_12
 \ir helper_psql_conn_setup.sql
 
 -- 'Test insert on repeated_table in test_schema'
@@ -201,5 +218,11 @@ SELECT (:fail::int + 1) AS fail \gset
 
 \if :{?DEBUG_MERGE}
 \connect postgres
-DROP DATABASE IF EXISTS cloudsync_test_repeated;
+DROP DATABASE IF EXISTS cloudsync_test_12;
+\endif
+
+-- Cleanup: Drop test databases if not in DEBUG mode and no failures
+\ir helper_test_cleanup.sql
+\if :should_cleanup
+DROP DATABASE IF EXISTS cloudsync_test_12;
 \endif

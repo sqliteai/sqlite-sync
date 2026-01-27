@@ -5,31 +5,32 @@
 -- 3) Sync and verify both columns are preserved on all DBs
 
 \set testid '09'
+\ir helper_test_init.sql
 
 \connect postgres
 \ir helper_psql_conn_setup.sql
-DROP DATABASE IF EXISTS cloudsync_test_a;
-DROP DATABASE IF EXISTS cloudsync_test_b;
-DROP DATABASE IF EXISTS cloudsync_test_c;
-CREATE DATABASE cloudsync_test_a;
-CREATE DATABASE cloudsync_test_b;
-CREATE DATABASE cloudsync_test_c;
+DROP DATABASE IF EXISTS cloudsync_test_09_a;
+DROP DATABASE IF EXISTS cloudsync_test_09_b;
+DROP DATABASE IF EXISTS cloudsync_test_09_c;
+CREATE DATABASE cloudsync_test_09_a;
+CREATE DATABASE cloudsync_test_09_b;
+CREATE DATABASE cloudsync_test_09_c;
 
-\connect cloudsync_test_a
+\connect cloudsync_test_09_a
 \ir helper_psql_conn_setup.sql
 CREATE EXTENSION IF NOT EXISTS cloudsync;
 DROP TABLE IF EXISTS smoke_tbl;
 CREATE TABLE smoke_tbl (id TEXT PRIMARY KEY, col_a TEXT, col_b TEXT);
 SELECT cloudsync_init('smoke_tbl', 'CLS', true) AS _init_site_id_a \gset
 
-\connect cloudsync_test_b
+\connect cloudsync_test_09_b
 \ir helper_psql_conn_setup.sql
 CREATE EXTENSION IF NOT EXISTS cloudsync;
 DROP TABLE IF EXISTS smoke_tbl;
 CREATE TABLE smoke_tbl (id TEXT PRIMARY KEY, col_a TEXT, col_b TEXT);
 SELECT cloudsync_init('smoke_tbl', 'CLS', true) AS _init_site_id_b \gset
 
-\connect cloudsync_test_c
+\connect cloudsync_test_09_c
 \ir helper_psql_conn_setup.sql
 CREATE EXTENSION IF NOT EXISTS cloudsync;
 DROP TABLE IF EXISTS smoke_tbl;
@@ -37,7 +38,7 @@ CREATE TABLE smoke_tbl (id TEXT PRIMARY KEY, col_a TEXT, col_b TEXT);
 SELECT cloudsync_init('smoke_tbl', 'CLS', true) AS _init_site_id_c \gset
 
 -- Round 1: seed row on A, sync to B/C
-\connect cloudsync_test_a
+\connect cloudsync_test_09_a
 INSERT INTO smoke_tbl VALUES ('id1', 'a0', 'b0');
 SELECT CASE WHEN payload IS NULL OR octet_length(payload) = 0
             THEN ''
@@ -50,7 +51,7 @@ FROM (
   WHERE site_id = cloudsync_siteid()
 ) AS p \gset
 
-\connect cloudsync_test_b
+\connect cloudsync_test_09_b
 SELECT CASE WHEN payload IS NULL OR octet_length(payload) = 0
             THEN ''
             ELSE '\x' || encode(payload, 'hex')
@@ -62,7 +63,7 @@ FROM (
   WHERE site_id = cloudsync_siteid()
 ) AS p \gset
 
-\connect cloudsync_test_c
+\connect cloudsync_test_09_c
 SELECT CASE WHEN payload IS NULL OR octet_length(payload) = 0
             THEN ''
             ELSE '\x' || encode(payload, 'hex')
@@ -74,7 +75,7 @@ FROM (
   WHERE site_id = cloudsync_siteid()
 ) AS p \gset
 
-\connect cloudsync_test_a
+\connect cloudsync_test_09_a
 \if :payload_b_r1_ok
 SELECT cloudsync_payload_apply(decode(substr(:'payload_b_r1', 3), 'hex')) AS _apply_a_r1_b \gset
 \else
@@ -86,7 +87,7 @@ SELECT cloudsync_payload_apply(decode(substr(:'payload_c_r1', 3), 'hex')) AS _ap
 SELECT 0 AS _apply_a_r1_c \gset
 \endif
 
-\connect cloudsync_test_b
+\connect cloudsync_test_09_b
 \if :payload_a_r1_ok
 SELECT cloudsync_payload_apply(decode(substr(:'payload_a_r1', 3), 'hex')) AS _apply_b_r1_a \gset
 \else
@@ -98,7 +99,7 @@ SELECT cloudsync_payload_apply(decode(substr(:'payload_c_r1', 3), 'hex')) AS _ap
 SELECT 0 AS _apply_b_r1_c \gset
 \endif
 
-\connect cloudsync_test_c
+\connect cloudsync_test_09_c
 \if :payload_a_r1_ok
 SELECT cloudsync_payload_apply(decode(substr(:'payload_a_r1', 3), 'hex')) AS _apply_c_r1_a \gset
 \else
@@ -111,7 +112,7 @@ SELECT 0 AS _apply_c_r1_b \gset
 \endif
 
 -- Round 2: concurrent edits on different columns
-\connect cloudsync_test_b
+\connect cloudsync_test_09_b
 UPDATE smoke_tbl SET col_a = 'a1' WHERE id = 'id1';
 SELECT CASE WHEN payload IS NULL OR octet_length(payload) = 0
             THEN ''
@@ -124,7 +125,7 @@ FROM (
   WHERE site_id = cloudsync_siteid()
 ) AS p \gset
 
-\connect cloudsync_test_c
+\connect cloudsync_test_09_c
 UPDATE smoke_tbl SET col_b = 'b1' WHERE id = 'id1';
 SELECT CASE WHEN payload IS NULL OR octet_length(payload) = 0
             THEN ''
@@ -137,7 +138,7 @@ FROM (
   WHERE site_id = cloudsync_siteid()
 ) AS p \gset
 
-\connect cloudsync_test_a
+\connect cloudsync_test_09_a
 SELECT CASE WHEN payload IS NULL OR octet_length(payload) = 0
             THEN ''
             ELSE '\x' || encode(payload, 'hex')
@@ -150,7 +151,7 @@ FROM (
 ) AS p \gset
 
 -- Apply round 2 payloads
-\connect cloudsync_test_a
+\connect cloudsync_test_09_a
 \if :payload_b_r2_ok
 SELECT cloudsync_payload_apply(decode(substr(:'payload_b_r2', 3), 'hex')) AS _apply_a_r2_b \gset
 \else
@@ -162,7 +163,7 @@ SELECT cloudsync_payload_apply(decode(substr(:'payload_c_r2', 3), 'hex')) AS _ap
 SELECT 0 AS _apply_a_r2_c \gset
 \endif
 
-\connect cloudsync_test_b
+\connect cloudsync_test_09_b
 \if :payload_a_r2_ok
 SELECT cloudsync_payload_apply(decode(substr(:'payload_a_r2', 3), 'hex')) AS _apply_b_r2_a \gset
 \else
@@ -174,7 +175,7 @@ SELECT cloudsync_payload_apply(decode(substr(:'payload_c_r2', 3), 'hex')) AS _ap
 SELECT 0 AS _apply_b_r2_c \gset
 \endif
 
-\connect cloudsync_test_c
+\connect cloudsync_test_09_c
 \if :payload_a_r2_ok
 SELECT cloudsync_payload_apply(decode(substr(:'payload_a_r2', 3), 'hex')) AS _apply_c_r2_a \gset
 \else
@@ -187,15 +188,15 @@ SELECT 0 AS _apply_c_r2_b \gset
 \endif
 
 -- Final consistency check across all three databases (both columns)
-\connect cloudsync_test_a
+\connect cloudsync_test_09_a
 SELECT md5(COALESCE(string_agg(id || ':' || COALESCE(col_a, '') || ':' || COALESCE(col_b, ''), ',' ORDER BY id), '')) AS smoke_hash_a
 FROM smoke_tbl \gset
 
-\connect cloudsync_test_b
+\connect cloudsync_test_09_b
 SELECT md5(COALESCE(string_agg(id || ':' || COALESCE(col_a, '') || ':' || COALESCE(col_b, ''), ',' ORDER BY id), '')) AS smoke_hash_b
 FROM smoke_tbl \gset
 
-\connect cloudsync_test_c
+\connect cloudsync_test_09_c
 SELECT md5(COALESCE(string_agg(id || ':' || COALESCE(col_a, '') || ':' || COALESCE(col_b, ''), ',' ORDER BY id), '')) AS smoke_hash_c
 FROM smoke_tbl \gset
 
@@ -205,4 +206,12 @@ SELECT (:'smoke_hash_a' = :'smoke_hash_b' AND :'smoke_hash_a' = :'smoke_hash_c')
 \else
 \echo [FAIL] (:testid) Multi-column concurrent edits
 SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- Cleanup: Drop test databases if not in DEBUG mode and no failures
+\ir helper_test_cleanup.sql
+\if :should_cleanup
+DROP DATABASE IF EXISTS cloudsync_test_09_a;
+DROP DATABASE IF EXISTS cloudsync_test_09_b;
+DROP DATABASE IF EXISTS cloudsync_test_09_c;
 \endif
