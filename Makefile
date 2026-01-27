@@ -214,12 +214,12 @@ $(BUILD_TEST)/%.o: %.c
 	$(CC) $(T_CFLAGS) -c $< -o $@
 
 # Run code coverage (--css-file $(CUSTOM_CSS))
-test: $(TARGET) $(TEST_TARGET)
+test: $(TARGET) $(TEST_TARGET) unittest
 	@if [ -f .env ]; then \
 		export $$(grep -v '^#' .env | xargs); \
 	fi; \
-	set -e; $(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();" && \
-	for t in $(TEST_TARGET); do ./$$t; done
+	set -e; $(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();" # && \
+	#for t in $(TEST_TARGET); do ./$$t; done
 ifneq ($(COVERAGE),false)
 	mkdir -p $(COV_DIR)
 	lcov --capture --directory . --output-file $(COV_DIR)/coverage.info $(subst src, --include src,${COV_FILES})
