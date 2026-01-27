@@ -424,8 +424,6 @@ jobs:
           echo "   Main: @sqliteai/sqlite-sync-dev@${{ steps.tag.outputs.version }}"
           echo "   Platform packages: 7"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: build and publish expo package
         if: steps.tag.outputs.version != ''
@@ -439,8 +437,6 @@ jobs:
           cd expo-package
           npm publish --provenance --access public --tag latest
           echo "✓ Published @sqliteai/sqlite-sync-expo-dev@${{ steps.tag.outputs.version }}"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - uses: softprops/action-gh-release@v2.2.1
         if: steps.tag.outputs.version != ''
