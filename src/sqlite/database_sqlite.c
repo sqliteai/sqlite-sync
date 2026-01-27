@@ -41,7 +41,7 @@ char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, boo
     return sql;
 }
 
-char *sql_escape_name (const char *name, char *buffer, size_t bsize) {
+char *sql_escape_identifier (const char *name, char *buffer, size_t bsize) {
     return sqlite3_snprintf((int)bsize, buffer, "%q", name);
 }
 
@@ -77,7 +77,7 @@ char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_n
     // Unfortunately in SQLite column names (or table names) cannot be bound parameters in a SELECT statement
     // otherwise we should have used something like SELECT 'SELECT ? FROM %w WHERE rowid=?';
     char buffer[1024];
-    char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
+    char *singlequote_escaped_table_name = sql_escape_identifier(table_name, buffer, sizeof(buffer));
     
     #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
     if (table->rowid_only) {
@@ -103,7 +103,7 @@ process_process:
 char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name, const char *schema) {
     UNUSED_PARAMETER(schema);
     char buffer[1024];
-    char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
+    char *singlequote_escaped_table_name = sql_escape_identifier(table_name, buffer, sizeof(buffer));
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_DELETE_ROW_BY_PK, table_name, singlequote_escaped_table_name);
     if (!sql) return NULL;
 
@@ -117,7 +117,7 @@ char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name, c
 char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_name, const char *schema) {
     UNUSED_PARAMETER(schema);
     char buffer[1024];
-    char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
+    char *singlequote_escaped_table_name = sql_escape_identifier(table_name, buffer, sizeof(buffer));
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_INSERT_PK_IGNORE, table_name, table_name, singlequote_escaped_table_name);
     if (!sql) return NULL;
 
@@ -132,8 +132,8 @@ char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_na
     UNUSED_PARAMETER(schema);
     char buffer[1024];
     char buffer2[1024];
-    char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
-    char *singlequote_escaped_col_name = sql_escape_name(colname, buffer2, sizeof(buffer2));
+    char *singlequote_escaped_table_name = sql_escape_identifier(table_name, buffer, sizeof(buffer));
+    char *singlequote_escaped_col_name = sql_escape_identifier(colname, buffer2, sizeof(buffer2));
     char *sql = cloudsync_memory_mprintf(
         SQL_BUILD_UPSERT_PK_AND_COL,
         table_name,
@@ -156,8 +156,8 @@ char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_na
     char *colnamequote = "\"";
     char buffer[1024];
     char buffer2[1024];
-    char *singlequote_escaped_table_name = sql_escape_name(table_name, buffer, sizeof(buffer));
-    char *singlequote_escaped_col_name = sql_escape_name(colname, buffer2, sizeof(buffer2));
+    char *singlequote_escaped_table_name = sql_escape_identifier(table_name, buffer, sizeof(buffer));
+    char *singlequote_escaped_col_name = sql_escape_identifier(colname, buffer2, sizeof(buffer2));
     char *sql = cloudsync_memory_mprintf(
         SQL_BUILD_SELECT_COLS_BY_PK_FMT,
         table_name,
@@ -186,33 +186,33 @@ char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, 
     return result;
 }
 
-char *database_table_schema(const char *table_name) {
+char *database_table_schema (const char *table_name) {
     return NULL;
 }
 
-char *database_build_meta_ref(const char *schema, const char *table_name) {
+char *database_build_meta_ref (const char *schema, const char *table_name) {
     // schema unused in SQLite
     return cloudsync_memory_mprintf("%s_cloudsync", table_name);
 }
 
-char *database_build_base_ref(const char *schema, const char *table_name) {
+char *database_build_base_ref (const char *schema, const char *table_name) {
     // schema unused in SQLite
     return cloudsync_string_dup(table_name);
 }
 
 // SQLite version: schema parameter unused (SQLite has no schemas).
-char *sql_build_delete_cols_not_in_schema_query(const char *schema, const char *table_name, const char *meta_ref, const char *pkcol) {
+char *sql_build_delete_cols_not_in_schema_query (const char *schema, const char *table_name, const char *meta_ref, const char *pkcol) {
     UNUSED_PARAMETER(schema);
     return cloudsync_memory_mprintf(
-        "DELETE FROM %s WHERE col_name NOT IN ("
-        "SELECT name FROM pragma_table_info('%s') "
+        "DELETE FROM \"%w\" WHERE col_name NOT IN ("
+        "SELECT name FROM pragma_table_info('%q') "
         "UNION SELECT '%s'"
         ");",
         meta_ref, table_name, pkcol
     );
 }
 
-char *sql_build_pk_collist_query(const char *schema, const char *table_name) {
+char *sql_build_pk_collist_query (const char *schema, const char *table_name) {
     UNUSED_PARAMETER(schema);
     return cloudsync_memory_mprintf(
         "SELECT group_concat('\"' || format('%%w', name) || '\"', ',') "
@@ -221,7 +221,7 @@ char *sql_build_pk_collist_query(const char *schema, const char *table_name) {
     );
 }
 
-char *sql_build_pk_decode_selectlist_query(const char *schema, const char *table_name) {
+char *sql_build_pk_decode_selectlist_query (const char *schema, const char *table_name) {
     UNUSED_PARAMETER(schema);
     return cloudsync_memory_mprintf(
         "SELECT group_concat("
@@ -232,12 +232,16 @@ char *sql_build_pk_decode_selectlist_query(const char *schema, const char *table
     );
 }
 
-char *sql_build_pk_qualified_collist_query(const char *schema, const char *table_name) {
+char *sql_build_pk_qualified_collist_query (const char *schema, const char *table_name) {
     UNUSED_PARAMETER(schema);
+    
+    char buffer[1024];
+    char *singlequote_escaped_table_name = sql_escape_identifier(table_name, buffer, sizeof(buffer));
+    if (!singlequote_escaped_table_name) return NULL;
+    
     return cloudsync_memory_mprintf(
         "SELECT group_concat('\"%w\".\"' || format('%%w', name) || '\"', ',') "
-        "FROM pragma_table_info('%s') WHERE pk>0 ORDER BY pk;",
-        table_name, table_name
+        "FROM pragma_table_info('%s') WHERE pk>0 ORDER BY pk;", singlequote_escaped_table_name, singlequote_escaped_table_name
     );
 }
 

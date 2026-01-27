@@ -1714,9 +1714,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
             goto finalize;
         }
         
-        char buffer[1024];
-        char *singlequote_escaped_table_name = sql_escape_name(table->name, buffer, sizeof(buffer));
-        sql = sql_build_pk_qualified_collist_query(schema, singlequote_escaped_table_name);
+        sql = sql_build_pk_qualified_collist_query(schema, table->name);
         if (!sql) {rc = DBRES_NOMEM; goto finalize;}
         
         char *pkclause = NULL;

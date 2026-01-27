@@ -86,26 +86,7 @@ static int database_refresh_snapshot (void);
 
 // MARK: - SQL -
 
-char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta) {
-    // Escape the table name (doubles any embedded quotes)
-    char escaped[512];
-    sql_escape_name(table_name, escaped, sizeof(escaped));
-
-    // Add the surrounding quotes in the format string
-    if (is_meta) {
-        snprintf(buffer, bsize, "DROP TABLE IF EXISTS \"%s_cloudsync\";", escaped);
-    } else {
-        snprintf(buffer, bsize, "DROP TABLE IF EXISTS \"%s\";", escaped);
-    }
-
-    return buffer;
-}
-
-char *sql_escape_name (const char *name, char *buffer, size_t bsize) {
-    // PostgreSQL identifier escaping: double any embedded double quotes
-    // Does NOT add surrounding quotes (caller's responsibility)
-    // Similar to SQLite's %q behavior for escaping
-
+static char *sql_escape_character (const char *name, char *buffer, size_t bsize, char c) {
     if (!name || !buffer || bsize < 1) {
         if (buffer && bsize > 0) buffer[0] = '\0';
         return NULL;
@@ -114,14 +95,14 @@ char *sql_escape_name (const char *name, char *buffer, size_t bsize) {
     size_t i = 0, j = 0;
 
     while (name[i]) {
-        if (name[i] == '"') {
-            // Need space for 2 chars (escaped quote) + null
+        if (name[i] == c) {
+            // Need space for 2 chars (escaped c) + null
             if (j >= bsize - 2) {
                 elog(WARNING, "Identifier name too long for buffer, truncated: %s", name);
                 break;
             }
-            buffer[j++] = '"';
-            buffer[j++] = '"';
+            buffer[j++] = c;
+            buffer[j++] = c;
         } else {
             // Need space for 1 char + null
             if (j >= bsize - 1) {
@@ -134,6 +115,34 @@ char *sql_escape_name (const char *name, char *buffer, size_t bsize) {
     }
 
     buffer[j] = '\0';
+    return buffer;
+}
+
+static char *sql_escape_identifier (const char *name, char *buffer, size_t bsize) {
+    // PostgreSQL identifier escaping: double any embedded double quotes
+    // Does NOT add surrounding quotes (caller's responsibility)
+    // Similar to SQLite's %q behavior for escaping
+    return sql_escape_character(name, buffer, bsize, '"');
+}
+
+static char *sql_escape_literal (const char *name, char *buffer, size_t bsize) {
+    // Escapes single quotes for use inside SQL string literals: ' → ''
+    // Does NOT add surrounding quotes (caller's responsibility)
+    return sql_escape_character(name, buffer, bsize, '\'');
+}
+
+char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta) {
+    // Escape the table name (doubles any embedded quotes)
+    char escaped[512];
+    sql_escape_identifier(table_name, escaped, sizeof(escaped));
+
+    // Add the surrounding quotes in the format string
+    if (is_meta) {
+        snprintf(buffer, bsize, "DROP TABLE IF EXISTS \"%s_cloudsync\";", escaped);
+    } else {
+        snprintf(buffer, bsize, "DROP TABLE IF EXISTS \"%s\";", escaped);
+    }
+
     return buffer;
 }
 
@@ -226,7 +235,7 @@ char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, 
     return result;
 }
 
-char *database_table_schema(const char *table_name) {
+char *database_table_schema (const char *table_name) {
     if (!table_name) return NULL;
 
     // Build metadata table name
@@ -279,23 +288,23 @@ char *database_table_schema(const char *table_name) {
     return schema;
 }
 
-char *database_build_meta_ref(const char *schema, const char *table_name) {
+char *database_build_meta_ref (const char *schema, const char *table_name) {
     char escaped_table[512];
-    sql_escape_name(table_name, escaped_table, sizeof(escaped_table));
+    sql_escape_identifier(table_name, escaped_table, sizeof(escaped_table));
     if (schema) {
         char escaped_schema[512];
-        sql_escape_name(schema, escaped_schema, sizeof(escaped_schema));
+        sql_escape_identifier(schema, escaped_schema, sizeof(escaped_schema));
         return cloudsync_memory_mprintf("\"%s\".\"%s_cloudsync\"", escaped_schema, escaped_table);
     }
     return cloudsync_memory_mprintf("\"%s_cloudsync\"", escaped_table);
 }
 
-char *database_build_base_ref(const char *schema, const char *table_name) {
+char *database_build_base_ref (const char *schema, const char *table_name) {
     char escaped_table[512];
-    sql_escape_name(table_name, escaped_table, sizeof(escaped_table));
+    sql_escape_identifier(table_name, escaped_table, sizeof(escaped_table));
     if (schema) {
         char escaped_schema[512];
-        sql_escape_name(schema, escaped_schema, sizeof(escaped_schema));
+        sql_escape_identifier(schema, escaped_schema, sizeof(escaped_schema));
         return cloudsync_memory_mprintf("\"%s\".\"%s\"", escaped_schema, escaped_table);
     }
     return cloudsync_memory_mprintf("\"%s\"", escaped_table);
@@ -303,7 +312,7 @@ char *database_build_base_ref(const char *schema, const char *table_name) {
 
 // Schema-aware SQL builder for PostgreSQL: deletes columns not in schema or pkcol.
 // Schema parameter: pass empty string to fall back to current_schema() via SQL.
-char *sql_build_delete_cols_not_in_schema_query(const char *schema, const char *table_name, const char *meta_ref, const char *pkcol) {
+char *sql_build_delete_cols_not_in_schema_query (const char *schema, const char *table_name, const char *meta_ref, const char *pkcol) {
     const char *schema_param = schema ? schema : "";
     return cloudsync_memory_mprintf(
         "DELETE FROM %s WHERE col_name NOT IN ("
@@ -316,7 +325,7 @@ char *sql_build_delete_cols_not_in_schema_query(const char *schema, const char *
 }
 
 // Builds query to get comma-separated list of primary key column names.
-char *sql_build_pk_collist_query(const char *schema, const char *table_name) {
+char *sql_build_pk_collist_query (const char *schema, const char *table_name) {
     const char *schema_param = schema ? schema : "";
     return cloudsync_memory_mprintf(
         "SELECT string_agg(quote_ident(column_name), ',') "
@@ -328,7 +337,7 @@ char *sql_build_pk_collist_query(const char *schema, const char *table_name) {
 }
 
 // Builds query to get SELECT list of decoded primary key columns.
-char *sql_build_pk_decode_selectlist_query(const char *schema, const char *table_name) {
+char *sql_build_pk_decode_selectlist_query (const char *schema, const char *table_name) {
     const char *schema_param = schema ? schema : "";
     return cloudsync_memory_mprintf(
         "SELECT string_agg("
@@ -342,14 +351,18 @@ char *sql_build_pk_decode_selectlist_query(const char *schema, const char *table
 }
 
 // Builds query to get qualified (schema.table.column) primary key column list.
-char *sql_build_pk_qualified_collist_query(const char *schema, const char *table_name) {
+char *sql_build_pk_qualified_collist_query (const char *schema, const char *table_name) {
     const char *schema_param = schema ? schema : "";
+    
+    char buffer[1024];
+    char *singlequote_escaped_table_name = sql_escape_literal(table_name, buffer, sizeof(buffer));
+    if (!singlequote_escaped_table_name) return NULL;
+    
     return cloudsync_memory_mprintf(
         "SELECT string_agg(quote_ident(column_name), ',' ORDER BY ordinal_position) "
         "FROM information_schema.key_column_usage "
         "WHERE table_name = '%s' AND table_schema = COALESCE(NULLIF('%s', ''), current_schema()) "
-        "AND constraint_name LIKE '%%_pkey';",
-        table_name, schema_param
+        "AND constraint_name LIKE '%%_pkey';", singlequote_escaped_table_name, schema_param
     );
 }
 
@@ -1116,7 +1129,7 @@ static int database_create_insert_trigger_internal (cloudsync_context *data, con
     char trigger_name[1024];
     char func_name[1024];
     char escaped_tbl[512];
-    sql_escape_name(table_name, escaped_tbl, sizeof(escaped_tbl));
+    sql_escape_identifier(table_name, escaped_tbl, sizeof(escaped_tbl));
     snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_insert_%s", escaped_tbl);
     snprintf(func_name, sizeof(func_name), "cloudsync_after_insert_%s_fn", escaped_tbl);
 
@@ -1178,7 +1191,7 @@ static int database_create_update_trigger_gos_internal (cloudsync_context *data,
     char trigger_name[1024];
     char func_name[1024];
     char escaped_tbl[512];
-    sql_escape_name(table_name, escaped_tbl, sizeof(escaped_tbl));
+    sql_escape_identifier(table_name, escaped_tbl, sizeof(escaped_tbl));
     snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_update_%s", escaped_tbl);
     snprintf(func_name, sizeof(func_name), "cloudsync_before_update_%s_fn", escaped_tbl);
 
@@ -1221,7 +1234,7 @@ static int database_create_update_trigger_internal (cloudsync_context *data, con
     char trigger_name[1024];
     char func_name[1024];
     char escaped_tbl[512];
-    sql_escape_name(table_name, escaped_tbl, sizeof(escaped_tbl));
+    sql_escape_identifier(table_name, escaped_tbl, sizeof(escaped_tbl));
     snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_update_%s", escaped_tbl);
     snprintf(func_name, sizeof(func_name), "cloudsync_after_update_%s_fn", escaped_tbl);
 
@@ -1327,7 +1340,7 @@ static int database_create_delete_trigger_gos_internal (cloudsync_context *data,
     char trigger_name[1024];
     char func_name[1024];
     char escaped_tbl[512];
-    sql_escape_name(table_name, escaped_tbl, sizeof(escaped_tbl));
+    sql_escape_identifier(table_name, escaped_tbl, sizeof(escaped_tbl));
     snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_delete_%s", escaped_tbl);
     snprintf(func_name, sizeof(func_name), "cloudsync_before_delete_%s_fn", escaped_tbl);
 
@@ -1370,7 +1383,7 @@ static int database_create_delete_trigger_internal (cloudsync_context *data, con
     char trigger_name[1024];
     char func_name[1024];
     char escaped_tbl[512];
-    sql_escape_name(table_name, escaped_tbl, sizeof(escaped_tbl));
+    sql_escape_identifier(table_name, escaped_tbl, sizeof(escaped_tbl));
     snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_delete_%s", escaped_tbl);
     snprintf(func_name, sizeof(func_name), "cloudsync_after_delete_%s_fn", escaped_tbl);
 
@@ -1470,7 +1483,7 @@ int database_delete_triggers (cloudsync_context *data, const char *table) {
     if (!base_ref) return DBRES_NOMEM;
 
     char escaped_tbl[512];
-    sql_escape_name(table, escaped_tbl, sizeof(escaped_tbl));
+    sql_escape_identifier(table, escaped_tbl, sizeof(escaped_tbl));
 
     char *sql = cloudsync_memory_mprintf(
              "DROP TRIGGER IF EXISTS \"cloudsync_after_insert_%s\" ON %s;",
