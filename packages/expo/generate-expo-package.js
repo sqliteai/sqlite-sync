@@ -53,12 +53,12 @@ function generatePackageJson(version) {
     license: 'SEE LICENSE IN LICENSE.md',
     repository: {
       type: 'git',
-      url: 'https://github.com/sqliteai/sqlite-sync.git',
+      url: 'https://github.com/sqliteai/sqlite-sync-dev.git',
       directory: 'packages/expo',
     },
-    homepage: 'https://github.com/sqliteai/sqlite-sync#react-native--expo',
+    homepage: 'https://github.com/sqliteai/sqlite-sync-dev#react-native--expo',
     bugs: {
-      url: 'https://github.com/sqliteai/sqlite-sync/issues',
+      url: 'https://github.com/sqliteai/sqlite-sync-dev/issues',
     },
     peerDependencies: {
       expo: '>=51.0.0',
@@ -379,7 +379,7 @@ console.log('SQLite Sync Version:', result.rows[0].version);
 
 ## Links
 
-- [SQLite Sync Documentation](https://github.com/sqliteai/sqlite-sync)
+- [SQLite Sync Documentation](https://github.com/sqliteai/sqlite-sync-dev)
 - [SQLite Cloud](https://sqlitecloud.io)
 
 ## License

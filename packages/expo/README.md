@@ -62,13 +62,13 @@ mkdir -p artifacts/cloudsync-android-armeabi-v7a
 mkdir -p artifacts/cloudsync-android-x86_64
 
 # Download xcframework
-curl -L "https://github.com/sqliteai/sqlite-sync/releases/download/${VERSION}/cloudsync-apple-xcframework-${VERSION}.zip" -o xcframework.zip
+curl -L "https://github.com/sqliteai/sqlite-sync-dev/releases/download/${VERSION}/cloudsync-apple-xcframework-${VERSION}.zip" -o xcframework.zip
 unzip xcframework.zip -d artifacts/cloudsync-apple-xcframework/
 rm xcframework.zip
 
 # Download Android binaries
 for arch in arm64-v8a armeabi-v7a x86_64; do
-  curl -L "https://github.com/sqliteai/sqlite-sync/releases/download/${VERSION}/cloudsync-android-${arch}-${VERSION}.zip" -o android-${arch}.zip
+  curl -L "https://github.com/sqliteai/sqlite-sync-dev/releases/download/${VERSION}/cloudsync-android-${arch}-${VERSION}.zip" -o android-${arch}.zip
   unzip android-${arch}.zip -d artifacts/cloudsync-android-${arch}/
   rm android-${arch}.zip
 done
@@ -107,10 +107,10 @@ node generate-expo-package.js 0.9.92 ../../artifacts ./expo-package
 
 ```bash
 # In your Expo app
-npm install /path/to/sqlite-sync/packages/expo/expo-package
+npm install /path/to/sqlite-sync-dev/packages/expo/expo-package
 
 # Or use file: reference in package.json
-# "@sqliteai/sqlite-sync-expo-dev": "file:/path/to/sqlite-sync/packages/expo/expo-package"
+# "@sqliteai/sqlite-sync-expo-dev": "file:/path/to/sqlite-sync-dev/packages/expo/expo-package"
 ```
 
 Update `app.json`:
