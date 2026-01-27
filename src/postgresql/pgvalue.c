@@ -125,6 +125,9 @@ pgvalue_t **pgvalues_from_array(ArrayType *array, int *out_count) {
         pgvalue_vec_push(&values, &count, &cap, v);
     }
 
+    if (elems) pfree(elems);
+    if (nulls) pfree(nulls);
+
     if (out_count) *out_count = count;
     return values;
 }

@@ -314,31 +314,46 @@ char *database_build_base_ref (const char *schema, const char *table_name) {
 // Schema parameter: pass empty string to fall back to current_schema() via SQL.
 char *sql_build_delete_cols_not_in_schema_query (const char *schema, const char *table_name, const char *meta_ref, const char *pkcol) {
     const char *schema_param = schema ? schema : "";
+
+    char esc_table[1024], esc_schema[1024];
+    sql_escape_literal(table_name, esc_table, sizeof(esc_table));
+    sql_escape_literal(schema_param, esc_schema, sizeof(esc_schema));
+
     return cloudsync_memory_mprintf(
         "DELETE FROM %s WHERE col_name NOT IN ("
         "SELECT column_name FROM information_schema.columns WHERE table_name = '%s' "
         "AND table_schema = COALESCE(NULLIF('%s', ''), current_schema()) "
         "UNION SELECT '%s'"
         ");",
-        meta_ref, table_name, schema_param, pkcol
+        meta_ref, esc_table, esc_schema, pkcol
     );
 }
 
 // Builds query to get comma-separated list of primary key column names.
 char *sql_build_pk_collist_query (const char *schema, const char *table_name) {
     const char *schema_param = schema ? schema : "";
+
+    char esc_table[1024], esc_schema[1024];
+    sql_escape_literal(table_name, esc_table, sizeof(esc_table));
+    sql_escape_literal(schema_param, esc_schema, sizeof(esc_schema));
+
     return cloudsync_memory_mprintf(
         "SELECT string_agg(quote_ident(column_name), ',') "
         "FROM information_schema.key_column_usage "
         "WHERE table_name = '%s' AND table_schema = COALESCE(NULLIF('%s', ''), current_schema()) "
         "AND constraint_name LIKE '%%_pkey';",
-        table_name, schema_param
+        esc_table, esc_schema
     );
 }
 
 // Builds query to get SELECT list of decoded primary key columns.
 char *sql_build_pk_decode_selectlist_query (const char *schema, const char *table_name) {
     const char *schema_param = schema ? schema : "";
+
+    char esc_table[1024], esc_schema[1024];
+    sql_escape_literal(table_name, esc_table, sizeof(esc_table));
+    sql_escape_literal(schema_param, esc_schema, sizeof(esc_schema));
+
     return cloudsync_memory_mprintf(
         "SELECT string_agg("
         "'cloudsync_pk_decode(pk, ' || ordinal_position || ') AS ' || quote_ident(column_name), ',' ORDER BY ordinal_position"
@@ -346,23 +361,23 @@ char *sql_build_pk_decode_selectlist_query (const char *schema, const char *tabl
         "FROM information_schema.key_column_usage "
         "WHERE table_name = '%s' AND table_schema = COALESCE(NULLIF('%s', ''), current_schema()) "
         "AND constraint_name LIKE '%%_pkey';",
-        table_name, schema_param
+        esc_table, esc_schema
     );
 }
 
 // Builds query to get qualified (schema.table.column) primary key column list.
 char *sql_build_pk_qualified_collist_query (const char *schema, const char *table_name) {
     const char *schema_param = schema ? schema : "";
-    
-    char buffer[1024];
-    char *singlequote_escaped_table_name = sql_escape_literal(table_name, buffer, sizeof(buffer));
-    if (!singlequote_escaped_table_name) return NULL;
-    
+
+    char esc_table[1024], esc_schema[1024];
+    sql_escape_literal(table_name, esc_table, sizeof(esc_table));
+    sql_escape_literal(schema_param, esc_schema, sizeof(esc_schema));
+
     return cloudsync_memory_mprintf(
         "SELECT string_agg(quote_ident(column_name), ',' ORDER BY ordinal_position) "
         "FROM information_schema.key_column_usage "
         "WHERE table_name = '%s' AND table_schema = COALESCE(NULLIF('%s', ''), current_schema()) "
-        "AND constraint_name LIKE '%%_pkey';", singlequote_escaped_table_name, schema_param
+        "AND constraint_name LIKE '%%_pkey';", esc_table, esc_schema
     );
 }
 
@@ -645,28 +660,29 @@ static bool database_system_exists (cloudsync_context *data, const char *name, c
           return false;
       }
 
+      bool need_schema_param = !force_public && strcmp(type, "trigger") != 0;
+      Datum datum_name = CStringGetTextDatum(name);
+      Datum datum_schema = need_schema_param ? CStringGetTextDatum(schema_param) : (Datum)0;
+
       MemoryContext oldcontext = CurrentMemoryContext;
       PG_TRY();
       {
-          if (force_public || strcmp(type, "trigger") == 0) {
+          if (!need_schema_param) {
               // force_public or trigger: only need table/trigger name parameter
               Oid argtypes[1] = {TEXTOID};
-              Datum values[1] = {CStringGetTextDatum(name)};
+              Datum values[1] = {datum_name};
               char nulls[1] = {' '};
               int rc = SPI_execute_with_args(query, 1, argtypes, values, nulls, true, 0);
               exists = (rc >= 0 && SPI_processed > 0);
               if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
-              pfree(DatumGetPointer(values[0]));
           } else {
               // table with schema parameter
               Oid argtypes[2] = {TEXTOID, TEXTOID};
-              Datum values[2] = {CStringGetTextDatum(name), CStringGetTextDatum(schema_param)};
+              Datum values[2] = {datum_name, datum_schema};
               char nulls[2] = {' ', ' '};
               int rc = SPI_execute_with_args(query, 2, argtypes, values, nulls, true, 0);
               exists = (rc >= 0 && SPI_processed > 0);
               if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
-              pfree(DatumGetPointer(values[0]));
-              pfree(DatumGetPointer(values[1]));
           }
       }
       PG_CATCH();
@@ -679,6 +695,9 @@ static bool database_system_exists (cloudsync_context *data, const char *name, c
           exists = false;
       }
       PG_END_TRY();
+
+      pfree(DatumGetPointer(datum_name));
+      if (need_schema_param) pfree(DatumGetPointer(datum_schema));
 
       elog(DEBUG1, "database_system_exists %s: %d", name, exists);
       return exists;
@@ -1135,6 +1154,10 @@ static int database_create_insert_trigger_internal (cloudsync_context *data, con
 
     if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
 
+    char esc_tbl_literal[1024], esc_schema_literal[1024];
+    sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
+    sql_escape_literal(schema_param, esc_schema_literal, sizeof(esc_schema_literal));
+
     char sql[2048];
     snprintf(sql, sizeof(sql),
              "SELECT string_agg('NEW.' || quote_ident(kcu.column_name), ',' ORDER BY kcu.ordinal_position) "
@@ -1144,7 +1167,7 @@ static int database_create_insert_trigger_internal (cloudsync_context *data, con
              "  AND tc.table_schema = kcu.table_schema "
              "WHERE tc.table_name = '%s' AND tc.table_schema = COALESCE(NULLIF('%s', ''), current_schema()) "
              "AND tc.constraint_type = 'PRIMARY KEY';",
-             table_name, schema_param);
+             esc_tbl_literal, esc_schema_literal);
 
     char *pk_list = NULL;
     int rc = database_select_text(data, sql, &pk_list);
@@ -1162,7 +1185,7 @@ static int database_create_insert_trigger_internal (cloudsync_context *data, con
         "  RETURN NEW; "
         "END; "
         "$$ LANGUAGE plpgsql;",
-        func_name, table_name, table_name, pk_list);
+        func_name, esc_tbl_literal, esc_tbl_literal, pk_list);
     cloudsync_memory_free(pk_list);
     if (!sql2) return DBRES_NOMEM;
 
@@ -1197,13 +1220,16 @@ static int database_create_update_trigger_gos_internal (cloudsync_context *data,
 
     if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
 
+    char esc_tbl_literal[1024];
+    sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
+
     char *sql = cloudsync_memory_mprintf(
         "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $$ "
         "BEGIN "
         "  RAISE EXCEPTION 'Error: UPDATE operation is not allowed on table %s.'; "
         "END; "
         "$$ LANGUAGE plpgsql;",
-        func_name, table_name);
+        func_name, esc_tbl_literal);
     if (!sql) return DBRES_NOMEM;
 
     int rc = database_exec(data, sql);
@@ -1217,7 +1243,7 @@ static int database_create_update_trigger_gos_internal (cloudsync_context *data,
         "CREATE TRIGGER \"%s\" BEFORE UPDATE ON %s "
         "FOR EACH ROW WHEN (cloudsync_is_enabled('%s') = true) "
         "EXECUTE FUNCTION \"%s\"();",
-        trigger_name, base_ref, table_name, func_name);
+        trigger_name, base_ref, esc_tbl_literal, func_name);
     cloudsync_memory_free(base_ref);
     if (!sql) return DBRES_NOMEM;
 
@@ -1240,6 +1266,10 @@ static int database_create_update_trigger_internal (cloudsync_context *data, con
 
     if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
 
+    char esc_tbl_literal[1024], esc_schema_literal[1024];
+    sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
+    sql_escape_literal(schema_param, esc_schema_literal, sizeof(esc_schema_literal));
+
     char sql[2048];
     snprintf(sql, sizeof(sql),
            "SELECT string_agg("
@@ -1253,7 +1283,7 @@ static int database_create_update_trigger_internal (cloudsync_context *data, con
            "  AND tc.table_schema = kcu.table_schema "
            "WHERE tc.table_name = '%s' AND tc.table_schema = COALESCE(NULLIF('%s', ''), current_schema()) "
            "AND tc.constraint_type = 'PRIMARY KEY';",
-           table_name, table_name, schema_param);
+           esc_tbl_literal, esc_tbl_literal, esc_schema_literal);
 
     char *pk_values_list = NULL;
     int rc = database_select_text(data, sql, &pk_values_list);
@@ -1282,7 +1312,7 @@ static int database_create_update_trigger_internal (cloudsync_context *data, con
            "  AND tc.constraint_type = 'PRIMARY KEY' "
            "  AND kcu.column_name = c.column_name"
            ");",
-           table_name, table_name, schema_param);
+           esc_tbl_literal, esc_tbl_literal, esc_schema_literal);
 
     char *col_values_list = NULL;
     rc = database_select_text(data, sql, &col_values_list);
@@ -1311,7 +1341,7 @@ static int database_create_update_trigger_internal (cloudsync_context *data, con
         "  RETURN NEW; "
         "END; "
         "$$ LANGUAGE plpgsql;",
-        func_name, table_name, values_query);
+        func_name, esc_tbl_literal, values_query);
     cloudsync_memory_free(values_query);
     if (!sql2) return DBRES_NOMEM;
 
@@ -1346,13 +1376,16 @@ static int database_create_delete_trigger_gos_internal (cloudsync_context *data,
 
     if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
 
+    char esc_tbl_literal[1024];
+    sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
+
     char *sql = cloudsync_memory_mprintf(
         "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $$ "
         "BEGIN "
         "  RAISE EXCEPTION 'Error: DELETE operation is not allowed on table %s.'; "
         "END; "
         "$$ LANGUAGE plpgsql;",
-        func_name, table_name);
+        func_name, esc_tbl_literal);
     if (!sql) return DBRES_NOMEM;
 
     int rc = database_exec(data, sql);
@@ -1366,7 +1399,7 @@ static int database_create_delete_trigger_gos_internal (cloudsync_context *data,
         "CREATE TRIGGER \"%s\" BEFORE DELETE ON %s "
         "FOR EACH ROW WHEN (cloudsync_is_enabled('%s') = true) "
         "EXECUTE FUNCTION \"%s\"();",
-        trigger_name, base_ref, table_name, func_name);
+        trigger_name, base_ref, esc_tbl_literal, func_name);
     cloudsync_memory_free(base_ref);
     if (!sql) return DBRES_NOMEM;
 
@@ -1389,6 +1422,10 @@ static int database_create_delete_trigger_internal (cloudsync_context *data, con
 
     if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
 
+    char esc_tbl_literal[1024], esc_schema_literal[1024];
+    sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
+    sql_escape_literal(schema_param, esc_schema_literal, sizeof(esc_schema_literal));
+
     char sql[2048];
     snprintf(sql, sizeof(sql),
              "SELECT string_agg('OLD.' || quote_ident(kcu.column_name), ',' ORDER BY kcu.ordinal_position) "
@@ -1398,7 +1435,7 @@ static int database_create_delete_trigger_internal (cloudsync_context *data, con
              "  AND tc.table_schema = kcu.table_schema "
              "WHERE tc.table_name = '%s' AND tc.table_schema = COALESCE(NULLIF('%s', ''), current_schema()) "
              "AND tc.constraint_type = 'PRIMARY KEY';",
-             table_name, schema_param);
+             esc_tbl_literal, esc_schema_literal);
 
     char *pk_list = NULL;
     int rc = database_select_text(data, sql, &pk_list);
@@ -1416,7 +1453,7 @@ static int database_create_delete_trigger_internal (cloudsync_context *data, con
         "  RETURN OLD; "
         "END; "
         "$$ LANGUAGE plpgsql;",
-        func_name, table_name, table_name, pk_list);
+        func_name, esc_tbl_literal, esc_tbl_literal, pk_list);
     cloudsync_memory_free(pk_list);
     if (!sql2) return DBRES_NOMEM;
 
@@ -1424,7 +1461,7 @@ static int database_create_delete_trigger_internal (cloudsync_context *data, con
     cloudsync_memory_free(sql2);
     if (rc != DBRES_OK) return rc;
 
-    char *base_ref = database_build_base_ref(cloudsync_schema(data), table_name);
+    char *base_ref = database_build_base_ref(schema, table_name);
     if (!base_ref) return DBRES_NOMEM;
 
     sql2 = cloudsync_memory_mprintf(
