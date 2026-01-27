@@ -1,8 +1,8 @@
-# @sqliteai/sqlite-sync
+# @sqliteai/sqlite-sync-dev
 
-[![npm version](https://badge.fury.io/js/@sqliteai%2Fsqlite-sync.svg)](https://www.npmjs.com/package/@sqliteai/sqlite-sync)
+[![npm version](https://badge.fury.io/js/@sqliteai%2Fsqlite-sync-dev.svg)](https://www.npmjs.com/package/@sqliteai/sqlite-sync-dev)
 [![License](https://img.shields.io/badge/license-Elastic%202.0-blue.svg)](LICENSE.md)
-[![sqlite-sync coverage](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fsqliteai.github.io%2Fsqlite-sync%2F&search=%3Ctd%20class%3D%22headerItem%22%3EFunctions%3A%3C%5C%2Ftd%3E%5Cs*%3Ctd%20class%3D%22headerCovTableEntryHi%22%3E(%5B%5Cd.%5D%2B)%26nbsp%3B%25%3C%5C%2Ftd%3E&replace=%241%25&label=coverage&labelColor=rgb(85%2C%2085%2C%2085)%3B&color=rgb(167%2C%20252%2C%20157)%3B&link=https%3A%2F%2Fsqliteai.github.io%2Fsqlite-sync%2F)](https://sqliteai.github.io/sqlite-sync/)
+[![sqlite-sync-dev coverage](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fsqliteai.github.io%2Fsqlite-sync-dev%2F&search=%3Ctd%20class%3D%22headerItem%22%3EFunctions%3A%3C%5C%2Ftd%3E%5Cs*%3Ctd%20class%3D%22headerCovTableEntryHi%22%3E(%5B%5Cd.%5D%2B)%26nbsp%3B%25%3C%5C%2Ftd%3E&replace=%241%25&label=coverage&labelColor=rgb(85%2C%2085%2C%2085)%3B&color=rgb(167%2C%20252%2C%20157)%3B&link=https%3A%2F%2Fsqliteai.github.io%2Fsqlite-sync-dev%2F)](https://sqliteai.github.io/sqlite-sync-dev/)
 
 > SQLite Sync extension packaged for Node.js
 
@@ -29,7 +29,7 @@ In simple terms, CRDTs make it possible for multiple users to **edit shared data
 ## Installation
 
 ```bash
-npm install @sqliteai/sqlite-sync
+npm install @sqliteai/sqlite-sync-dev
 ```
 
 The package automatically downloads the correct native extension for your platform during installation.
@@ -38,22 +38,22 @@ The package automatically downloads the correct native extension for your platfo
 
 | Platform | Architecture | Package |
 |----------|-------------|---------|
-| macOS | ARM64 (Apple Silicon) | `@sqliteai/sqlite-sync-darwin-arm64` |
-| macOS | x86_64 (Intel) | `@sqliteai/sqlite-sync-darwin-x86_64` |
-| Linux | ARM64 (glibc) | `@sqliteai/sqlite-sync-linux-arm64` |
-| Linux | ARM64 (musl/Alpine) | `@sqliteai/sqlite-sync-linux-arm64-musl` |
-| Linux | x86_64 (glibc) | `@sqliteai/sqlite-sync-linux-x86_64` |
-| Linux | x86_64 (musl/Alpine) | `@sqliteai/sqlite-sync-linux-x86_64-musl` |
-| Windows | x86_64 | `@sqliteai/sqlite-sync-win32-x86_64` |
+| macOS | ARM64 (Apple Silicon) | `@sqliteai/sqlite-sync-dev-darwin-arm64` |
+| macOS | x86_64 (Intel) | `@sqliteai/sqlite-sync-dev-darwin-x86_64` |
+| Linux | ARM64 (glibc) | `@sqliteai/sqlite-sync-dev-linux-arm64` |
+| Linux | ARM64 (musl/Alpine) | `@sqliteai/sqlite-sync-dev-linux-arm64-musl` |
+| Linux | x86_64 (glibc) | `@sqliteai/sqlite-sync-dev-linux-x86_64` |
+| Linux | x86_64 (musl/Alpine) | `@sqliteai/sqlite-sync-dev-linux-x86_64-musl` |
+| Windows | x86_64 | `@sqliteai/sqlite-sync-dev-win32-x86_64` |
 
-## sqlite-sync API
+## sqlite-sync-dev API
 
-For detailed information on how to use the sync extension features, see the [main documentation](https://github.com/sqliteai/sqlite-sync/blob/main/API.md).
+For detailed information on how to use the sync extension features, see the [main documentation](https://github.com/sqliteai/sqlite-sync-dev/blob/main/API.md).
 
 ## Usage
 
 ```typescript
-import { getExtensionPath } from '@sqliteai/sqlite-sync';
+import { getExtensionPath } from '@sqliteai/sqlite-sync-dev';
 import Database from 'better-sqlite3';
 
 const db = new Database(':memory:');
@@ -96,7 +96,7 @@ Returns detailed information about the extension for the current platform.
 
 **Example:**
 ```typescript
-import { getExtensionInfo } from '@sqliteai/sqlite-sync';
+import { getExtensionInfo } from '@sqliteai/sqlite-sync-dev';
 
 const info = getExtensionInfo();
 console.log(`Running on ${info.platform}`);
@@ -148,9 +148,9 @@ For production or managed service use, please [contact SQLite Cloud, Inc](mailto
 
 ## Contributing
 
-Contributions are welcome! Please see the [main repository](https://github.com/sqliteai/sqlite-sync) to open an issue.
+Contributions are welcome! Please see the [main repository](https://github.com/sqliteai/sqlite-sync-dev) to open an issue.
 
 ## Support
 
-- 📖 [Documentation](https://github.com/sqliteai/sqlite-sync/blob/main/API.md)
-- 🐛 [Report Issues](https://github.com/sqliteai/sqlite-sync/issues)
+- 📖 [Documentation](https://github.com/sqliteai/sqlite-sync-dev/blob/main/API.md)
+- 🐛 [Report Issues](https://github.com/sqliteai/sqlite-sync-dev/issues)

@@ -1,6 +1,6 @@
 {
-  "name": "@sqliteai/sqlite-sync",
-  "version": "0.8.53",
+  "name": "@sqliteai/sqlite-sync-dev",
+  "version": "0.9.92",
   "description": "SQLite Sync extension for Node.js - Sync on-device databases with the cloud",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -42,24 +42,24 @@
   "license": "SEE LICENSE IN LICENSE.md",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sqliteai/sqlite-sync.git",
+    "url": "https://github.com/sqliteai/sqlite-sync-dev.git",
     "directory": "packages/node"
   },
-  "homepage": "https://github.com/sqliteai/sqlite-sync#readme",
+  "homepage": "https://github.com/sqliteai/sqlite-sync-dev#readme",
   "bugs": {
-    "url": "https://github.com/sqliteai/sqlite-sync/issues"
+    "url": "https://github.com/sqliteai/sqlite-sync-dev/issues"
   },
   "engines": {
     "node": ">=16.0.0"
   },
   "optionalDependencies": {
-    "@sqliteai/sqlite-sync-darwin-arm64": "0.8.53",
-    "@sqliteai/sqlite-sync-darwin-x86_64": "0.8.53",
-    "@sqliteai/sqlite-sync-linux-arm64": "0.8.53",
-    "@sqliteai/sqlite-sync-linux-arm64-musl": "0.8.53",
-    "@sqliteai/sqlite-sync-linux-x86_64": "0.8.53",
-    "@sqliteai/sqlite-sync-linux-x86_64-musl": "0.8.53",
-    "@sqliteai/sqlite-sync-win32-x86_64": "0.8.53"
+    "@sqliteai/sqlite-sync-dev-darwin-arm64": "0.9.92",
+    "@sqliteai/sqlite-sync-dev-darwin-x86_64": "0.9.92",
+    "@sqliteai/sqlite-sync-dev-linux-arm64": "0.9.92",
+    "@sqliteai/sqlite-sync-dev-linux-arm64-musl": "0.9.92",
+    "@sqliteai/sqlite-sync-dev-linux-x86_64": "0.9.92",
+    "@sqliteai/sqlite-sync-dev-linux-x86_64-musl": "0.9.92",
+    "@sqliteai/sqlite-sync-dev-win32-x86_64": "0.9.92"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

@@ -158,7 +158,7 @@ sqlite3_close(db)
 Add the [following](https://central.sonatype.com/artifact/ai.sqlite/sync.dev) to your Gradle dependencies:
 
 ```gradle
-implementation 'ai.sqlite:sync.dev:0.9.91'
+implementation 'ai.sqlite:sync.dev:0.9.92'
 ```
 
 Here's an example of how to use the package:

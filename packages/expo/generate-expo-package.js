@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Generates the @sqliteai/sqlite-sync-expo package
+ * Generates the @sqliteai/sqlite-sync-expo-dev package
  *
  * This script creates an npm package that bundles CloudSync binaries
  * for Expo apps, with an Expo config plugin for automatic setup.
@@ -10,7 +10,7 @@
  *   node generate-expo-package.js <version> <artifacts-dir> <output-dir>
  *
  * Example:
- *   node generate-expo-package.js 0.8.53 ./artifacts ./expo-package
+ *   node generate-expo-package.js 0.9.92 ./artifacts ./expo-package
  */
 
 const fs = require('fs');
@@ -28,7 +28,7 @@ const ANDROID_ARCHS = [
  */
 function generatePackageJson(version) {
   return {
-    name: '@sqliteai/sqlite-sync-expo',
+    name: '@sqliteai/sqlite-sync-expo-dev',
     version: version,
     description: 'SQLite Sync extension for Expo - Sync on-device databases with SQLite Cloud',
     main: 'src/index.js',
@@ -77,20 +77,20 @@ function generatePackageJson(version) {
  */
 function generateIndexJs() {
   return `/**
- * @sqliteai/sqlite-sync-expo
+ * @sqliteai/sqlite-sync-expo-dev
  *
  * SQLite Sync extension binaries for Expo.
  * This package provides pre-built binaries and an Expo config plugin.
  *
  * Usage:
- * 1. Add to app.json plugins: ["@sqliteai/sqlite-sync-expo"]
+ * 1. Add to app.json plugins: ["@sqliteai/sqlite-sync-expo-dev"]
  * 2. Run: npx expo prebuild --clean
  * 3. Load extension in your code (see README)
  */
 
 module.exports = {
   // Package metadata
-  name: '@sqliteai/sqlite-sync-expo',
+  name: '@sqliteai/sqlite-sync-expo-dev',
 
   // Extension identifiers for loading
   ios: {
@@ -108,7 +108,7 @@ module.exports = {
  * Generate src/index.d.ts
  */
 function generateIndexDts() {
-  return `declare module '@sqliteai/sqlite-sync-expo' {
+  return `declare module '@sqliteai/sqlite-sync-expo-dev' {
   export const name: string;
 
   export const ios: {
@@ -131,12 +131,12 @@ function generateAppPlugin() {
  * Expo Config Plugin for SQLite Sync Extension
  *
  * This plugin automatically configures iOS and Android to include the SQLite Sync
- * native binaries. Just add "@sqliteai/sqlite-sync-expo" to your app.json plugins.
+ * native binaries. Just add "@sqliteai/sqlite-sync-expo-dev" to your app.json plugins.
  *
  * Usage in app.json:
  * {
  *   "expo": {
- *     "plugins": ["@sqliteai/sqlite-sync-expo"]
+ *     "plugins": ["@sqliteai/sqlite-sync-expo-dev"]
  *   }
  * }
  */
@@ -176,12 +176,12 @@ function withSqliteSyncIOS(config) {
     if (!fs.existsSync(srcFrameworkPath)) {
       throw new Error(
         \`CloudSync.xcframework not found at \${srcFrameworkPath}. \` +
-        'This is a bug in @sqliteai/sqlite-sync-expo - the package is missing iOS binaries.'
+        'This is a bug in @sqliteai/sqlite-sync-expo-dev - the package is missing iOS binaries.'
       );
     }
 
     // Copy xcframework to iOS project directory
-    console.log(\`[@sqliteai/sqlite-sync-expo] Copying xcframework to \${destFrameworkPath}\`);
+    console.log(\`[@sqliteai/sqlite-sync-expo-dev] Copying xcframework to \${destFrameworkPath}\`);
     fs.cpSync(srcFrameworkPath, destFrameworkPath, { recursive: true });
 
     // Get the main app target
@@ -197,7 +197,7 @@ function withSqliteSyncIOS(config) {
     );
 
     if (!embedFrameworksBuildPhase) {
-      console.log('[@sqliteai/sqlite-sync-expo] Creating "Embed Frameworks" build phase');
+      console.log('[@sqliteai/sqlite-sync-expo-dev] Creating "Embed Frameworks" build phase');
       xcodeProject.addBuildPhase(
         [],
         'PBXCopyFilesBuildPhase',
@@ -209,7 +209,7 @@ function withSqliteSyncIOS(config) {
 
     // Add the framework to the project
     const relativePath = \`\${projectName}/CloudSync.xcframework\`;
-    console.log(\`[@sqliteai/sqlite-sync-expo] Adding framework: \${relativePath}\`);
+    console.log(\`[@sqliteai/sqlite-sync-expo-dev] Adding framework: \${relativePath}\`);
 
     xcodeProject.addFramework(relativePath, {
       target: target.uuid,
@@ -219,7 +219,7 @@ function withSqliteSyncIOS(config) {
       link: true,
     });
 
-    console.log('[@sqliteai/sqlite-sync-expo] iOS setup complete');
+    console.log('[@sqliteai/sqlite-sync-expo-dev] iOS setup complete');
     return config;
   });
 }
@@ -257,7 +257,7 @@ function withSqliteSyncAndroid(config) {
         // Check source exists
         if (!fs.existsSync(srcFile)) {
           console.warn(
-            \`[@sqliteai/sqlite-sync-expo] Warning: \${srcFile} not found, skipping \${arch}\`
+            \`[@sqliteai/sqlite-sync-expo-dev] Warning: \${srcFile} not found, skipping \${arch}\`
           );
           continue;
         }
@@ -266,11 +266,11 @@ function withSqliteSyncAndroid(config) {
         fs.mkdirSync(destDir, { recursive: true });
 
         // Copy the .so file
-        console.log(\`[@sqliteai/sqlite-sync-expo] Copying \${arch}/cloudsync.so\`);
+        console.log(\`[@sqliteai/sqlite-sync-expo-dev] Copying \${arch}/cloudsync.so\`);
         fs.copyFileSync(srcFile, destFile);
       }
 
-      console.log('[@sqliteai/sqlite-sync-expo] Android setup complete');
+      console.log('[@sqliteai/sqlite-sync-expo-dev] Android setup complete');
       return config;
     },
   ]);
@@ -280,7 +280,7 @@ function withSqliteSyncAndroid(config) {
  * Main plugin function - combines iOS and Android plugins
  */
 function withSqliteSync(config) {
-  console.log('[@sqliteai/sqlite-sync-expo] Configuring SQLite Sync extension...');
+  console.log('[@sqliteai/sqlite-sync-expo-dev] Configuring SQLite Sync extension...');
 
   // Apply iOS modifications
   config = withSqliteSyncIOS(config);
@@ -299,7 +299,7 @@ module.exports = withSqliteSync;
  * Generate README.md
  */
 function generateReadme(version) {
-  return `# @sqliteai/sqlite-sync-expo
+  return `# @sqliteai/sqlite-sync-expo-dev
 
 SQLite Sync extension for Expo apps.
 
@@ -310,9 +310,9 @@ This package provides pre-built SQLite Sync binaries for iOS and Android, along 
 ## Installation
 
 \`\`\`bash
-npm install @sqliteai/sqlite-sync-expo @op-engineering/op-sqlite
+npm install @sqliteai/sqlite-sync-expo-dev @op-engineering/op-sqlite
 # or
-yarn add @sqliteai/sqlite-sync-expo @op-engineering/op-sqlite
+yarn add @sqliteai/sqlite-sync-expo-dev @op-engineering/op-sqlite
 \`\`\`
 
 ## Setup
@@ -322,7 +322,7 @@ yarn add @sqliteai/sqlite-sync-expo @op-engineering/op-sqlite
 \`\`\`json
 {
   "expo": {
-    "plugins": ["@sqliteai/sqlite-sync-expo"]
+    "plugins": ["@sqliteai/sqlite-sync-expo-dev"]
   }
 }
 \`\`\`
@@ -396,7 +396,7 @@ function main() {
 
   if (args.length < 3) {
     console.error('Usage: node generate-expo-package.js <version> <artifacts-dir> <output-dir>');
-    console.error('Example: node generate-expo-package.js 0.8.53 ./artifacts ./expo-package');
+    console.error('Example: node generate-expo-package.js 0.9.92 ./artifacts ./expo-package');
     process.exit(1);
   }
 
@@ -405,7 +405,7 @@ function main() {
   // Validate version format
   if (!/^\d+\.\d+\.\d+$/.test(version)) {
     console.error(`Error: Invalid version format: ${version}`);
-    console.error('Version must be in semver format (e.g., 0.8.53)');
+    console.error('Version must be in semver format (e.g., 0.9.92)');
     process.exit(1);
   }
 
@@ -416,7 +416,7 @@ function main() {
     process.exit(1);
   }
 
-  console.log(`Generating @sqliteai/sqlite-sync-expo package version ${version}...\n`);
+  console.log(`Generating @sqliteai/sqlite-sync-expo-dev package version ${version}...\n`);
 
   // Create output directory structure
   const srcDir = path.join(outputDir, 'src');
@@ -495,7 +495,7 @@ function main() {
   }
 
   console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log(`✅ Generated @sqliteai/sqlite-sync-expo@${version}`);
+  console.log(`✅ Generated @sqliteai/sqlite-sync-expo-dev@${version}`);
   console.log(`   iOS: CloudSync.xcframework`);
   console.log(`   Android: ${androidSuccess}/${ANDROID_ARCHS.length} architectures`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');

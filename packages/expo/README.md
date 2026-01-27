@@ -1,6 +1,6 @@
-# @sqliteai/sqlite-sync-expo Generator
+# @sqliteai/sqlite-sync-expo-dev Generator
 
-This directory contains the generator script for the `@sqliteai/sqlite-sync-expo` npm package.
+This directory contains the generator script for the `@sqliteai/sqlite-sync-expo-dev` npm package.
 
 ## How It Works
 
@@ -21,7 +21,7 @@ node generate-expo-package.js <version> <artifacts-dir> <output-dir>
 Example:
 
 ```bash
-node generate-expo-package.js 0.8.57 ../../artifacts ./expo-package
+node generate-expo-package.js 0.9.92 ../../artifacts ./expo-package
 cd expo-package && npm publish --provenance --access public
 ```
 
@@ -54,7 +54,7 @@ To test the generator locally, you need to set up mock artifacts that simulate w
 **Option A: Download from latest release**
 
 ```bash
-VERSION="0.8.57"  # or latest version
+VERSION="0.9.92"  # or latest version
 
 mkdir -p artifacts/cloudsync-apple-xcframework
 mkdir -p artifacts/cloudsync-android-arm64-v8a
@@ -100,7 +100,7 @@ cp -r dist/CloudSync.xcframework artifacts/cloudsync-apple-xcframework/
 
 ```bash
 cd packages/expo
-node generate-expo-package.js 0.8.57 ../../artifacts ./expo-package
+node generate-expo-package.js 0.9.92 ../../artifacts ./expo-package
 ```
 
 ### Step 3: Test in a Expo app
@@ -110,7 +110,7 @@ node generate-expo-package.js 0.8.57 ../../artifacts ./expo-package
 npm install /path/to/sqlite-sync/packages/expo/expo-package
 
 # Or use file: reference in package.json
-# "@sqliteai/sqlite-sync-expo": "file:/path/to/sqlite-sync/packages/expo/expo-package"
+# "@sqliteai/sqlite-sync-expo-dev": "file:/path/to/sqlite-sync/packages/expo/expo-package"
 ```
 
 Update `app.json`:
@@ -118,7 +118,7 @@ Update `app.json`:
 ```json
 {
   "expo": {
-    "plugins": ["@sqliteai/sqlite-sync-expo"]
+    "plugins": ["@sqliteai/sqlite-sync-expo-dev"]
   }
 }
 ```

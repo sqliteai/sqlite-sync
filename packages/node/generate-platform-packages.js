@@ -10,7 +10,7 @@
  *   node generate-platform-packages.js <version> <artifacts-dir> <output-dir>
  *
  * Example:
- *   node generate-platform-packages.js 0.8.53 ./artifacts ./platform-packages
+ *   node generate-platform-packages.js 0.9.92 ./artifacts ./platform-packages
  */
 
 const fs = require('fs');
@@ -81,7 +81,7 @@ const PLATFORMS = [
  */
 function generatePackageJson(platform, version) {
   return {
-    name: `@sqliteai/sqlite-sync-${platform.name}`,
+    name: `@sqliteai/sqlite-sync-dev-${platform.name}`,
     version: version,
     description: platform.description,
     main: 'index.js',
@@ -102,7 +102,7 @@ function generatePackageJson(platform, version) {
     license: 'SEE LICENSE IN LICENSE.md',
     repository: {
       type: 'git',
-      url: 'https://github.com/sqliteai/sqlite-sync.git',
+      url: 'https://github.com/sqliteai/sqlite-sync-dev.git',
       directory: 'packages/node',
     },
     engines: {
@@ -127,13 +127,13 @@ module.exports = {
  * Generate README.md for a platform
  */
 function generateReadme(platform, version) {
-  return `# @sqliteai/sqlite-sync-${platform.name}
+  return `# @sqliteai/sqlite-sync-dev-${platform.name}
 
 ${platform.description}
 
 **Version:** ${version}
 
-This is a platform-specific package for [@sqliteai/sqlite-sync](https://www.npmjs.com/package/@sqliteai/sqlite-sync).
+This is a platform-specific package for [@sqliteai/sqlite-sync-dev](https://www.npmjs.com/package/@sqliteai/sqlite-sync-dev).
 
 It is installed automatically as an optional dependency and should not be installed directly.
 
@@ -142,7 +142,7 @@ It is installed automatically as an optional dependency and should not be instal
 Install the main package instead:
 
 \`\`\`bash
-npm install @sqliteai/sqlite-sync
+npm install @sqliteai/sqlite-sync-dev
 \`\`\`
 
 ## Platform
@@ -165,7 +165,7 @@ function main() {
 
   if (args.length < 3) {
     console.error('Usage: node generate-platform-packages.js <version> <artifacts-dir> <output-dir>');
-    console.error('Example: node generate-platform-packages.js 0.8.53 ./artifacts ./platform-packages');
+    console.error('Example: node generate-platform-packages.js 0.9.92 ./artifacts ./platform-packages');
     process.exit(1);
   }
 
@@ -181,7 +181,7 @@ function main() {
   // Validate version format
   if (!/^\d+\.\d+\.\d+$/.test(version)) {
     console.error(`Error: Invalid version format: ${version}`);
-    console.error('Version must be in semver format (e.g., 0.8.53)');
+    console.error('Version must be in semver format (e.g., 0.9.92)');
     process.exit(1);
   }
 

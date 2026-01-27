@@ -130,7 +130,7 @@ export function getCurrentPlatform(): Platform {
  */
 export function getPlatformPackageName(): string {
   const currentPlatform = getCurrentPlatform();
-  return `@sqliteai/sqlite-sync-${currentPlatform}`;
+  return `@sqliteai/sqlite-sync-dev-${currentPlatform}`;
 }
 
 /**

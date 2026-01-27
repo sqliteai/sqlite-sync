@@ -382,7 +382,7 @@ jobs:
 
           # Update package.json
           jq --arg version "${{ steps.tag.outputs.version }}" \
-            '.version = $version | .optionalDependencies = (.optionalDependencies | with_entries(.value = "dev"))' \
+            '.version = $version | .optionalDependencies = (.optionalDependencies | with_entries(.value = $version))' \
             package.json > package.tmp.json && mv package.tmp.json package.json
 
           echo "✓ Updated package.json to version ${{ steps.tag.outputs.version }}"
@@ -405,38 +405,42 @@ jobs:
           cd platform-packages
           for platform_dir in */; do
             platform_name=$(basename "$platform_dir")
-            echo "  Publishing @sqliteai/sqlite-sync-${platform_name}..."
+            echo "  Publishing @sqliteai/sqlite-sync-dev-${platform_name}..."
             cd "$platform_dir"
-            npm publish --provenance --access public --tag dev
+            npm publish --provenance --access public --tag latest
             cd ..
-            echo "  ✓ Published @sqliteai/sqlite-sync-${platform_name}"
+            echo "  ✓ Published @sqliteai/sqlite-sync-dev-${platform_name}"
           done
           cd ..
 
           # Publish main package
           echo "Publishing main package to npm..."
-          npm publish --provenance --access public --tag dev
-          echo "✓ Published @sqliteai/sqlite-sync@${{ steps.tag.outputs.version }}"
+          npm publish --provenance --access public --tag latest
+          echo "✓ Published @sqliteai/sqlite-sync-dev@${{ steps.tag.outputs.version }}"
 
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "✅ Successfully published 8 packages to npm"
-          echo "   Main: @sqliteai/sqlite-sync@${{ steps.tag.outputs.version }}"
+          echo "   Main: @sqliteai/sqlite-sync-dev@${{ steps.tag.outputs.version }}"
           echo "   Platform packages: 7"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: build and publish expo package
         if: steps.tag.outputs.version != ''
         run: |
           cd packages/expo
 
-          echo "Generating @sqliteai/sqlite-sync-expo package..."
+          echo "Generating @sqliteai/sqlite-sync-expo-dev package..."
           node generate-expo-package.js "${{ steps.tag.outputs.version }}" "../../artifacts" "./expo-package"
 
-          echo "Publishing @sqliteai/sqlite-sync-expo to npm..."
+          echo "Publishing @sqliteai/sqlite-sync-expo-dev to npm..."
           cd expo-package
-          npm publish --provenance --access public --tag dev
-          echo "✓ Published @sqliteai/sqlite-sync-expo@${{ steps.tag.outputs.version }}"
+          npm publish --provenance --access public --tag latest
+          echo "✓ Published @sqliteai/sqlite-sync-expo-dev@${{ steps.tag.outputs.version }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - uses: softprops/action-gh-release@v2.2.1
         if: steps.tag.outputs.version != ''
@@ -444,9 +448,9 @@ jobs:
           body: |
             # Packages
 
-            [**Node**](https://www.npmjs.com/package/@sqliteai/sqlite-sync): `npm install @sqliteai/sqlite-sync@dev`
+            [**Node**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-dev): `npm install @sqliteai/sqlite-sync-dev`
             [**WASM**](https://www.npmjs.com/package/@sqliteai/sqlite-wasm): `npm install @sqliteai/sqlite-wasm@dev`
-            [**Expo**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo): `npm install @sqliteai/sqlite-sync-expo@dev`
+            [**Expo**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo-dev): `npm install @sqliteai/sqlite-sync-expo-dev`
             [**Android**](https://central.sonatype.com/artifact/ai.sqlite/sync.dev): `ai.sqlite:sync.dev:${{ steps.tag.outputs.version }}`
             [**Swift**](https://github.com/sqliteai/sqlite-sync-dev#swift-package): [Installation Guide](https://github.com/sqliteai/sqlite-sync-dev#swift-package)
 
