@@ -682,19 +682,22 @@ abort_cleanup:
     network_data_free(netdata);
 }
 
-void cloudsync_network_cleanup (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    DEBUG_FUNCTION("cloudsync_network_cleanup");
-    
+void cloudsync_network_cleanup_internal (sqlite3_context *context) {    
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     network_data *netdata = cloudsync_network_data(context);
     cloudsync_set_auxdata(data, NULL);
     network_data_free(netdata);
-
-    sqlite3_result_int(context, SQLITE_OK);
     
     #ifndef CLOUDSYNC_OMIT_CURL
     curl_global_cleanup();
     #endif
+}
+
+void cloudsync_network_cleanup (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_network_cleanup");
+    
+    cloudsync_network_cleanup_internal(context);
+    sqlite3_result_int(context, SQLITE_OK);
 }
 
 // MARK: - Public -
@@ -983,6 +986,7 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
 finalize:
     if (completed) {
         database_commit_savepoint(data, "cloudsync_logout_savepoint");
+        cloudsync_network_cleanup_internal(context);
         sqlite3_result_int(context, SQLITE_OK);
     } else {
         // cleanup:
