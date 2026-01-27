@@ -17,7 +17,7 @@ apply plugin: 'maven-publish'
 apply plugin: 'signing'
 
 android {
-    namespace 'ai.sqlite.sync-dev'
+    namespace 'ai.sqlite.sync.dev'
     compileSdk 34
 
     defaultConfig {
@@ -57,7 +57,7 @@ afterEvaluate {
         publications {
             release(MavenPublication) {
                 groupId = 'ai.sqlite'
-                artifactId = 'sync-dev'
+                artifactId = 'sync.dev'
                 version = project.hasProperty('VERSION') ? project.VERSION : ['make', 'version'].execute(null, file('../..')).text.trim()
 
                 artifact(project.hasProperty('AAR_PATH') ? project.AAR_PATH : "$buildDir/outputs/aar/android-release.aar")

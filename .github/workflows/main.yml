@@ -445,7 +445,7 @@ jobs:
             [**Node**](https://www.npmjs.com/package/@sqliteai/sqlite-sync): `npm install @sqliteai/sqlite-sync@dev`
             [**WASM**](https://www.npmjs.com/package/@sqliteai/sqlite-wasm): `npm install @sqliteai/sqlite-wasm@dev`
             [**Expo**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo): `npm install @sqliteai/sqlite-sync-expo@dev`
-            [**Android**](https://central.sonatype.com/artifact/ai.sqlite/sync-dev): `ai.sqlite:sync-dev:${{ steps.tag.outputs.version }}`
+            [**Android**](https://central.sonatype.com/artifact/ai.sqlite/sync.dev): `ai.sqlite:sync.dev:${{ steps.tag.outputs.version }}`
             [**Swift**](https://github.com/sqliteai/sqlite-sync-dev#swift-package): [Installation Guide](https://github.com/sqliteai/sqlite-sync-dev#swift-package)
 
             ---
