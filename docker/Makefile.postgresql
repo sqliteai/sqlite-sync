@@ -123,6 +123,7 @@ DOCKER_TAG ?= latest
 DOCKER_BUILD_ARGS ?=
 SUPABASE_CLI_IMAGE ?= $(shell docker ps --format '{{.Image}} {{.Names}}' | awk '/supabase_db/ {print $$1; exit}')
 SUPABASE_CLI_DOCKERFILE ?= docker/postgresql/Dockerfile.supabase
+SUPABASE_POSTGRES_TAG ?= 17.6.1.071
 SUPABASE_WORKDIR ?=
 SUPABASE_WORKDIR_ARG = $(if $(SUPABASE_WORKDIR),--workdir $(SUPABASE_WORKDIR),)
 SUPABASE_DB_HOST ?= 127.0.0.1
@@ -237,13 +238,17 @@ postgres-docker-shell:
 # Build CloudSync into the Supabase CLI postgres image tag
 postgres-supabase-build:
 	@echo "Building CloudSync image for Supabase CLI..."
-	@if [ -z "$(SUPABASE_CLI_IMAGE)" ]; then \
+	@tmp_dockerfile="$$(mktemp /tmp/cloudsync-supabase-cli.XXXXXX)"; \
+	src_dockerfile="$(SUPABASE_CLI_DOCKERFILE)"; \
+	supabase_cli_image="$(SUPABASE_CLI_IMAGE)"; \
+	if [ -z "$$supabase_cli_image" ]; then \
+		supabase_cli_image="public.ecr.aws/supabase/postgres:$(SUPABASE_POSTGRES_TAG)"; \
+	fi; \
+	if [ -z "$$supabase_cli_image" ]; then \
 		echo "Error: Supabase CLI postgres image not found."; \
 		echo "Run 'supabase start' first, or set SUPABASE_CLI_IMAGE=public.ecr.aws/supabase/postgres:<tag>."; \
 		exit 1; \
-	fi
-	@tmp_dockerfile="$$(mktemp /tmp/cloudsync-supabase-cli.XXXXXX)"; \
-	src_dockerfile="$(SUPABASE_CLI_DOCKERFILE)"; \
+	fi; \
 	if [ ! -f "$$src_dockerfile" ]; then \
 		if [ -f "docker/postgresql/Dockerfile.supabase" ]; then \
 			src_dockerfile="docker/postgresql/Dockerfile.supabase"; \
@@ -253,18 +258,18 @@ postgres-supabase-build:
 			exit 1; \
 		fi; \
 	fi; \
-	sed -e "s|^FROM supabase/postgres:[^ ]*|FROM $(SUPABASE_CLI_IMAGE)|" \
-	    -e "s|^FROM public.ecr.aws/supabase/postgres:[^ ]*|FROM $(SUPABASE_CLI_IMAGE)|" \
+	sed -e "s|^FROM supabase/postgres:[^ ]*|FROM $$supabase_cli_image|" \
+	    -e "s|^FROM public.ecr.aws/supabase/postgres:[^ ]*|FROM $$supabase_cli_image|" \
 		"$$src_dockerfile" > "$$tmp_dockerfile"; \
 	if [ ! -s "$$tmp_dockerfile" ]; then \
 		echo "Error: Generated Dockerfile is empty."; \
 		rm -f "$$tmp_dockerfile"; \
 		exit 1; \
 	fi; \
-	echo "Using base image: $(SUPABASE_CLI_IMAGE)"; \
-	docker build -f "$$tmp_dockerfile" -t "$(SUPABASE_CLI_IMAGE)" .; \
+	echo "Using base image: $$supabase_cli_image"; \
+	docker build --build-arg SUPABASE_POSTGRES_TAG="$(SUPABASE_POSTGRES_TAG)" -f "$$tmp_dockerfile" -t "$$supabase_cli_image" .; \
 	rm -f "$$tmp_dockerfile"; \
-	echo "Build complete: $(SUPABASE_CLI_IMAGE)"
+	echo "Build complete: $$supabase_cli_image"
 
 # Rebuild CloudSync image and restart Supabase CLI stack
 postgres-supabase-rebuild: postgres-supabase-build

@@ -136,11 +136,16 @@ enabling the extension in the CLI-managed Postgres container.
    make postgres-supabase-build
    ```
    This auto-detects the running `supabase_db` image tag and rebuilds it with
-   CloudSync installed. If you need to override the tag, set
+   CloudSync installed. If you need to override the full image tag, set
    `SUPABASE_CLI_IMAGE=public.ecr.aws/supabase/postgres:<tag>`.
    Example: 
    ```bash
    SUPABASE_CLI_IMAGE=public.ecr.aws/supabase/postgres:17.6.1.071 make postgres-supabase-build
+   ```
+   You can also set the Supabase base image tag explicitly (defaults to
+   `17.6.1.071`). This only affects the base image used in the Dockerfile:
+   ```bash
+   SUPABASE_POSTGRES_TAG=17.6.1.071 make postgres-supabase-build
    ```
 
 4. Restart the stack:
@@ -156,7 +161,10 @@ manually.
 
 Migration-based (notes for CLI): Supabase CLI migrations run as the `postgres`
 role, which cannot create C extensions by default. Use manual enable or grant
-`USAGE` on language `c` once, then migrations will work.
+`USAGE` on language `c` once, then migrations will work. Note: `c` is an
+untrusted language, so `GRANT USAGE ON LANGUAGE c` is only allowed for
+superusers. On the CLI/local stack, the simplest approach is to enable the
+extension manually as `supabase_admin` after `supabase db reset`.
 
 If you still want a migration file, add:
 ```bash
