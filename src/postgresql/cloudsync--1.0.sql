@@ -160,13 +160,13 @@ AS 'MODULE_PATHNAME', 'cloudsync_is_sync'
 LANGUAGE C STABLE;
 
 -- Internal insert handler (variadic for multiple PK columns)
-CREATE OR REPLACE FUNCTION cloudsync_insert(table_name text, VARIADIC pk_values anyarray)
+CREATE OR REPLACE FUNCTION cloudsync_insert(table_name text, VARIADIC pk_values "any")
 RETURNS boolean
 AS 'MODULE_PATHNAME', 'cloudsync_insert'
 LANGUAGE C VOLATILE;
 
 -- Internal delete handler (variadic for multiple PK columns)
-CREATE OR REPLACE FUNCTION cloudsync_delete(table_name text, VARIADIC pk_values anyarray)
+CREATE OR REPLACE FUNCTION cloudsync_delete(table_name text, VARIADIC pk_values "any")
 RETURNS boolean
 AS 'MODULE_PATHNAME', 'cloudsync_delete'
 LANGUAGE C VOLATILE;
@@ -195,7 +195,7 @@ AS 'MODULE_PATHNAME', 'cloudsync_seq'
 LANGUAGE C VOLATILE;
 
 -- Encode primary key (variadic for multiple columns)
-CREATE OR REPLACE FUNCTION cloudsync_pk_encode(VARIADIC pk_values anyarray)
+CREATE OR REPLACE FUNCTION cloudsync_pk_encode(VARIADIC pk_values "any")
 RETURNS bytea
 AS 'MODULE_PATHNAME', 'cloudsync_pk_encode'
 LANGUAGE C IMMUTABLE STRICT;

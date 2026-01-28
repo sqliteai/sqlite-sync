@@ -1800,7 +1800,6 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     
     dbvm_t *vm = NULL;
     int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
-    char *pkdecode = NULL;
 
     const char *schema = table->schema ? table->schema : "";
     char *sql = sql_build_pk_collist_query(schema, table_name);
@@ -1810,13 +1809,9 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     if (rc != DBRES_OK) goto finalize;
     char *pkvalues_identifiers = (pkclause_identifiers) ? pkclause_identifiers : "rowid";
 
-    sql = sql_build_pk_decode_selectlist_query(schema, table_name);
-    rc = database_select_text(data, sql, &pkdecode);
-    cloudsync_memory_free(sql);
-    if (rc != DBRES_OK) goto finalize;
-    char *pkdecodeval = (pkdecode) ? pkdecode : "cloudsync_pk_decode(pk, 1) AS rowid";
-     
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_INSERT_MISSING_PKS_FROM_BASE_EXCEPT_SYNC, table_name, pkvalues_identifiers, pkvalues_identifiers, table->base_ref, pkdecodeval, table->meta_ref);
+    // Use database-specific query builder to handle type differences in composite PKs
+    sql = sql_build_insert_missing_pks_query(schema, table_name, pkvalues_identifiers, table->base_ref, table->meta_ref);
+    if (!sql) {rc = DBRES_NOMEM; goto finalize;}
     rc = database_exec(data, sql);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
@@ -1858,7 +1853,6 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
 finalize:
     if (rc != DBRES_OK) {DEBUG_ALWAYS("cloudsync_refill_metatable error: %s", database_errmsg(data));}
     if (pkclause_identifiers) cloudsync_memory_free(pkclause_identifiers);
-    if (pkdecode) cloudsync_memory_free(pkdecode);
     if (vm) databasevm_finalize(vm);
     return rc;
 }

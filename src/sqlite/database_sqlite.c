@@ -234,15 +234,38 @@ char *sql_build_pk_decode_selectlist_query (const char *schema, const char *tabl
 
 char *sql_build_pk_qualified_collist_query (const char *schema, const char *table_name) {
     UNUSED_PARAMETER(schema);
-    
+
     char buffer[1024];
     char *singlequote_escaped_table_name = sql_escape_identifier(table_name, buffer, sizeof(buffer));
     if (!singlequote_escaped_table_name) return NULL;
-    
+
     return cloudsync_memory_mprintf(
         "SELECT group_concat('\"%w\".\"' || format('%%w', name) || '\"', ',') "
         "FROM pragma_table_info('%s') WHERE pk>0 ORDER BY pk;", singlequote_escaped_table_name, singlequote_escaped_table_name
     );
+}
+
+char *sql_build_insert_missing_pks_query(const char *schema, const char *table_name,
+                                         const char *pkvalues_identifiers,
+                                         const char *base_ref, const char *meta_ref) {
+    UNUSED_PARAMETER(schema);
+
+    // Build pk_decode select list
+    char *pkdecode = sql_build_pk_decode_selectlist_query(NULL, table_name);
+    if (!pkdecode) {
+        pkdecode = cloudsync_memory_strdup("cloudsync_pk_decode(pk, 1) AS rowid");
+        if (!pkdecode) return NULL;
+    }
+
+    // SQLite: Use EXCEPT (type-flexible)
+    char *result = cloudsync_memory_mprintf(
+        "SELECT cloudsync_insert('%q', %s) "
+        "FROM (SELECT %s FROM \"%w\" EXCEPT SELECT %s FROM \"%w\");",
+        table_name, pkvalues_identifiers, pkvalues_identifiers, base_ref, pkdecode, meta_ref
+    );
+
+    cloudsync_memory_free(pkdecode);
+    return result;
 }
 
 // MARK: - PRIVATE -

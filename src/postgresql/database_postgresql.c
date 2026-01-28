@@ -381,6 +381,33 @@ char *sql_build_pk_qualified_collist_query (const char *schema, const char *tabl
     );
 }
 
+char *sql_build_insert_missing_pks_query(const char *schema, const char *table_name,
+                                         const char *pkvalues_identifiers,
+                                         const char *base_ref, const char *meta_ref) {
+    UNUSED_PARAMETER(schema);
+
+    char esc_table[1024];
+    sql_escape_literal(table_name, esc_table, sizeof(esc_table));
+
+    // PostgreSQL: Use NOT EXISTS with cloudsync_pk_encode to avoid EXCEPT type mismatch.
+    //
+    // CRITICAL: Pass PK columns directly to VARIADIC functions (NOT wrapped in ARRAY[]).
+    // This preserves each column's actual type (TEXT, INTEGER, etc.) for correct pk_encode.
+    // Using ARRAY[] would require all elements to be the same type, causing errors with
+    // mixed-type composite PKs (e.g., TEXT + INTEGER).
+    //
+    // Example: cloudsync_insert('table', col1, col2) where col1=TEXT, col2=INTEGER
+    // PostgreSQL's VARIADIC handling preserves each type and matches SQLite's encoding.
+    return cloudsync_memory_mprintf(
+        "SELECT cloudsync_insert('%s', %s) "
+        "FROM %s b "
+        "WHERE NOT EXISTS ("
+        "    SELECT 1 FROM %s m WHERE m.pk = cloudsync_pk_encode(%s)"
+        ");",
+        esc_table, pkvalues_identifiers, base_ref, meta_ref, pkvalues_identifiers
+    );
+}
+
 // MARK: - HELPER FUNCTIONS -
 
 // Map SPI result codes to DBRES
@@ -1181,7 +1208,7 @@ static int database_create_insert_trigger_internal (cloudsync_context *data, con
         "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $$ "
         "BEGIN "
         "  IF cloudsync_is_sync('%s') THEN RETURN NEW; END IF; "
-        "  PERFORM cloudsync_insert('%s', VARIADIC ARRAY[%s]); "
+        "  PERFORM cloudsync_insert('%s', %s); "
         "  RETURN NEW; "
         "END; "
         "$$ LANGUAGE plpgsql;",
@@ -1449,7 +1476,7 @@ static int database_create_delete_trigger_internal (cloudsync_context *data, con
         "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $$ "
         "BEGIN "
         "  IF cloudsync_is_sync('%s') THEN RETURN OLD; END IF; "
-        "  PERFORM cloudsync_delete('%s', VARIADIC ARRAY[%s]); "
+        "  PERFORM cloudsync_delete('%s', %s); "
         "  RETURN OLD; "
         "END; "
         "$$ LANGUAGE plpgsql;",

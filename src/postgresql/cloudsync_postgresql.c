@@ -993,10 +993,11 @@ Datum cloudsync_pk_encode (PG_FUNCTION_ARGS) {
     int argc = 0;
     pgvalue_t **argv = NULL;
 
-    // Signature is VARIADIC anyarray, so arg 0 is an array of PK values.
-    if (!PG_ARGISNULL(0)) {
-        ArrayType *array = PG_GETARG_ARRAYTYPE_P(0);
-        argv = pgvalues_from_array(array, &argc);
+    // Signature is VARIADIC "any", so extract all arguments starting from index 0
+    argv = pgvalues_from_args(fcinfo, 0, &argc);
+    if (!argv || argc == 0) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                errmsg("cloudsync_pk_encode requires at least one primary key value")));
     }
 
     size_t pklen = 0;
@@ -1134,11 +1135,8 @@ Datum cloudsync_insert (PG_FUNCTION_ARGS) {
             }
         }
 
-        // Extract PK values from VARIADIC anyarray (arg 1)
-        if (!PG_ARGISNULL(1)) {
-            ArrayType *pk_array = PG_GETARG_ARRAYTYPE_P(1);
-            cleanup.argv = pgvalues_from_array(pk_array, &cleanup.argc);
-        }
+        // Extract PK values from VARIADIC "any" (args starting from index 1)
+        cleanup.argv = pgvalues_from_args(fcinfo, 1, &cleanup.argc);
 
         // Verify we have the correct number of PK columns
         int expected_pks = table_count_pks(table);
@@ -1228,10 +1226,8 @@ Datum cloudsync_delete (PG_FUNCTION_ARGS) {
             }
         }
 
-        if (!PG_ARGISNULL(1)) {
-            ArrayType *pk_array = PG_GETARG_ARRAYTYPE_P(1);
-            cleanup.argv = pgvalues_from_array(pk_array, &cleanup.argc);
-        }
+        // Extract PK values from VARIADIC "any" (args starting from index 1)
+        cleanup.argv = pgvalues_from_args(fcinfo, 1, &cleanup.argc);
 
         int expected_pks = table_count_pks(table);
         if (cleanup.argc != expected_pks) {

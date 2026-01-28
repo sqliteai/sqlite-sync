@@ -148,6 +148,7 @@ char *sql_build_delete_cols_not_in_schema_query(const char *schema, const char *
 char *sql_build_pk_collist_query(const char *schema, const char *table_name);
 char *sql_build_pk_decode_selectlist_query(const char *schema, const char *table_name);
 char *sql_build_pk_qualified_collist_query(const char *schema, const char *table_name);
+char *sql_build_insert_missing_pks_query(const char *schema, const char *table_name, const char *pkvalues_identifiers, const char *base_ref, const char *meta_ref);
 
 char *database_table_schema(const char *table_name);
 char *database_build_meta_ref(const char *schema, const char *table_name);
