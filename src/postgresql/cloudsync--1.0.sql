@@ -22,7 +22,7 @@ LANGUAGE C STABLE;
 
 -- Generate a new UUID
 CREATE OR REPLACE FUNCTION cloudsync_uuid()
-RETURNS bytea
+RETURNS uuid
 AS 'MODULE_PATHNAME', 'cloudsync_uuid'
 LANGUAGE C VOLATILE;
 

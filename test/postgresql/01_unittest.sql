@@ -19,12 +19,43 @@ CREATE EXTENSION IF NOT EXISTS cloudsync;
 SELECT cloudsync_version() AS version \gset
 \echo [PASS] (:testid) Test cloudsync_version: :version
 
--- 'Test uuid generation'
-SELECT (length(cloudsync_uuid()) > 0) AS uuid_ok \gset
-\if :uuid_ok
-\echo [PASS] (:testid) Test uuid generation
+-- Test uuid generation
+SELECT cloudsync_uuid() AS uuid1 \gset
+SELECT cloudsync_uuid() AS uuid2 \gset
+
+-- Test 1: Format check (UUID v7 has standard format: xxxxxxxx-xxxx-7xxx-xxxx-xxxxxxxxxxxx)
+SELECT (:'uuid1' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') AS uuid_format_ok \gset
+\if :uuid_format_ok
+\echo [PASS] (:testid) UUID format valid (UUIDv7 pattern)
 \else
-\echo [FAIL] (:testid) Test uuid generation
+\echo [FAIL] (:testid) UUID format invalid - Got: :uuid1
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- Test 2: Uniqueness check
+SELECT (:'uuid1' != :'uuid2') AS uuid_unique_ok \gset
+\if :uuid_unique_ok
+\echo [PASS] (:testid) UUID uniqueness (two calls generated different UUIDs)
+\else
+\echo [FAIL] (:testid) UUID uniqueness - Both calls returned: :uuid1
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- Test 3: Monotonicity check (UUIDv7 should be sortable by timestamp)
+SELECT (:'uuid1' < :'uuid2') AS uuid_monotonic_ok \gset
+\if :uuid_monotonic_ok
+\echo [PASS] (:testid) UUID monotonicity (UUIDs are time-ordered)
+\else
+\echo [FAIL] (:testid) UUID monotonicity - uuid1: :uuid1, uuid2: :uuid2
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- Test 4: Type check (ensure it's actually UUID type, not text)
+SELECT (pg_typeof(cloudsync_uuid())::text = 'uuid') AS uuid_type_ok \gset
+\if :uuid_type_ok
+\echo [PASS] (:testid) UUID type is correct (uuid, not text or bytea)
+\else
+\echo [FAIL] (:testid) UUID type incorrect - Got: (pg_typeof(cloudsync_uuid())::text)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 

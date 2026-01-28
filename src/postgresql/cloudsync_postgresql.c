@@ -176,15 +176,17 @@ PG_FUNCTION_INFO_V1(cloudsync_uuid);
 Datum cloudsync_uuid (PG_FUNCTION_ARGS) {
     UNUSED_PARAMETER(fcinfo);
 
-    uint8_t uuid[UUID_LEN];
-    cloudsync_uuid_v7(uuid);
+    uint8_t uuid_bytes[UUID_LEN];
+    cloudsync_uuid_v7(uuid_bytes);
 
-    // Return as bytea
-    bytea *result = (bytea *)palloc(VARHDRSZ + UUID_LEN);
-    SET_VARSIZE(result, VARHDRSZ + UUID_LEN);
-    memcpy(VARDATA(result), uuid, UUID_LEN);
+    // Format as text with dashes (matches SQLite implementation)
+    char uuid_str[UUID_STR_MAXLEN];
+    cloudsync_uuid_v7_stringify(uuid_bytes, uuid_str, true);
 
-    PG_RETURN_BYTEA_P(result);
+    // Parse into PostgreSQL UUID type
+    Datum uuid_datum = DirectFunctionCall1(uuid_in, CStringGetDatum(uuid_str));
+    
+    PG_RETURN_DATUM(uuid_datum);
 }
 
 // cloudsync_db_version() - Get current database version
