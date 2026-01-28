@@ -1665,11 +1665,15 @@ static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, Oid target_
             argt[0] = FLOAT8OID;
             argv[0] = Float8GetDatum(dv.dval);
             break;
-        case DBTYPE_TEXT:
+        case DBTYPE_TEXT: {
             argt[0] = TEXTOID;
-            argv[0] = PointerGetDatum(cstring_to_text_with_len(dv.pval ? dv.pval : "", (int)(dv.len)));
+            Size tlen = dv.pval ? (Size)dv.len : 0;
+            text *t = (text *)palloc(VARHDRSZ + tlen);
+            SET_VARSIZE(t, VARHDRSZ + tlen);
+            if (tlen > 0) memmove(VARDATA(t), dv.pval, tlen);
+            argv[0] = PointerGetDatum(t);
             argv_is_pointer = true;
-            break;
+        } break;
         case DBTYPE_BLOB: {
             argt[0] = BYTEAOID;
             bytea *ba = (bytea *)palloc(VARHDRSZ + dv.len);

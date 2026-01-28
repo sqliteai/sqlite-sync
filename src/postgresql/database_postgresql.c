@@ -2199,8 +2199,9 @@ int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value) {
             // Pass-by-reference: need to copy the actual data
             // Handle variable-length types (typlen == -1) and cstrings (typlen == -2)
             if (typlen == -1) {
-                // Variable-length type (varlena): use datumCopy with correct size
-                Size len = VARSIZE(DatumGetPointer(v->datum));
+                // Variable-length type (varlena): use VARSIZE_ANY to handle
+                // both short (1-byte) and regular (4-byte) varlena headers
+                Size len = VARSIZE_ANY(DatumGetPointer(v->datum));
                 dcopy = PointerGetDatum(palloc(len));
                 memcpy(DatumGetPointer(dcopy), DatumGetPointer(v->datum), len);
             } else if (typlen == -2) {
@@ -2430,8 +2431,10 @@ const void *database_value_blob (dbvalue_t *value) {
     pgvalue_t *v = (pgvalue_t *)value;
     if (!v || v->isnull) return NULL;
 
-    // Text types reuse blob accessor (pk encode reads text bytes directly)
-    if (pgvalue_is_text_type(v->typeid)) {
+    // Text types reuse blob accessor (pk encode reads text bytes directly).
+    // Exclude JSONB: its internal format is binary, not text —
+    // it must go through OidOutputFunctionCall to get the JSON text.
+    if (pgvalue_is_text_type(v->typeid) && v->typeid != JSONBOID) {
         pgvalue_ensure_detoast(v);
         text *txt = (text *)DatumGetPointer(v->datum);
         return VARDATA_ANY(txt);
@@ -2442,6 +2445,11 @@ const void *database_value_blob (dbvalue_t *value) {
         bytea *ba = (bytea *)DatumGetPointer(v->datum);
         return VARDATA_ANY(ba);
     }
+
+    // For unmapped types and JSONB (mapped to DBTYPE_TEXT),
+    // convert to text representation via the type's output function
+    const char *cstr = database_value_text(value);
+    if (cstr) return cstr;
 
     return NULL;
 }
@@ -2495,11 +2503,11 @@ const char *database_value_text (dbvalue_t *value) {
     if (!v->cstring && !v->owns_cstring) {
         PG_TRY();
         {
-            if (pgvalue_is_text_type(v->typeid)) {
+            if (pgvalue_is_text_type(v->typeid) && v->typeid != JSONBOID) {
                 pgvalue_ensure_detoast(v);
                 v->cstring = text_to_cstring((text *)DatumGetPointer(v->datum));
             } else {
-                // Fallback to type output function for non-text types
+                // Type output function for JSONB and other non-text types
                 Oid outfunc;
                 bool isvarlena;
                 getTypeOutputInfo(v->typeid, &outfunc, &isvarlena);
@@ -2527,7 +2535,8 @@ int database_value_bytes (dbvalue_t *value) {
     pgvalue_t *v = (pgvalue_t *)value;
     if (!v || v->isnull) return 0;
 
-    if (pgvalue_is_text_type(v->typeid)) {
+    // Exclude JSONB: binary internal format, must use OidOutputFunctionCall
+    if (pgvalue_is_text_type(v->typeid) && v->typeid != JSONBOID) {
         pgvalue_ensure_detoast(v);
         text *txt = (text *)DatumGetPointer(v->datum);
         return VARSIZE_ANY_EXHDR(txt);
@@ -2537,6 +2546,9 @@ int database_value_bytes (dbvalue_t *value) {
         bytea *ba = (bytea *)DatumGetPointer(v->datum);
         return VARSIZE_ANY_EXHDR(ba);
     }
+    // For unmapped types and JSONB (mapped to DBTYPE_TEXT),
+    // ensure the text representation is materialized
+    database_value_text(value);
     if (v->cstring) {
         return (int)strlen(v->cstring);
     }

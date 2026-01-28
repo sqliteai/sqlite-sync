@@ -253,7 +253,7 @@ char *sql_build_insert_missing_pks_query(const char *schema, const char *table_n
     // Build pk_decode select list
     char *pkdecode = sql_build_pk_decode_selectlist_query(NULL, table_name);
     if (!pkdecode) {
-        pkdecode = cloudsync_memory_strdup("cloudsync_pk_decode(pk, 1) AS rowid");
+        pkdecode = cloudsync_string_dup("cloudsync_pk_decode(pk, 1) AS rowid");
         if (!pkdecode) return NULL;
     }
 
