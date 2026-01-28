@@ -1,13 +1,11 @@
 # Demo Deployment
 
-For the current demo, a single cloudsync node is deployed in **Europe** on Fly.io.
+For the current demo, a single CloudSync node is deployed in **Europe** on Fly.io.
 
 If testing from other regions, latency will reflect this single-node deployment.  
 A production deployment would use **geographically distributed nodes with regional routing** for global coverage.
 
----
-
-### Fly.io
+## Fly.io
 
 Project Name: **cloudsync-staging**  
 Fly.io App: https://fly.io/apps/cloudsync-staging  
@@ -15,8 +13,6 @@ CloudSync Server URL: https://cloudsync-staging.fly.dev/
 Logs: https://fly.io/apps/cloudsync-staging/monitoring  
 
 > Note: This is a **demo-only environment**, not intended for production use.
-
----
 
 ## Environment Variables
 
@@ -35,8 +31,6 @@ Environment variables:
 - `CLOUDSYNC_SERVICE_PROJECT_ID` — project ID for service user  
 - `CLOUDSYNC_SERVICE_DATABASE_CONNECTION_STRING` — service user DB connection  
 
----
-
 ## Tables
 
 - **cloudsync_jobs** — queue of asynchronous jobs  
@@ -46,9 +40,7 @@ Environment variables:
 
 - **cloudsync_artifacts** — blobs ready for client download  
 - **cloudsync_metrics** — collected metrics  
-- **cloudsync_push_tokens** — Expo push tokens  
-
----
+- **cloudsync_push_tokens** — Expo push tokens
 
 ## Metrics
 

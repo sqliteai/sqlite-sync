@@ -7,15 +7,57 @@ The **SQLite AI offline-sync solution** consists of three main components:
 
 Together, these components provide a complete, production-grade **offline-first synchronization stack** for SQLite and PostgreSQL.
 
+
 # SQLite Sync
 
 **SQLite Sync** is a native SQLite extension that must be installed and loaded on all client devices.
 We provide prebuilt binaries for:
 * Desktop and mobile platforms
 * WebAssembly (WASM)
-* Popular frameworks including React, Expo, npm, and more
+* Popular package managers and frameworks including React Native, Expo, Node, Swift PM and Android AAR
 
-**Note:** The latest version (v0.9.96) is not yet available in the official SQLite Sync repository. Please use our development fork instead:[https://github.com/sqliteai/sqlite-sync-dev](https://github.com/sqliteai/sqlite-sync-dev)
+**Note:** The latest version (v0.9.96) is not yet available in the official SQLite Sync repository. Please use our development fork instead: [https://github.com/sqliteai/sqlite-sync-dev](https://github.com/sqliteai/sqlite-sync-dev)
+
+<details>
+<summary>List of development fork binaries (v0.9.96)</summary>
+
+### Android
+- [cloudsync-android-aar-0.9.96.aar](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-android-aar-0.9.96.aar)
+- [cloudsync-android-arm64-v8a-0.9.96.tar.gz](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-android-arm64-v8a-0.9.96.tar.gz)
+- [cloudsync-android-arm64-v8a-0.9.96.zip](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-android-arm64-v8a-0.9.96.zip)
+- [cloudsync-android-armeabi-v7a-0.9.96.tar.gz](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-android-armeabi-v7a-0.9.96.tar.gz)
+- [cloudsync-android-armeabi-v7a-0.9.96.zip](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-android-armeabi-v7a-0.9.96.zip)
+- [cloudsync-android-x86_64-0.9.96.tar.gz](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-android-x86_64-0.9.96.tar.gz)
+- [cloudsync-android-x86_64-0.9.96.zip](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-android-x86_64-0.9.96.zip)
+
+### Apple (iOS / macOS)
+- [cloudsync-apple-xcframework-0.9.96.zip](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-apple-xcframework-0.9.96.zip)
+- [cloudsync-ios-0.9.96.tar.gz](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-ios-0.9.96.tar.gz)
+- [cloudsync-ios-0.9.96.zip](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-ios-0.9.96.zip)
+- [cloudsync-ios-sim-0.9.96.tar.gz](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-ios-sim-0.9.96.tar.gz)
+- [cloudsync-ios-sim-0.9.96.zip](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-ios-sim-0.9.96.zip)
+- [cloudsync-macos-0.9.96.tar.gz](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-macos-0.9.96.tar.gz)
+- [cloudsync-macos-0.9.96.zip](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-macos-0.9.96.zip)
+- [cloudsync-macos-arm64-0.9.96.tar.gz](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-macos-arm64-0.9.96.tar.gz)
+- [cloudsync-macos-arm64-0.9.96.zip](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-macos-arm64-0.9.96.zip)
+- [cloudsync-macos-x86_64-0.9.96.tar.gz](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-macos-x86_64-0.9.96.tar.gz)
+- [cloudsync-macos-x86_64-0.9.96.zip](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-macos-x86_64-0.9.96.zip)
+
+### Linux
+- [cloudsync-linux-arm64-0.9.96.tar.gz](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-linux-arm64-0.9.96.tar.gz)
+- [cloudsync-linux-arm64-0.9.96.zip](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-linux-arm64-0.9.96.zip)
+- [cloudsync-linux-musl-arm64-0.9.96.tar.gz](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-linux-musl-arm64-0.9.96.tar.gz)
+- [cloudsync-linux-musl-arm64-0.9.96.zip](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-linux-musl-arm64-0.9.96.zip)
+- [cloudsync-linux-musl-x86_64-0.9.96.tar.gz](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-linux-musl-x86_64-0.9.96.tar.gz)
+- [cloudsync-linux-musl-x86_64-0.9.96.zip](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-linux-musl-x86_64-0.9.96.zip)
+- [cloudsync-linux-x86_64-0.9.96.tar.gz](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-linux-x86_64-0.9.96.tar.gz)
+- [cloudsync-linux-x86_64-0.9.96.zip](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-linux-x86_64-0.9.96.zip)
+
+### Windows
+- [cloudsync-windows-x86_64-0.9.96.tar.gz](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-windows-x86_64-0.9.96.tar.gz)
+- [cloudsync-windows-x86_64-0.9.96.zip](https://github.com/sqliteai/sqlite-sync-dev/releases/download/0.9.96/cloudsync-windows-x86_64-0.9.96.zip)
+
+</details>
 
 ### Architecture Refactoring
 The extension has been refactored to support both **SQLite** and **PostgreSQL** backends.
@@ -29,7 +71,7 @@ This modular design improves **portability**, **maintainability**, and **cross-d
 * Code coverage exceeds **90%**
 * PostgreSQL-specific code has its own dedicated test suite
 
-Key Features
+### Key Features
 * Deep integration with SQLite — the default database for Edge applications
 * Built-in network layer exposed as ordinary SQLite functions
 * Cross-platform, language-agnostic payload format
@@ -45,7 +87,6 @@ Currently implemented CRDT algorithms:
 Additional CRDTs can be implemented if needed, though LWW covers most real-world use cases.
 
 
-
 # CloudSync
 
 **CloudSync** is a lightweight, stateless microservice responsible for synchronizing clients with central servers.
@@ -58,9 +99,7 @@ Additional CRDTs can be implemented if needed, though LWW covers most real-world
 * Collects operational metrics (connected devices, sync volume, traffic, etc.)
 * Exposes a complete **REST API**
 
-⠀
-
-Technology Stack
+### Technology Stack
 
 * Written in **Go**
 * Built on the high-performance **Gin Web Framework**
@@ -69,21 +108,16 @@ Technology Stack
 * Stateless architecture enables horizontal scaling simply by adding nodes
 * Serialized job queue ensures **no job loss**, even after restarts
 
-⠀
-
-Observability
+### Observability
 
 * Metrics dashboard available in [grafana-dashboard.json](grafana-dashboard.json)
 
 * Additional logs available via the Fly.io monitoring dashboard
 
-  
+### Demo Deployment
 
-Demo Deployment
-
-For the current demo, a single CloudSYnc node is deployed in **Europe** on Fly.io.
+For the current demo, a single CloudSync node is deployed in **Europe** on Fly.io.
 If testing from other regions, latency will reflect this single-node deployment. A production deployment would use **geographically distributed nodes with regional routing** for global coverage.
-
 
 
 # Postgres Sync
@@ -105,16 +139,14 @@ SQLite does not support schemas, while PostgreSQL does. To bridge this differenc
 
 This preserves PostgreSQL-native organization while maintaining SQLite compatibility.
 
-
-
 # Current Limitations
 
 The PostgreSQL integration is actively evolving. Current limitations include:
 
 * **User Impersonation**: The microservice currently applies server changes using the Supabase Admin user. In the next version, changes will be applied under the identity associated with the client’s JWT.
 * **Table Creation**: Tables must currently be created manually in PostgreSQL before synchronization. We are implementing automatic translation of SQLite CREATE TABLE statements to PostgreSQL syntax.
-* **Row-Level Security**: RLS is fully implemented for SQLite Cloud servers.PostgreSQL RLS integration is in progress and will be included in the final release.
-* **Beta Status**: While extensively tested, the PostgreSQL sync stack should currently be considered **beta software**. Please report any issues, we are committed to resolving them quickly.
+* **Row-Level Security**: RLS is fully implemented for SQLite Cloud servers. PostgreSQL RLS integration is in progress and will be included in the final release.
+* **Beta Status**: While extensively tested, the PostgreSQL sync stack should currently be considered **beta software**. Please report any issues; we are committed to resolving them quickly.
 
 # Next
 * [CLIENT](CLIENT.md) installation and setup

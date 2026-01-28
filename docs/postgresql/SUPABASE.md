@@ -10,8 +10,6 @@ Supabase deployments.
 - Supabase stack running (CLI local or self-hosted)
 - The Supabase Postgres image tag in use (e.g. `public.ecr.aws/supabase/postgres:17.6.1.071`)
 
-
-
 ## Option A: Supabase CLI Local Stack
 
 1) Start the stack once so the Postgres image is present:

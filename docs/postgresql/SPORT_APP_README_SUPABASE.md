@@ -13,7 +13,7 @@ A Vite/React demonstration app showcasing [**SQLite Sync (Dev)**](https://github
 
 ### 2. Database Setup
 1. Create database
-2. Execute the schema with [sport-tracker-schema-postgres.sql](sport-tracker-schema-postgres.sql).  
+2. Execute the schema with [sport-tracker-schema-postgres.sql](../../examples/sport-tracker-app/sport-tracker-schema-postgres.sql).  
 3. Enable CloudSync for all tables on the remote database with:
     ```sql
     CREATE EXTENSION IF NOT EXISTS cloudsync;

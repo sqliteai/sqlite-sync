@@ -10,8 +10,6 @@ Under the hood, SQLite Sync uses advanced **CRDT (Conflict-free Replicated Data 
 - When they reconnect, all changes are **merged automatically and without conflicts**.
 - **No data loss. No overwrites. No manual conflict resolution.**
 
----
-
 ## IMPORTANT
 
 - Make sure to use version **0.9.96 or newer**  
@@ -19,17 +17,14 @@ Under the hood, SQLite Sync uses advanced **CRDT (Conflict-free Replicated Data 
 
 - Until v0.9.96 is released upstream, always use the development fork:  
   https://github.com/sqliteai/sqlite-sync-dev  
-  and **not** the original repository:  
+  and **NOT** the original repository:  
   https://github.com/sqliteai/sqlite-sync
 
-- Updated example apps are available at:  
-  https://github.com/sqliteai/sqlite-sync-dev/tree/main/examples  
-  - sport-tracker-app (WASM), see [SPORT_APP_README_SUPABASE.md](SPORT_APP_README_SUPABASE.md) for more details
-  - to-do-app (React)
-  - React-Native (Expo): https://github.com/sqliteai/sqlite-sync-react-native
-  - Remaining demos will be updated in the next days  
-
----
+- Updated example apps are available [here](https://github.com/sqliteai/sqlite-sync-dev/tree/main/examples):  
+  - sport-tracker app (WASM), see [SPORT_APP_README_SUPABASE.md](SPORT_APP_README_SUPABASE.md) for more details
+  - to-do app (Expo)
+  - React Native Library: https://github.com/sqliteai/sqlite-sync-react-native
+  - Remaining demos will be updated in the next days
 
 ## Conversion Between SQLite and PostgreSQL Tables
 
@@ -140,9 +135,7 @@ SELECT cloudsync_init('notes');
 - [ ] Same column names and order
 - [ ] Same defaults (semantic match)
 
-Database Schema Recommendations: https://github.com/sqliteai/sqlite-sync-dev?tab=readme-ov-file#database-schema-recommendations
-
----
+Please follow [these Database Schema Recommendations](https://github.com/sqliteai/sqlite-sync-dev?tab=readme-ov-file#database-schema-recommendations)
 
 ## Pre-built Binaries
 
@@ -154,8 +147,6 @@ Download the appropriate pre-built binary for your platform from the official [R
 - Android
 - iOS
 
-
-
 ## Loading the Extension
 
 ```
@@ -166,33 +157,26 @@ Download the appropriate pre-built binary for your platform from the official [R
 SELECT load_extension('./cloudsync');
 ```
 
+## WASM Version -> React client-side
 
-
-## WASM Version
-
+Make sure to install the extension tagged as **dev** and not **latest**
 ```
-npm i sqlite-wasm@dev
+npm i @sqliteai/sqlite-wasm@dev
 ```
 
-Then follow the instructions available from https://www.npmjs.com/package/@sqliteai/sqlite-wasm
-
-
+Then follow the instructions from the [README](https://www.npmjs.com/package/@sqliteai/sqlite-wasm)
 
 ## Swift Package
 
 You can [add this repository as a package dependency to your Swift project](https://developer.apple.com/documentation/xcode/adding-package-dependencies-to-your-app#Add-a-package-dependency). After adding the package, you'll need to set up SQLite with extension loading by following steps 4 and 5 of [this guide](https://github.com/sqliteai/sqlite-extensions-guide/blob/main/platforms/ios.md#4-set-up-sqlite-with-extension-loading).
-
-
 
 ## Android Package
 
 Add the [following](https://central.sonatype.com/artifact/ai.sqlite/sync.dev) to your Gradle dependencies:
 
 ```
-implementation 'ai.sqlite:sync.dev:0.9.92'
+implementation 'ai.sqlite:sync.dev:0.9.96'
 ```
-
-
 
 ## Expo
 
@@ -202,13 +186,9 @@ Install the Expo package:
 npm install @sqliteai/sqlite-sync-expo-dev
 ```
 
-Then follow the instructions from:
+Then follow the instructions from the [README](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo-dev)
 
-https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo-dev
-
-
-
-## React/Node
+## Node -> React server-side
 
 ```js
 npm i better-sqlite3
@@ -226,8 +206,6 @@ console.log('Sync extension version:', version);" >> index.js
 
 node index.js
 ```
-
----
 
 ## Naming Clarification
 
