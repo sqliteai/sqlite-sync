@@ -250,22 +250,16 @@ char *sql_build_insert_missing_pks_query(const char *schema, const char *table_n
                                          const char *base_ref, const char *meta_ref) {
     UNUSED_PARAMETER(schema);
 
-    // Build pk_decode select list
-    char *pkdecode = sql_build_pk_decode_selectlist_query(NULL, table_name);
-    if (!pkdecode) {
-        pkdecode = cloudsync_string_dup("cloudsync_pk_decode(pk, 1) AS rowid");
-        if (!pkdecode) return NULL;
-    }
-
-    // SQLite: Use EXCEPT (type-flexible)
-    char *result = cloudsync_memory_mprintf(
+    // SQLite: Use NOT EXISTS with cloudsync_pk_encode (same approach as PostgreSQL).
+    // This avoids needing pk_decode select list which requires executing a query.
+    return cloudsync_memory_mprintf(
         "SELECT cloudsync_insert('%q', %s) "
-        "FROM (SELECT %s FROM \"%w\" EXCEPT SELECT %s FROM \"%w\");",
-        table_name, pkvalues_identifiers, pkvalues_identifiers, base_ref, pkdecode, meta_ref
+        "FROM \"%w\" "
+        "WHERE NOT EXISTS ("
+        "    SELECT 1 FROM \"%w\" WHERE pk = cloudsync_pk_encode(%s)"
+        ");",
+        table_name, pkvalues_identifiers, base_ref, meta_ref, pkvalues_identifiers
     );
-
-    cloudsync_memory_free(pkdecode);
-    return result;
 }
 
 // MARK: - PRIVATE -
