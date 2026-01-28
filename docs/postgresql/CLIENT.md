@@ -24,7 +24,7 @@ Under the hood, SQLite Sync uses advanced **CRDT (Conflict-free Replicated Data 
 
 - Updated example apps are available at:  
   https://github.com/sqliteai/sqlite-sync-dev/tree/main/examples  
-  - sport-tracker-app (WASM), see SPORT_APP_README_SUPABASE.md
+  - sport-tracker-app (WASM), see [SPORT_APP_README_SUPABASE.md](SPORT_APP_README_SUPABASE.md) for more details
   - to-do-app (React)
   - React-Native (Expo): https://github.com/sqliteai/sqlite-sync-react-native
   - Remaining demos will be updated in the next days  
