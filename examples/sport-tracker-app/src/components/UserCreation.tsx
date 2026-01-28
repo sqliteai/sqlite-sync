@@ -15,26 +15,22 @@ interface UserCreationProps {
  */
 const fetchRemoteUsers = async (): Promise<User[]> => {
   const response = await fetch(
-    `${import.meta.env.VITE_SQLITECLOUD_API_URL}/v2/weblite/sql`,
+    `${import.meta.env.VITE_SQLITECLOUD_API_URL}/rest/v1/users_sport?select=id,name`,
     {
-      method: "POST",
+      method: "GET",
       headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${import.meta.env.VITE_SQLITECLOUD_API_KEY}`,
+        Accept: "application/json",
+        Authorization: `Bearer ${import.meta.env.VITE_SQLITECLOUD_API_KEY || ""}`,
       },
-      body: JSON.stringify({
-        sql: "SELECT id, name FROM users;",
-        database: import.meta.env.VITE_SQLITECLOUD_DATABASE || "",
-      }),
     }
   );
-
+  
   if (!response.ok) {
     throw new Error(`Failed to fetch users: ${response.status}`);
   }
 
   const result = await response.json();
-  return result.data;
+  return result as User[];
 };
 
 const UserCreation: React.FC<UserCreationProps> = ({
@@ -58,6 +54,7 @@ const UserCreation: React.FC<UserCreationProps> = ({
         setRemoteUsers(users);
       } catch (error) {
         console.error("Failed to load remote users:", error);
+        alert("Failed to load remote users. Error: " + error);
       } finally {
         setIsLoadingRemoteUsers(false);
       }

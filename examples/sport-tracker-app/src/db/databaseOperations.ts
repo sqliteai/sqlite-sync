@@ -216,7 +216,7 @@ export const getDatabaseOperations = (db: any) => ({
 
     try {
       db.exec({
-        sql: "INSERT INTO users (id, name) VALUES (?, ?)",
+        sql: "INSERT INTO users_sport (id, name) VALUES (?, ?)",
         bind: [userId, name],
       });
       return { id: userId, name };
@@ -228,7 +228,7 @@ export const getDatabaseOperations = (db: any) => ({
   getUsers() {
     const users: any[] = [];
     db.exec({
-      sql: "SELECT id, name FROM users ORDER BY name",
+      sql: "SELECT id, name FROM users_sport ORDER BY name",
       callback: (row: any) => {
         users.push({
           id: row[0],
@@ -243,7 +243,7 @@ export const getDatabaseOperations = (db: any) => ({
     const { id } = data;
     let user = null;
     db.exec({
-      sql: "SELECT id, name FROM users WHERE id = ?",
+      sql: "SELECT id, name FROM users_sport WHERE id = ?",
       bind: [id],
       callback: (row: any) => {
         user = {
@@ -268,7 +268,7 @@ export const getDatabaseOperations = (db: any) => ({
 
     // Get total counts (always show total for comparison)
     db.exec({
-      sql: "SELECT COUNT(*) FROM users WHERE name != ?",
+      sql: "SELECT COUNT(*) FROM users_sport WHERE name != ?",
       bind: ["coach"],
       callback: (row: any) => (counts.totalUsers = row[0]),
     });
@@ -287,7 +287,7 @@ export const getDatabaseOperations = (db: any) => ({
     if (user_id && !is_coach) {
       // Regular user - count only their data
       db.exec({
-        sql: "SELECT COUNT(*) FROM users WHERE name != ?",
+        sql: "SELECT COUNT(*) FROM users_sport WHERE name != ?",
         bind: ["coach"],
         callback: (row: any) => (counts.users = row[0]),
       });

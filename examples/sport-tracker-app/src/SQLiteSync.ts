@@ -111,21 +111,23 @@ export class SQLiteSync {
 
     const now = new Date();
     if (!token) {
-      console.log("SQLite Sync: No token available, requesting new one from API");
-      const tokenData = await this.fetchNewToken(userId, name);
-      localStorage.setItem(
-        SQLiteSync.TOKEN_KEY_PREFIX,
-        JSON.stringify(tokenData)
+      console.log(
+        "SQLite Sync: No token available, requesting new one from API",
       );
+      const tokenData = await this.fetchNewToken(userId, name);
+      // localStorage.setItem(
+      //   SQLiteSync.TOKEN_KEY_PREFIX,
+      //   JSON.stringify(tokenData),
+      // );
       token = tokenData.token;
       console.log("SQLite Sync: New token obtained and stored in localStorage");
     } else if (tokenExpiry && tokenExpiry <= now) {
       console.warn("SQLite Sync: Token expired, requesting new one from API");
       const tokenData = await this.fetchNewToken(userId, name);
-      localStorage.setItem(
-        SQLiteSync.TOKEN_KEY_PREFIX,
-        JSON.stringify(tokenData)
-      );
+      // localStorage.setItem(
+      //   SQLiteSync.TOKEN_KEY_PREFIX,
+      //   JSON.stringify(tokenData),
+      // );
       token = tokenData.token;
       console.log("SQLite Sync: New token obtained and stored in localStorage");
     } else {
@@ -143,69 +145,18 @@ export class SQLiteSync {
    */
   private async fetchNewToken(
     userId: string,
-    name: string
+    name: string,
   ): Promise<Record<string, any>> {
-    const response = await fetch(
-      `${import.meta.env.VITE_SQLITECLOUD_API_URL}/v2/tokens`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${import.meta.env.VITE_SQLITECLOUD_API_KEY}`,
-        },
-        body: JSON.stringify({
-          userId,
-          name,
-          expiresAt: new Date(
-            Date.now() + SQLiteSync.TOKEN_EXPIRY_MINUTES * 60 * 1000
-          ).toISOString(),
-        }),
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(`Failed to get token: ${response.status}`);
-    }
-
-    const result = await response.json();
-    return result.data;
+    const jwt = await Promise.resolve(import.meta.env.VITE_SQLITECLOUD_API_KEY);
+    return {
+      token: jwt
+    };
   }
 
   /**
    * Checks if a valid token exists in localStorage
    */
   static hasValidToken(): boolean {
-    const storedTokenData = localStorage.getItem(SQLiteSync.TOKEN_KEY_PREFIX);
-
-    if (!storedTokenData) {
-      console.log("SQLite Sync: No token data found in localStorage");
-      return false;
-    }
-
-    try {
-      const parsed: TokenData = JSON.parse(storedTokenData);
-
-      // Check if token exists
-      if (!parsed.token) {
-        console.log("SQLite Sync: Token data exists but no token found");
-        return false;
-      }
-
-      // Check if token is expired
-      if (parsed.expiresAt) {
-        const tokenExpiry = new Date(parsed.expiresAt);
-        const now = new Date();
-        if (tokenExpiry <= now) {
-          console.log("SQLite Sync: Token found but expired");
-          return false;
-        }
-      }
-
-      console.log("SQLite Sync: Valid token found in localStorage");
-      return true;
-    } catch (e) {
-      console.error("SQLite Sync: Failed to parse stored token:", e);
-      return false;
-    }
+    return false;
   }
 }

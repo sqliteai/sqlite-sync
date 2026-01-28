@@ -26,7 +26,7 @@ export const getSqliteSyncOperations = (db: any) => ({
    * This will push changes to the cloud and check for changes from the cloud.
    * The first attempt may not find anything to apply, but subsequent attempts
    * will find changes if they exist.
-  */
+   */
   sqliteSyncNetworkSync() {
     console.log("SQLite Sync - Starting sync...");
     db.exec("SELECT cloudsync_network_sync(1000, 2);");
@@ -38,7 +38,7 @@ export const getSqliteSyncOperations = (db: any) => ({
    */
   sqliteSyncSendChanges() {
     console.log(
-      "SQLite Sync - Sending changes to your the SQLite Cloud node..."
+      "SQLite Sync - Sending changes to your the SQLite Cloud node...",
     );
     db.exec("SELECT cloudsync_network_send_changes();");
     console.log("SQLite Sync - Changes sent");
@@ -84,7 +84,7 @@ export const initSQLiteSync = (db: any) => {
   }
 
   // Initialize SQLite Sync
-  db.exec(`SELECT cloudsync_init('users');`);
+  db.exec(`SELECT cloudsync_init('users_sport');`);
   db.exec(`SELECT cloudsync_init('activities');`);
   db.exec(`SELECT cloudsync_init('workouts');`);
   // ...or initialize all tables at once 
