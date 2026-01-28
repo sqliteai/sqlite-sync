@@ -399,6 +399,6 @@ SELECT (:fail::int + 1) AS fail \gset
 
 \ir helper_test_cleanup.sql
 \if :should_cleanup
--- DROP DATABASE IF EXISTS cloudsync_test_14a;
--- DROP DATABASE IF EXISTS cloudsync_test_14b;
+DROP DATABASE IF EXISTS cloudsync_test_14a;
+DROP DATABASE IF EXISTS cloudsync_test_14b;
 \endif

@@ -22,7 +22,7 @@
 \ir 12_repeated_table_multi_schemas.sql
 \ir 13_per_table_schema_tracking.sql
 \ir 14_datatype_roundtrip.sql
--- \ir 15_datatype_roundtrip_unmapped.sql
+\ir 15_datatype_roundtrip_unmapped.sql
 \ir 16_composite_pk_text_int_roundtrip.sql
 
 -- 'Test summary'
