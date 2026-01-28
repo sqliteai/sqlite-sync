@@ -1,25 +1,25 @@
 # Architecture Overview
 
 The **SQLite AI offline-sync solution** consists of three main components:
-* **sqlite-sync**: Native client-side SQLite extension
-* **cloud-sync**: Synchronization microservice
-* **postgres-sync**: Native PostgreSQL extension
+* **SQLite Sync**: Native client-side SQLite extension
+* **CloudSync**: Synchronization microservice
+* **Postgres Sync**: Native PostgreSQL extension
 
 Together, these components provide a complete, production-grade **offline-first synchronization stack** for SQLite and PostgreSQL.
 
-# sqlite-sync
+# SQLite Sync
 
-**sqlite-sync** is a native SQLite extension that must be installed and loaded on all client devices.
+**SQLite Sync** is a native SQLite extension that must be installed and loaded on all client devices.
 We provide prebuilt binaries for:
 * Desktop and mobile platforms
 * WebAssembly (WASM)
 * Popular frameworks including React, Expo, npm, and more
 
-**Note:** The latest version (v0.9.96) is not yet available in the official sqlite-sync repository.  Please use our development fork instead:[https://github.com/sqliteai/sqlite-sync-dev](https://github.com/sqliteai/sqlite-sync-dev)
+**Note:** The latest version (v0.9.96) is not yet available in the official SQLite Sync repository. Please use our development fork instead:[https://github.com/sqliteai/sqlite-sync-dev](https://github.com/sqliteai/sqlite-sync-dev)
 
 ### Architecture Refactoring
 The extension has been refactored to support both **SQLite** and **PostgreSQL** backends.
-* All database-specific native calls have been isolated in database.h
+* All database-specific native calls have been isolated in [database.h](../../src/database.h)
 * Each database engine implements its own engine-dependent layer
 * The core **CRDT logic** is fully shared across engines
 
@@ -35,7 +35,7 @@ Key Features
 * Cross-platform, language-agnostic payload format
 * Works seamlessly in any framework or programming language
 
-Unlike other offline-sync solutions, **sqlite-sync embeds networking directly inside SQLite**, eliminating external sync SDKs.
+Unlike other offline-sync solutions, **SQLite Sync embeds networking directly inside SQLite**, eliminating external sync SDKs.
 
 ### Supported CRDTs
 Currently implemented CRDT algorithms:
@@ -46,12 +46,12 @@ Additional CRDTs can be implemented if needed, though LWW covers most real-world
 
 
 
-# cloud-sync
+# CloudSync
 
-**cloudsync** is a lightweight, stateless microservice responsible for synchronizing clients with central servers.
+**CloudSync** is a lightweight, stateless microservice responsible for synchronizing clients with central servers.
 ### Responsibilities
 * Synchronizes clients with:
-  * **SQLiteCloud servers**
+  * **SQLite Cloud servers**
   * **PostgreSQL servers**
 * Manages upload and download of CRDT payloads
 * Stores payloads via **AWS S3**
@@ -73,23 +73,24 @@ Technology Stack
 
 Observability
 
-* Metrics dashboard available in grafana-dashboard.json
+* Metrics dashboard available in [grafana-dashboard.json](grafana-dashboard.json)
 
 * Additional logs available via the Fly.io monitoring dashboard
 
   
 
 Demo Deployment
-For the current demo, a single cloudsync node is deployed in **Europe** on Fly.io.
-If testing from other regions, latency will reflect this single-node deployment.  A production deployment would use **geographically distributed nodes with regional routing** for global coverage.
+
+For the current demo, a single CloudSYnc node is deployed in **Europe** on Fly.io.
+If testing from other regions, latency will reflect this single-node deployment. A production deployment would use **geographically distributed nodes with regional routing** for global coverage.
 
 
 
-# postgres-sync
+# Postgres Sync
 
-**postgres-sync** is a native PostgreSQL extension derived from sqlite-sync.
+**Postgres Sync** is a native PostgreSQL extension derived from SQLite Sync.
 ### Features
-* Implements the same CRDT algorithms available in sqlite-sync
+* Implements the same CRDT algorithms available in SQLite Sync
 * Applies CRDT logic to:
   * Changes coming from synchronized clients
   * Changes made directly in PostgreSQL (CLI, Drizzle, dashboards, etc.)
@@ -97,9 +98,11 @@ If testing from other regions, latency will reflect this single-node deployment.
 This ensures **full bidirectional consistency**, regardless of where changes originate.
 
 ### Schema Handling
-SQLite does not support schemas, while PostgreSQL does. To bridge this difference, postgres-sync introduces a mechanism to:
+SQLite does not support schemas, while PostgreSQL does. To bridge this difference, Postgres Sync introduces a mechanism to:
+
 * Associate each synchronized table with a specific PostgreSQL schema
 * Allow different schemas per table
+
 This preserves PostgreSQL-native organization while maintaining SQLite compatibility.
 
 
@@ -107,12 +110,14 @@ This preserves PostgreSQL-native organization while maintaining SQLite compatibi
 # Current Limitations
 
 The PostgreSQL integration is actively evolving. Current limitations include:
-* **User Impersonation** : The microservice currently applies server changes using the Supabase Admin user.  In the next version, changes will be applied under the identity associated with the client’s JWT.
-* **Table Creation** : Tables must currently be created manually in PostgreSQL before synchronization.  We are implementing automatic translation of SQLite CREATE TABLE statements to PostgreSQL syntax.
-* **Row-Level Security**: RLS is fully implemented for SQLiteCloud servers. PostgreSQL RLS integration is in progress and will be included in the final release.
-* **Beta Status** : While extensively tested, the PostgreSQL sync stack should currently be considered **beta software**. Please report any issues, we are committed to resolving them quickly.
+
+* **User Impersonation**: The microservice currently applies server changes using the Supabase Admin user. In the next version, changes will be applied under the identity associated with the client’s JWT.
+* **Table Creation**: Tables must currently be created manually in PostgreSQL before synchronization. We are implementing automatic translation of SQLite CREATE TABLE statements to PostgreSQL syntax.
+* **Row-Level Security**: RLS is fully implemented for SQLite Cloud servers.PostgreSQL RLS integration is in progress and will be included in the final release.
+* **Beta Status**: While extensively tested, the PostgreSQL sync stack should currently be considered **beta software**. Please report any issues, we are committed to resolving them quickly.
 
 # Next
 * [CLIENT](CLIENT.md) installation and setup
 * [CLOUDSYNC](CLOUDSYNC.md) microservice configuration and setup
 * [SUPABASE](SUPABASE.md) configuration and setup
+* [SPORT-TRACKER APP](SPORT_APP_README_SUPABASE.md) demo web app based on SQLite Sync WASM

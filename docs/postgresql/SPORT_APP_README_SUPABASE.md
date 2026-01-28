@@ -4,6 +4,8 @@ A Vite/React demonstration app showcasing [**SQLite Sync (Dev)**](https://github
 
 > This app uses the packed WASM version of SQLite with the [SQLite Sync extension enabled](https://www.npmjs.com/package/@sqliteai/sqlite-wasm).
 
+**The source code is located in [examples/sport-tracker-app](../../examples/sport-tracker-app/)**
+
 ## Setup Instructions
 
 ### 1. Prerequisites
