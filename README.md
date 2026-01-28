@@ -217,6 +217,16 @@ if (Platform.OS === 'ios') {
 }
 ```
 
+### React Native
+
+Install the React Native library:
+
+```bash
+npm install @sqliteai/sqlite-sync-react-native
+```
+
+Then follow the instructions from the [README](https://www.npmjs.com/package/@sqliteai/sqlite-sync-react-native)
+
 ## Getting Started
 
 Here's a quick example to get started with SQLite Sync:

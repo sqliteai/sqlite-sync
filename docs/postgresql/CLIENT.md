@@ -188,6 +188,16 @@ npm install @sqliteai/sqlite-sync-expo-dev
 
 Then follow the instructions from the [README](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo-dev)
 
+## React Native
+
+Install the React Native library:
+
+```
+npm install @sqliteai/sqlite-sync-react-native
+```
+
+Then follow the instructions from the [README](https://www.npmjs.com/package/@sqliteai/sqlite-sync-react-native)
+
 ## Node -> React server-side
 
 ```js

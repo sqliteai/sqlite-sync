@@ -351,7 +351,25 @@ jobs:
           git add "$PKG"
           git commit -m "Bump sqlite-sync-dev version to ${{ steps.tag.outputs.version }}"
           git push origin dev
-          
+
+      - uses: actions/checkout@v4.2.2
+        if: steps.tag.outputs.version != ''
+        with:
+          repository: sqliteai/sqlite-sync-react-native
+          path: sqlite-sync-react-native
+          token: ${{ secrets.PAT }}
+
+      - name: release sqlite-sync-react-native
+        if: steps.tag.outputs.version != ''
+        run: |
+          cd sqlite-sync-react-native
+          git config --global user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          git config --global user.name "$GITHUB_ACTOR"
+          jq --arg version "${{ steps.tag.outputs.version }}" '.version = $version' package.json > package.tmp.json && mv package.tmp.json package.json
+          git add package.json
+          git commit -m "Bump sqlite-sync version to ${{ steps.tag.outputs.version }}"
+          git push origin main
+
       - uses: actions/setup-java@v4
         if: steps.tag.outputs.version != ''
         with:
@@ -446,6 +464,7 @@ jobs:
 
             [**Node**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-dev): `npm install @sqliteai/sqlite-sync-dev`
             [**WASM**](https://www.npmjs.com/package/@sqliteai/sqlite-wasm): `npm install @sqliteai/sqlite-wasm@dev`
+            [**React Native**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-react-native): `npm install @sqliteai/sqlite-sync-react-native`
             [**Expo**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo-dev): `npm install @sqliteai/sqlite-sync-expo-dev`
             [**Android**](https://central.sonatype.com/artifact/ai.sqlite/sync.dev): `ai.sqlite:sync.dev:${{ steps.tag.outputs.version }}`
             [**Swift**](https://github.com/sqliteai/sqlite-sync-dev#swift-package): [Installation Guide](https://github.com/sqliteai/sqlite-sync-dev#swift-package)

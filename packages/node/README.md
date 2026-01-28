@@ -136,6 +136,8 @@ Error thrown when the SQLite Sync extension cannot be found for the current plat
 
 ## Related Projects
 
+- **[@sqliteai/sqlite-sync-react-native](https://www.npmjs.com/package/@sqliteai/sqlite-sync-react-native)** - SQLite Sync for React Native
+- **[@sqliteai/sqlite-sync-expo-dev](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo-dev)** - SQLite Sync for Expo
 - **[@sqliteai/sqlite-vector](https://www.npmjs.com/package/@sqliteai/sqlite-vector)** - Vector search and similarity matching
 - **[@sqliteai/sqlite-ai](https://www.npmjs.com/package/@sqliteai/sqlite-ai)** - On-device AI inference and embedding generation
 - **[@sqliteai/sqlite-js](https://www.npmjs.com/package/@sqliteai/sqlite-js)** - Define SQLite functions in JavaScript
