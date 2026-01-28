@@ -15,7 +15,7 @@ We provide prebuilt binaries for:
 * WebAssembly (WASM)
 * Popular frameworks including React, Expo, npm, and more
 
-**Note:** The latest version (v0.9.96) is not yet available in the official sqlite-sync repository.  Please use our development fork instead:~[https://github.com/sqliteai/sqlite-sync-dev](https://github.com/sqliteai/sqlite-sync-dev)~
+**Note:** The latest version (v0.9.96) is not yet available in the official sqlite-sync repository.  Please use our development fork instead:[https://github.com/sqliteai/sqlite-sync-dev](https://github.com/sqliteai/sqlite-sync-dev)
 
 ### Architecture Refactoring
 The extension has been refactored to support both **SQLite** and **PostgreSQL** backends.
@@ -111,3 +111,8 @@ The PostgreSQL integration is actively evolving. Current limitations include:
 * **Table Creation** : Tables must currently be created manually in PostgreSQL before synchronization.  We are implementing automatic translation of SQLite CREATE TABLE statements to PostgreSQL syntax.
 * **Row-Level Security**: RLS is fully implemented for SQLiteCloud servers. PostgreSQL RLS integration is in progress and will be included in the final release.
 * **Beta Status** : While extensively tested, the PostgreSQL sync stack should currently be considered **beta software**. Please report any issues, we are committed to resolving them quickly.
+
+# Next
+* [CLIENT](CLIENT.md) installation and setup
+* [CLOUDSYNC](CLOUDSYNC.md) microservice configuration and setup
+* [SUPABASE](SUPABASE.md) configuration and setup
