@@ -172,7 +172,7 @@ const char * const SQL_BUILD_DELETE_ROW_BY_PK =
     "  SELECT to_regclass('%s') AS oid"
     "), "
     "pk AS ("
-    "  SELECT a.attname, k.ord "
+    "  SELECT a.attname, k.ord, format_type(a.atttypid, a.atttypmod) AS coltype "
     "  FROM pg_index x "
     "  JOIN tbl t ON t.oid = x.indrelid "
     "  JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
@@ -183,7 +183,7 @@ const char * const SQL_BUILD_DELETE_ROW_BY_PK =
     "SELECT "
     "  'DELETE FROM ' || (SELECT (oid::regclass)::text FROM tbl)"
     "  || ' WHERE '"
-    "  || (SELECT string_agg(format('%%I=$%%s', attname, ord), ' AND ' ORDER BY ord) FROM pk)"
+    "  || (SELECT string_agg(format('%%I=$%%s::%%s', attname, ord, coltype), ' AND ' ORDER BY ord) FROM pk)"
     "  || ';';";
 
 const char * const SQL_INSERT_ROWID_IGNORE =
@@ -198,7 +198,7 @@ const char * const SQL_BUILD_INSERT_PK_IGNORE =
     "  SELECT to_regclass('%s') AS oid"
     "), "
     "pk AS ("
-    "  SELECT a.attname, k.ord "
+    "  SELECT a.attname, k.ord, format_type(a.atttypid, a.atttypmod) AS coltype "
     "  FROM pg_index x "
     "  JOIN tbl t ON t.oid = x.indrelid "
     "  JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
@@ -209,7 +209,7 @@ const char * const SQL_BUILD_INSERT_PK_IGNORE =
     "SELECT "
     "  'INSERT INTO ' || (SELECT (oid::regclass)::text FROM tbl)"
     "  || ' (' || (SELECT string_agg(format('%%I', attname), ',') FROM pk) || ')'"
-    "  || ' VALUES (' || (SELECT string_agg(format('$%%s', ord), ',') FROM pk) || ')'"
+    "  || ' VALUES (' || (SELECT string_agg(format('$%%s::%%s', ord, coltype), ',') FROM pk) || ')'"
     "  || ' ON CONFLICT DO NOTHING;';";
 
 const char * const SQL_BUILD_UPSERT_PK_AND_COL =
@@ -217,7 +217,7 @@ const char * const SQL_BUILD_UPSERT_PK_AND_COL =
     "  SELECT to_regclass('%s') AS oid"
     "), "
     "pk AS ("
-    "  SELECT a.attname, k.ord "
+    "  SELECT a.attname, k.ord, format_type(a.atttypid, a.atttypmod) AS coltype "
     "  FROM pg_index x "
     "  JOIN tbl t ON t.oid = x.indrelid "
     "  JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
@@ -235,7 +235,7 @@ const char * const SQL_BUILD_UPSERT_PK_AND_COL =
     "  'INSERT INTO ' || (SELECT (oid::regclass)::text FROM tbl)"
     "  || ' (' || (SELECT string_agg(format('%%I', attname), ',') FROM pk)"
     "  || ',' || (SELECT format('%%I', colname) FROM col) || ')'"
-    "  || ' VALUES (' || (SELECT string_agg(format('$%%s', ord), ',') FROM pk)"
+    "  || ' VALUES (' || (SELECT string_agg(format('$%%s::%%s', ord, coltype), ',') FROM pk)"
     "  || ',' || (SELECT format('$%%s', (SELECT n FROM pk_count) + 1)) || ')'"
     "  || ' ON CONFLICT (' || (SELECT string_agg(format('%%I', attname), ',') FROM pk) || ')'"
     "  || ' DO UPDATE SET ' || (SELECT format('%%I', colname) FROM col)"
@@ -249,7 +249,7 @@ const char * const SQL_BUILD_SELECT_COLS_BY_PK_FMT =
     "  SELECT to_regclass('%s') AS tblreg"
     "), "
     "pk AS ("
-    "  SELECT a.attname, k.ord "
+    "  SELECT a.attname, k.ord, format_type(a.atttypid, a.atttypmod) AS coltype "
     "  FROM pg_index x "
     "  JOIN tbl t ON t.tblreg = x.indrelid "
     "  JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
@@ -264,7 +264,7 @@ const char * const SQL_BUILD_SELECT_COLS_BY_PK_FMT =
     "  'SELECT ' || (SELECT format('%%I', colname) FROM col) "
     "  || ' FROM ' || (SELECT tblreg::text FROM tbl)"
     "  || ' WHERE '"
-    "  || (SELECT string_agg(format('%%I=$%%s', attname, ord), ' AND ' ORDER BY ord) FROM pk)"
+    "  || (SELECT string_agg(format('%%I=$%%s::%%s', attname, ord, coltype), ' AND ' ORDER BY ord) FROM pk)"
     "  || ';';";
 
 const char * const SQL_CLOUDSYNC_ROW_EXISTS_BY_PK =

@@ -131,7 +131,7 @@ SUPABASE_DB_PORT ?= 54322
 SUPABASE_DB_PASSWORD ?= postgres
 PG_DOCKER_DB_HOST ?= localhost
 PG_DOCKER_DB_PORT ?= 5432
-PG_DOCKER_DB_NAME ?= cloudsync_test
+PG_DOCKER_DB_NAME ?= postgres
 PG_DOCKER_DB_USER ?= postgres
 PG_DOCKER_DB_PASSWORD ?= postgres
 
@@ -280,16 +280,16 @@ postgres-supabase-rebuild: postgres-supabase-build
 	@echo "Supabase CLI stack restarted."
 
 # Run smoke test against Supabase CLI local database
-postgres-supabase-run-smoke-test:
-	@echo "Running Supabase CLI smoke test..."
-	@PGPASSWORD="$(SUPABASE_DB_PASSWORD)" psql postgresql://supabase_admin@$(SUPABASE_DB_HOST):$(SUPABASE_DB_PORT)/postgres -f docker/postgresql/smoke_test.sql
-	@echo "Smoke test completed."
+postgres-supabase-run-test:
+	@echo "Running Supabase CLI test..."
+	@PGPASSWORD="$(SUPABASE_DB_PASSWORD)" psql postgresql://supabase_admin@$(SUPABASE_DB_HOST):$(SUPABASE_DB_PORT)/postgres -f test/postgresql/full_test.sql
+	@echo "Test completed."
 
 # Run smoke test against Docker standalone database
-postgres-docker-run-smoke-test:
-	@echo "Running Docker smoke test..."
-	@PGPASSWORD="$(PG_DOCKER_DB_PASSWORD)" psql postgresql://$(PG_DOCKER_DB_USER)@$(PG_DOCKER_DB_HOST):$(PG_DOCKER_DB_PORT)/$(PG_DOCKER_DB_NAME) -f docker/postgresql/smoke_test.sql
-	@echo "Smoke test completed."
+postgres-docker-run-test:
+	@echo "Running Docker test..."
+	@PGPASSWORD="$(PG_DOCKER_DB_PASSWORD)" psql postgresql://$(PG_DOCKER_DB_USER)@$(PG_DOCKER_DB_HOST):$(PG_DOCKER_DB_PORT)/$(PG_DOCKER_DB_NAME) -f test/postgresql/full_test.sql
+	@echo "Test completed."
 
 # ============================================================================
 # Development Workflow Targets

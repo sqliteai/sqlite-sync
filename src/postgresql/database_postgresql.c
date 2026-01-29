@@ -1695,7 +1695,7 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
     int rc = SPI_execute_with_args(sql, 1, argtypes, values, nulls, true, 0);
     pfree(DatumGetPointer(values[0]));
     
-    if (rc < 0 || SPI_processed == 0) {
+    if (rc != SPI_OK_SELECT || SPI_processed == 0) {
         *names = NULL;
         *count = 0;
         if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
@@ -1704,22 +1704,25 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
     
     uint64_t n = SPI_processed;
     char **pk_names = cloudsync_memory_zeroalloc(n * sizeof(char*));
-    if (!pk_names) return DBRES_NOMEM;
+    if (!pk_names) {
+        if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
+        return DBRES_NOMEM;
+    }
     
     for (uint64_t i = 0; i < n; i++) {
         HeapTuple tuple = SPI_tuptable->vals[i];
         bool isnull;
         Datum datum = SPI_getbinval(tuple, SPI_tuptable->tupdesc, 1, &isnull);
         if (!isnull) {
-            text *txt = DatumGetTextP(datum);
-            char *name = text_to_cstring(txt);
+            // information_schema.column_name is of type 'name', not 'text'
+            Name namedata = DatumGetName(datum);
+            char *name = (namedata) ? NameStr(*namedata) : NULL;
             pk_names[i] = (name) ? cloudsync_string_dup(name) : NULL;
-            if (name) pfree(name);
         }
         
         // Cleanup on allocation failure
         if (!isnull && pk_names[i] == NULL) {
-            for (int j = 0; j < i; j++) {
+            for (uint64_t j = 0; j < i; j++) {
                 if (pk_names[j]) cloudsync_memory_free(pk_names[j]);
             }
             cloudsync_memory_free(pk_names);
