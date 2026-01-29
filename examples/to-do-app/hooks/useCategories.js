@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Platform } from 'react-native';
 import { db } from "../db/dbConnection";
-import { CONNECTION_STRING } from "@env";
+import { CONNECTION_STRING, API_TOKEN } from "@env";
 import { getDylibPath } from "@op-engineering/op-sqlite";
 import { randomUUID } from 'expo-crypto';
 import { useSyncContext } from '../components/SyncContext';
@@ -69,11 +69,8 @@ const useCategories = () => {
       await db.execute('INSERT OR IGNORE INTO tags (uuid, name) VALUES (?, ?)', [randomUUID(), 'Work'])
       await db.execute('INSERT OR IGNORE INTO tags (uuid, name) VALUES (?, ?)', [randomUUID(), 'Personal'])
 
-      if (CONNECTION_STRING && CONNECTION_STRING.startsWith('sqlitecloud://')) {
-        await db.execute(`SELECT cloudsync_network_init('${CONNECTION_STRING}');`);
-      } else {
-        throw new Error('No valid CONNECTION_STRING provided, cloudsync_network_init will not be called');
-      }
+      await db.execute(`SELECT cloudsync_network_init('${CONNECTION_STRING}');`);
+      await db.execute(`SELECT cloudsync_network_set_token('${API_TOKEN}');`)
 
       db.execute('SELECT cloudsync_network_sync(100, 10);')
       getCategories()
