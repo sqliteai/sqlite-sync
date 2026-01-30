@@ -134,7 +134,7 @@ const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_PK =
     "  SELECT to_regclass('%s') AS oid"
     "), "
     "pk AS ("
-    "  SELECT a.attname, k.ord "
+    "  SELECT a.attname, k.ord, format_type(a.atttypid, a.atttypmod) AS coltype "
     "  FROM pg_index x "
     "  JOIN tbl t ON t.oid = x.indrelid "
     "  JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
@@ -161,7 +161,7 @@ const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_PK =
     "  || (SELECT string_agg(format('%%I', attname), ',') FROM nonpk)"
     "  || ' FROM ' || (SELECT (oid::regclass)::text FROM tbl)"
     "  || ' WHERE '"
-    "  || (SELECT string_agg(format('%%I=$%%s', attname, ord), ' AND ' ORDER BY ord) FROM pk)"
+    "  || (SELECT string_agg(format('%%I=$%%s::%%s', attname, ord, coltype), ' AND ' ORDER BY ord) FROM pk)"
     "  || ';';";
 
 const char * const SQL_DELETE_ROW_BY_ROWID =
@@ -229,17 +229,20 @@ const char * const SQL_BUILD_UPSERT_PK_AND_COL =
     "  SELECT count(*) AS n FROM pk"
     "), "
     "col AS ("
-    "  SELECT '%s'::text AS colname"
+    "  SELECT '%s'::text AS colname, format_type(a.atttypid, a.atttypmod) AS coltype "
+    "  FROM pg_attribute a "
+    "  JOIN tbl t ON t.oid = a.attrelid "
+    "  WHERE a.attname = '%s' AND a.attnum > 0 AND NOT a.attisdropped"
     ") "
     "SELECT "
     "  'INSERT INTO ' || (SELECT (oid::regclass)::text FROM tbl)"
     "  || ' (' || (SELECT string_agg(format('%%I', attname), ',') FROM pk)"
     "  || ',' || (SELECT format('%%I', colname) FROM col) || ')'"
     "  || ' VALUES (' || (SELECT string_agg(format('$%%s::%%s', ord, coltype), ',') FROM pk)"
-    "  || ',' || (SELECT format('$%%s', (SELECT n FROM pk_count) + 1)) || ')'"
+    "  || ',' || (SELECT format('$%%s::%%s', (SELECT n FROM pk_count) + 1, coltype) FROM col) || ')'"
     "  || ' ON CONFLICT (' || (SELECT string_agg(format('%%I', attname), ',') FROM pk) || ')'"
     "  || ' DO UPDATE SET ' || (SELECT format('%%I', colname) FROM col)"
-    "  || '=' || (SELECT format('$%%s', (SELECT n FROM pk_count) + 2)) || ';';";
+    "  || '=' || (SELECT format('$%%s::%%s', (SELECT n FROM pk_count) + 2, coltype) FROM col) || ';';";
 
 const char * const SQL_SELECT_COLS_BY_ROWID_FMT =
     "SELECT %s%s%s FROM %s WHERE ctid = $1;";  // TODO: align with PK/rowid selection builder

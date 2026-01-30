@@ -199,7 +199,7 @@ char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_na
     char *qualified = database_build_base_ref(schema, table_name);
     if (!qualified) return NULL;
 
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_UPSERT_PK_AND_COL, qualified, colname);
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_UPSERT_PK_AND_COL, qualified, colname, colname);
     cloudsync_memory_free(qualified);
     if (!sql) return NULL;
 

@@ -25,6 +25,8 @@
 \ir 15_datatype_roundtrip_unmapped.sql
 \ir 16_composite_pk_text_int_roundtrip.sql
 \ir 17_uuid_pk_roundtrip.sql
+\ir 18_bulk_insert_performance.sql
+\ir 19_uuid_pk_with_unmapped_cols.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

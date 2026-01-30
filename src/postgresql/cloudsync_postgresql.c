@@ -1638,8 +1638,9 @@ static int cloudsync_decode_value_cb (void *xdata, int index, int type, int64_t 
     return DBRES_OK;
 }
 
-// Decode encoded bytea into a pgvalue_t matching the target type
-static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, Oid target_typoid, const char *target_typname, bool *out_isnull) {
+// Decode encoded bytea into a pgvalue_t with the decoded base type.
+// Type casting to the target column type is handled by the SQL statement.
+static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, bool *out_isnull) {
     // Decode input guardrails.
     if (out_isnull) *out_isnull = true;
     if (!encoded) return NULL;
@@ -1652,37 +1653,34 @@ static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, Oid target_
     if (out_isnull) *out_isnull = dv.isnull;
     if (dv.isnull) return NULL;
 
-    // Map decoded C types into a PostgreSQL Datum.
-    Oid argt[1] = {TEXTOID};
-    Datum argv[1];
-    char argn[1] = {' '};
-    bool argv_is_pointer = false;  // Track if argv[0] needs pfree on error
+    // Map decoded C types into a PostgreSQL Datum with the base type.
+    // The SQL statement handles casting to the target column type via $n::typename.
+    Oid typoid = TEXTOID;
+    Datum datum;
 
     switch (dv.dbtype) {
         case DBTYPE_INTEGER:
-            argt[0] = INT8OID;
-            argv[0] = Int64GetDatum(dv.ival);
+            typoid = INT8OID;
+            datum = Int64GetDatum(dv.ival);
             break;
         case DBTYPE_FLOAT:
-            argt[0] = FLOAT8OID;
-            argv[0] = Float8GetDatum(dv.dval);
+            typoid = FLOAT8OID;
+            datum = Float8GetDatum(dv.dval);
             break;
         case DBTYPE_TEXT: {
-            argt[0] = TEXTOID;
+            typoid = TEXTOID;
             Size tlen = dv.pval ? (Size)dv.len : 0;
             text *t = (text *)palloc(VARHDRSZ + tlen);
             SET_VARSIZE(t, VARHDRSZ + tlen);
             if (tlen > 0) memmove(VARDATA(t), dv.pval, tlen);
-            argv[0] = PointerGetDatum(t);
-            argv_is_pointer = true;
+            datum = PointerGetDatum(t);
         } break;
         case DBTYPE_BLOB: {
-            argt[0] = BYTEAOID;
+            typoid = BYTEAOID;
             bytea *ba = (bytea *)palloc(VARHDRSZ + dv.len);
             SET_VARSIZE(ba, VARHDRSZ + dv.len);
             if (dv.len > 0) memcpy(VARDATA(ba), dv.pval, (size_t)dv.len);
-            argv[0] = PointerGetDatum(ba);
-            argv_is_pointer = true;
+            datum = PointerGetDatum(ba);
         } break;
         case DBTYPE_NULL:
             if (out_isnull) *out_isnull = true;
@@ -1695,44 +1693,7 @@ static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, Oid target_
 
     if (dv.pval) pfree(dv.pval);
 
-    // Cast to the target column type from the table schema.
-    if (argt[0] == target_typoid) {
-        pgvalue_t *result = pgvalue_create(argv[0], target_typoid, -1, InvalidOid, false);
-        if (!result && argv_is_pointer) {
-            pfree(DatumGetPointer(argv[0]));
-        }
-        return result;
-    }
-
-    StringInfoData castq;
-    initStringInfo(&castq);
-    appendStringInfo(&castq, "SELECT $1::%s", target_typname);
-
-    int rc = SPI_execute_with_args(castq.data, 1, argt, argv, argn, true, 1);
-    if (rc != SPI_OK_SELECT || SPI_processed != 1 || !SPI_tuptable) {
-        if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
-        pfree(castq.data);
-        if (argv_is_pointer) pfree(DatumGetPointer(argv[0]));
-        ereport(ERROR, (errmsg("cloudsync: failed to cast value to %s", target_typname)));
-    }
-    pfree(castq.data);
-
-    bool typed_isnull = false;
-    // SPI_getbinval uses 1-based column indexing, but TupleDescAttr uses 0-based indexing
-    Datum typed_value = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &typed_isnull);
-    int32 typmod = TupleDescAttr(SPI_tuptable->tupdesc, 0)->atttypmod;
-    Oid collation = TupleDescAttr(SPI_tuptable->tupdesc, 0)->attcollation;
-    if (!typed_isnull) {
-        Form_pg_attribute att = TupleDescAttr(SPI_tuptable->tupdesc, 0);
-        typed_value = datumCopy(typed_value, att->attbyval, att->attlen);
-    }
-    if (SPI_tuptable) {
-        SPI_freetuptable(SPI_tuptable);
-        SPI_tuptable = NULL;
-    }
-
-    if (out_isnull) *out_isnull = typed_isnull;
-    return pgvalue_create(typed_value, target_typoid, typmod, collation, typed_isnull);
+    return pgvalue_create(datum, typoid, -1, InvalidOid, false);
 }
 
 PG_FUNCTION_INFO_V1(cloudsync_encode_value);
@@ -2092,30 +2053,6 @@ static char * build_union_sql (void) {
     return result;
 }
 
-static Oid lookup_column_type_oid (const char *tbl, const char *col_name, const char *schema) {
-    // SPI_connect not needed here
-    if (strcmp(col_name, CLOUDSYNC_TOMBSTONE_VALUE) == 0) return BYTEAOID;
-
-    // lookup table OID with optional schema qualification
-    Oid relid;
-    if (schema) {
-        Oid nspid = get_namespace_oid(schema, false);
-        relid = get_relname_relid(tbl, nspid);
-    } else {
-        relid = RelnameGetRelid(tbl);
-    }
-    if (!OidIsValid(relid)) ereport(ERROR, (errmsg("cloudsync: table \"%s\" not found (schema: %s)", tbl, schema ? schema : "search_path")));
-
-    // find attribute
-    int attnum = get_attnum(relid, col_name);
-    if (attnum == InvalidAttrNumber) ereport(ERROR, (errmsg("cloudsync: column \"%s\" not found in table \"%s\"", col_name, tbl)));
-
-    Oid typoid = get_atttype(relid, attnum);
-    if (!OidIsValid(typoid)) ereport(ERROR, (errmsg("cloudsync: could not resolve type for %s.%s", tbl, col_name)));
-
-    return typoid;
-}
-
 PG_FUNCTION_INFO_V1(cloudsync_changes_select);
 Datum cloudsync_changes_select(PG_FUNCTION_ARGS) {
     FuncCallContext *funcctx;
@@ -2307,19 +2244,12 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
         cloudsync_table_context *table = table_lookup(data, insert_tbl);
         if (!table) ereport(ERROR, (errmsg("Unable to find table")));
 
-        // get real column type from tbl.col_name (skip tombstone sentinel)
-        Oid target_typoid = InvalidOid;
-        char *target_typname = NULL;
-        if (!is_tombstone) {
-            target_typoid = lookup_column_type_oid(insert_tbl, insert_name, cloudsync_schema(data));
-            target_typname = format_type_be(target_typoid);
-        }
-
         if (SPI_connect() != SPI_OK_CONNECT) ereport(ERROR, (errmsg("cloudsync: SPI_connect failed in trigger")));
         spi_connected = true;
 
+        // Decode value to base type; SQL statement handles type casting via $n::typename
         if (!is_tombstone) {
-            col_value = cloudsync_decode_bytea_to_pgvalue(insert_value_encoded, target_typoid, target_typname, NULL);
+            col_value = cloudsync_decode_bytea_to_pgvalue(insert_value_encoded, NULL);
         }
         
         int rc = DBRES_OK;

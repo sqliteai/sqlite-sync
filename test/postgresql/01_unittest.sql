@@ -21,6 +21,7 @@ SELECT cloudsync_version() AS version \gset
 
 -- Test uuid generation
 SELECT cloudsync_uuid() AS uuid1 \gset
+SELECT pg_sleep(0.1);
 SELECT cloudsync_uuid() AS uuid2 \gset
 
 -- Test 1: Format check (UUID v7 has standard format: xxxxxxxx-xxxx-7xxx-xxxx-xxxxxxxxxxxx)
