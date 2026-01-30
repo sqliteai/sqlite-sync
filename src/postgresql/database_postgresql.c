@@ -2693,21 +2693,30 @@ int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_
 }
 
 // MARK: - MEMORY -
+// Use palloc in TopMemoryContext for PostgreSQL memory management integration.
+// This provides memory tracking, debugging support, and proper cleanup on connection end.
 
 void *dbmem_alloc (uint64_t size) {
-    return malloc(size);
+    MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
+    void *ptr = palloc(size);
+    MemoryContextSwitchTo(old);
+    return ptr;
 }
 
 void *dbmem_zeroalloc (uint64_t size) {
-    void *ptr = malloc(size);
-    if (ptr) {
-        memset(ptr, 0, (size_t)size);
-    }
+    MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
+    void *ptr = palloc0(size);
+    MemoryContextSwitchTo(old);
     return ptr;
 }
 
 void *dbmem_realloc (void *ptr, uint64_t new_size) {
-    return realloc(ptr, new_size);
+    // repalloc doesn't accept NULL, unlike realloc
+    if (!ptr) return dbmem_alloc(new_size);
+    MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
+    void *newptr = repalloc(ptr, new_size);
+    MemoryContextSwitchTo(old);
+    return newptr;
 }
 
 char *dbmem_mprintf (const char *format, ...) {
@@ -2727,8 +2736,10 @@ char *dbmem_mprintf (const char *format, ...) {
         return NULL;
     }
 
-    // Allocate buffer and format string
-    char *result = (char*)malloc(len + 1);
+    // Allocate buffer in TopMemoryContext and format string
+    MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
+    char *result = (char*)palloc(len + 1);
+    MemoryContextSwitchTo(old);
     if (!result) {va_end(args); return NULL;}
     vsnprintf(result, len + 1, format, args);
 
@@ -2747,8 +2758,10 @@ char *dbmem_vmprintf (const char *format, va_list list) {
 
     if (len < 0) return NULL;
 
-    // Allocate buffer and format string
-    char *result = (char*)malloc(len + 1);
+    // Allocate buffer in TopMemoryContext and format string
+    MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
+    char *result = (char*)palloc(len + 1);
+    MemoryContextSwitchTo(old);
     if (!result) return NULL;
     vsnprintf(result, len + 1, format, list);
 
@@ -2757,12 +2770,12 @@ char *dbmem_vmprintf (const char *format, va_list list) {
 
 void dbmem_free (void *ptr) {
     if (ptr) {
-        free(ptr);
+        pfree(ptr);
     }
 }
 
 uint64_t dbmem_size (void *ptr) {
-    // PostgreSQL memory alloc doesn't expose allocated size directly
+    // palloc doesn't expose allocated size directly
     // Return 0 as a safe default
     return 0;
 }
