@@ -30,6 +30,7 @@
   "dependencies": {
     "@op-engineering/op-sqlite": "14.1.4",
     "@react-native-picker/picker": "2.11.1",
+    "@react-native-vector-icons/fontawesome": "^12.4.0",
     "@react-navigation/native": "^7.1.17",
     "@react-navigation/stack": "^7.4.7",
     "expo": "^53.0.22",
@@ -37,14 +38,14 @@
     "expo-constants": "^18.0.13",
     "expo-crypto": "~14.1.5",
     "expo-status-bar": "~2.2.3",
+    "prop-types": "^15.8.1",
     "react": "19.0.0",
     "react-native": "0.79.6",
     "react-native-gesture-handler": "~2.24.0",
     "react-native-paper": "5.14.5",
     "react-native-picker-select": "^9.3.1",
     "react-native-safe-area-context": "5.4.0",
-    "react-native-screens": "~4.11.1",
-    "react-native-vector-icons": "^10.3.0"
+    "react-native-screens": "~4.11.1"
   },
   "devDependencies": {
     "@babel/core": "7.28.3",

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { View, Text, StyleSheet, FlatList, Alert } from "react-native";
 import { Button } from "react-native-paper";
-import Icon from "react-native-vector-icons/FontAwesome";
+import Icon from "@react-native-vector-icons/fontawesome";
 import TaskRow from "../components/TaskRow";
 import AddTaskModal from "../components/AddTaskModal";
 import useTasks from "../hooks/useTasks"
