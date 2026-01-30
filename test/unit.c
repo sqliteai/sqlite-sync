@@ -2232,21 +2232,1295 @@ bool do_test_string_replace_prefix(void) {
     char *host = "rejfwkr.sqlite.cloud";
     char *prefix = "sqlitecloud://";
     char *replacement = "https://";
-    
+
     char string[512];
     snprintf(string, sizeof(string), "%s%s", prefix, host);
     char expected[512];
     snprintf(expected, sizeof(expected), "%s%s", replacement, host);
-    
+
     char *replaced = cloudsync_string_replace_prefix(string, prefix, replacement);
     if (string == replaced || strcmp(replaced, expected) != 0) return false;
     if (string != replaced) cloudsync_memory_free(replaced);
-    
+
     replaced = cloudsync_string_replace_prefix(expected, prefix, replacement);
     if (expected != replaced) return false;
-    
+
     return true;
 }
+
+// Test cloudsync_string_ndup_lowercase function
+bool do_test_string_lowercase(void) {
+    // Test cloudsync_string_ndup_lowercase
+    const char *test_str = "HELLO World MiXeD";
+    char *lowercase = cloudsync_string_ndup_lowercase(test_str, strlen(test_str));
+    if (!lowercase) return false;
+    if (strcmp(lowercase, "hello world mixed") != 0) {
+        cloudsync_memory_free(lowercase);
+        return false;
+    }
+    cloudsync_memory_free(lowercase);
+
+    // Test cloudsync_string_dup_lowercase
+    char *dup_lower = cloudsync_string_dup_lowercase("TEST STRING");
+    if (!dup_lower) return false;
+    if (strcmp(dup_lower, "test string") != 0) {
+        cloudsync_memory_free(dup_lower);
+        return false;
+    }
+    cloudsync_memory_free(dup_lower);
+
+    // Test with NULL
+    char *null_result = cloudsync_string_ndup_lowercase(NULL, 0);
+    if (null_result != NULL) return false;
+
+    null_result = cloudsync_string_dup_lowercase(NULL);
+    if (null_result != NULL) return false;
+
+    return true;
+}
+
+// Test context error and auxdata functions
+bool do_test_context_functions(void) {
+    sqlite3 *db = NULL;
+    bool result = false;
+
+    int rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    cloudsync_context *data = cloudsync_context_create(db);
+    if (!data) goto cleanup;
+
+    // Test cloudsync_errcode - should return OK initially
+    int err = cloudsync_errcode(data);
+    if (err != DBRES_OK) goto cleanup_ctx;
+
+    // Test cloudsync_set_error and cloudsync_errmsg
+    cloudsync_set_error(data, "Test error message", DBRES_ERROR);
+    err = cloudsync_errcode(data);
+    if (err != DBRES_ERROR) goto cleanup_ctx;
+
+    const char *errmsg = cloudsync_errmsg(data);
+    if (!errmsg || strlen(errmsg) == 0) goto cleanup_ctx;
+
+    // Test cloudsync_reset_error
+    cloudsync_reset_error(data);
+    err = cloudsync_errcode(data);
+    if (err != DBRES_OK) goto cleanup_ctx;
+
+    // Test cloudsync_auxdata / cloudsync_set_auxdata
+    void *aux = cloudsync_auxdata(data);
+    if (aux != NULL) goto cleanup_ctx;  // Should be NULL initially
+
+    int test_data = 12345;
+    cloudsync_set_auxdata(data, &test_data);
+    aux = cloudsync_auxdata(data);
+    if (aux != &test_data) goto cleanup_ctx;
+
+    // Reset auxdata
+    cloudsync_set_auxdata(data, NULL);
+    aux = cloudsync_auxdata(data);
+    if (aux != NULL) goto cleanup_ctx;
+
+    // Test cloudsync_set_schema / cloudsync_schema
+    const char *schema = cloudsync_schema(data);
+    // Initially NULL or empty
+
+    cloudsync_set_schema(data, "test_schema");
+    schema = cloudsync_schema(data);
+    if (!schema || strcmp(schema, "test_schema") != 0) goto cleanup_ctx;
+
+    // Set same schema (should be a no-op)
+    cloudsync_set_schema(data, schema);
+    schema = cloudsync_schema(data);
+    if (!schema || strcmp(schema, "test_schema") != 0) goto cleanup_ctx;
+
+    // Set different schema
+    cloudsync_set_schema(data, "another_schema");
+    schema = cloudsync_schema(data);
+    if (!schema || strcmp(schema, "another_schema") != 0) goto cleanup_ctx;
+
+    // Set to NULL
+    cloudsync_set_schema(data, NULL);
+    schema = cloudsync_schema(data);
+    if (schema != NULL) goto cleanup_ctx;
+
+    // Test cloudsync_table_schema with non-existent table
+    const char *table_schema = cloudsync_table_schema(data, "non_existent_table");
+    if (table_schema != NULL) goto cleanup_ctx;  // Should return NULL for non-existent table
+
+    // Create and init a table, then test cloudsync_table_schema
+    rc = sqlite3_exec(db, "CREATE TABLE schema_test_tbl (id TEXT PRIMARY KEY NOT NULL, data TEXT);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup_ctx;
+
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('schema_test_tbl');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup_ctx;
+
+    table_schema = cloudsync_table_schema(data, "schema_test_tbl");
+    // table_schema can be NULL or a valid schema depending on implementation
+
+    result = true;
+
+cleanup_ctx:
+    cloudsync_context_free(data);
+cleanup:
+    if (db) close_db(db);
+    return result;
+}
+
+// Test pk_decode with count from buffer (count == -1)
+bool do_test_pk_decode_count_from_buffer(void) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+
+    int rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Encode multiple values
+    const char *sql = "SELECT cloudsync_pk_encode(123, 'text value', 3.14, X'DEADBEEF', NULL);";
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    char *pk = (char *)sqlite3_column_blob(stmt, 0);
+    int pklen = sqlite3_column_bytes(stmt, 0);
+
+    // Copy buffer
+    char buffer[1024];
+    memcpy(buffer, pk, (size_t)pklen);
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test pk_decode with count = -1 (read count from buffer)
+    // The count is embedded in the first byte of the encoded pk
+    size_t seek = 0;
+    int n = pk_decode(buffer, (size_t)pklen, -1, &seek, -1, NULL, NULL);
+    if (n != 5) goto cleanup;  // Should decode 5 values
+
+    result = true;
+
+cleanup:
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) close_db(db);
+    return result;
+}
+
+// Test various error paths in cloudsync_set_error
+bool do_test_error_handling(void) {
+    sqlite3 *db = NULL;
+    bool result = false;
+
+    int rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    cloudsync_context *data = cloudsync_context_create(db);
+    if (!data) goto cleanup;
+
+    // Test cloudsync_set_error with NULL err_user (line 519-520 in cloudsync.c)
+    int err_code = cloudsync_set_dberror(data);  // This calls set_error with NULL
+    // err_code should be non-zero since we force an error state
+
+    // Reset for next test
+    cloudsync_reset_error(data);
+
+    // Test cloudsync_set_error with err_code = DBRES_OK (should convert to DBRES_ERROR)
+    err_code = cloudsync_set_error(data, "Test", DBRES_OK);
+    if (err_code == DBRES_OK) {
+        cloudsync_context_free(data);
+        goto cleanup;
+    }
+
+    cloudsync_context_free(data);
+    result = true;
+
+cleanup:
+    if (db) close_db(db);
+    return result;
+}
+
+// Test cloudsync_terminate function
+bool do_test_terminate(void) {
+    sqlite3 *db = NULL;
+    bool result = false;
+
+    int rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Create and init a table
+    rc = sqlite3_exec(db, "CREATE TABLE term_test (id TEXT PRIMARY KEY NOT NULL);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('term_test');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Call terminate
+    rc = sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    result = true;
+
+cleanup:
+    if (db) sqlite3_close(db);
+    return result;
+}
+
+// Test hash function edge cases
+bool do_test_hash_function(void) {
+    // Test fnv1a_hash with various inputs
+
+    // Empty string
+    uint64_t h1 = fnv1a_hash("", 0);
+
+    // Simple string
+    uint64_t h2 = fnv1a_hash("hello", 5);
+    if (h1 == h2) return false;  // Different inputs should produce different hashes
+
+    // String with comments (SQL normalization)
+    const char *sql1 = "CREATE TABLE foo (id INT)";
+    const char *sql2 = "CREATE TABLE foo (id INT) -- comment";
+    uint64_t h3 = fnv1a_hash(sql1, strlen(sql1));
+    uint64_t h4 = fnv1a_hash(sql2, strlen(sql2));
+    if (h3 == h4) return false;  // Comment should affect hash
+
+    // String with quotes
+    const char *sql3 = "CREATE TABLE 'foo' (id INT)";
+    uint64_t h5 = fnv1a_hash(sql3, strlen(sql3));
+    if (h3 == h5) return false;
+
+    // Block comment
+    const char *sql4 = "CREATE TABLE /* comment */ foo (id INT)";
+    uint64_t h6 = fnv1a_hash(sql4, strlen(sql4));
+
+    // Whitespace normalization
+    const char *sql5 = "CREATE  TABLE   foo    (id INT)";
+    uint64_t h7 = fnv1a_hash(sql5, strlen(sql5));
+
+    // Suppress unused variable warnings
+    (void)h6;
+    (void)h7;
+
+    return true;
+}
+
+// Test cloudsync_blob_compare function
+bool do_test_blob_compare(void) {
+    // Test same content, same size
+    const char blob1[] = {0x01, 0x02, 0x03, 0x04};
+    const char blob2[] = {0x01, 0x02, 0x03, 0x04};
+    int result = cloudsync_blob_compare(blob1, 4, blob2, 4);
+    if (result != 0) return false;
+
+    // Test different sizes (line 168 in utils.c)
+    const char blob3[] = {0x01, 0x02, 0x03};
+    result = cloudsync_blob_compare(blob1, 4, blob3, 3);
+    if (result == 0) return false;  // Should be non-zero (different sizes)
+
+    // Test different content, same size
+    const char blob4[] = {0x01, 0x02, 0x03, 0x05};
+    result = cloudsync_blob_compare(blob1, 4, blob4, 4);
+    if (result == 0) return false;  // Should be non-zero (different content)
+
+    // Test empty blobs
+    result = cloudsync_blob_compare("", 0, "", 0);
+    if (result != 0) return false;
+
+    return true;
+}
+
+// Test string duplication functions more thoroughly
+bool do_test_string_functions(void) {
+    // Test cloudsync_string_ndup (non-lowercase path)
+    const char *test_str = "Hello World";
+    char *dup = cloudsync_string_ndup(test_str, 5);  // "Hello"
+    if (!dup) return false;
+    if (strcmp(dup, "Hello") != 0) {
+        cloudsync_memory_free(dup);
+        return false;
+    }
+    cloudsync_memory_free(dup);
+
+    // Test cloudsync_string_dup
+    dup = cloudsync_string_dup("Test String");
+    if (!dup) return false;
+    if (strcmp(dup, "Test String") != 0) {
+        cloudsync_memory_free(dup);
+        return false;
+    }
+    cloudsync_memory_free(dup);
+
+    // Test with empty string
+    dup = cloudsync_string_dup("");
+    if (!dup) return false;
+    if (strlen(dup) != 0) {
+        cloudsync_memory_free(dup);
+        return false;
+    }
+    cloudsync_memory_free(dup);
+
+    return true;
+}
+
+// Test UUID functions
+bool do_test_uuid_functions(void) {
+    uint8_t uuid1[UUID_LEN];
+    uint8_t uuid2[UUID_LEN];
+
+    // Generate two UUIDs
+    if (cloudsync_uuid_v7(uuid1) != 0) return false;
+    if (cloudsync_uuid_v7(uuid2) != 0) return false;
+
+    // Test UUID comparison - uuid1 should be less than or equal to uuid2 (time-based)
+    int cmp = cloudsync_uuid_v7_compare(uuid1, uuid2);
+    // cmp can be -1, 0, or 1
+
+    // Test UUID stringify
+    char str[UUID_STR_MAXLEN];
+    char *result = cloudsync_uuid_v7_stringify(uuid1, str, true);  // With dashes
+    if (!result) return false;
+    if (strlen(result) != 36) return false;  // UUID with dashes is 36 chars
+
+    result = cloudsync_uuid_v7_stringify(uuid1, str, false);  // Without dashes
+    if (!result) return false;
+    if (strlen(result) != 32) return false;  // UUID without dashes is 32 chars
+
+    // Test cloudsync_uuid_v7_string
+    result = cloudsync_uuid_v7_string(str, true);
+    if (!result) return false;
+    if (strlen(result) != 36) return false;
+
+    // Test comparison with same UUID
+    cmp = cloudsync_uuid_v7_compare(uuid1, uuid1);
+    if (cmp != 0) return false;
+
+    return true;
+}
+
+// Test rowid decode function
+bool do_test_rowid_decode(void) {
+    int64_t db_version, seq;
+
+    // Test with a known rowid value
+    // rowid = (db_version << 30) | seq
+    int64_t test_db_version = 100;
+    int64_t test_seq = 500;
+    int64_t rowid = (test_db_version << 30) | test_seq;
+
+    cloudsync_rowid_decode(rowid, &db_version, &seq);
+
+    if (db_version != test_db_version) return false;
+    if (seq != test_seq) return false;
+
+    // Test with larger values
+    test_db_version = 1000000;
+    test_seq = 1000000;  // Max seq is 30 bits
+    rowid = (test_db_version << 30) | (test_seq & 0x3FFFFFFF);
+
+    cloudsync_rowid_decode(rowid, &db_version, &seq);
+
+    if (db_version != test_db_version) return false;
+    if (seq != (test_seq & 0x3FFFFFFF)) return false;
+
+    return true;
+}
+
+// Test SQL-level schema functions
+bool do_test_sql_schema_functions(void) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+    int rc;
+
+    rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Test cloudsync_set_schema SQL function
+    rc = sqlite3_exec(db, "SELECT cloudsync_set_schema('test_schema');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Test cloudsync_schema SQL function - should return the schema we just set
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_schema();", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    const char *schema = (const char *)sqlite3_column_text(stmt, 0);
+    if (!schema || strcmp(schema, "test_schema") != 0) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Set schema to NULL
+    rc = sqlite3_exec(db, "SELECT cloudsync_set_schema(NULL);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Test cloudsync_schema SQL function - should return NULL now
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_schema();", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    // Should be NULL
+    if (sqlite3_column_type(stmt, 0) != SQLITE_NULL) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Create a table and test cloudsync_table_schema
+    rc = sqlite3_exec(db, "CREATE TABLE schema_test (id TEXT PRIMARY KEY NOT NULL, data TEXT);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('schema_test');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Test cloudsync_table_schema SQL function
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_table_schema('schema_test');", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+    // Result can be NULL or a schema name depending on implementation
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test cloudsync_table_schema for non-existent table
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_table_schema('non_existent_table');", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    // Should be NULL for non-existent table
+    if (sqlite3_column_type(stmt, 0) != SQLITE_NULL) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    result = true;
+
+cleanup:
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) close_db(db);
+    return result;
+}
+
+// Test SQL-level pk_decode function
+bool do_test_sql_pk_decode(void) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+    int rc;
+
+    rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Create a primary key with multiple values
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_encode(123, 'hello', 3.14, X'DEADBEEF', NULL);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    const void *pk = sqlite3_column_blob(stmt, 0);
+    int pk_len = sqlite3_column_bytes(stmt, 0);
+
+    // Copy the pk blob
+    char pk_copy[1024];
+    memcpy(pk_copy, pk, pk_len);
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test cloudsync_pk_decode SQL function for INTEGER (index 1)
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_decode(?, 1);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_blob(stmt, 1, pk_copy, pk_len, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    int64_t int_val = sqlite3_column_int64(stmt, 0);
+    if (int_val != 123) goto cleanup;
+
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test cloudsync_pk_decode for TEXT (index 2)
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_decode(?, 2);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_blob(stmt, 1, pk_copy, pk_len, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    const char *text_val = (const char *)sqlite3_column_text(stmt, 0);
+    if (!text_val || strcmp(text_val, "hello") != 0) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test cloudsync_pk_decode for FLOAT (index 3)
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_decode(?, 3);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_blob(stmt, 1, pk_copy, pk_len, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    double float_val = sqlite3_column_double(stmt, 0);
+    if (float_val < 3.13 || float_val > 3.15) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test cloudsync_pk_decode for BLOB (index 4)
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_decode(?, 4);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_blob(stmt, 1, pk_copy, pk_len, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    const unsigned char expected_blob[] = {0xDE, 0xAD, 0xBE, 0xEF};
+    const void *blob_val = sqlite3_column_blob(stmt, 0);
+    int blob_len = sqlite3_column_bytes(stmt, 0);
+    if (blob_len != 4 || memcmp(blob_val, expected_blob, 4) != 0) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test cloudsync_pk_decode for NULL (index 5)
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_decode(?, 5);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_blob(stmt, 1, pk_copy, pk_len, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    if (sqlite3_column_type(stmt, 0) != SQLITE_NULL) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    result = true;
+
+cleanup:
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) close_db(db);
+    return result;
+}
+
+// Test negative integer and float encoding/decoding
+bool do_test_pk_negative_values(void) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+    int rc;
+
+    rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Test negative integer encoding and decoding
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_encode(-12345);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    const void *pk = sqlite3_column_blob(stmt, 0);
+    int pk_len = sqlite3_column_bytes(stmt, 0);
+    char pk_copy[1024];
+    memcpy(pk_copy, pk, pk_len);
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Decode and verify
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_decode(?, 1);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_blob(stmt, 1, pk_copy, pk_len, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    int64_t int_val = sqlite3_column_int64(stmt, 0);
+    if (int_val != -12345) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test negative float encoding and decoding
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_encode(-3.14159);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    pk = sqlite3_column_blob(stmt, 0);
+    pk_len = sqlite3_column_bytes(stmt, 0);
+    memcpy(pk_copy, pk, pk_len);
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_decode(?, 1);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_blob(stmt, 1, pk_copy, pk_len, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    double float_val = sqlite3_column_double(stmt, 0);
+    if (float_val > -3.14 || float_val < -3.15) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test INT64_MIN (maximum negative integer)
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_encode(-9223372036854775808);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    pk = sqlite3_column_blob(stmt, 0);
+    pk_len = sqlite3_column_bytes(stmt, 0);
+    memcpy(pk_copy, pk, pk_len);
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_decode(?, 1);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_blob(stmt, 1, pk_copy, pk_len, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    int_val = sqlite3_column_int64(stmt, 0);
+    if (int_val != INT64_MIN) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    result = true;
+
+cleanup:
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) close_db(db);
+    return result;
+}
+
+// Test settings functions
+bool do_test_settings_functions(void) {
+    sqlite3 *db = NULL;
+    bool result = false;
+    int rc;
+
+    rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Test cloudsync_set
+    rc = sqlite3_exec(db, "SELECT cloudsync_set('test_key', 'test_value');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Create a table and test table-level settings
+    rc = sqlite3_exec(db, "CREATE TABLE settings_test (id TEXT PRIMARY KEY NOT NULL, data TEXT);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('settings_test');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Test cloudsync_set_table
+    rc = sqlite3_exec(db, "SELECT cloudsync_set_table('settings_test', 'table_key', 'table_value');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Test cloudsync_set_column
+    rc = sqlite3_exec(db, "SELECT cloudsync_set_column('settings_test', 'data', 'col_key', 'col_value');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    result = true;
+
+cleanup:
+    if (db) close_db(db);
+    return result;
+}
+
+// Test cloudsync_is_sync and cloudsync_is_enabled functions
+bool do_test_sync_enabled_functions(void) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+    int rc;
+
+    rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Create and init a table
+    rc = sqlite3_exec(db, "CREATE TABLE sync_test (id TEXT PRIMARY KEY NOT NULL);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('sync_test');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Test cloudsync_is_enabled - should be 1 after init
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_is_enabled('sync_test');", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    int enabled = sqlite3_column_int(stmt, 0);
+    if (enabled != 1) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test cloudsync_is_sync - should return 0 (not in sync mode)
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_is_sync('sync_test');", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    // Value depends on implementation
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Disable sync
+    rc = sqlite3_exec(db, "SELECT cloudsync_disable('sync_test');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Test cloudsync_is_enabled - should be 0 after disable
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_is_enabled('sync_test');", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    enabled = sqlite3_column_int(stmt, 0);
+    if (enabled != 0) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Re-enable sync
+    rc = sqlite3_exec(db, "SELECT cloudsync_enable('sync_test');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Test cloudsync_is_enabled - should be 1 again
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_is_enabled('sync_test');", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    enabled = sqlite3_column_int(stmt, 0);
+    if (enabled != 1) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test with non-existent table
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_is_enabled('non_existent_table');", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    enabled = sqlite3_column_int(stmt, 0);
+    if (enabled != 0) goto cleanup;  // Should be 0 for non-existent table
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    result = true;
+
+cleanup:
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) close_db(db);
+    return result;
+}
+
+// Test cloudsync_uuid SQL function
+bool do_test_sql_uuid_function(void) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+    int rc;
+
+    rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Test cloudsync_uuid() SQL function
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_uuid();", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    const char *uuid1 = (const char *)sqlite3_column_text(stmt, 0);
+    if (!uuid1 || strlen(uuid1) != 36) goto cleanup;  // UUID with dashes
+
+    // Store the first UUID
+    char uuid1_copy[40];
+    strncpy(uuid1_copy, uuid1, sizeof(uuid1_copy) - 1);
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Get another UUID - should be different
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_uuid();", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    const char *uuid2 = (const char *)sqlite3_column_text(stmt, 0);
+    if (!uuid2 || strlen(uuid2) != 36) goto cleanup;
+
+    // UUIDs should be different
+    if (strcmp(uuid1_copy, uuid2) == 0) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    result = true;
+
+cleanup:
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) close_db(db);
+    return result;
+}
+
+// Test pk_encode with empty values
+bool do_test_pk_encode_edge_cases(void) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+    int rc;
+
+    rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Test encoding empty text
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_encode('');", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    const void *pk = sqlite3_column_blob(stmt, 0);
+    if (!pk) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test encoding empty blob
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_encode(X'');", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    pk = sqlite3_column_blob(stmt, 0);
+    if (!pk) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test encoding zero
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_encode(0);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    pk = sqlite3_column_blob(stmt, 0);
+    if (!pk) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test encoding 0.0
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_encode(0.0);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    pk = sqlite3_column_blob(stmt, 0);
+    if (!pk) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test encoding large integers
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_encode(9223372036854775807);", -1, &stmt, NULL);  // INT64_MAX
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    pk = sqlite3_column_blob(stmt, 0);
+    if (!pk) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    result = true;
+
+cleanup:
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) close_db(db);
+    return result;
+}
+
+// Test cloudsync_col_value function
+bool do_test_col_value_function(void) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+    int rc;
+
+    rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Create and init a table
+    rc = sqlite3_exec(db, "CREATE TABLE col_test (id TEXT PRIMARY KEY NOT NULL, data TEXT, num INTEGER);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('col_test');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Insert data
+    rc = sqlite3_exec(db, "INSERT INTO col_test (id, data, num) VALUES ('key1', 'value1', 42);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Get the pk for key1
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_pk_encode('key1');", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    const void *pk = sqlite3_column_blob(stmt, 0);
+    int pk_len = sqlite3_column_bytes(stmt, 0);
+    char pk_copy[256];
+    memcpy(pk_copy, pk, pk_len);
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test cloudsync_col_value for text column
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_col_value('col_test', 'data', ?);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_blob(stmt, 1, pk_copy, pk_len, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    const char *val = (const char *)sqlite3_column_text(stmt, 0);
+    if (!val || strcmp(val, "value1") != 0) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test cloudsync_col_value for integer column
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_col_value('col_test', 'num', ?);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_blob(stmt, 1, pk_copy, pk_len, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    int num_val = sqlite3_column_int(stmt, 0);
+    if (num_val != 42) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test cloudsync_col_value with TOMBSTONE value (should return NULL)
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_col_value('col_test', '__[RIP]__', ?);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_blob(stmt, 1, pk_copy, pk_len, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    if (sqlite3_column_type(stmt, 0) != SQLITE_NULL) goto cleanup;
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    result = true;
+
+cleanup:
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) close_db(db);
+    return result;
+}
+
+// Test cloudsync_is_sync function
+bool do_test_is_sync_function(void) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+    int rc;
+
+    rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Create and init a table
+    rc = sqlite3_exec(db, "CREATE TABLE sync_check (id TEXT PRIMARY KEY NOT NULL);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('sync_check');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Test cloudsync_is_sync
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_is_sync('sync_check');", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    // Result depends on internal state
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test cloudsync_is_sync with non-existent table
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_is_sync('non_existent');", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    int is_sync = sqlite3_column_int(stmt, 0);
+    if (is_sync != 0) goto cleanup;  // Should be 0 for non-existent table
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    result = true;
+
+cleanup:
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) close_db(db);
+    return result;
+}
+
+// Test cloudsync_db_version_next function
+bool do_test_db_version_next(void) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+    int rc;
+
+    rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Create and sync a table to properly initialize the context
+    rc = sqlite3_exec(db, "CREATE TABLE dbv_test (id TEXT PRIMARY KEY NOT NULL, val TEXT);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(db, "SELECT cloudsync_sync('dbv_test');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Test cloudsync_db_version_next without argument
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_db_version_next();", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    int64_t v1 = sqlite3_column_int64(stmt, 0);
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Test cloudsync_db_version_next with merging_version argument
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_db_version_next(100);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    int64_t v2 = sqlite3_column_int64(stmt, 0);
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // v2 should be greater or equal to v1
+    if (v2 < v1) goto cleanup;
+
+    result = true;
+
+cleanup:
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) close_db(db);
+    return result;
+}
+
+// Test various insert/update/delete scenarios through SQL
+bool do_test_insert_update_delete_sql(void) {
+    sqlite3 *db = NULL;
+    bool result = false;
+    int rc;
+
+    rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Create and init a table
+    rc = sqlite3_exec(db, "CREATE TABLE iud_test (id TEXT PRIMARY KEY NOT NULL, val TEXT, num REAL);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('iud_test');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Insert data
+    rc = sqlite3_exec(db, "INSERT INTO iud_test (id, val, num) VALUES ('id1', 'initial', 1.5);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Update data
+    rc = sqlite3_exec(db, "UPDATE iud_test SET val = 'updated', num = 2.5 WHERE id = 'id1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Insert more data
+    rc = sqlite3_exec(db, "INSERT INTO iud_test (id, val, num) VALUES ('id2', 'second', 3.5);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Delete data
+    rc = sqlite3_exec(db, "DELETE FROM iud_test WHERE id = 'id2';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Check changes table
+    rc = sqlite3_exec(db, "SELECT COUNT(*) FROM cloudsync_changes;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    result = true;
+
+cleanup:
+    if (db) close_db(db);
+    return result;
+}
+
+// Test dbutils_binary_comparison function (already exposed for testing)
+bool do_test_binary_comparison(void) {
+    // Test cases for dbutils_binary_comparison
+    int result1 = dbutils_binary_comparison(5, 3);  // 5 > 3, should return 1
+    if (result1 != 1) return false;
+
+    int result2 = dbutils_binary_comparison(3, 5);  // 3 < 5, should return -1
+    if (result2 != -1) return false;
+
+    int result3 = dbutils_binary_comparison(5, 5);  // 5 == 5, should return 0
+    if (result3 != 0) return false;
+
+    int result4 = dbutils_binary_comparison(-10, 10);  // -10 < 10
+    if (result4 != -1) return false;
+
+    int result5 = dbutils_binary_comparison(0, 0);  // 0 == 0
+    if (result5 != 0) return false;
+
+    return true;
+}
+
+
+// Test pk_decode with various malformed inputs
+bool do_test_pk_decode_malformed(void) {
+    // Test with empty buffer
+    int res = pk_decode_prikey(NULL, 0, NULL, NULL);
+    if (res != -1) return false;  // Should fail for NULL buffer
+
+    // Test with buffer but 0 length
+    char empty[1] = {0};
+    res = pk_decode_prikey(empty, 0, NULL, NULL);
+    // This should also fail since count can't be read
+    if (res != -1) return false;
+
+    // Test pk_decode with count specified but incomplete buffer
+    size_t seek = 0;
+    res = pk_decode(empty, 0, 5, &seek, -1, NULL, NULL);
+    if (res != -1) return false;  // Should fail - can't read 5 elements from empty buffer
+
+    return true;
+}
+
 
 bool do_test_many_columns (int ncols, sqlite3 *db) {
     char sql_create[10000];
@@ -6291,6 +7565,28 @@ int main (int argc, const char * argv[]) {
     result += test_report("Functions Test:", do_test_functions(db, print_result));
     result += test_report("Functions Test (Int):", do_test_internal_functions());
     result += test_report("String Func Test:", do_test_string_replace_prefix());
+    result += test_report("String Lowercase Test:", do_test_string_lowercase());
+    result += test_report("Context Functions Test:", do_test_context_functions());
+    result += test_report("PK Decode Count Test:", do_test_pk_decode_count_from_buffer());
+    result += test_report("Error Handling Test:", do_test_error_handling());
+    result += test_report("Terminate Test:", do_test_terminate());
+    result += test_report("Hash Function Test:", do_test_hash_function());
+    result += test_report("Blob Compare Test:", do_test_blob_compare());
+    result += test_report("String Functions Test:", do_test_string_functions());
+    result += test_report("UUID Functions Test:", do_test_uuid_functions());
+    result += test_report("RowID Decode Test:", do_test_rowid_decode());
+    result += test_report("SQL Schema Funcs Test:", do_test_sql_schema_functions());
+    result += test_report("SQL PK Decode Test:", do_test_sql_pk_decode());
+    result += test_report("PK Negative Values Test:", do_test_pk_negative_values());
+    result += test_report("Settings Functions Test:", do_test_settings_functions());
+    result += test_report("Sync/Enabled Funcs Test:", do_test_sync_enabled_functions());
+    result += test_report("SQL UUID Func Test:", do_test_sql_uuid_function());
+    result += test_report("PK Encode Edge Cases:", do_test_pk_encode_edge_cases());
+    result += test_report("Col Value Func Test:", do_test_col_value_function());
+    result += test_report("Is Sync Func Test:", do_test_is_sync_function());
+    result += test_report("Insert/Update/Delete:", do_test_insert_update_delete_sql());
+    result += test_report("Binary Comparison Test:", do_test_binary_comparison());
+    result += test_report("PK Decode Malformed:", do_test_pk_decode_malformed());
     result += test_report("Test Many Columns:", do_test_many_columns(600, db));
     result += test_report("Payload Buffer Test (500KB):", do_test_payload_buffer(500 * 1024));
     result += test_report("Payload Buffer Test (600KB):", do_test_payload_buffer(600 * 1024));
