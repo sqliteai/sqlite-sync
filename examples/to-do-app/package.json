@@ -7,7 +7,16 @@
     "url": "git+https://github.com/sqliteai/sqlite-sync.git"
   },
   "author": "SQLiteAI",
-  "keywords": ["expo-template", "sqlite", "cloudsync", "todo", "sync", "react-native", "expo", "template"],
+  "keywords": [
+    "expo-template",
+    "sqlite",
+    "cloudsync",
+    "todo",
+    "sync",
+    "react-native",
+    "expo",
+    "template"
+  ],
   "main": "expo/AppEntry.js",
   "scripts": {
     "start": "expo start",
@@ -24,10 +33,12 @@
     "@react-navigation/native": "^7.1.17",
     "@react-navigation/stack": "^7.4.7",
     "expo": "^53.0.22",
+    "expo-asset": "^12.0.12",
+    "expo-constants": "^18.0.13",
     "expo-crypto": "~14.1.5",
     "expo-status-bar": "~2.2.3",
     "react": "19.0.0",
-    "react-native": "0.79.5",
+    "react-native": "0.79.6",
     "react-native-gesture-handler": "~2.24.0",
     "react-native-paper": "5.14.5",
     "react-native-picker-select": "^9.3.1",

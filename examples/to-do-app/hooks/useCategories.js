@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Platform } from 'react-native';
 import { db } from "../db/dbConnection";
-import { CONNECTION_STRING, API_TOKEN } from "@env";
+import { ANDROID_CONNECTION_STRING, CONNECTION_STRING, API_TOKEN } from "@env";
 import { getDylibPath } from "@op-engineering/op-sqlite";
 import { randomUUID } from 'expo-crypto';
 import { useSyncContext } from '../components/SyncContext';
@@ -65,12 +65,19 @@ const useCategories = () => {
       await db.execute('CREATE TABLE IF NOT EXISTS tags (uuid TEXT NOT NULL PRIMARY KEY, name TEXT, UNIQUE(name));')
       await db.execute('CREATE TABLE IF NOT EXISTS tasks_tags (uuid TEXT NOT NULL PRIMARY KEY, task_uuid TEXT, tag_uuid TEXT, FOREIGN KEY (task_uuid) REFERENCES tasks(uuid), FOREIGN KEY (tag_uuid) REFERENCES tags(uuid));')
 
-      await db.execute(`SELECT cloudsync_init('*');`);
+      await db.execute(`SELECT cloudsync_init('tasks');`);
+      await db.execute(`SELECT cloudsync_init('tags');`);
+      await db.execute(`SELECT cloudsync_init('tasks_tags');`);
+      
       await db.execute('INSERT OR IGNORE INTO tags (uuid, name) VALUES (?, ?)', [randomUUID(), 'Work'])
       await db.execute('INSERT OR IGNORE INTO tags (uuid, name) VALUES (?, ?)', [randomUUID(), 'Personal'])
 
-      await db.execute(`SELECT cloudsync_network_init('${CONNECTION_STRING}');`);
-      await db.execute(`SELECT cloudsync_network_set_token('${API_TOKEN}');`)
+      if ((ANDROID_CONNECTION_STRING || CONNECTION_STRING) && API_TOKEN) {
+        await db.execute(`SELECT cloudsync_network_init('${Platform.OS == 'android' && ANDROID_CONNECTION_STRING ? ANDROID_CONNECTION_STRING : CONNECTION_STRING}');`);
+        await db.execute(`SELECT cloudsync_network_set_token('${API_TOKEN}');`)
+      } else {
+        throw new Error('No valid CONNECTION_STRING or API_TOKEN provided, cloudsync_network_init will not be called');
+      }
 
       db.execute('SELECT cloudsync_network_sync(100, 10);')
       getCategories()
