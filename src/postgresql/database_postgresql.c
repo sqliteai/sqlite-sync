@@ -2737,9 +2737,7 @@ char *dbmem_mprintf (const char *format, ...) {
     }
 
     // Allocate buffer in TopMemoryContext and format string
-    MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
-    char *result = (char*)palloc(len + 1);
-    MemoryContextSwitchTo(old);
+    char *result = dbmem_alloc(len + 1);
     if (!result) {va_end(args); return NULL;}
     vsnprintf(result, len + 1, format, args);
 
@@ -2759,9 +2757,7 @@ char *dbmem_vmprintf (const char *format, va_list list) {
     if (len < 0) return NULL;
 
     // Allocate buffer in TopMemoryContext and format string
-    MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
-    char *result = (char*)palloc(len + 1);
-    MemoryContextSwitchTo(old);
+    char *result = dbmem_alloc(len + 1);
     if (!result) return NULL;
     vsnprintf(result, len + 1, format, list);
 
