@@ -1,4 +1,4 @@
-const { withDangerousMod, withXcodeProject } = require('@expo/config-plugins');
+const { withDangerousMod, withXcodeProject, withInfoPlist } = require('@expo/config-plugins');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
@@ -277,7 +277,20 @@ const withCloudSync = (config) => {
   
   // iOS setup - add to Xcode project
   config = withCloudSyncFramework(config);
-  
+
+  // iOS setup - register icon fonts in Info.plist
+  config = withInfoPlist(config, (config) => {
+    const fonts = config.modResults.UIAppFonts || [];
+    if (!fonts.includes('FontAwesome.ttf')) {
+      fonts.push('FontAwesome.ttf');
+    }
+    if (!fonts.includes('MaterialDesignIcons.ttf')) {
+      fonts.push('MaterialDesignIcons.ttf');
+    }
+    config.modResults.UIAppFonts = fonts;
+    return config;
+  });
+
   return config;
 };
 
