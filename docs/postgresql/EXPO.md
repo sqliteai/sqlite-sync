@@ -16,9 +16,16 @@ cd MyApp
 
 ### 2. Setup
 
-1. Execute the exact schema from `to-do-app.sql`.
-2. Rename the `.env.example` into `.env` and fill with your values.
-3. If you're testing with a local server define also the `ANDROID_CONNECTION_STRING` variable and use a different connection string for it, replace localhost with `10.0.2.2`.
+1. Execute the exact schema from [`to-do-app.sql`](../../examples/to-do-app/to-do-app.sql).
+2. Enable CloudSync for all tables on the remote database with:
+    ```sql
+    CREATE EXTENSION IF NOT EXISTS cloudsync;
+    SELECT cloudsync_init('tasks');
+    SELECT cloudsync_init('tags');
+    SELECT cloudsync_init('tasks_tags');
+    ```
+3. Rename the `.env.example` into `.env` and fill with your values.
+4. If you're testing with a local server define also the `ANDROID_CONNECTION_STRING` variable and use a different connection string for it, replace localhost with `10.0.2.2`.
 
 ```
 CONNECTION_STRING="http://localhost:8091/postgres"
@@ -26,7 +33,7 @@ ANDROID_CONNECTION_STRING="http://10.0.2.2:8091/postgres"
 API_TOKEN="token"
 ```
 
-4. Fill the `API_TOKEN` variable with the token from the `CloudSync` service.
+5. Fill the `API_TOKEN` variable with the access token from the [`CloudSync`](CLOUDSYNC.md) service.
 
 > **⚠️ SECURITY WARNING**: This example puts database connection strings directly in `.env` files for demonstration purposes only. **Do not use this pattern in production.** 
 >
