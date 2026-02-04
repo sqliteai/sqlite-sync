@@ -69,8 +69,8 @@ const useCategories = () => {
       await db.execute(`SELECT cloudsync_init('tags');`);
       await db.execute(`SELECT cloudsync_init('tasks_tags');`);
       
-      await db.execute('INSERT OR IGNORE INTO tags (uuid, name) VALUES (?, ?)', [randomUUID(), 'Work'])
-      await db.execute('INSERT OR IGNORE INTO tags (uuid, name) VALUES (?, ?)', [randomUUID(), 'Personal'])
+      await db.execute('INSERT OR IGNORE INTO tags (uuid, name) VALUES (?, ?)', ['work', 'Work'])
+      await db.execute('INSERT OR IGNORE INTO tags (uuid, name) VALUES (?, ?)', ['personal', 'Personal'])
 
       if ((ANDROID_CONNECTION_STRING || CONNECTION_STRING) && API_TOKEN) {
         await db.execute(`SELECT cloudsync_network_init('${Platform.OS == 'android' && ANDROID_CONNECTION_STRING ? ANDROID_CONNECTION_STRING : CONNECTION_STRING}');`);
