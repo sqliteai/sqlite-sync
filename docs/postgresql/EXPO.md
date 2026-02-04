@@ -2,7 +2,7 @@
 
 A simple Expo example demonstrating SQLite synchronization with CloudSync and PostgreSQL. Build cross-platform apps that sync data seamlessly across devices.
 
-<img src="https://github.com/user-attachments/assets/86db5c25-d8ff-4c31-b157-8dff178e1720" width="40%" height="40%">
+https://github.com/user-attachments/assets/21a0332a-7f8f-468b-bd5c-004049e70763
 
 ## 🚀 Quick Start
 
