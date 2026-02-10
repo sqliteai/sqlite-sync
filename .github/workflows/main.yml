@@ -226,10 +226,41 @@ jobs:
           path: dist/${{ matrix.name == 'apple-xcframework' && 'CloudSync.*' || 'cloudsync.*'}}
           if-no-files-found: error
 
+  postgres-test:
+    runs-on: ubuntu-22.04
+    name: postgresql build + test
+    timeout-minutes: 10
+
+    steps:
+
+      - uses: actions/checkout@v4.2.2
+
+      - name: build and start postgresql container
+        run: make postgres-docker-rebuild
+
+      - name: wait for postgresql to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec cloudsync-postgres pg_isready -U postgres > /dev/null 2>&1; then
+              echo "PostgreSQL is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "PostgreSQL failed to start within 60s"
+          docker logs cloudsync-postgres
+          exit 1
+
+      - name: run postgresql tests
+        run: |
+          docker exec cloudsync-postgres mkdir -p /tmp/cloudsync/test
+          docker cp test/postgresql cloudsync-postgres:/tmp/cloudsync/test/postgresql
+          docker exec cloudsync-postgres psql -U postgres -d postgres -f /tmp/cloudsync/test/postgresql/full_test.sql
+
   release:
     runs-on: ubuntu-22.04
     name: release
-    needs: build
+    needs: [build, postgres-test]
     if: github.ref == 'refs/heads/main'
 
     env:

@@ -1204,18 +1204,20 @@ int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, c
         return rc;
     }
     
-    // bind value
+    // bind value (always bind all expected parameters for correct prepared statement handling)
     if (col_value) {
         rc = databasevm_bind_value(vm, table->npks+1, col_value);
         if (rc == DBRES_OK) rc = databasevm_bind_value(vm, table->npks+2, col_value);
-        if (rc != DBRES_OK) {
-            cloudsync_set_dberror(data);
-            dbvm_reset(vm);
-            return rc;
-        }
-        
+    } else {
+        rc = databasevm_bind_null(vm, table->npks+1);
+        if (rc == DBRES_OK) rc = databasevm_bind_null(vm, table->npks+2);
     }
-    
+    if (rc != DBRES_OK) {
+        cloudsync_set_dberror(data);
+        dbvm_reset(vm);
+        return rc;
+    }
+
     // perform real operation and disable triggers
     
     // in case of GOS we reused the table->col_merge_stmt statement
@@ -2442,8 +2444,8 @@ int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size,
     
     // retrieve BLOB
     char sql[1024];
-    snprintf(sql, sizeof(sql), "WITH max_db_version AS (SELECT MAX(db_version) AS max_db_version FROM cloudsync_changes) "
-                               "SELECT * FROM (SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) AS payload, max_db_version AS max_db_version, MAX(IIF(db_version = max_db_version, seq, NULL)) FROM cloudsync_changes, max_db_version WHERE site_id=cloudsync_siteid() AND (db_version>%d OR (db_version=%d AND seq>%d))) WHERE payload IS NOT NULL", *db_version, *db_version, *seq);
+    snprintf(sql, sizeof(sql), "WITH max_db_version AS (SELECT MAX(db_version) AS max_db_version FROM cloudsync_changes WHERE site_id=cloudsync_siteid()) "
+                               "SELECT * FROM (SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) AS payload, max_db_version AS max_db_version, MAX(IIF(db_version = max_db_version, seq, 0)) FROM cloudsync_changes, max_db_version WHERE site_id=cloudsync_siteid() AND (db_version>%d OR (db_version=%d AND seq>%d))) WHERE payload IS NOT NULL", *db_version, *db_version, *seq);
     
     int64_t len = 0;
     int rc = database_select_blob_2int(data, sql, blob, &len, new_db_version, new_seq);

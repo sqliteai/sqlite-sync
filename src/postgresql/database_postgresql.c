@@ -2177,7 +2177,7 @@ int databasevm_bind_null (dbvm_t *vm, int index) {
     
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
     stmt->values[idx] = (Datum)0;
-    stmt->types[idx] = BYTEAOID;
+    stmt->types[idx] = TEXTOID;  // TEXTOID has casts to most types
     stmt->nulls[idx] = 'n';
     
     if (stmt->nparams < idx + 1) stmt->nparams = idx + 1;
@@ -2222,7 +2222,8 @@ int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value) {
     pgvalue_t *v = (pgvalue_t *)value;
     if (!v || v->isnull) {
         stmt->values[idx] = (Datum)0;
-        stmt->types[idx] = TEXTOID;
+        // Use the actual column type if available, otherwise default to TEXTOID
+        stmt->types[idx] = (v && OidIsValid(v->typeid)) ? v->typeid : TEXTOID;
         stmt->nulls[idx] = 'n';
     } else {
         int16 typlen;

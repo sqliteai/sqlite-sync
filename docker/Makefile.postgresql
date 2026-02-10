@@ -137,32 +137,32 @@ PG_DOCKER_DB_PASSWORD ?= postgres
 
 # Build Docker image with pre-installed extension
 postgres-docker-build:
-	@echo "Building Docker image via docker-compose (rebuilt when sources change)..."
+	@echo "Building Docker image via docker compose (rebuilt when sources change)..."
 	# To force plaintext BuildKit logs, run: make postgres-docker-build DOCKER_BUILD_ARGS="--progress=plain"
-	cd docker/postgresql && docker-compose build $(DOCKER_BUILD_ARGS)
+	cd docker/postgresql && docker compose build $(DOCKER_BUILD_ARGS)
 	@echo ""
 	@echo "Docker image built successfully!"
 
 # Build Docker image with AddressSanitizer enabled (override compose file)
 postgres-docker-build-asan:
-	@echo "Building Docker image with ASAN via docker-compose..."
+	@echo "Building Docker image with ASAN via docker compose..."
 	# To force plaintext BuildKit logs, run: make postgres-docker-build-asan DOCKER_BUILD_ARGS=\"--progress=plain\"
-	cd docker/postgresql && docker-compose -f docker-compose.debug.yml -f docker-compose.asan.yml build $(DOCKER_BUILD_ARGS)
+	cd docker/postgresql && docker compose -f docker-compose.debug.yml -f docker-compose.asan.yml build $(DOCKER_BUILD_ARGS)
 	@echo ""
 	@echo "ASAN Docker image built successfully!"
 
 # Build Docker image using docker-compose.debug.yml
 postgres-docker-debug-build:
-	@echo "Building debug Docker image via docker-compose..."
+	@echo "Building debug Docker image via docker compose..."
 	# To force plaintext BuildKit logs, run: make postgres-docker-debug-build DOCKER_BUILD_ARGS=\"--progress=plain\"
-	cd docker/postgresql && docker-compose -f docker-compose.debug.yml build $(DOCKER_BUILD_ARGS)
+	cd docker/postgresql && docker compose -f docker-compose.debug.yml build $(DOCKER_BUILD_ARGS)
 	@echo ""
 	@echo "Debug Docker image built successfully!"
 
 # Run PostgreSQL container with CloudSync
 postgres-docker-run:
 	@echo "Starting PostgreSQL with CloudSync..."
-	cd docker/postgresql && docker-compose up -d --build
+	cd docker/postgresql && docker compose up -d --build
 	@echo ""
 	@echo "Container started successfully!"
 	@echo ""
@@ -179,7 +179,7 @@ postgres-docker-run:
 # Run PostgreSQL container with CloudSync and AddressSanitizer enabled
 postgres-docker-run-asan:
 	@echo "Starting PostgreSQL with CloudSync (ASAN enabled)..."
-	cd docker/postgresql && docker-compose -f docker-compose.debug.yml -f docker-compose.asan.yml up -d --build
+	cd docker/postgresql && docker compose -f docker-compose.debug.yml -f docker-compose.asan.yml up -d --build
 	@echo ""
 	@echo "Container started successfully!"
 	@echo ""
@@ -196,7 +196,7 @@ postgres-docker-run-asan:
 # Run PostgreSQL container using docker-compose.debug.yml
 postgres-docker-debug-run:
 	@echo "Starting PostgreSQL with CloudSync (debug compose)..."
-	cd docker/postgresql && docker-compose -f docker-compose.debug.yml up -d --build
+	cd docker/postgresql && docker compose -f docker-compose.debug.yml up -d --build
 	@echo ""
 	@echo "Container started successfully!"
 	@echo ""
@@ -213,21 +213,21 @@ postgres-docker-debug-run:
 # Stop PostgreSQL container
 postgres-docker-stop:
 	@echo "Stopping PostgreSQL container..."
-	cd docker/postgresql && docker-compose down
+	cd docker/postgresql && docker compose down
 	@echo "Container stopped"
 
 # Rebuild and restart container
 postgres-docker-rebuild: postgres-docker-build
 	@echo "Rebuilding and restarting container..."
-	cd docker/postgresql && docker-compose down
-	cd docker/postgresql && docker-compose up -d --build
+	cd docker/postgresql && docker compose down
+	cd docker/postgresql && docker compose up -d --build
 	@echo "Container restarted with new image"
 
 # Rebuild and restart container using docker-compose.debug.yml
 postgres-docker-debug-rebuild: postgres-docker-debug-build
 	@echo "Rebuilding and restarting debug container..."
-	cd docker/postgresql && docker-compose -f docker-compose.debug.yml down
-	cd docker/postgresql && docker-compose -f docker-compose.debug.yml up -d --build
+	cd docker/postgresql && docker compose -f docker-compose.debug.yml down
+	cd docker/postgresql && docker compose -f docker-compose.debug.yml up -d --build
 	@echo "Debug container restarted with new image"
 
 # Interactive shell in container
@@ -353,5 +353,5 @@ postgres-help:
 # Simple smoke test: rebuild image/container, create extension, and query version
 unittest-pg: postgres-docker-rebuild
 	@echo "Running PostgreSQL extension smoke test..."
-	cd docker/postgresql && docker-compose exec -T postgres psql -U postgres -d cloudsync_test -f /tmp/cloudsync/docker/postgresql/smoke_test.sql
+	cd docker/postgresql && docker compose exec -T postgres psql -U postgres -d cloudsync_test -f /tmp/cloudsync/docker/postgresql/smoke_test.sql
 	@echo "Smoke test completed."

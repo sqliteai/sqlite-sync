@@ -1638,6 +1638,77 @@ static int cloudsync_decode_value_cb (void *xdata, int index, int type, int64_t 
     return DBRES_OK;
 }
 
+// Map a column Oid to the decoded type Oid that would be used for non-NULL values.
+// This ensures NULL and non-NULL values use consistent types for SPI plan caching.
+// The mapping must match pgvalue_dbtype() in pgvalue.c which determines encode/decode types.
+// For example, INT4OID columns decode to INT8OID, UUIDOID columns decode to TEXTOID.
+static Oid map_column_oid_to_decoded_oid(Oid col_oid) {
+    switch (col_oid) {
+        // Integer types → INT8OID (all integers decode to int64)
+        // Must match DBTYPE_INTEGER cases in pgvalue_dbtype()
+        case INT2OID:
+        case INT4OID:
+        case INT8OID:
+        case BOOLOID:   // BOOLEAN encodes/decodes as INTEGER
+        case CHAROID:   // "char" encodes/decodes as INTEGER
+        case OIDOID:    // OID encodes/decodes as INTEGER
+            return INT8OID;
+        // Float types → FLOAT8OID (all floats decode to double)
+        // Must match DBTYPE_FLOAT cases in pgvalue_dbtype()
+        case FLOAT4OID:
+        case FLOAT8OID:
+        case NUMERICOID:
+            return FLOAT8OID;
+        // Binary types → BYTEAOID
+        // Must match DBTYPE_BLOB cases in pgvalue_dbtype()
+        case BYTEAOID:
+            return BYTEAOID;
+        // All other types (text, varchar, uuid, json, date, timestamp, etc.) → TEXTOID
+        // These all encode/decode as DBTYPE_TEXT
+        default:
+            return TEXTOID;
+    }
+}
+
+// Get the Oid of a column from the system catalog.
+// Requires SPI to be connected. Returns InvalidOid if not found.
+static Oid get_column_oid(const char *schema, const char *table_name, const char *column_name) {
+    if (!table_name || !column_name) return InvalidOid;
+
+    const char *query =
+        "SELECT a.atttypid "
+        "FROM pg_attribute a "
+        "JOIN pg_class c ON c.oid = a.attrelid "
+        "LEFT JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE c.relname = $1 "
+        "AND a.attname = $2 "
+        "AND a.attnum > 0 "
+        "AND NOT a.attisdropped "
+        "AND (n.nspname = $3 OR $3 IS NULL)";
+
+    Oid argtypes[3] = {TEXTOID, TEXTOID, TEXTOID};
+    Datum values[3];
+    char nulls[3] = {' ', ' ', schema ? ' ' : 'n'};
+
+    values[0] = CStringGetTextDatum(table_name);
+    values[1] = CStringGetTextDatum(column_name);
+    values[2] = schema ? CStringGetTextDatum(schema) : (Datum)0;
+
+    int ret = SPI_execute_with_args(query, 3, argtypes, values, nulls, true, 1);
+
+    pfree(DatumGetPointer(values[0]));
+    pfree(DatumGetPointer(values[1]));
+    if (schema) pfree(DatumGetPointer(values[2]));
+
+    if (ret != SPI_OK_SELECT || SPI_processed == 0) return InvalidOid;
+
+    bool isnull;
+    Datum col_oid = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
+    if (isnull) return InvalidOid;
+
+    return DatumGetObjectId(col_oid);
+}
+
 // Decode encoded bytea into a pgvalue_t with the decoded base type.
 // Type casting to the target column type is handled by the SQL statement.
 static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, bool *out_isnull) {
@@ -2247,9 +2318,23 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
         if (SPI_connect() != SPI_OK_CONNECT) ereport(ERROR, (errmsg("cloudsync: SPI_connect failed in trigger")));
         spi_connected = true;
 
-        // Decode value to base type; SQL statement handles type casting via $n::typename
+        // Decode value to base type; SQL statement handles type casting via $n::typename.
+        // For non-NULL values, we get the decoded base type (INT8OID for integers, TEXTOID for text/UUID, etc).
+        // For NULL values, we must use the SAME decoded type that non-NULL values would use.
+        // This ensures type consistency across all calls, as SPI caches parameter types on first prepare.
         if (!is_tombstone) {
-            col_value = cloudsync_decode_bytea_to_pgvalue(insert_value_encoded, NULL);
+            bool value_is_null = false;
+            col_value = cloudsync_decode_bytea_to_pgvalue(insert_value_encoded, &value_is_null);
+
+            // When value is NULL, create a typed NULL pgvalue with the decoded type.
+            // We map the column's actual Oid to the corresponding decoded Oid (e.g., INT4OID → INT8OID).
+            if (!col_value && value_is_null) {
+                Oid col_oid = get_column_oid(table_schema(table), insert_tbl, insert_name);
+                if (OidIsValid(col_oid)) {
+                    Oid decoded_oid = map_column_oid_to_decoded_oid(col_oid);
+                    col_value = pgvalue_create((Datum)0, decoded_oid, -1, InvalidOid, true);
+                }
+            }
         }
         
         int rc = DBRES_OK;

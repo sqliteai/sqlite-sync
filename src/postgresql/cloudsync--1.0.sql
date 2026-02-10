@@ -276,3 +276,21 @@ CREATE OR REPLACE FUNCTION cloudsync_table_schema(table_name text)
 RETURNS text
 AS 'MODULE_PATHNAME', 'pg_cloudsync_table_schema'
 LANGUAGE C VOLATILE;
+
+-- ============================================================================
+-- Type Casts
+-- ============================================================================
+
+-- Cast function: converts bigint to boolean (0 = false, non-zero = true)
+-- Required because BOOLEAN values are encoded as INT8 in sync payloads,
+-- but PostgreSQL has no built-in cast from bigint to boolean.
+CREATE FUNCTION cloudsync_int8_to_bool(bigint) RETURNS boolean AS $$
+    SELECT $1 <> 0
+$$ LANGUAGE SQL IMMUTABLE STRICT;
+
+-- ASSIGNMENT cast: auto-applies in INSERT/UPDATE context only
+-- This enables BOOLEAN column sync where values are encoded as INT8.
+-- Using ASSIGNMENT (not IMPLICIT) to avoid unintended conversions in WHERE clauses.
+CREATE CAST (bigint AS boolean)
+    WITH FUNCTION cloudsync_int8_to_bool(bigint)
+    AS ASSIGNMENT;
