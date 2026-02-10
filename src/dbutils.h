@@ -25,6 +25,7 @@
 #define CLOUDSYNC_KEY_SCHEMA                "schema"
 #define CLOUDSYNC_KEY_DEBUG                 "debug"
 #define CLOUDSYNC_KEY_ALGO                  "algo"
+#define CLOUDSYNC_KEY_SKIP_SCHEMA_HASH_CHECK    "skip_schema_hash_check"
 
 // settings
 int dbutils_settings_init (cloudsync_context *data);

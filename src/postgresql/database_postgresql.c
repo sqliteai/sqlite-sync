@@ -1612,21 +1612,9 @@ int64_t database_schema_version (cloudsync_context *data) {
 }
 
 uint64_t database_schema_hash (cloudsync_context *data) {
-    char *schema = NULL;
-    database_select_text(data,
-        "SELECT string_agg(LOWER(table_name || column_name || data_type), '' ORDER BY table_name, column_name) "
-        "FROM information_schema.columns WHERE table_schema = COALESCE(cloudsync_schema(), current_schema())",
-        &schema);
-
-    if (!schema) {
-        elog(INFO, "database_schema_hash: schema is NULL");
-        return 0;
-    }
-
-    size_t schema_len = strlen(schema);
-    uint64_t hash = fnv1a_hash(schema, schema_len);
-    cloudsync_memory_free(schema);
-    return hash;
+    int64_t value = 0;
+    int rc = database_select_int(data, "SELECT hash FROM cloudsync_schema_versions ORDER BY seq DESC LIMIT 1;", &value);
+    return (rc == DBRES_OK) ? (uint64_t)value : 0;
 }
 
 bool database_check_schema_hash (cloudsync_context *data, uint64_t hash) {
@@ -1639,16 +1627,65 @@ bool database_check_schema_hash (cloudsync_context *data, uint64_t hash) {
 }
 
 int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
+    // Build normalized schema string using only: column name (lowercase), type (SQLite affinity), pk flag
+    // Format: tablename:colname:affinity:pk,... (ordered by table name, then column ordinal position)
+    // This makes the hash resilient to formatting, quoting, case differences and portable across databases
+    //
+    // PostgreSQL type to SQLite affinity mapping:
+    // - integer, smallint, bigint, boolean → 'integer'
+    // - bytea → 'blob'
+    // - real, double precision → 'real'
+    // - numeric, decimal → 'numeric'
+    // - Everything else → 'text' (default)
+    //   This includes: text, varchar, char, uuid, timestamp, timestamptz, date, time,
+    //   interval, json, jsonb, inet, cidr, macaddr, geometric types, xml, enums,
+    //   and any custom/extension types. Using 'text' as default ensures compatibility
+    //   since most types serialize to text representation and SQLite stores unknown
+    //   types as TEXT affinity.
+
     char *schema = NULL;
     int rc = database_select_text(data,
-        "SELECT string_agg(LOWER(table_name || column_name || data_type), '' ORDER BY table_name, column_name) "
-        "FROM information_schema.columns WHERE table_schema = COALESCE(cloudsync_schema(), current_schema())",
+        "SELECT string_agg("
+        "    LOWER(c.table_name) || ':' || LOWER(c.column_name) || ':' || "
+        "    CASE "
+        // Integer types (including boolean as 0/1)
+        "        WHEN c.data_type IN ('integer', 'smallint', 'bigint', 'boolean') THEN 'integer' "
+        // Blob type
+        "        WHEN c.data_type = 'bytea' THEN 'blob' "
+        // Real/float types
+        "        WHEN c.data_type IN ('real', 'double precision') THEN 'real' "
+        // Numeric types (explicit precision/scale)
+        "        WHEN c.data_type IN ('numeric', 'decimal') THEN 'numeric' "
+        // Default to text for everything else:
+        // - String types: text, character varying, character, name, uuid
+        // - Date/time: timestamp, date, time, interval, etc.
+        // - JSON: json, jsonb
+        // - Network: inet, cidr, macaddr
+        // - Geometric: point, line, box, etc.
+        // - Custom/extension types
+        "        ELSE 'text' "
+        "    END || ':' || "
+        "    CASE WHEN kcu.column_name IS NOT NULL THEN '1' ELSE '0' END, "
+        "    ',' ORDER BY c.table_name, c.ordinal_position"
+        ") "
+        "FROM information_schema.columns c "
+        "JOIN cloudsync_table_settings cts ON LOWER(c.table_name) = LOWER(cts.tbl_name) "
+        "LEFT JOIN information_schema.table_constraints tc "
+        "    ON tc.table_name = c.table_name "
+        "    AND tc.table_schema = c.table_schema "
+        "    AND tc.constraint_type = 'PRIMARY KEY' "
+        "LEFT JOIN information_schema.key_column_usage kcu "
+        "    ON kcu.table_name = c.table_name "
+        "    AND kcu.column_name = c.column_name "
+        "    AND kcu.table_schema = c.table_schema "
+        "    AND kcu.constraint_name = tc.constraint_name "
+        "WHERE c.table_schema = COALESCE(cloudsync_schema(), current_schema())",
         &schema);
 
     if (rc != DBRES_OK || !schema) return cloudsync_set_error(data, "database_update_schema_hash error 1", DBRES_ERROR);
 
     size_t schema_len = strlen(schema);
-    DEBUG_ALWAYS("database_update_schema_hash len %zu", schema_len);
+    DEBUG_MERGE("database_update_schema_hash len %zu schema %s", schema_len, schema);
     uint64_t h = fnv1a_hash(schema, schema_len);
     cloudsync_memory_free(schema);
     if (hash && *hash == h) return cloudsync_set_error(data, "database_update_schema_hash constraint", DBRES_CONSTRAINT);
@@ -1664,7 +1701,7 @@ int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
     if (rc == DBRES_OK) {
         if (hash) *hash = h;
         return rc;
-    } 
+    }
 
     return cloudsync_set_error(data, "database_update_schema_hash error 2", DBRES_ERROR);
 }

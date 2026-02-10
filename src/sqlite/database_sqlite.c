@@ -803,25 +803,124 @@ bool database_check_schema_hash (cloudsync_context *data, uint64_t hash) {
 }
 
 int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
-    char *schemasql = "SELECT group_concat(LOWER(sql)) FROM sqlite_master "
-            "WHERE type = 'table' AND name IN (SELECT tbl_name FROM cloudsync_table_settings ORDER BY tbl_name) "
-            "ORDER BY name;";
-    
+    // Build normalized schema string using only: column name (lowercase), type (SQLite affinity), pk flag
+    // Format: tablename:colname:affinity:pk,... (ordered by table name, then column id)
+    // This makes the hash resilient to formatting, quoting, case differences and portable across databases
+    //
+    // Type mapping (simplified from SQLite affinity rules for cross-database compatibility):
+    // - Types containing 'INT' → 'integer'
+    // - Types containing 'CHAR', 'CLOB', 'TEXT' → 'text'
+    // - Types containing 'BLOB' or empty → 'blob'
+    // - Types containing 'REAL', 'FLOA', 'DOUB' → 'real'
+    // - Types exactly 'NUMERIC' or 'DECIMAL' → 'numeric'
+    // - Everything else → 'text' (default)
+    //
+    // NOTE: This deviates from SQLite's actual affinity rules where unknown types get NUMERIC affinity.
+    // We use 'text' as default to improve cross-database compatibility with PostgreSQL, where types
+    // like TIMESTAMPTZ, UUID, JSON, etc. are commonly used and map to 'text' in the PostgreSQL
+    // implementation. This ensures schemas with PostgreSQL-specific type names in SQLite DDL
+    // will hash consistently across both databases.
+    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
+
+    char **tables = NULL;
+    int ntables, tcols;
+    int rc = sqlite3_get_table(db, "SELECT DISTINCT tbl_name FROM cloudsync_table_settings ORDER BY tbl_name;",
+                               &tables, &ntables, &tcols, NULL);
+    if (rc != SQLITE_OK || ntables == 0) {
+        if (tables) sqlite3_free_table(tables);
+        return SQLITE_ERROR;
+    }
+
     char *schema = NULL;
-    int rc = database_select_text(data, schemasql, &schema);
-    if (rc != DBRES_OK) return rc;
-    if (!schema) return DBRES_ERROR;
-        
-    uint64_t h = fnv1a_hash(schema, strlen(schema));
+    size_t schema_len = 0;
+    size_t schema_cap = 0;
+
+    for (int t = 1; t <= ntables; t++) {
+        const char *tbl_name = tables[t];
+
+        // Query pragma_table_info for this table with normalized type
+        char *col_sql = cloudsync_memory_mprintf(
+            "SELECT LOWER(name), "
+            "CASE "
+            "  WHEN UPPER(type) LIKE '%%INT%%' THEN 'integer' "
+            "  WHEN UPPER(type) LIKE '%%CHAR%%' OR UPPER(type) LIKE '%%CLOB%%' OR UPPER(type) LIKE '%%TEXT%%' THEN 'text' "
+            "  WHEN UPPER(type) LIKE '%%BLOB%%' OR type = '' THEN 'blob' "
+            "  WHEN UPPER(type) LIKE '%%REAL%%' OR UPPER(type) LIKE '%%FLOA%%' OR UPPER(type) LIKE '%%DOUB%%' THEN 'real' "
+            "  WHEN UPPER(type) IN ('NUMERIC', 'DECIMAL') THEN 'numeric' "
+            "  ELSE 'text' "
+            "END, "
+            "CASE WHEN pk > 0 THEN '1' ELSE '0' END "
+            "FROM pragma_table_info('%q') ORDER BY cid;", tbl_name);
+
+        if (!col_sql) {
+            if (schema) cloudsync_memory_free(schema);
+            sqlite3_free_table(tables);
+            return SQLITE_NOMEM;
+        }
+
+        char **cols = NULL;
+        int nrows, ncols;
+        rc = sqlite3_get_table(db, col_sql, &cols, &nrows, &ncols, NULL);
+        cloudsync_memory_free(col_sql);
+
+        if (rc != SQLITE_OK || ncols != 3) {
+            if (cols) sqlite3_free_table(cols);
+            if (schema) cloudsync_memory_free(schema);
+            sqlite3_free_table(tables);
+            return SQLITE_ERROR;
+        }
+
+        // Append each column: tablename:colname:affinity:pk
+        for (int r = 1; r <= nrows; r++) {
+            const char *col_name = cols[r * 3];
+            const char *col_type = cols[r * 3 + 1];
+            const char *col_pk = cols[r * 3 + 2];
+
+            // Calculate required size: tbl_name:col_name:col_type:col_pk,
+            size_t entry_len = strlen(tbl_name) + 1 + strlen(col_name) + 1 + strlen(col_type) + 1 + strlen(col_pk) + 1;
+
+            if (schema_len + entry_len + 1 > schema_cap) {
+                schema_cap = (schema_cap == 0) ? 1024 : schema_cap * 2;
+                if (schema_cap < schema_len + entry_len + 1) schema_cap = schema_len + entry_len + 1;
+                char *new_schema = cloudsync_memory_realloc(schema, schema_cap);
+                if (!new_schema) {
+                    if (schema) cloudsync_memory_free(schema);
+                    sqlite3_free_table(cols);
+                    sqlite3_free_table(tables);
+                    return SQLITE_NOMEM;
+                }
+                schema = new_schema;
+            }
+
+            int written = snprintf(schema + schema_len, schema_cap - schema_len, "%s:%s:%s:%s,",
+                                   tbl_name, col_name, col_type, col_pk);
+            schema_len += written;
+        }
+
+        sqlite3_free_table(cols);
+    }
+
+    sqlite3_free_table(tables);
+
+    if (!schema || schema_len == 0) return SQLITE_ERROR;
+
+    // Remove trailing comma
+    if (schema_len > 0 && schema[schema_len - 1] == ',') {
+        schema[schema_len - 1] = '\0';
+        schema_len--;
+    }
+
+    DEBUG_MERGE("database_update_schema_hash len %zu schema %s", schema_len, schema);
+    sqlite3_uint64 h = fnv1a_hash(schema, schema_len);
     cloudsync_memory_free(schema);
     if (hash && *hash == h) return SQLITE_CONSTRAINT;
-    
+
     char sql[1024];
     snprintf(sql, sizeof(sql), "INSERT INTO cloudsync_schema_versions (hash, seq) "
-                               "VALUES (%" PRIu64 ", COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
+                               "VALUES (%lld, COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
                                "ON CONFLICT(hash) DO UPDATE SET "
-                               "seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);", h);
-    rc = database_exec(data, sql);
+                               "  seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);", (sqlite3_int64)h);
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc == SQLITE_OK && hash) *hash = h;
     return rc;
 }

@@ -49,12 +49,12 @@
 #define CLOUDSYNC_INIT_NTABLES                  64
 #define CLOUDSYNC_MIN_DB_VERSION                0
 
-#define CLOUDSYNC_PAYLOAD_SKIP_SCHEMA_HASH_CHECK        1
 #define CLOUDSYNC_PAYLOAD_MINBUF_SIZE                   (512*1024)
 #define CLOUDSYNC_PAYLOAD_SIGNATURE                     0x434C5359  /* 'C','L','S','Y' */
 #define CLOUDSYNC_PAYLOAD_VERSION_ORIGNAL               1
 #define CLOUDSYNC_PAYLOAD_VERSION_1                     CLOUDSYNC_PAYLOAD_VERSION_ORIGNAL
 #define CLOUDSYNC_PAYLOAD_VERSION_2                     2
+#define CLOUDSYNC_PAYLOAD_VERSION_LATEST                CLOUDSYNC_PAYLOAD_VERSION_2
 #define CLOUDSYNC_PAYLOAD_MIN_VERSION_WITH_CHECKSUM     CLOUDSYNC_PAYLOAD_VERSION_2
 
 #ifndef MAX
@@ -62,10 +62,6 @@
 #endif
 
 #define DEBUG_DBERROR(_rc, _fn, _data)   do {if (_rc != DBRES_OK) printf("Error in %s: %s\n", _fn, database_errmsg(_data));} while (0)
-
-#if CLOUDSYNC_PAYLOAD_SKIP_SCHEMA_HASH_CHECK
-bool schema_hash_disabled = true;
-#endif
 
 typedef enum {
     CLOUDSYNC_PK_INDEX_TBL          = 0,
@@ -2263,15 +2259,17 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     header.nrows = ntohl(header.nrows);
     header.schema_hash = ntohll(header.schema_hash);
     
-    #if !CLOUDSYNC_PAYLOAD_SKIP_SCHEMA_HASH_CHECK
-    if (!data || header.schema_hash != data->schema_hash) {
-        if (!database_check_schema_hash(data, header.schema_hash)) {
-            char buffer[1024];
-            snprintf(buffer, sizeof(buffer), "Cannot apply the received payload because the schema hash is unknown %llu.", header.schema_hash);
-            return cloudsync_set_error(data, buffer, DBRES_MISUSE);
+    // compare schema_hash only if not disabled and if the received payload was created with the current header version
+    // to avoid schema hash mismatch when processed by a peer with a different extension version during software updates.
+    if (dbutils_settings_get_int64_value(data, CLOUDSYNC_KEY_SKIP_SCHEMA_HASH_CHECK) == 0 && header.version == CLOUDSYNC_PAYLOAD_VERSION_LATEST ) {
+        if (header.schema_hash != data->schema_hash) {
+            if (!database_check_schema_hash(data, header.schema_hash)) {
+                char buffer[1024];
+                snprintf(buffer, sizeof(buffer), "Cannot apply the received payload because the schema hash is unknown %llu.", header.schema_hash);
+                return cloudsync_set_error(data, buffer, DBRES_MISUSE);
+            }
         }
     }
-    #endif
     
     // sanity check header
     if ((header.signature != CLOUDSYNC_PAYLOAD_SIGNATURE) || (header.ncols == 0)) {

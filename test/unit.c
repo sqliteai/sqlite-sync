@@ -30,7 +30,6 @@
 extern char *OUT_OF_MEMORY_BUFFER;
 extern bool force_vtab_filter_abort;
 extern bool force_uncompressed_blob;
-extern bool schema_hash_disabled;
 
 void dbvm_reset (dbvm_t *stmt);
 int dbvm_count (dbvm_t *stmt, const char *value, size_t len, int type);
@@ -4511,11 +4510,9 @@ bool do_test_merge_alter_schema_1 (int nclients, bool print_result, bool cleanup
     do_insert(db[0], TEST_PRIKEYS, NINSERT, print_result);
     
     // merge changes from db0 to db1, it should fail because db0 has a newer schema hash
-    if (!schema_hash_disabled) {
-        // perform the test ONLY if schema hash is enabled
-        if (do_merge_using_payload(db[0], db[1], only_locals, false) == true) {
-            return false;
-        }
+    // perform the test ONLY if schema hash is enabled
+    if (do_merge_using_payload(db[0], db[1], only_locals, false) == true) {
+        return false;
     }
     
     // augment TEST_NOCOLS also on db1
