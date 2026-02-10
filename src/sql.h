@@ -64,6 +64,7 @@ extern const char * const SQL_PRAGMA_TABLEINFO_PK_COLLIST;
 extern const char * const SQL_PRAGMA_TABLEINFO_PK_DECODE_SELECTLIST;
 extern const char * const SQL_CLOUDSYNC_INSERT_MISSING_PKS_FROM_BASE_EXCEPT_SYNC;
 extern const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL;
+extern const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL_FILTERED;
 extern const char * const SQL_CHANGES_INSERT_ROW;
 
 #endif

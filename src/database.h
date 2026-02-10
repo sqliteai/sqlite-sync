@@ -70,7 +70,7 @@ bool database_table_exists (cloudsync_context *data, const char *table_name, con
 bool database_internal_table_exists (cloudsync_context *data, const char *name);
 bool database_trigger_exists (cloudsync_context *data, const char *table_name);
 int  database_create_metatable (cloudsync_context *data, const char *table_name);
-int  database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo);
+int  database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo, const char *filter);
 int  database_delete_triggers (cloudsync_context *data, const char *table_name);
 int  database_pk_names (cloudsync_context *data, const char *table_name, char ***names, int *count);
 int  database_cleanup (cloudsync_context *data);
@@ -148,7 +148,7 @@ char *sql_build_delete_cols_not_in_schema_query(const char *schema, const char *
 char *sql_build_pk_collist_query(const char *schema, const char *table_name);
 char *sql_build_pk_decode_selectlist_query(const char *schema, const char *table_name);
 char *sql_build_pk_qualified_collist_query(const char *schema, const char *table_name);
-char *sql_build_insert_missing_pks_query(const char *schema, const char *table_name, const char *pkvalues_identifiers, const char *base_ref, const char *meta_ref);
+char *sql_build_insert_missing_pks_query(const char *schema, const char *table_name, const char *pkvalues_identifiers, const char *base_ref, const char *meta_ref, const char *filter);
 
 char *database_table_schema(const char *table_name);
 char *database_build_meta_ref(const char *schema, const char *table_name);

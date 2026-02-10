@@ -49,3 +49,4 @@ jniLibs/
 # System
 .DS_Store
 Thumbs.db
+CLAUDE.md

@@ -1792,12 +1792,103 @@ rollback_finalize_alter:
     return rc;
 }
 
+// MARK: - Filter Rewrite -
+
+// Replace bare column names in a filter expression with prefix-qualified names.
+// E.g., filter="user_id = 42", prefix="NEW", columns=["user_id","id"] → "NEW.\"user_id\" = 42"
+// Columns must be sorted by length descending by the caller to avoid partial matches.
+// Skips content inside single-quoted string literals.
+// Returns a newly allocated string (caller must free with cloudsync_memory_free), or NULL on error.
+// Helper: check if an identifier token matches a column name.
+static bool filter_is_column (const char *token, size_t token_len, char **columns, int ncols) {
+    for (int i = 0; i < ncols; ++i) {
+        if (strlen(columns[i]) == token_len && strncmp(token, columns[i], token_len) == 0)
+            return true;
+    }
+    return false;
+}
+
+// Helper: check if character is part of a SQL identifier.
+static bool filter_is_ident_char (char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+char *cloudsync_filter_add_row_prefix (const char *filter, const char *prefix, char **columns, int ncols) {
+    if (!filter || !prefix || !columns || ncols <= 0) return NULL;
+
+    size_t filter_len = strlen(filter);
+    size_t prefix_len = strlen(prefix);
+
+    // Each identifier match grows by at most (prefix_len + 3) bytes.
+    // Worst case: the entire filter is one repeated column reference separated by
+    // single characters, so up to (filter_len / 2) matches.  Use a safe upper bound.
+    size_t max_growth = (filter_len / 2 + 1) * (prefix_len + 3);
+    size_t cap = filter_len + max_growth + 64;
+    char *result = (char *)cloudsync_memory_alloc(cap);
+    if (!result) return NULL;
+    size_t out = 0;
+
+    // Single pass: tokenize into identifiers, quoted strings, and everything else.
+    size_t i = 0;
+    while (i < filter_len) {
+        // Skip single-quoted string literals verbatim (handle '' escape)
+        if (filter[i] == '\'') {
+            result[out++] = filter[i++];
+            while (i < filter_len) {
+                if (filter[i] == '\'') {
+                    result[out++] = filter[i++];
+                    // '' is an escaped quote — keep going
+                    if (i < filter_len && filter[i] == '\'') {
+                        result[out++] = filter[i++];
+                        continue;
+                    }
+                    break; // single ' ends the literal
+                }
+                result[out++] = filter[i++];
+            }
+            continue;
+        }
+
+        // Extract identifier token
+        if (filter_is_ident_char(filter[i])) {
+            size_t start = i;
+            while (i < filter_len && filter_is_ident_char(filter[i])) ++i;
+            size_t token_len = i - start;
+
+            if (filter_is_column(&filter[start], token_len, columns, ncols)) {
+                // Emit PREFIX."column_name"
+                memcpy(&result[out], prefix, prefix_len); out += prefix_len;
+                result[out++] = '.';
+                result[out++] = '"';
+                memcpy(&result[out], &filter[start], token_len); out += token_len;
+                result[out++] = '"';
+            } else {
+                // Not a column — copy as-is
+                memcpy(&result[out], &filter[start], token_len); out += token_len;
+            }
+            continue;
+        }
+
+        // Any other character — copy as-is
+        result[out++] = filter[i++];
+    }
+
+    result[out] = '\0';
+    return result;
+}
+
 int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name) {
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) return DBRES_ERROR;
-    
+
     dbvm_t *vm = NULL;
     int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
+
+    // Read row-level filter from settings (if any)
+    char filter_buf[2048];
+    int frc = dbutils_table_settings_get_value(data, table_name, "*", "filter", filter_buf, sizeof(filter_buf));
+    const char *filter = (frc == DBRES_OK && filter_buf[0]) ? filter_buf : NULL;
 
     const char *schema = table->schema ? table->schema : "";
     char *sql = sql_build_pk_collist_query(schema, table_name);
@@ -1808,18 +1899,22 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
     char *pkvalues_identifiers = (pkclause_identifiers) ? pkclause_identifiers : "rowid";
 
     // Use database-specific query builder to handle type differences in composite PKs
-    sql = sql_build_insert_missing_pks_query(schema, table_name, pkvalues_identifiers, table->base_ref, table->meta_ref);
+    sql = sql_build_insert_missing_pks_query(schema, table_name, pkvalues_identifiers, table->base_ref, table->meta_ref, filter);
     if (!sql) {rc = DBRES_NOMEM; goto finalize;}
     rc = database_exec(data, sql);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
-    
+
     // fill missing colums
     // for each non-pk column:
     // The new query does 1 encode per source row and one indexed NOT-EXISTS probe.
-    // The old plan does many decodes per candidate and can’t use an index to rule out matches quickly—so it burns CPU and I/O.
-    
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL, pkvalues_identifiers, table->base_ref, table->meta_ref);
+    // The old plan does many decodes per candidate and can't use an index to rule out matches quickly—so it burns CPU and I/O.
+
+    if (filter) {
+        sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL_FILTERED, pkvalues_identifiers, table->base_ref, filter, table->meta_ref);
+    } else {
+        sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL, pkvalues_identifiers, table->base_ref, table->meta_ref);
+    }
     rc = databasevm_prepare(data, sql, (void **)&vm, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto finalize;
@@ -2723,8 +2818,13 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     // sync algo with table (unused in this version)
     // cloudsync_sync_table_key(data, table_name, "*", CLOUDSYNC_KEY_ALGO, crdt_algo_name(algo_new));
     
+    // read row-level filter from settings (if any)
+    char init_filter_buf[2048];
+    int init_frc = dbutils_table_settings_get_value(data, table_name, "*", "filter", init_filter_buf, sizeof(init_filter_buf));
+    const char *init_filter = (init_frc == DBRES_OK && init_filter_buf[0]) ? init_filter_buf : NULL;
+
     // check triggers
-    rc = database_create_triggers(data, table_name, algo_new);
+    rc = database_create_triggers(data, table_name, algo_new, init_filter);
     if (rc != DBRES_OK) return cloudsync_set_error(data, "An error occurred while creating triggers", DBRES_MISUSE);
     
     // check meta-table

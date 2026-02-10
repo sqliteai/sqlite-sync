@@ -915,6 +915,69 @@ int dbsync_register_aggregate (sqlite3 *db, const char *name, void (*xstep)(sqli
     return dbsync_register(db, name, NULL, xstep, xfinal, nargs, pzErrMsg, ctx, ctx_free);
 }
 
+// MARK: - Row Filter -
+
+void dbsync_set_filter (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_set_filter");
+
+    const char *tbl = (const char *)database_value_text(argv[0]);
+    const char *filter_expr = (const char *)database_value_text(argv[1]);
+    if (!tbl || !filter_expr) {
+        dbsync_set_error(context, "cloudsync_set_filter: table and filter expression required");
+        return;
+    }
+
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+
+    // Store filter in table settings
+    dbutils_table_settings_set_key_value(data, tbl, "*", "filter", filter_expr);
+
+    // Read current algo
+    table_algo algo = dbutils_table_settings_get_algo(data, tbl);
+    if (algo == table_algo_none) algo = table_algo_crdt_cls;
+
+    // Drop and recreate triggers with the filter
+    database_delete_triggers(data, tbl);
+    int rc = database_create_triggers(data, tbl, algo, filter_expr);
+    if (rc != DBRES_OK) {
+        dbsync_set_error(context, "cloudsync_set_filter: error recreating triggers");
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+
+    sqlite3_result_int(context, 1);
+}
+
+void dbsync_clear_filter (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_clear_filter");
+
+    const char *tbl = (const char *)database_value_text(argv[0]);
+    if (!tbl) {
+        dbsync_set_error(context, "cloudsync_clear_filter: table name required");
+        return;
+    }
+
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+
+    // Remove filter from table settings (set to NULL/empty)
+    dbutils_table_settings_set_key_value(data, tbl, "*", "filter", NULL);
+
+    // Read current algo
+    table_algo algo = dbutils_table_settings_get_algo(data, tbl);
+    if (algo == table_algo_none) algo = table_algo_crdt_cls;
+
+    // Drop and recreate triggers without filter
+    database_delete_triggers(data, tbl);
+    int rc = database_create_triggers(data, tbl, algo, NULL);
+    if (rc != DBRES_OK) {
+        dbsync_set_error(context, "cloudsync_clear_filter: error recreating triggers");
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+
+    sqlite3_result_int(context, 1);
+}
+
 int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     int rc = SQLITE_OK;
     
@@ -968,7 +1031,13 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     
     rc = dbsync_register_function(db, "cloudsync_set_table", dbsync_set_table, 3, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
-    
+
+    rc = dbsync_register_function(db, "cloudsync_set_filter", dbsync_set_filter, 2, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbsync_register_function(db, "cloudsync_clear_filter", dbsync_clear_filter, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
     rc = dbsync_register_function(db, "cloudsync_set_schema", dbsync_set_schema, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     

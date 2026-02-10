@@ -610,6 +610,125 @@ Datum cloudsync_set_column (PG_FUNCTION_ARGS) {
     PG_RETURN_BOOL(true);
 }
 
+// MARK: - Row Filter -
+
+// cloudsync_set_filter - Set a row-level filter for conditional sync
+PG_FUNCTION_INFO_V1(cloudsync_set_filter);
+Datum cloudsync_set_filter (PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1)) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("cloudsync_set_filter: table and filter expression required")));
+    }
+
+    const char *tbl = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *filter_expr = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+    cloudsync_context *data = get_cloudsync_context();
+    bool spi_connected = false;
+
+    int spi_rc = SPI_connect();
+    if (spi_rc != SPI_OK_CONNECT) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
+    }
+    spi_connected = true;
+
+    PG_TRY();
+    {
+        // Store filter in table settings
+        dbutils_table_settings_set_key_value(data, tbl, "*", "filter", filter_expr);
+
+        // Read current algo
+        table_algo algo = dbutils_table_settings_get_algo(data, tbl);
+        if (algo == table_algo_none) algo = table_algo_crdt_cls;
+
+        // Drop triggers
+        database_delete_triggers(data, tbl);
+
+        // Reconnect SPI so that the catalog changes from DROP are visible
+        SPI_finish();
+        spi_connected = false;
+        spi_rc = SPI_connect();
+        if (spi_rc != SPI_OK_CONNECT) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
+        }
+        spi_connected = true;
+
+        // Recreate triggers with filter
+        int rc = database_create_triggers(data, tbl, algo, filter_expr);
+        if (rc != DBRES_OK) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("cloudsync_set_filter: error recreating triggers")));
+        }
+    }
+    PG_CATCH();
+    {
+        if (spi_connected) SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    if (spi_connected) SPI_finish();
+    PG_RETURN_BOOL(true);
+}
+
+// cloudsync_clear_filter - Remove the row-level filter for a table
+PG_FUNCTION_INFO_V1(cloudsync_clear_filter);
+Datum cloudsync_clear_filter (PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0)) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("cloudsync_clear_filter: table name required")));
+    }
+
+    const char *tbl = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+    cloudsync_context *data = get_cloudsync_context();
+    bool spi_connected = false;
+
+    int spi_rc = SPI_connect();
+    if (spi_rc != SPI_OK_CONNECT) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
+    }
+    spi_connected = true;
+
+    PG_TRY();
+    {
+        // Remove filter from settings
+        dbutils_table_settings_set_key_value(data, tbl, "*", "filter", NULL);
+
+        // Read current algo
+        table_algo algo = dbutils_table_settings_get_algo(data, tbl);
+        if (algo == table_algo_none) algo = table_algo_crdt_cls;
+
+        // Drop triggers
+        database_delete_triggers(data, tbl);
+
+        // Reconnect SPI so that the catalog changes from DROP are visible
+        SPI_finish();
+        spi_connected = false;
+        spi_rc = SPI_connect();
+        if (spi_rc != SPI_OK_CONNECT) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
+        }
+        spi_connected = true;
+
+        // Recreate triggers without filter
+        int rc = database_create_triggers(data, tbl, algo, NULL);
+        if (rc != DBRES_OK) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("cloudsync_clear_filter: error recreating triggers")));
+        }
+    }
+    PG_CATCH();
+    {
+        if (spi_connected) SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    if (spi_connected) SPI_finish();
+    PG_RETURN_BOOL(true);
+}
+
 // MARK: - Schema Alteration -
 
 // cloudsync_begin_alter - Begin schema alteration

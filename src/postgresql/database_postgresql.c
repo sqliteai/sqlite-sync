@@ -383,7 +383,8 @@ char *sql_build_pk_qualified_collist_query (const char *schema, const char *tabl
 
 char *sql_build_insert_missing_pks_query(const char *schema, const char *table_name,
                                          const char *pkvalues_identifiers,
-                                         const char *base_ref, const char *meta_ref) {
+                                         const char *base_ref, const char *meta_ref,
+                                         const char *filter) {
     UNUSED_PARAMETER(schema);
 
     char esc_table[1024];
@@ -398,6 +399,16 @@ char *sql_build_insert_missing_pks_query(const char *schema, const char *table_n
     //
     // Example: cloudsync_insert('table', col1, col2) where col1=TEXT, col2=INTEGER
     // PostgreSQL's VARIADIC handling preserves each type and matches SQLite's encoding.
+    if (filter) {
+        return cloudsync_memory_mprintf(
+            "SELECT cloudsync_insert('%s', %s) "
+            "FROM %s b "
+            "WHERE (%s) AND NOT EXISTS ("
+            "    SELECT 1 FROM %s m WHERE m.pk = cloudsync_pk_encode(%s)"
+            ");",
+            esc_table, pkvalues_identifiers, base_ref, filter, meta_ref, pkvalues_identifiers
+        );
+    }
     return cloudsync_memory_mprintf(
         "SELECT cloudsync_insert('%s', %s) "
         "FROM %s b "
@@ -1503,7 +1514,75 @@ static int database_create_delete_trigger_internal (cloudsync_context *data, con
     return rc;
 }
 
-int database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo) {
+// Build trigger WHEN clauses, optionally incorporating a row-level filter.
+// INSERT/UPDATE use NEW-prefixed filter, DELETE uses OLD-prefixed filter.
+static void database_build_trigger_when(
+    cloudsync_context *data, const char *table_name, const char *filter,
+    const char *schema,
+    char *when_new, size_t when_new_size,
+    char *when_old, size_t when_old_size)
+{
+    char *new_filter_str = NULL;
+    char *old_filter_str = NULL;
+
+    if (filter) {
+        const char *schema_param = (schema && schema[0]) ? schema : "";
+        char esc_tbl[1024], esc_schema[1024];
+        sql_escape_literal(table_name, esc_tbl, sizeof(esc_tbl));
+        sql_escape_literal(schema_param, esc_schema, sizeof(esc_schema));
+
+        char col_sql[2048];
+        snprintf(col_sql, sizeof(col_sql),
+            "SELECT column_name::text FROM information_schema.columns "
+            "WHERE table_name = '%s' AND table_schema = COALESCE(NULLIF('%s', ''), current_schema()) "
+            "ORDER BY ordinal_position;",
+            esc_tbl, esc_schema);
+
+        char *col_names[256];
+        int ncols = 0;
+
+        dbvm_t *col_vm = NULL;
+        int crc = databasevm_prepare(data, col_sql, &col_vm, 0);
+        if (crc == DBRES_OK) {
+            while (databasevm_step(col_vm) == DBRES_ROW && ncols < 256) {
+                const char *name = database_column_text(col_vm, 0);
+                if (name) col_names[ncols++] = cloudsync_memory_mprintf("%s", name);
+            }
+            databasevm_finalize(col_vm);
+        }
+
+        if (ncols > 0) {
+            new_filter_str = cloudsync_filter_add_row_prefix(filter, "NEW", col_names, ncols);
+            old_filter_str = cloudsync_filter_add_row_prefix(filter, "OLD", col_names, ncols);
+            for (int i = 0; i < ncols; ++i) cloudsync_memory_free(col_names[i]);
+        }
+    }
+
+    if (new_filter_str) {
+        snprintf(when_new, when_new_size,
+            "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false AND (%s))",
+            table_name, new_filter_str);
+    } else {
+        snprintf(when_new, when_new_size,
+            "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false)",
+            table_name);
+    }
+
+    if (old_filter_str) {
+        snprintf(when_old, when_old_size,
+            "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false AND (%s))",
+            table_name, old_filter_str);
+    } else {
+        snprintf(when_old, when_old_size,
+            "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false)",
+            table_name);
+    }
+
+    if (new_filter_str) cloudsync_memory_free(new_filter_str);
+    if (old_filter_str) cloudsync_memory_free(old_filter_str);
+}
+
+int database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo, const char *filter) {
     if (!table_name) return DBRES_MISUSE;
 
     // Detect schema from metadata table if it exists, otherwise use cloudsync_schema()
@@ -1511,12 +1590,13 @@ int database_create_triggers (cloudsync_context *data, const char *table_name, t
     char *detected_schema = database_table_schema(table_name);
     const char *schema = detected_schema ? detected_schema : cloudsync_schema(data);
 
-    char trigger_when[1024];
-    snprintf(trigger_when, sizeof(trigger_when),
-             "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false)",
-             table_name);
+    char trigger_when_new[4096];
+    char trigger_when_old[4096];
+    database_build_trigger_when(data, table_name, filter, schema,
+        trigger_when_new, sizeof(trigger_when_new),
+        trigger_when_old, sizeof(trigger_when_old));
 
-    int rc = database_create_insert_trigger_internal(data, table_name, trigger_when, schema);
+    int rc = database_create_insert_trigger_internal(data, table_name, trigger_when_new, schema);
     if (rc != DBRES_OK) {
         if (detected_schema) cloudsync_memory_free(detected_schema);
         return rc;
@@ -1525,7 +1605,7 @@ int database_create_triggers (cloudsync_context *data, const char *table_name, t
     if (algo == table_algo_crdt_gos) {
         rc = database_create_update_trigger_gos_internal(data, table_name, schema);
     } else {
-        rc = database_create_update_trigger_internal(data, table_name, trigger_when, schema);
+        rc = database_create_update_trigger_internal(data, table_name, trigger_when_new, schema);
     }
     if (rc != DBRES_OK) {
         if (detected_schema) cloudsync_memory_free(detected_schema);
@@ -1535,7 +1615,7 @@ int database_create_triggers (cloudsync_context *data, const char *table_name, t
     if (algo == table_algo_crdt_gos) {
         rc = database_create_delete_trigger_gos_internal(data, table_name, schema);
     } else {
-        rc = database_create_delete_trigger_internal(data, table_name, trigger_when, schema);
+        rc = database_create_delete_trigger_internal(data, table_name, trigger_when_old, schema);
     }
 
     if (detected_schema) cloudsync_memory_free(detected_schema);

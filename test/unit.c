@@ -7518,6 +7518,138 @@ cleanup:
     return success;
 }
 
+// MARK: - Row Filter Test -
+
+static int64_t test_query_int(sqlite3 *db, const char *sql) {
+    sqlite3_stmt *stmt = NULL;
+    int64_t value = -1;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW) value = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return value;
+}
+
+bool do_test_row_filter(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[MAX_SIMULATED_CLIENTS] = {NULL};
+    bool result = false;
+    int rc = SQLITE_OK;
+
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    if (nclients >= MAX_SIMULATED_CLIENTS) nclients = MAX_SIMULATED_CLIENTS;
+    if (nclients < 2) nclients = 2;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+    for (int i = 0; i < nclients; ++i) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        // Create table
+        rc = sqlite3_exec(db[i], "CREATE TABLE tasks(id TEXT PRIMARY KEY NOT NULL, title TEXT, user_id INTEGER);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+
+        // Init cloudsync
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('tasks');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+
+        // Set filter: only sync rows where user_id = 1
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_filter('tasks', 'user_id = 1');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // --- Test 1: Insert matching and non-matching rows on db[0] ---
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('a', 'Task A', 1);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('b', 'Task B', 2);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('c', 'Task C', 1);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Verify: tasks_cloudsync should only have metadata for user_id=1 rows ('a' and 'c')
+    {
+        // Count distinct PKs in the meta table
+        int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
+        if (meta_count != 2) {
+            printf("do_test_row_filter: expected 2 tracked PKs after insert, got %" PRId64 "\n", meta_count);
+            goto finalize;
+        }
+    }
+
+    // --- Test 2: Update matching row → metadata should update ---
+    rc = sqlite3_exec(db[0], "UPDATE tasks SET title='Task A Updated' WHERE id='a';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // --- Test 3: Update non-matching row → NO metadata change ---
+    {
+        int64_t before = test_query_int(db[0], "SELECT COUNT(*) FROM tasks_cloudsync;");
+        rc = sqlite3_exec(db[0], "UPDATE tasks SET title='Task B Updated' WHERE id='b';", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        int64_t after = test_query_int(db[0], "SELECT COUNT(*) FROM tasks_cloudsync;");
+        if (after != before) {
+            printf("do_test_row_filter: non-matching UPDATE changed meta count (%" PRId64 " -> %" PRId64 ")\n", before, after);
+            goto finalize;
+        }
+    }
+
+    // --- Test 4: Delete non-matching row → NO metadata change ---
+    {
+        int64_t before = test_query_int(db[0], "SELECT COUNT(*) FROM tasks_cloudsync;");
+        rc = sqlite3_exec(db[0], "DELETE FROM tasks WHERE id='b';", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        int64_t after = test_query_int(db[0], "SELECT COUNT(*) FROM tasks_cloudsync;");
+        if (after != before) {
+            printf("do_test_row_filter: non-matching DELETE changed meta count (%" PRId64 " -> %" PRId64 ")\n", before, after);
+            goto finalize;
+        }
+    }
+
+    // --- Test 5: Delete matching row → metadata should update (tombstone) ---
+    rc = sqlite3_exec(db[0], "DELETE FROM tasks WHERE id='a';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // --- Test 6: Merge from db[0] to db[1] and verify only filtered rows transfer ---
+    if (do_merge_using_payload(db[0], db[1], true, true) == false) goto finalize;
+
+    {
+        // db[1] should have 'c' (user_id=1) and the tombstone for 'a', but NOT 'b'
+        int64_t task_count = test_query_int(db[1], "SELECT COUNT(*) FROM tasks;");
+        if (task_count != 1) {
+            printf("do_test_row_filter: expected 1 row in db[1] tasks after merge, got %" PRId64 "\n", task_count);
+            goto finalize;
+        }
+        // Verify it's 'c'
+        int64_t c_exists = test_query_int(db[1], "SELECT COUNT(*) FROM tasks WHERE id='c';");
+        if (c_exists != 1) {
+            printf("do_test_row_filter: expected task 'c' in db[1], not found\n");
+            goto finalize;
+        }
+    }
+
+    if (print_result) {
+        printf("\n-> tasks (db[0])\n");
+        do_query(db[0], "SELECT * FROM tasks ORDER BY id;", NULL);
+        printf("\n-> tasks_cloudsync (db[0])\n");
+        do_query(db[0], "SELECT hex(pk), col_name, col_version, db_version FROM tasks_cloudsync ORDER BY pk, col_name;", NULL);
+        printf("\n-> tasks (db[1])\n");
+        do_query(db[1], "SELECT * FROM tasks ORDER BY id;", NULL);
+    }
+
+    result = true;
+
+finalize:
+    for (int i = 0; i < nclients; ++i) {
+        if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK))
+            printf("do_test_row_filter error: %s\n", sqlite3_errmsg(db[i]));
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
 int test_report(const char *description, bool result){
     printf("%-30s %s\n", description, (result) ? "OK" : "FAILED");
     return result ? 0 : 1;
@@ -7638,7 +7770,10 @@ int main (int argc, const char * argv[]) {
     result += test_report("Test Alter Table 1:", do_test_alter(3, 1, print_result, cleanup_databases));
     result += test_report("Test Alter Table 2:", do_test_alter(3, 2, print_result, cleanup_databases));
     result += test_report("Test Alter Table 3:", do_test_alter(3, 3, print_result, cleanup_databases));
-    
+
+    // test row-level filter
+    result += test_report("Test Row Filter:", do_test_row_filter(2, print_result, cleanup_databases));
+
 finalize:
     if (rc != SQLITE_OK) printf("%s (%d)\n", (db) ? sqlite3_errmsg(db) : "N/A", rc);
     close_db(db);

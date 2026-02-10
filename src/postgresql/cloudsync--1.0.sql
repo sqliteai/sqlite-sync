@@ -102,6 +102,18 @@ RETURNS boolean
 AS 'MODULE_PATHNAME', 'cloudsync_set_table'
 LANGUAGE C VOLATILE;
 
+-- Set row-level filter for conditional sync
+CREATE OR REPLACE FUNCTION cloudsync_set_filter(table_name text, filter_expr text)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'cloudsync_set_filter'
+LANGUAGE C VOLATILE;
+
+-- Clear row-level filter
+CREATE OR REPLACE FUNCTION cloudsync_clear_filter(table_name text)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'cloudsync_clear_filter'
+LANGUAGE C VOLATILE;
+
 -- Set column-level configuration
 CREATE OR REPLACE FUNCTION cloudsync_set_column(table_name text, column_name text, key text, value text)
 RETURNS boolean

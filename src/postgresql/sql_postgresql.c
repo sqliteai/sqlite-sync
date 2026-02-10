@@ -400,3 +400,11 @@ const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL =
     "SELECT 1 FROM %s _cstemp2 "
     "WHERE _cstemp2.pk = _cstemp1.pk AND _cstemp2.col_name = $1"
     ");";
+
+const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL_FILTERED =
+    "WITH _cstemp1 AS (SELECT cloudsync_pk_encode(%s) AS pk FROM %s WHERE (%s)) "
+    "SELECT _cstemp1.pk FROM _cstemp1 "
+    "WHERE NOT EXISTS ("
+    "SELECT 1 FROM %s _cstemp2 "
+    "WHERE _cstemp2.pk = _cstemp1.pk AND _cstemp2.col_name = $1"
+    ");";
