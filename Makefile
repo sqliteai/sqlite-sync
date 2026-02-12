@@ -8,8 +8,8 @@ SQLITE3 ?= sqlite3
 # set curl version to download and build
 CURL_VERSION ?= 8.12.1
 
-# set OpenSSL version to download and build
-OPENSSL_VERSION ?= openssl-3.6.0
+# set mbedTLS version for Android (3.6.x is LTS, 4.x has breaking API changes)
+MBEDTLS_VERSION ?= 3.6.5
 
 # Set default platform if not specified
 ifeq ($(OS),Windows_NT)
@@ -32,6 +32,7 @@ MAKEFLAGS += -j$(CPUS)
 
 # Compiler and flags
 CC = gcc
+OPT_LEVEL = -O3
 CFLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(SQLITE_DIR) -I$(CURL_DIR)/include
 T_CFLAGS = $(CFLAGS) -DSQLITE_CORE -DCLOUDSYNC_UNITTEST -DCLOUDSYNC_OMIT_NETWORK -DCLOUDSYNC_OMIT_PRINT_RESULT
 COVERAGE = false
@@ -48,15 +49,16 @@ VPATH = $(SRC_DIR):$(SQLITE_DIR):$(TEST_DIR)
 BUILD_RELEASE = build/release
 BUILD_TEST = build/test
 BUILD_DIRS = $(BUILD_TEST) $(BUILD_RELEASE)
-OPENSSL_DIR = openssl
+MBEDTLS_DIR = mbedtls
 CURL_DIR = curl
 CURL_SRC = $(CURL_DIR)/src/curl-$(CURL_VERSION)
+CURL_ZIP = $(CURL_DIR)/src/curl-$(CURL_VERSION).zip
 COV_DIR = coverage
 CUSTOM_CSS = $(TEST_DIR)/sqliteai.css
 
-# Android OpenSSL local installation directory
+# Android SSL library installation directory
 ifeq ($(PLATFORM),android)
-	OPENSSL_INSTALL_DIR = $(OPENSSL_DIR)/$(PLATFORM)/$(ARCH)
+	MBEDTLS_INSTALL_DIR = $(MBEDTLS_DIR)/$(PLATFORM)/$(ARCH)
 endif
 
 SRC_FILES = $(wildcard $(SRC_DIR)/*.c)
@@ -114,13 +116,14 @@ else ifeq ($(PLATFORM),android)
 		ANDROID_ABI := android26
 	endif
 
-	OPENSSL := $(OPENSSL_INSTALL_DIR)/lib/libssl.a
+	MBEDTLS := $(MBEDTLS_INSTALL_DIR)/lib/libmbedtls.a
 	CC = $(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang
 	CURL_LIB = $(CURL_DIR)/$(PLATFORM)/$(ARCH)/libcurl.a
-	CURL_CONFIG = --host $(ARCH)-linux-$(ANDROID_ABI) --with-openssl=$(CURDIR)/$(OPENSSL_INSTALL_DIR) LDFLAGS="-L$(CURDIR)/$(OPENSSL_INSTALL_DIR)/lib" LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(CC) CXX=$(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
+	CURL_CONFIG = --host $(ARCH)-linux-$(ANDROID_ABI) --with-mbedtls=$(CURDIR)/$(MBEDTLS_INSTALL_DIR) LDFLAGS="-L$(CURDIR)/$(MBEDTLS_INSTALL_DIR)/lib" LIBS="-lmbedtls -lmbedx509 -lmbedcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(CC) CXX=$(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
 	TARGET := $(DIST_DIR)/cloudsync.so
-	CFLAGS += -fPIC -I$(OPENSSL_INSTALL_DIR)/include
-	LDFLAGS += -shared -fPIC -L$(OPENSSL_INSTALL_DIR)/lib -lssl -lcrypto -Wl,-z,max-page-size=16384
+	OPT_LEVEL = -Os
+	CFLAGS += -fPIC -I$(MBEDTLS_INSTALL_DIR)/include -ffunction-sections -fdata-sections -flto
+	LDFLAGS += -shared -fPIC -L$(MBEDTLS_INSTALL_DIR)/lib -lmbedtls -lmbedx509 -lmbedcrypto -Wl,-z,max-page-size=16384 -Wl,--gc-sections -flto
 	STRIP = $(BIN)/llvm-strip --strip-unneeded $@
 else ifeq ($(PLATFORM),ios)
 	TARGET := $(DIST_DIR)/cloudsync.dylib
@@ -199,7 +202,7 @@ $(TEST_TARGET): $(TEST_OBJ)
 
 # Object files
 $(BUILD_RELEASE)/%.o: %.c
-	$(CC) $(CFLAGS) -O3 -fPIC -c $< -o $@
+	$(CC) $(CFLAGS) $(OPT_LEVEL) -fPIC -c $< -o $@
 $(BUILD_TEST)/sqlite3.o: $(SQLITE_DIR)/sqlite3.c
 	$(CC) $(CFLAGS) -DSQLITE_DQS=0 -DSQLITE_CORE -c $< -o $@
 $(BUILD_TEST)/%.o: %.c
@@ -215,36 +218,46 @@ ifneq ($(COVERAGE),false)
 	genhtml $(COV_DIR)/coverage.info --output-directory $(COV_DIR)
 endif
 
-OPENSSL_TARBALL = $(OPENSSL_DIR)/$(OPENSSL_VERSION).tar.gz
+# mbedTLS for Android - minimal TLS library (much smaller than OpenSSL)
+# Matches rustls capabilities: TLS 1.2/1.3, AES-GCM, ChaCha20-Poly1305, ECDHE
+MBEDTLS_TARBALL = $(MBEDTLS_DIR)/mbedtls-$(MBEDTLS_VERSION).tar.bz2
 
-$(OPENSSL_TARBALL):
-	mkdir -p $(OPENSSL_DIR)
-	curl -L -o $(OPENSSL_TARBALL) https://github.com/openssl/openssl/releases/download/$(OPENSSL_VERSION)/$(OPENSSL_VERSION).tar.gz
+$(MBEDTLS_TARBALL):
+	mkdir -p $(MBEDTLS_DIR)
+	curl -L -o $(MBEDTLS_TARBALL) https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$(MBEDTLS_VERSION)/mbedtls-$(MBEDTLS_VERSION).tar.bz2
 
-$(OPENSSL): $(OPENSSL_TARBALL)
-	mkdir -p $(OPENSSL_DIR)
-	tar -xzf $(OPENSSL_TARBALL) -C $(OPENSSL_DIR)
-	cd $(OPENSSL_DIR)/$(OPENSSL_VERSION) && \
-	./Configure android-$(if $(filter aarch64,$(ARCH)),arm64,$(if $(filter armv7a,$(ARCH)),arm,$(ARCH))) \
-		--prefix=$(CURDIR)/$(OPENSSL_INSTALL_DIR) \
-		no-shared no-unit-test \
-		-fPIC \
-		-D__ANDROID_API__=26 && \
-	$(MAKE) && $(MAKE) install_sw
-	rm -rf $(OPENSSL_DIR)/$(OPENSSL_VERSION)
+$(MBEDTLS): $(MBEDTLS_TARBALL)
+	mkdir -p $(MBEDTLS_DIR)
+	tar -xjf $(MBEDTLS_TARBALL) -C $(MBEDTLS_DIR)
+	mkdir -p $(MBEDTLS_DIR)/mbedtls-$(MBEDTLS_VERSION)/build
+	cd $(MBEDTLS_DIR)/mbedtls-$(MBEDTLS_VERSION)/build && \
+	cmake .. \
+		-DCMAKE_TOOLCHAIN_FILE=$(ANDROID_NDK)/build/cmake/android.toolchain.cmake \
+		-DANDROID_ABI=$(if $(filter aarch64,$(ARCH)),arm64-v8a,$(if $(filter armv7a,$(ARCH)),armeabi-v7a,x86_64)) \
+		-DANDROID_PLATFORM=android-26 \
+		-DCMAKE_BUILD_TYPE=MinSizeRel \
+		-DCMAKE_INSTALL_PREFIX=$(CURDIR)/$(MBEDTLS_INSTALL_DIR) \
+		-DENABLE_PROGRAMS=OFF \
+		-DENABLE_TESTING=OFF \
+		-DUSE_STATIC_MBEDTLS_LIBRARY=ON \
+		-DUSE_SHARED_MBEDTLS_LIBRARY=OFF \
+		-DCMAKE_C_FLAGS="-Os -ffunction-sections -fdata-sections" && \
+	$(MAKE) && $(MAKE) install
+	rm -rf $(MBEDTLS_DIR)/mbedtls-$(MBEDTLS_VERSION)
+
+$(CURL_ZIP):
+	mkdir -p $(CURL_DIR)/src
+	curl -L -o $(CURL_ZIP) "https://github.com/curl/curl/releases/download/curl-$(subst .,_,${CURL_VERSION})/curl-$(CURL_VERSION).zip"
 
 ifeq ($(PLATFORM),android)
-$(CURL_LIB): $(OPENSSL)
+$(CURL_LIB): $(MBEDTLS) $(CURL_ZIP)
 else
-$(CURL_LIB):
+$(CURL_LIB): $(CURL_ZIP)
 endif
-	mkdir -p $(CURL_DIR)/src
-	curl -L -o $(CURL_DIR)/src/curl.zip "https://github.com/curl/curl/releases/download/curl-$(subst .,_,${CURL_VERSION})/curl-$(CURL_VERSION).zip"
-
 ifeq ($(HOST),windows)
-	powershell -Command "Expand-Archive -Path '$(CURL_DIR)\src\curl.zip' -DestinationPath '$(CURL_DIR)\src\'"
+	powershell -Command "Expand-Archive -Path '$(CURL_ZIP)' -DestinationPath '$(CURL_DIR)\src\'"
 else
-	unzip $(CURL_DIR)/src/curl.zip -d $(CURL_DIR)/src/.
+	unzip -o $(CURL_ZIP) -d $(CURL_DIR)/src/.
 endif
 	
 	cd $(CURL_SRC) && ./configure \
@@ -318,7 +331,7 @@ endif
 
 	mkdir -p $(dir $(CURL_LIB))
 	mv $(CURL_SRC)/lib/.libs/libcurl.a $(CURL_LIB)
-	rm -rf $(CURL_DIR)/src
+	rm -rf $(CURL_DIR)/src/curl-$(CURL_VERSION)
 
 .NOTPARALLEL: %.dylib
 %.dylib:
@@ -398,7 +411,7 @@ version:
 
 # Clean up generated files
 clean:
-	rm -rf $(BUILD_DIRS) $(DIST_DIR)/* $(COV_DIR) *.gcda *.gcno *.gcov $(CURL_DIR)/src *.sqlite
+	rm -rf $(BUILD_DIRS) $(DIST_DIR)/* $(COV_DIR) *.gcda *.gcno *.gcov *.sqlite
 
 # Help message
 help:
