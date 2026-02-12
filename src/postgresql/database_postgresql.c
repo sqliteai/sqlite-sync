@@ -383,7 +383,8 @@ char *sql_build_pk_qualified_collist_query (const char *schema, const char *tabl
 
 char *sql_build_insert_missing_pks_query(const char *schema, const char *table_name,
                                          const char *pkvalues_identifiers,
-                                         const char *base_ref, const char *meta_ref) {
+                                         const char *base_ref, const char *meta_ref,
+                                         const char *filter) {
     UNUSED_PARAMETER(schema);
 
     char esc_table[1024];
@@ -398,6 +399,16 @@ char *sql_build_insert_missing_pks_query(const char *schema, const char *table_n
     //
     // Example: cloudsync_insert('table', col1, col2) where col1=TEXT, col2=INTEGER
     // PostgreSQL's VARIADIC handling preserves each type and matches SQLite's encoding.
+    if (filter) {
+        return cloudsync_memory_mprintf(
+            "SELECT cloudsync_insert('%s', %s) "
+            "FROM %s b "
+            "WHERE (%s) AND NOT EXISTS ("
+            "    SELECT 1 FROM %s m WHERE m.pk = cloudsync_pk_encode(%s)"
+            ");",
+            esc_table, pkvalues_identifiers, base_ref, filter, meta_ref, pkvalues_identifiers
+        );
+    }
     return cloudsync_memory_mprintf(
         "SELECT cloudsync_insert('%s', %s) "
         "FROM %s b "
@@ -1503,7 +1514,75 @@ static int database_create_delete_trigger_internal (cloudsync_context *data, con
     return rc;
 }
 
-int database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo) {
+// Build trigger WHEN clauses, optionally incorporating a row-level filter.
+// INSERT/UPDATE use NEW-prefixed filter, DELETE uses OLD-prefixed filter.
+static void database_build_trigger_when(
+    cloudsync_context *data, const char *table_name, const char *filter,
+    const char *schema,
+    char *when_new, size_t when_new_size,
+    char *when_old, size_t when_old_size)
+{
+    char *new_filter_str = NULL;
+    char *old_filter_str = NULL;
+
+    if (filter) {
+        const char *schema_param = (schema && schema[0]) ? schema : "";
+        char esc_tbl[1024], esc_schema[1024];
+        sql_escape_literal(table_name, esc_tbl, sizeof(esc_tbl));
+        sql_escape_literal(schema_param, esc_schema, sizeof(esc_schema));
+
+        char col_sql[2048];
+        snprintf(col_sql, sizeof(col_sql),
+            "SELECT column_name::text FROM information_schema.columns "
+            "WHERE table_name = '%s' AND table_schema = COALESCE(NULLIF('%s', ''), current_schema()) "
+            "ORDER BY ordinal_position;",
+            esc_tbl, esc_schema);
+
+        char *col_names[256];
+        int ncols = 0;
+
+        dbvm_t *col_vm = NULL;
+        int crc = databasevm_prepare(data, col_sql, &col_vm, 0);
+        if (crc == DBRES_OK) {
+            while (databasevm_step(col_vm) == DBRES_ROW && ncols < 256) {
+                const char *name = database_column_text(col_vm, 0);
+                if (name) col_names[ncols++] = cloudsync_memory_mprintf("%s", name);
+            }
+            databasevm_finalize(col_vm);
+        }
+
+        if (ncols > 0) {
+            new_filter_str = cloudsync_filter_add_row_prefix(filter, "NEW", col_names, ncols);
+            old_filter_str = cloudsync_filter_add_row_prefix(filter, "OLD", col_names, ncols);
+            for (int i = 0; i < ncols; ++i) cloudsync_memory_free(col_names[i]);
+        }
+    }
+
+    if (new_filter_str) {
+        snprintf(when_new, when_new_size,
+            "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false AND (%s))",
+            table_name, new_filter_str);
+    } else {
+        snprintf(when_new, when_new_size,
+            "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false)",
+            table_name);
+    }
+
+    if (old_filter_str) {
+        snprintf(when_old, when_old_size,
+            "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false AND (%s))",
+            table_name, old_filter_str);
+    } else {
+        snprintf(when_old, when_old_size,
+            "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false)",
+            table_name);
+    }
+
+    if (new_filter_str) cloudsync_memory_free(new_filter_str);
+    if (old_filter_str) cloudsync_memory_free(old_filter_str);
+}
+
+int database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo, const char *filter) {
     if (!table_name) return DBRES_MISUSE;
 
     // Detect schema from metadata table if it exists, otherwise use cloudsync_schema()
@@ -1511,12 +1590,13 @@ int database_create_triggers (cloudsync_context *data, const char *table_name, t
     char *detected_schema = database_table_schema(table_name);
     const char *schema = detected_schema ? detected_schema : cloudsync_schema(data);
 
-    char trigger_when[1024];
-    snprintf(trigger_when, sizeof(trigger_when),
-             "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false)",
-             table_name);
+    char trigger_when_new[4096];
+    char trigger_when_old[4096];
+    database_build_trigger_when(data, table_name, filter, schema,
+        trigger_when_new, sizeof(trigger_when_new),
+        trigger_when_old, sizeof(trigger_when_old));
 
-    int rc = database_create_insert_trigger_internal(data, table_name, trigger_when, schema);
+    int rc = database_create_insert_trigger_internal(data, table_name, trigger_when_new, schema);
     if (rc != DBRES_OK) {
         if (detected_schema) cloudsync_memory_free(detected_schema);
         return rc;
@@ -1525,7 +1605,7 @@ int database_create_triggers (cloudsync_context *data, const char *table_name, t
     if (algo == table_algo_crdt_gos) {
         rc = database_create_update_trigger_gos_internal(data, table_name, schema);
     } else {
-        rc = database_create_update_trigger_internal(data, table_name, trigger_when, schema);
+        rc = database_create_update_trigger_internal(data, table_name, trigger_when_new, schema);
     }
     if (rc != DBRES_OK) {
         if (detected_schema) cloudsync_memory_free(detected_schema);
@@ -1535,7 +1615,7 @@ int database_create_triggers (cloudsync_context *data, const char *table_name, t
     if (algo == table_algo_crdt_gos) {
         rc = database_create_delete_trigger_gos_internal(data, table_name, schema);
     } else {
-        rc = database_create_delete_trigger_internal(data, table_name, trigger_when, schema);
+        rc = database_create_delete_trigger_internal(data, table_name, trigger_when_old, schema);
     }
 
     if (detected_schema) cloudsync_memory_free(detected_schema);
@@ -1612,21 +1692,9 @@ int64_t database_schema_version (cloudsync_context *data) {
 }
 
 uint64_t database_schema_hash (cloudsync_context *data) {
-    char *schema = NULL;
-    database_select_text(data,
-        "SELECT string_agg(LOWER(table_name || column_name || data_type), '' ORDER BY table_name, column_name) "
-        "FROM information_schema.columns WHERE table_schema = COALESCE(cloudsync_schema(), current_schema())",
-        &schema);
-
-    if (!schema) {
-        elog(INFO, "database_schema_hash: schema is NULL");
-        return 0;
-    }
-
-    size_t schema_len = strlen(schema);
-    uint64_t hash = fnv1a_hash(schema, schema_len);
-    cloudsync_memory_free(schema);
-    return hash;
+    int64_t value = 0;
+    int rc = database_select_int(data, "SELECT hash FROM cloudsync_schema_versions ORDER BY seq DESC LIMIT 1;", &value);
+    return (rc == DBRES_OK) ? (uint64_t)value : 0;
 }
 
 bool database_check_schema_hash (cloudsync_context *data, uint64_t hash) {
@@ -1639,16 +1707,65 @@ bool database_check_schema_hash (cloudsync_context *data, uint64_t hash) {
 }
 
 int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
+    // Build normalized schema string using only: column name (lowercase), type (SQLite affinity), pk flag
+    // Format: tablename:colname:affinity:pk,... (ordered by table name, then column ordinal position)
+    // This makes the hash resilient to formatting, quoting, case differences and portable across databases
+    //
+    // PostgreSQL type to SQLite affinity mapping:
+    // - integer, smallint, bigint, boolean → 'integer'
+    // - bytea → 'blob'
+    // - real, double precision → 'real'
+    // - numeric, decimal → 'numeric'
+    // - Everything else → 'text' (default)
+    //   This includes: text, varchar, char, uuid, timestamp, timestamptz, date, time,
+    //   interval, json, jsonb, inet, cidr, macaddr, geometric types, xml, enums,
+    //   and any custom/extension types. Using 'text' as default ensures compatibility
+    //   since most types serialize to text representation and SQLite stores unknown
+    //   types as TEXT affinity.
+
     char *schema = NULL;
     int rc = database_select_text(data,
-        "SELECT string_agg(LOWER(table_name || column_name || data_type), '' ORDER BY table_name, column_name) "
-        "FROM information_schema.columns WHERE table_schema = COALESCE(cloudsync_schema(), current_schema())",
+        "SELECT string_agg("
+        "    LOWER(c.table_name) || ':' || LOWER(c.column_name) || ':' || "
+        "    CASE "
+        // Integer types (including boolean as 0/1)
+        "        WHEN c.data_type IN ('integer', 'smallint', 'bigint', 'boolean') THEN 'integer' "
+        // Blob type
+        "        WHEN c.data_type = 'bytea' THEN 'blob' "
+        // Real/float types
+        "        WHEN c.data_type IN ('real', 'double precision') THEN 'real' "
+        // Numeric types (explicit precision/scale)
+        "        WHEN c.data_type IN ('numeric', 'decimal') THEN 'numeric' "
+        // Default to text for everything else:
+        // - String types: text, character varying, character, name, uuid
+        // - Date/time: timestamp, date, time, interval, etc.
+        // - JSON: json, jsonb
+        // - Network: inet, cidr, macaddr
+        // - Geometric: point, line, box, etc.
+        // - Custom/extension types
+        "        ELSE 'text' "
+        "    END || ':' || "
+        "    CASE WHEN kcu.column_name IS NOT NULL THEN '1' ELSE '0' END, "
+        "    ',' ORDER BY c.table_name, c.ordinal_position"
+        ") "
+        "FROM information_schema.columns c "
+        "JOIN cloudsync_table_settings cts ON LOWER(c.table_name) = LOWER(cts.tbl_name) "
+        "LEFT JOIN information_schema.table_constraints tc "
+        "    ON tc.table_name = c.table_name "
+        "    AND tc.table_schema = c.table_schema "
+        "    AND tc.constraint_type = 'PRIMARY KEY' "
+        "LEFT JOIN information_schema.key_column_usage kcu "
+        "    ON kcu.table_name = c.table_name "
+        "    AND kcu.column_name = c.column_name "
+        "    AND kcu.table_schema = c.table_schema "
+        "    AND kcu.constraint_name = tc.constraint_name "
+        "WHERE c.table_schema = COALESCE(cloudsync_schema(), current_schema())",
         &schema);
 
     if (rc != DBRES_OK || !schema) return cloudsync_set_error(data, "database_update_schema_hash error 1", DBRES_ERROR);
 
     size_t schema_len = strlen(schema);
-    DEBUG_ALWAYS("database_update_schema_hash len %zu", schema_len);
+    DEBUG_MERGE("database_update_schema_hash len %zu schema %s", schema_len, schema);
     uint64_t h = fnv1a_hash(schema, schema_len);
     cloudsync_memory_free(schema);
     if (hash && *hash == h) return cloudsync_set_error(data, "database_update_schema_hash constraint", DBRES_CONSTRAINT);
@@ -1664,7 +1781,7 @@ int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
     if (rc == DBRES_OK) {
         if (hash) *hash = h;
         return rc;
-    } 
+    }
 
     return cloudsync_set_error(data, "database_update_schema_hash error 2", DBRES_ERROR);
 }
@@ -2140,7 +2257,7 @@ int databasevm_bind_null (dbvm_t *vm, int index) {
     
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
     stmt->values[idx] = (Datum)0;
-    stmt->types[idx] = BYTEAOID;
+    stmt->types[idx] = TEXTOID;  // TEXTOID has casts to most types
     stmt->nulls[idx] = 'n';
     
     if (stmt->nparams < idx + 1) stmt->nparams = idx + 1;
@@ -2185,7 +2302,8 @@ int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value) {
     pgvalue_t *v = (pgvalue_t *)value;
     if (!v || v->isnull) {
         stmt->values[idx] = (Datum)0;
-        stmt->types[idx] = TEXTOID;
+        // Use the actual column type if available, otherwise default to TEXTOID
+        stmt->types[idx] = (v && OidIsValid(v->typeid)) ? v->typeid : TEXTOID;
         stmt->nulls[idx] = 'n';
     } else {
         int16 typlen;

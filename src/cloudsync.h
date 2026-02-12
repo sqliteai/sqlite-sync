@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define CLOUDSYNC_VERSION                       "0.9.101"
+#define CLOUDSYNC_VERSION                       "0.9.110"
 #define CLOUDSYNC_MAX_TABLENAME_LEN             512
 
 #define CLOUDSYNC_VALUE_NOTSET                  -1
@@ -120,6 +120,9 @@ int local_update_move_meta (cloudsync_table_context *table, const char *pk, size
 // used by changes virtual table
 int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, const char *col_name, dbvalue_t *col_value, int64_t col_version, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid);
 int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, int64_t insert_cl, const char *insert_name, dbvalue_t *insert_value, int64_t insert_col_version, int64_t insert_db_version, const char *insert_site_id, int insert_site_id_len, int64_t insert_seq, int64_t *rowid);
+
+// filter rewrite
+char *cloudsync_filter_add_row_prefix(const char *filter, const char *prefix, char **columns, int ncols);
 
 // decode bind context
 char *cloudsync_pk_context_tbl (cloudsync_pk_decode_bind_context *ctx, int64_t *tbl_len);

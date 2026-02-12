@@ -247,11 +247,22 @@ char *sql_build_pk_qualified_collist_query (const char *schema, const char *tabl
 
 char *sql_build_insert_missing_pks_query(const char *schema, const char *table_name,
                                          const char *pkvalues_identifiers,
-                                         const char *base_ref, const char *meta_ref) {
+                                         const char *base_ref, const char *meta_ref,
+                                         const char *filter) {
     UNUSED_PARAMETER(schema);
 
     // SQLite: Use NOT EXISTS with cloudsync_pk_encode (same approach as PostgreSQL).
     // This avoids needing pk_decode select list which requires executing a query.
+    if (filter) {
+        return cloudsync_memory_mprintf(
+            "SELECT cloudsync_insert('%q', %s) "
+            "FROM \"%w\" "
+            "WHERE (%s) AND NOT EXISTS ("
+            "    SELECT 1 FROM \"%w\" WHERE pk = cloudsync_pk_encode(%s)"
+            ");",
+            table_name, pkvalues_identifiers, base_ref, filter, meta_ref, pkvalues_identifiers
+        );
+    }
     return cloudsync_memory_mprintf(
         "SELECT cloudsync_insert('%q', %s) "
         "FROM \"%w\" "
@@ -712,31 +723,89 @@ int database_create_delete_trigger (cloudsync_context *data, const char *table_n
     return rc;
 }
 
-int database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo) {
+// Build trigger WHEN clauses, optionally incorporating a row-level filter.
+// INSERT/UPDATE use NEW-prefixed filter, DELETE uses OLD-prefixed filter.
+static void database_build_trigger_when(
+    cloudsync_context *data, const char *table_name, const char *filter,
+    char *when_new, size_t when_new_size,
+    char *when_old, size_t when_old_size)
+{
+    char *new_filter_str = NULL;
+    char *old_filter_str = NULL;
+
+    if (filter) {
+        char sql_cols[1024];
+        sqlite3_snprintf(sizeof(sql_cols), sql_cols,
+            "SELECT name FROM pragma_table_info('%q') ORDER BY cid;", table_name);
+
+        char *col_names[256];
+        int ncols = 0;
+
+        sqlite3_stmt *col_vm = NULL;
+        int col_rc = sqlite3_prepare_v2((sqlite3 *)cloudsync_db(data), sql_cols, -1, &col_vm, NULL);
+        if (col_rc == SQLITE_OK) {
+            while (sqlite3_step(col_vm) == SQLITE_ROW && ncols < 256) {
+                const char *name = (const char *)sqlite3_column_text(col_vm, 0);
+                if (name) col_names[ncols++] = cloudsync_memory_mprintf("%s", name);
+            }
+            sqlite3_finalize(col_vm);
+        }
+
+        if (ncols > 0) {
+            new_filter_str = cloudsync_filter_add_row_prefix(filter, "NEW", col_names, ncols);
+            old_filter_str = cloudsync_filter_add_row_prefix(filter, "OLD", col_names, ncols);
+            for (int i = 0; i < ncols; ++i) cloudsync_memory_free(col_names[i]);
+        }
+    }
+
+    if (new_filter_str) {
+        sqlite3_snprintf((int)when_new_size, when_new,
+            "FOR EACH ROW WHEN cloudsync_is_sync('%q') = 0 AND (%s)", table_name, new_filter_str);
+    } else {
+        sqlite3_snprintf((int)when_new_size, when_new,
+            "FOR EACH ROW WHEN cloudsync_is_sync('%q') = 0", table_name);
+    }
+
+    if (old_filter_str) {
+        sqlite3_snprintf((int)when_old_size, when_old,
+            "FOR EACH ROW WHEN cloudsync_is_sync('%q') = 0 AND (%s)", table_name, old_filter_str);
+    } else {
+        sqlite3_snprintf((int)when_old_size, when_old,
+            "FOR EACH ROW WHEN cloudsync_is_sync('%q') = 0", table_name);
+    }
+
+    if (new_filter_str) cloudsync_memory_free(new_filter_str);
+    if (old_filter_str) cloudsync_memory_free(old_filter_str);
+}
+
+int database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo, const char *filter) {
     DEBUG_DBFUNCTION("dbutils_check_triggers %s", table);
-    
+
     if (dbutils_settings_check_version(data, "0.8.25") <= 0) {
         database_delete_triggers(data, table_name);
     }
-    
-    // common part
-    char buffer1[1024];
-    char *trigger_when = sqlite3_snprintf(sizeof(buffer1), buffer1, "FOR EACH ROW WHEN cloudsync_is_sync('%q') = 0", table_name);
-    
-    // INSERT TRIGGER
-    int rc = database_create_insert_trigger(data, table_name, trigger_when);
+
+    char trigger_when_new[4096];
+    char trigger_when_old[4096];
+    database_build_trigger_when(data, table_name, filter,
+        trigger_when_new, sizeof(trigger_when_new),
+        trigger_when_old, sizeof(trigger_when_old));
+
+    // INSERT TRIGGER (uses NEW prefix)
+    int rc = database_create_insert_trigger(data, table_name, trigger_when_new);
     if (rc != SQLITE_OK) return rc;
-    
-    // UPDATE TRIGGER
+
+    // UPDATE TRIGGER (uses NEW prefix)
     if (algo == table_algo_crdt_gos) rc = database_create_update_trigger_gos(data, table_name);
-    else rc = database_create_update_trigger(data, table_name, trigger_when);
+    else rc = database_create_update_trigger(data, table_name, trigger_when_new);
     if (rc != SQLITE_OK) return rc;
-    
-    // DELETE TRIGGER
+
+    // DELETE TRIGGER (uses OLD prefix)
     if (algo == table_algo_crdt_gos) rc = database_create_delete_trigger_gos(data, table_name);
-    else rc = database_create_delete_trigger(data, table_name, trigger_when);
-    
+    else rc = database_create_delete_trigger(data, table_name, trigger_when_old);
+
     if (rc != SQLITE_OK) DEBUG_ALWAYS("database_create_triggers error %s (%d)", sqlite3_errmsg(cloudsync_db(data)), rc);
+
     return rc;
 }
 
@@ -803,25 +872,124 @@ bool database_check_schema_hash (cloudsync_context *data, uint64_t hash) {
 }
 
 int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
-    char *schemasql = "SELECT group_concat(LOWER(sql)) FROM sqlite_master "
-            "WHERE type = 'table' AND name IN (SELECT tbl_name FROM cloudsync_table_settings ORDER BY tbl_name) "
-            "ORDER BY name;";
-    
+    // Build normalized schema string using only: column name (lowercase), type (SQLite affinity), pk flag
+    // Format: tablename:colname:affinity:pk,... (ordered by table name, then column id)
+    // This makes the hash resilient to formatting, quoting, case differences and portable across databases
+    //
+    // Type mapping (simplified from SQLite affinity rules for cross-database compatibility):
+    // - Types containing 'INT' → 'integer'
+    // - Types containing 'CHAR', 'CLOB', 'TEXT' → 'text'
+    // - Types containing 'BLOB' or empty → 'blob'
+    // - Types containing 'REAL', 'FLOA', 'DOUB' → 'real'
+    // - Types exactly 'NUMERIC' or 'DECIMAL' → 'numeric'
+    // - Everything else → 'text' (default)
+    //
+    // NOTE: This deviates from SQLite's actual affinity rules where unknown types get NUMERIC affinity.
+    // We use 'text' as default to improve cross-database compatibility with PostgreSQL, where types
+    // like TIMESTAMPTZ, UUID, JSON, etc. are commonly used and map to 'text' in the PostgreSQL
+    // implementation. This ensures schemas with PostgreSQL-specific type names in SQLite DDL
+    // will hash consistently across both databases.
+    sqlite3 *db = (sqlite3 *)cloudsync_db(data);
+
+    char **tables = NULL;
+    int ntables, tcols;
+    int rc = sqlite3_get_table(db, "SELECT DISTINCT tbl_name FROM cloudsync_table_settings ORDER BY tbl_name;",
+                               &tables, &ntables, &tcols, NULL);
+    if (rc != SQLITE_OK || ntables == 0) {
+        if (tables) sqlite3_free_table(tables);
+        return SQLITE_ERROR;
+    }
+
     char *schema = NULL;
-    int rc = database_select_text(data, schemasql, &schema);
-    if (rc != DBRES_OK) return rc;
-    if (!schema) return DBRES_ERROR;
-        
-    uint64_t h = fnv1a_hash(schema, strlen(schema));
+    size_t schema_len = 0;
+    size_t schema_cap = 0;
+
+    for (int t = 1; t <= ntables; t++) {
+        const char *tbl_name = tables[t];
+
+        // Query pragma_table_info for this table with normalized type
+        char *col_sql = cloudsync_memory_mprintf(
+            "SELECT LOWER(name), "
+            "CASE "
+            "  WHEN UPPER(type) LIKE '%%INT%%' THEN 'integer' "
+            "  WHEN UPPER(type) LIKE '%%CHAR%%' OR UPPER(type) LIKE '%%CLOB%%' OR UPPER(type) LIKE '%%TEXT%%' THEN 'text' "
+            "  WHEN UPPER(type) LIKE '%%BLOB%%' OR type = '' THEN 'blob' "
+            "  WHEN UPPER(type) LIKE '%%REAL%%' OR UPPER(type) LIKE '%%FLOA%%' OR UPPER(type) LIKE '%%DOUB%%' THEN 'real' "
+            "  WHEN UPPER(type) IN ('NUMERIC', 'DECIMAL') THEN 'numeric' "
+            "  ELSE 'text' "
+            "END, "
+            "CASE WHEN pk > 0 THEN '1' ELSE '0' END "
+            "FROM pragma_table_info('%q') ORDER BY cid;", tbl_name);
+
+        if (!col_sql) {
+            if (schema) cloudsync_memory_free(schema);
+            sqlite3_free_table(tables);
+            return SQLITE_NOMEM;
+        }
+
+        char **cols = NULL;
+        int nrows, ncols;
+        rc = sqlite3_get_table(db, col_sql, &cols, &nrows, &ncols, NULL);
+        cloudsync_memory_free(col_sql);
+
+        if (rc != SQLITE_OK || ncols != 3) {
+            if (cols) sqlite3_free_table(cols);
+            if (schema) cloudsync_memory_free(schema);
+            sqlite3_free_table(tables);
+            return SQLITE_ERROR;
+        }
+
+        // Append each column: tablename:colname:affinity:pk
+        for (int r = 1; r <= nrows; r++) {
+            const char *col_name = cols[r * 3];
+            const char *col_type = cols[r * 3 + 1];
+            const char *col_pk = cols[r * 3 + 2];
+
+            // Calculate required size: tbl_name:col_name:col_type:col_pk,
+            size_t entry_len = strlen(tbl_name) + 1 + strlen(col_name) + 1 + strlen(col_type) + 1 + strlen(col_pk) + 1;
+
+            if (schema_len + entry_len + 1 > schema_cap) {
+                schema_cap = (schema_cap == 0) ? 1024 : schema_cap * 2;
+                if (schema_cap < schema_len + entry_len + 1) schema_cap = schema_len + entry_len + 1;
+                char *new_schema = cloudsync_memory_realloc(schema, schema_cap);
+                if (!new_schema) {
+                    if (schema) cloudsync_memory_free(schema);
+                    sqlite3_free_table(cols);
+                    sqlite3_free_table(tables);
+                    return SQLITE_NOMEM;
+                }
+                schema = new_schema;
+            }
+
+            int written = snprintf(schema + schema_len, schema_cap - schema_len, "%s:%s:%s:%s,",
+                                   tbl_name, col_name, col_type, col_pk);
+            schema_len += written;
+        }
+
+        sqlite3_free_table(cols);
+    }
+
+    sqlite3_free_table(tables);
+
+    if (!schema || schema_len == 0) return SQLITE_ERROR;
+
+    // Remove trailing comma
+    if (schema_len > 0 && schema[schema_len - 1] == ',') {
+        schema[schema_len - 1] = '\0';
+        schema_len--;
+    }
+
+    DEBUG_MERGE("database_update_schema_hash len %zu schema %s", schema_len, schema);
+    sqlite3_uint64 h = fnv1a_hash(schema, schema_len);
     cloudsync_memory_free(schema);
     if (hash && *hash == h) return SQLITE_CONSTRAINT;
-    
+
     char sql[1024];
     snprintf(sql, sizeof(sql), "INSERT INTO cloudsync_schema_versions (hash, seq) "
-                               "VALUES (%" PRIu64 ", COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
+                               "VALUES (%lld, COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
                                "ON CONFLICT(hash) DO UPDATE SET "
-                               "seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);", h);
-    rc = database_exec(data, sql);
+                               "  seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);", (sqlite3_int64)h);
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc == SQLITE_OK && hash) *hash = h;
     return rc;
 }

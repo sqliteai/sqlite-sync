@@ -363,7 +363,10 @@ int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values,
         if (strcmp(key, "algo")!=0) continue;
 
         table_algo algo = cloudsync_algo_from_name(value);
-        if (database_create_triggers(data, table_name, algo) != DBRES_OK) return DBRES_MISUSE;
+        char fbuf[2048];
+        int frc = dbutils_table_settings_get_value(data, table_name, "*", "filter", fbuf, sizeof(fbuf));
+        const char *filt = (frc == DBRES_OK && fbuf[0]) ? fbuf : NULL;
+        if (database_create_triggers(data, table_name, algo, filt) != DBRES_OK) return DBRES_MISUSE;
         if (table_add_to_context(data, algo, table_name) == false) return DBRES_MISUSE;
 
         DEBUG_SETTINGS("load tbl_name: %s value: %s", key, value);

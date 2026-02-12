@@ -27,6 +27,13 @@
 \ir 17_uuid_pk_roundtrip.sql
 \ir 18_bulk_insert_performance.sql
 \ir 19_uuid_pk_with_unmapped_cols.sql
+\ir 20_init_with_existing_data.sql
+\ir 21_null_value_sync.sql
+\ir 22_null_column_roundtrip.sql
+\ir 23_uuid_column_roundtrip.sql
+\ir 24_nullable_types_roundtrip.sql
+\ir 25_boolean_type_issue.sql
+\ir 26_row_filter.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

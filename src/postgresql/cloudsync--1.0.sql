@@ -102,6 +102,18 @@ RETURNS boolean
 AS 'MODULE_PATHNAME', 'cloudsync_set_table'
 LANGUAGE C VOLATILE;
 
+-- Set row-level filter for conditional sync
+CREATE OR REPLACE FUNCTION cloudsync_set_filter(table_name text, filter_expr text)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'cloudsync_set_filter'
+LANGUAGE C VOLATILE;
+
+-- Clear row-level filter
+CREATE OR REPLACE FUNCTION cloudsync_clear_filter(table_name text)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'cloudsync_clear_filter'
+LANGUAGE C VOLATILE;
+
 -- Set column-level configuration
 CREATE OR REPLACE FUNCTION cloudsync_set_column(table_name text, column_name text, key text, value text)
 RETURNS boolean
@@ -276,3 +288,21 @@ CREATE OR REPLACE FUNCTION cloudsync_table_schema(table_name text)
 RETURNS text
 AS 'MODULE_PATHNAME', 'pg_cloudsync_table_schema'
 LANGUAGE C VOLATILE;
+
+-- ============================================================================
+-- Type Casts
+-- ============================================================================
+
+-- Cast function: converts bigint to boolean (0 = false, non-zero = true)
+-- Required because BOOLEAN values are encoded as INT8 in sync payloads,
+-- but PostgreSQL has no built-in cast from bigint to boolean.
+CREATE FUNCTION cloudsync_int8_to_bool(bigint) RETURNS boolean AS $$
+    SELECT $1 <> 0
+$$ LANGUAGE SQL IMMUTABLE STRICT;
+
+-- ASSIGNMENT cast: auto-applies in INSERT/UPDATE context only
+-- This enables BOOLEAN column sync where values are encoded as INT8.
+-- Using ASSIGNMENT (not IMPLICIT) to avoid unintended conversions in WHERE clauses.
+CREATE CAST (bigint AS boolean)
+    WITH FUNCTION cloudsync_int8_to_bool(bigint)
+    AS ASSIGNMENT;
