@@ -283,8 +283,8 @@ const char * const SQL_CLOUDSYNC_UPSERT_COL_INIT_OR_BUMP_VERSION =
     "INSERT INTO %s (pk, col_name, col_version, db_version, seq, site_id) "
     "VALUES ($1, '%s', 1, $2, $3, 0) "
     "ON CONFLICT (pk, col_name) DO UPDATE SET "
-    "col_version = CASE EXCLUDED.col_version %% 2 WHEN 0 THEN EXCLUDED.col_version + 1 ELSE EXCLUDED.col_version + 2 END, "
-    "db_version = $2, seq = $3, site_id = 0;";  // TODO: mirror SQLite's bump rules and bind usage
+    "col_version = CASE %s.col_version %% 2 WHEN 0 THEN %s.col_version + 1 ELSE %s.col_version + 2 END, "
+    "db_version = $2, seq = $3, site_id = 0;";
 
 const char * const SQL_CLOUDSYNC_UPSERT_RAW_COLVERSION =
     "INSERT INTO %s (pk, col_name, col_version, db_version, seq, site_id) "

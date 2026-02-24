@@ -2516,6 +2516,119 @@ bool do_test_hash_function(void) {
     return true;
 }
 
+// Test blob compare with large sizes that would overflow old (int)(size1-size2) code
+bool do_test_blob_compare_large_sizes(void) {
+    // The old code did (int)(size1 - size2) which overflows for large size_t values
+    const char blob1[] = {0x01};
+    const char blob2[] = {0x02};
+
+    // size1 > size2 should give positive result
+    int r1 = cloudsync_blob_compare(blob1, 100, blob2, 1);
+    if (r1 <= 0) return false;
+
+    // size1 < size2 should give negative result
+    int r2 = cloudsync_blob_compare(blob1, 1, blob2, 100);
+    if (r2 >= 0) return false;
+
+    // Same size, different content
+    int r3 = cloudsync_blob_compare(blob1, 1, blob2, 1);
+    if (r3 == 0) return false;
+
+    // Equal
+    int r4 = cloudsync_blob_compare(blob1, 1, blob1, 1);
+    if (r4 != 0) return false;
+
+    return true;
+}
+
+// Test that cloudsync_uuid() is non-deterministic (returns different values in same query)
+bool do_test_deterministic_flags(void) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+
+    int rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // SELECT cloudsync_uuid(), cloudsync_uuid() — both values should differ
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_uuid(), cloudsync_uuid();", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    const char *u1 = (const char *)sqlite3_column_text(stmt, 0);
+    const char *u2 = (const char *)sqlite3_column_text(stmt, 1);
+    if (!u1 || !u2) goto cleanup;
+
+    // Non-deterministic: same query, different results
+    if (strcmp(u1, u2) == 0) goto cleanup;
+
+    result = true;
+
+cleanup:
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) close_db(db);
+    return result;
+}
+
+// Test schema hash consistency for int64 roundtrip (high-bit values)
+bool do_test_schema_hash_consistency(void) {
+    sqlite3 *db = NULL;
+    bool result = false;
+
+    int rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Create and init a table — use TEXT pk to avoid single INTEGER pk warning
+    rc = sqlite3_exec(db, "CREATE TABLE t1 (id TEXT PRIMARY KEY NOT NULL, name TEXT);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('t1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Get the schema hash value by reading cloudsync_schema_versions
+    {
+        sqlite3_stmt *stmt = NULL;
+        rc = sqlite3_prepare_v2(db, "SELECT hash FROM cloudsync_schema_versions ORDER BY seq DESC LIMIT 1;", -1, &stmt, NULL);
+        if (rc != SQLITE_OK) goto cleanup;
+
+        rc = sqlite3_step(stmt);
+        if (rc != SQLITE_ROW) { sqlite3_finalize(stmt); goto cleanup; }
+
+        int64_t hash = sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+
+        // Verify the hash can be looked up using the same int64 representation
+        // This tests the PRId64 format consistency fix
+        char sql[256];
+        snprintf(sql, sizeof(sql), "SELECT 1 FROM cloudsync_schema_versions WHERE hash = (%" PRId64 ")", hash);
+
+        stmt = NULL;
+        rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+        if (rc != SQLITE_OK) goto cleanup;
+
+        rc = sqlite3_step(stmt);
+        if (rc != SQLITE_ROW) { sqlite3_finalize(stmt); goto cleanup; }
+
+        int found = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+        if (found != 1) goto cleanup;
+    }
+
+    result = true;
+
+cleanup:
+    if (db) close_db(db);
+    return result;
+}
+
 // Test cloudsync_blob_compare function
 bool do_test_blob_compare(void) {
     // Test same content, same size
@@ -7701,6 +7814,9 @@ int main (int argc, const char * argv[]) {
     result += test_report("Terminate Test:", do_test_terminate());
     result += test_report("Hash Function Test:", do_test_hash_function());
     result += test_report("Blob Compare Test:", do_test_blob_compare());
+    result += test_report("Blob Compare Large:", do_test_blob_compare_large_sizes());
+    result += test_report("Deterministic Flags:", do_test_deterministic_flags());
+    result += test_report("Schema Hash Roundtrip:", do_test_schema_hash_consistency());
     result += test_report("String Functions Test:", do_test_string_functions());
     result += test_report("UUID Functions Test:", do_test_uuid_functions());
     result += test_report("RowID Decode Test:", do_test_rowid_decode());

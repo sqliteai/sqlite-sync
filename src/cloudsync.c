@@ -115,7 +115,6 @@ struct cloudsync_context {
     void        *aux_data;
     
     // stmts and context values
-    bool        pragma_checked;             // we need to check PRAGMAs only once per transaction
     dbvm_t      *schema_version_stmt;
     dbvm_t      *data_version_stmt;
     dbvm_t      *db_version_stmt;
@@ -255,13 +254,15 @@ const char *cloudsync_algo_name (table_algo algo) {
 // MARK: - DBVM Utils -
 
 DBVM_VALUE dbvm_execute (dbvm_t *stmt, cloudsync_context *data) {
+    if (!stmt) return DBVM_VALUE_ERROR;
+
     int rc = databasevm_step(stmt);
     if (rc != DBRES_ROW && rc != DBRES_DONE) {
         if (data) DEBUG_DBERROR(rc, "stmt_execute", data);
         databasevm_reset(stmt);
         return DBVM_VALUE_ERROR;
     }
-    
+
     DBVM_VALUE result = DBVM_VALUE_CHANGED;
     if (stmt == data->data_version_stmt) {
         int version = (int)database_column_int(stmt, 0);
@@ -365,12 +366,17 @@ int cloudsync_dbversion_rebuild (cloudsync_context *data) {
 int cloudsync_dbversion_rerun (cloudsync_context *data) {
     DBVM_VALUE schema_changed = dbvm_execute(data->schema_version_stmt, data);
     if (schema_changed == DBVM_VALUE_ERROR) return -1;
-    
+
     if (schema_changed == DBVM_VALUE_CHANGED) {
         int rc = cloudsync_dbversion_rebuild(data);
         if (rc != DBRES_OK) return -1;
     }
-    
+
+    if (!data->db_version_stmt) {
+        data->db_version = CLOUDSYNC_MIN_DB_VERSION;
+        return 0;
+    }
+
     DBVM_VALUE rc = dbvm_execute(data->db_version_stmt, data);
     if (rc == DBVM_VALUE_ERROR) return -1;
     return 0;
@@ -559,7 +565,7 @@ void cloudsync_set_auxdata (cloudsync_context *data, void *xdata) {
 }
 
 void cloudsync_set_schema (cloudsync_context *data, const char *schema) {
-    if (data->current_schema == schema) return;
+    if (data->current_schema && schema && strcmp(data->current_schema, schema) == 0) return;
     if (data->current_schema) cloudsync_memory_free(data->current_schema);
     data->current_schema = NULL;
     if (schema) data->current_schema = cloudsync_string_dup_lowercase(schema);
@@ -748,7 +754,7 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     if (rc != DBRES_OK) goto cleanup;
     
     // precompile the insert local sentinel statement
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_UPSERT_COL_INIT_OR_BUMP_VERSION, table->meta_ref, CLOUDSYNC_TOMBSTONE_VALUE);
+    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_UPSERT_COL_INIT_OR_BUMP_VERSION, table->meta_ref, CLOUDSYNC_TOMBSTONE_VALUE, table->meta_ref, table->meta_ref, table->meta_ref);
     if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
     DEBUG_SQL("meta_sentinel_insert_stmt: %s", sql);
     
@@ -920,37 +926,44 @@ int table_remove (cloudsync_context *data, cloudsync_table_context *table) {
 int table_add_to_context_cb (void *xdata, int ncols, char **values, char **names) {
     cloudsync_table_context *table = (cloudsync_table_context *)xdata;
     cloudsync_context *data = table->context;
-    
+
     int index = table->ncols;
     for (int i=0; i<ncols; i+=2) {
         const char *name = values[i];
         int cid = (int)strtol(values[i+1], NULL, 0);
-        
+
         table->col_id[index] = cid;
         table->col_name[index] = cloudsync_string_dup_lowercase(name);
-        if (!table->col_name[index]) return 1;
-        
+        if (!table->col_name[index]) goto error;
+
         char *sql = table_build_mergeinsert_sql(table, name);
-        if (!sql) return DBRES_NOMEM;
+        if (!sql) goto error;
         DEBUG_SQL("col_merge_stmt[%d]: %s", index, sql);
-        
+
         int rc = databasevm_prepare(data, sql, (void **)&table->col_merge_stmt[index], DBFLAG_PERSISTENT);
         cloudsync_memory_free(sql);
-        if (rc != DBRES_OK) return rc;
-        if (!table->col_merge_stmt[index]) return DBRES_MISUSE;
-        
+        if (rc != DBRES_OK) goto error;
+        if (!table->col_merge_stmt[index]) goto error;
+
         sql = table_build_value_sql(table, name);
-        if (!sql) return DBRES_NOMEM;
+        if (!sql) goto error;
         DEBUG_SQL("col_value_stmt[%d]: %s", index, sql);
-        
+
         rc = databasevm_prepare(data, sql, (void **)&table->col_value_stmt[index], DBFLAG_PERSISTENT);
         cloudsync_memory_free(sql);
-        if (rc != DBRES_OK) return rc;
-        if (!table->col_value_stmt[index]) return DBRES_MISUSE;
+        if (rc != DBRES_OK) goto error;
+        if (!table->col_value_stmt[index]) goto error;
     }
     table->ncols += 1;
-    
+
     return 0;
+
+error:
+    // clean up partially-initialized entry at index
+    if (table->col_name[index]) {cloudsync_memory_free(table->col_name[index]); table->col_name[index] = NULL;}
+    if (table->col_merge_stmt[index]) {databasevm_finalize(table->col_merge_stmt[index]); table->col_merge_stmt[index] = NULL;}
+    if (table->col_value_stmt[index]) {databasevm_finalize(table->col_value_stmt[index]); table->col_value_stmt[index] = NULL;}
+    return 1;
 }
 
 bool table_ensure_capacity (cloudsync_context *data) {
@@ -992,7 +1005,7 @@ bool table_add_to_context (cloudsync_context *data, table_algo algo, const char 
     table->npks = count;
     if (table->npks == 0) {
         #if CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
-        return false;
+        goto abort_add_table;
         #else
         table->rowid_only = true;
         table->npks = 1; // rowid
@@ -1039,7 +1052,8 @@ abort_add_table:
 
 dbvm_t *cloudsync_colvalue_stmt (cloudsync_context *data, const char *tbl_name, bool *persistent) {
     dbvm_t *vm = NULL;
-    
+    *persistent = false;
+
     cloudsync_table_context *table = table_lookup(data, tbl_name);
     if (table) {
         char *col_name = NULL;
@@ -1082,7 +1096,7 @@ const char *table_colname (cloudsync_table_context *table, int index) {
 bool table_pk_exists (cloudsync_table_context *table, const char *value, size_t len) {
     // check if a row with the same primary key already exists
     // if so, this means the row might have been previously deleted (sentinel)
-    return (bool)dbvm_count(table->meta_pkexists_stmt, value, len, DBTYPE_BLOB);
+    return (dbvm_count(table->meta_pkexists_stmt, value, len, DBTYPE_BLOB) > 0);
 }
 
 char **table_pknames (cloudsync_table_context *table) {
@@ -1373,6 +1387,10 @@ int merge_did_cid_win (cloudsync_context *data, cloudsync_table_context *table, 
     rc = databasevm_step(vm);
     if (rc == DBRES_ROW) {
         const void *local_site_id = database_column_blob(vm, 0);
+        if (!local_site_id) {
+            dbvm_reset(vm);
+            return cloudsync_set_error(data, "NULL site_id in cloudsync table, table is probably corrupted", DBRES_ERROR);
+        }
         ret = memcmp(site_id, local_site_id, site_len);
         *didwin_flag = (ret > 0);
         dbvm_reset(vm);
@@ -1929,6 +1947,7 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
             rc = databasevm_step(vm);
             if (rc == DBRES_ROW) {
                 const char *pk = (const char *)database_column_text(vm, 0);
+                if (!pk) { rc = DBRES_ERROR; break; }
                 size_t pklen = strlen(pk);
                 rc = local_mark_insert_or_update_meta(table, pk, pklen, col_name, db_version, cloudsync_bumpseq(data));
             } else if (rc == DBRES_DONE) {
@@ -2448,8 +2467,8 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         if (in_savepoint && db_version_changed) {
             rc = database_commit_savepoint(data, "cloudsync_payload_apply");
             if (rc != DBRES_OK) {
-                if (clone) cloudsync_memory_free(clone);
-                return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to release a savepoint", rc);
+                cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to release a savepoint", rc);
+                goto cleanup;
             }
             in_savepoint = false;
         }
@@ -2459,8 +2478,8 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         if (!in_transaction && db_version_changed) {
             rc = database_begin_savepoint(data, "cloudsync_payload_apply");
             if (rc != DBRES_OK) {
-                if (clone) cloudsync_memory_free(clone);
-                return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to start a transaction", rc);
+                cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to start a transaction", rc);
+                goto cleanup;
             }
             last_payload_db_version = decoded_context.db_version;
             in_savepoint = true;
@@ -2548,7 +2567,7 @@ int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size,
     if (rc != DBRES_OK) return rc;
     
     // exit if there is no data to send
-    if (blob == NULL || *blob_size == 0) return DBRES_OK;
+    if (*blob == NULL || *blob_size == 0) return DBRES_OK;
     return rc;
 }
 

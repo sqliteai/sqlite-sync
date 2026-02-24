@@ -411,14 +411,16 @@ int dbutils_settings_init (cloudsync_context *data) {
         if (rc != DBRES_OK) return rc;
         
         // library version
-        char sql[1024];
-        snprintf(sql, sizeof(sql), SQL_INSERT_SETTINGS_STR_FORMAT, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
+        char *sql = cloudsync_memory_mprintf(SQL_INSERT_SETTINGS_STR_FORMAT, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
+        if (!sql) return DBRES_NOMEM;
         rc = database_exec(data, sql);
+        cloudsync_memory_free(sql);
         if (rc != DBRES_OK) return rc;
-        
+
         // schema version
-        snprintf(sql, sizeof(sql), SQL_INSERT_SETTINGS_INT_FORMAT, CLOUDSYNC_KEY_SCHEMAVERSION, (long long)database_schema_version(data));
-        rc = database_exec(data, sql);
+        char sql_int[1024];
+        snprintf(sql_int, sizeof(sql_int), SQL_INSERT_SETTINGS_INT_FORMAT, CLOUDSYNC_KEY_SCHEMAVERSION, (long long)database_schema_version(data));
+        rc = database_exec(data, sql_int);
         if (rc != DBRES_OK) return rc;
     }
     

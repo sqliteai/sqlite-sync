@@ -473,7 +473,7 @@ Datum pg_cloudsync_terminate (PG_FUNCTION_ARGS) {
     PG_END_TRY();
 
     if (spi_connected) SPI_finish();
-    PG_RETURN_INT32(rc);
+    PG_RETURN_BOOL(rc == DBRES_OK);
 }
 
 // MARK: - Settings Functions -
@@ -820,8 +820,7 @@ Datum cloudsync_payload_encode_transfn (PG_FUNCTION_ARGS) {
     // Get or allocate aggregate state
     if (PG_ARGISNULL(0)) {
         MemoryContext oldContext = MemoryContextSwitchTo(aggContext);
-        payload = (cloudsync_payload_context *)cloudsync_memory_alloc(cloudsync_payload_context_size(NULL));
-        memset(payload, 0, cloudsync_payload_context_size(NULL));
+        payload = (cloudsync_payload_context *)palloc0(cloudsync_payload_context_size(NULL));
         MemoryContextSwitchTo(oldContext);
     } else {
         payload = (cloudsync_payload_context *)PG_GETARG_POINTER(0);
@@ -1819,13 +1818,16 @@ static Oid get_column_oid(const char *schema, const char *table_name, const char
     pfree(DatumGetPointer(values[1]));
     if (schema) pfree(DatumGetPointer(values[2]));
 
-    if (ret != SPI_OK_SELECT || SPI_processed == 0) return InvalidOid;
+    if (ret != SPI_OK_SELECT || SPI_processed == 0) {
+        if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
+        return InvalidOid;
+    }
 
     bool isnull;
     Datum col_oid = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
-    if (isnull) return InvalidOid;
-
-    return DatumGetObjectId(col_oid);
+    Oid result = isnull ? InvalidOid : DatumGetObjectId(col_oid);
+    SPI_freetuptable(SPI_tuptable);
+    return result;
 }
 
 // Decode encoded bytea into a pgvalue_t with the decoded base type.
@@ -1958,23 +1960,34 @@ Datum cloudsync_col_value(PG_FUNCTION_ARGS) {
     }
     
     // execute vm
-    Datum d = (Datum)0;
     int rc = databasevm_step(vm);
     if (rc == DBRES_DONE) {
-        rc = DBRES_OK;
-        PG_RETURN_CSTRING(CLOUDSYNC_RLS_RESTRICTED_VALUE);
-    } else if (rc == DBRES_ROW) {
-        // store value result
-        rc = DBRES_OK;
-        d = database_column_datum(vm, 0);
-    }
-    
-    if (rc != DBRES_OK) {
         databasevm_reset(vm);
-        ereport(ERROR, (errmsg("cloudsync_col_value error: %s", cloudsync_errmsg(data))));
+        // row not found (RLS or genuinely missing) — return the RLS sentinel as bytea
+        const char *rls = CLOUDSYNC_RLS_RESTRICTED_VALUE;
+        size_t rls_len = strlen(rls);
+        bytea *result = (bytea *)palloc(VARHDRSZ + rls_len);
+        SET_VARSIZE(result, VARHDRSZ + rls_len);
+        memcpy(VARDATA(result), rls, rls_len);
+        PG_RETURN_BYTEA_P(result);
+    } else if (rc == DBRES_ROW) {
+        // copy value before reset invalidates SPI tuple memory
+        const void *blob = database_column_blob(vm, 0);
+        int blob_len = database_column_bytes(vm, 0);
+        bytea *result = NULL;
+        if (blob && blob_len > 0) {
+            result = (bytea *)palloc(VARHDRSZ + blob_len);
+            SET_VARSIZE(result, VARHDRSZ + blob_len);
+            memcpy(VARDATA(result), blob, blob_len);
+        }
+        databasevm_reset(vm);
+        if (result) PG_RETURN_BYTEA_P(result);
+        PG_RETURN_NULL();
     }
+
     databasevm_reset(vm);
-    PG_RETURN_DATUM(d);
+    ereport(ERROR, (errmsg("cloudsync_col_value error: %s", cloudsync_errmsg(data))));
+    PG_RETURN_NULL(); // unreachable, silences compiler
 }
 
 // Track SRF execution state across calls

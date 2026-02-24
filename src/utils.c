@@ -165,7 +165,7 @@ char *cloudsync_string_dup_lowercase (const char *str) {
 }
 
 int cloudsync_blob_compare(const char *blob1, size_t size1, const char *blob2, size_t size2) {
-    if (size1 != size2) return (int)(size1 - size2); // blobs are different if sizes are different
+    if (size1 != size2) return (size1 > size2) ? 1 : -1; // blobs are different if sizes are different
     return memcmp(blob1, blob2, size1); // use memcmp for byte-by-byte comparison
 }
 

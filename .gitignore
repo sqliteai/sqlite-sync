@@ -50,3 +50,4 @@ jniLibs/
 .DS_Store
 Thumbs.db
 CLAUDE.md
+*.o

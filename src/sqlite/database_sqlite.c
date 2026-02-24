@@ -565,7 +565,7 @@ exit_cleanup:
 // MARK: - TRIGGERS and META -
 
 int database_create_metatable (cloudsync_context *data, const char *table_name) {
-    DEBUG_DBFUNCTION("database_create_metatable %s", table);
+    DEBUG_DBFUNCTION("database_create_metatable %s", table_name);
     
     // table_name cannot be longer than 512 characters so static buffer size is computed accordling to that value
     char buffer[2048];
@@ -725,10 +725,10 @@ int database_create_delete_trigger (cloudsync_context *data, const char *table_n
 
 // Build trigger WHEN clauses, optionally incorporating a row-level filter.
 // INSERT/UPDATE use NEW-prefixed filter, DELETE uses OLD-prefixed filter.
+// Returns dynamically-allocated strings that must be freed with cloudsync_memory_free.
 static void database_build_trigger_when(
     cloudsync_context *data, const char *table_name, const char *filter,
-    char *when_new, size_t when_new_size,
-    char *when_old, size_t when_old_size)
+    char **when_new_out, char **when_old_out)
 {
     char *new_filter_str = NULL;
     char *old_filter_str = NULL;
@@ -746,7 +746,11 @@ static void database_build_trigger_when(
         if (col_rc == SQLITE_OK) {
             while (sqlite3_step(col_vm) == SQLITE_ROW && ncols < 256) {
                 const char *name = (const char *)sqlite3_column_text(col_vm, 0);
-                if (name) col_names[ncols++] = cloudsync_memory_mprintf("%s", name);
+                if (name) {
+                    char *dup = cloudsync_memory_mprintf("%s", name);
+                    if (!dup) break;
+                    col_names[ncols++] = dup;
+                }
             }
             sqlite3_finalize(col_vm);
         }
@@ -759,18 +763,18 @@ static void database_build_trigger_when(
     }
 
     if (new_filter_str) {
-        sqlite3_snprintf((int)when_new_size, when_new,
+        *when_new_out = cloudsync_memory_mprintf(
             "FOR EACH ROW WHEN cloudsync_is_sync('%q') = 0 AND (%s)", table_name, new_filter_str);
     } else {
-        sqlite3_snprintf((int)when_new_size, when_new,
+        *when_new_out = cloudsync_memory_mprintf(
             "FOR EACH ROW WHEN cloudsync_is_sync('%q') = 0", table_name);
     }
 
     if (old_filter_str) {
-        sqlite3_snprintf((int)when_old_size, when_old,
+        *when_old_out = cloudsync_memory_mprintf(
             "FOR EACH ROW WHEN cloudsync_is_sync('%q') = 0 AND (%s)", table_name, old_filter_str);
     } else {
-        sqlite3_snprintf((int)when_old_size, when_old,
+        *when_old_out = cloudsync_memory_mprintf(
             "FOR EACH ROW WHEN cloudsync_is_sync('%q') = 0", table_name);
     }
 
@@ -779,33 +783,40 @@ static void database_build_trigger_when(
 }
 
 int database_create_triggers (cloudsync_context *data, const char *table_name, table_algo algo, const char *filter) {
-    DEBUG_DBFUNCTION("dbutils_check_triggers %s", table);
+    DEBUG_DBFUNCTION("database_create_triggers %s", table_name);
 
     if (dbutils_settings_check_version(data, "0.8.25") <= 0) {
         database_delete_triggers(data, table_name);
     }
 
-    char trigger_when_new[4096];
-    char trigger_when_old[4096];
+    char *trigger_when_new = NULL;
+    char *trigger_when_old = NULL;
     database_build_trigger_when(data, table_name, filter,
-        trigger_when_new, sizeof(trigger_when_new),
-        trigger_when_old, sizeof(trigger_when_old));
+        &trigger_when_new, &trigger_when_old);
+
+    if (!trigger_when_new || !trigger_when_old) {
+        if (trigger_when_new) cloudsync_memory_free(trigger_when_new);
+        if (trigger_when_old) cloudsync_memory_free(trigger_when_old);
+        return SQLITE_NOMEM;
+    }
 
     // INSERT TRIGGER (uses NEW prefix)
     int rc = database_create_insert_trigger(data, table_name, trigger_when_new);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) goto done;
 
     // UPDATE TRIGGER (uses NEW prefix)
     if (algo == table_algo_crdt_gos) rc = database_create_update_trigger_gos(data, table_name);
     else rc = database_create_update_trigger(data, table_name, trigger_when_new);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) goto done;
 
     // DELETE TRIGGER (uses OLD prefix)
     if (algo == table_algo_crdt_gos) rc = database_create_delete_trigger_gos(data, table_name);
     else rc = database_create_delete_trigger(data, table_name, trigger_when_old);
 
+done:
     if (rc != SQLITE_OK) DEBUG_ALWAYS("database_create_triggers error %s (%d)", sqlite3_errmsg(cloudsync_db(data)), rc);
-
+    cloudsync_memory_free(trigger_when_new);
+    cloudsync_memory_free(trigger_when_old);
     return rc;
 }
 
@@ -864,7 +875,7 @@ bool database_check_schema_hash (cloudsync_context *data, uint64_t hash) {
     // the idea is to allow changes on stale peers and to be able to apply these changes on peers with newer schema,
     // but it requires alter table operation on augmented tables only add new columns and never drop columns for backward compatibility
     char sql[1024];
-    snprintf(sql, sizeof(sql), "SELECT 1 FROM cloudsync_schema_versions WHERE hash = (%" PRIu64 ")", hash);
+    snprintf(sql, sizeof(sql), "SELECT 1 FROM cloudsync_schema_versions WHERE hash = (%" PRId64 ")", (int64_t)hash);
     
     int64_t value = 0;
     database_select_int(data, sql, &value);
@@ -986,9 +997,9 @@ int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
 
     char sql[1024];
     snprintf(sql, sizeof(sql), "INSERT INTO cloudsync_schema_versions (hash, seq) "
-                               "VALUES (%lld, COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
+                               "VALUES (%" PRId64 ", COALESCE((SELECT MAX(seq) FROM cloudsync_schema_versions), 0) + 1) "
                                "ON CONFLICT(hash) DO UPDATE SET "
-                               "  seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);", (sqlite3_int64)h);
+                               "  seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM cloudsync_schema_versions);", (int64_t)h);
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc == SQLITE_OK && hash) *hash = h;
     return rc;
@@ -1030,19 +1041,14 @@ static int database_pk_rowid (sqlite3 *db, const char *table_name, char ***names
     sqlite3_stmt *vm = NULL;
     int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
-    
-    if (rc == SQLITE_OK) {
+
+    {
         char **r = (char**)cloudsync_memory_alloc(sizeof(char*));
         if (!r) {rc = SQLITE_NOMEM; goto cleanup;}
         r[0] = cloudsync_string_dup("rowid");
         if (!r[0]) {cloudsync_memory_free(r); rc = SQLITE_NOMEM; goto cleanup;}
         *names = r;
         *count = 1;
-    } else {
-        // WITHOUT ROWID + no declared PKs => return empty set
-        *names = NULL;
-        *count = 0;
-        rc = SQLITE_OK;
     }
     
 cleanup:

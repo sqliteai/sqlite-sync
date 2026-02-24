@@ -942,7 +942,7 @@ void cloudsync_network_logout (sqlite3_context *context, int argc, sqlite3_value
     }
     
     // run everything in a savepoint
-    rc = database_begin_savepoint(data, "cloudsync_logout_savepoint;");
+    rc = database_begin_savepoint(data, "cloudsync_logout_savepoint");
     if (rc != SQLITE_OK) {
         errmsg = cloudsync_memory_mprintf("Unable to create cloudsync_logout savepoint %s", cloudsync_errmsg(data));
         goto finalize;

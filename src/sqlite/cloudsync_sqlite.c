@@ -441,34 +441,48 @@ void dbsync_update_payload_free (cloudsync_update_payload *payload) {
 int dbsync_update_payload_append (cloudsync_update_payload *payload, sqlite3_value *v1, sqlite3_value *v2, sqlite3_value *v3) {
     if (payload->count >= payload->capacity) {
         int newcap = payload->capacity ? payload->capacity * 2 : 128;
-        
+
         sqlite3_value **new_values_2 = (sqlite3_value **)cloudsync_memory_realloc(payload->new_values, newcap * sizeof(*new_values_2));
         if (!new_values_2) return SQLITE_NOMEM;
-        payload->new_values = new_values_2;
-        
+
         sqlite3_value **old_values_2 = (sqlite3_value **)cloudsync_memory_realloc(payload->old_values, newcap * sizeof(*old_values_2));
-        if (!old_values_2) return SQLITE_NOMEM;
+        if (!old_values_2) {
+            // new_values_2 succeeded but old_values failed; keep new_values_2 pointer
+            // (it's still valid, just larger) but don't update capacity
+            payload->new_values = new_values_2;
+            return SQLITE_NOMEM;
+        }
+
+        payload->new_values = new_values_2;
         payload->old_values = old_values_2;
-        
         payload->capacity = newcap;
     }
-    
+
     int index = payload->count;
     if (payload->table_name == NULL) payload->table_name = database_value_dup(v1);
     else if (dbutils_value_compare(payload->table_name, v1) != 0) return SQLITE_NOMEM;
+
     payload->new_values[index] = database_value_dup(v2);
     payload->old_values[index] = database_value_dup(v3);
-    payload->count++;
-    
-    // sanity check memory allocations
+
+    // sanity check memory allocations before committing count
     bool v1_can_be_null = (database_value_type(v1) == SQLITE_NULL);
     bool v2_can_be_null = (database_value_type(v2) == SQLITE_NULL);
     bool v3_can_be_null = (database_value_type(v3) == SQLITE_NULL);
-    
-    if ((payload->table_name == NULL) && (!v1_can_be_null)) return SQLITE_NOMEM;
-    if ((payload->new_values[index] == NULL) && (!v2_can_be_null)) return SQLITE_NOMEM;
-    if ((payload->old_values[index] == NULL) && (!v3_can_be_null)) return SQLITE_NOMEM;
-    
+
+    bool oom = false;
+    if ((payload->table_name == NULL) && (!v1_can_be_null)) oom = true;
+    if ((payload->new_values[index] == NULL) && (!v2_can_be_null)) oom = true;
+    if ((payload->old_values[index] == NULL) && (!v3_can_be_null)) oom = true;
+
+    if (oom) {
+        // clean up partial allocations at this index to prevent leaks
+        if (payload->new_values[index]) { database_value_free(payload->new_values[index]); payload->new_values[index] = NULL; }
+        if (payload->old_values[index]) { database_value_free(payload->old_values[index]); payload->old_values[index] = NULL; }
+        return SQLITE_NOMEM;
+    }
+
+    payload->count++;
     return SQLITE_OK;
 }
 
@@ -498,6 +512,7 @@ void dbsync_update_final (sqlite3_context *context) {
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) {
         dbsync_set_error(context, "Unable to retrieve table name %s in cloudsync_update.", table_name);
+        dbsync_update_payload_free(payload);
         return;
     }
 
@@ -524,6 +539,7 @@ void dbsync_update_final (sqlite3_context *context) {
     char *pk = pk_encode_prikey((dbvalue_t **)payload->new_values, table_count_pks(table), buffer, &pklen);
     if (!pk) {
         sqlite3_result_error(context, "Not enough memory to encode the primary key(s).", -1);
+        dbsync_update_payload_free(payload);
         return;
     }
     
@@ -537,6 +553,7 @@ void dbsync_update_final (sqlite3_context *context) {
         if (!oldpk) {
             if (pk != buffer) cloudsync_memory_free(pk);
             sqlite3_result_error(context, "Not enough memory to encode the primary key(s).", -1);
+            dbsync_update_payload_free(payload);
             return;
         }
         
@@ -893,10 +910,9 @@ void dbsync_payload_load (sqlite3_context *context, int argc, sqlite3_value **ar
 
 // MARK: - Register -
 
-int dbsync_register (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_context*,int,sqlite3_value**), void (*xstep)(sqlite3_context*,int,sqlite3_value**), void (*xfinal)(sqlite3_context*), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
-    
-    const int DEFAULT_FLAGS = SQLITE_UTF8 | SQLITE_INNOCUOUS | SQLITE_DETERMINISTIC;
-    int rc = sqlite3_create_function_v2(db, name, nargs, DEFAULT_FLAGS, ctx, xfunc, xstep, xfinal, ctx_free);
+int dbsync_register_with_flags (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_context*,int,sqlite3_value**), void (*xstep)(sqlite3_context*,int,sqlite3_value**), void (*xfinal)(sqlite3_context*), int nargs, int flags, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
+
+    int rc = sqlite3_create_function_v2(db, name, nargs, flags, ctx, xfunc, xstep, xfinal, ctx_free);
     
     if (rc != SQLITE_OK) {
         if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("Error creating function %s: %s", name, sqlite3_errmsg(db));
@@ -905,9 +921,21 @@ int dbsync_register (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_contex
     return SQLITE_OK;
 }
 
+int dbsync_register (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_context*,int,sqlite3_value**), void (*xstep)(sqlite3_context*,int,sqlite3_value**), void (*xfinal)(sqlite3_context*), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
+    const int FLAGS_VOLATILE = SQLITE_UTF8;
+    DEBUG_DBFUNCTION("dbsync_register %s", name);
+    return dbsync_register_with_flags(db, name, xfunc, xstep, xfinal, nargs, FLAGS_VOLATILE, pzErrMsg, ctx, ctx_free);
+}
+
 int dbsync_register_function (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_context*,int,sqlite3_value**), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
     DEBUG_DBFUNCTION("dbsync_register_function %s", name);
     return dbsync_register(db, name, xfunc, NULL, NULL, nargs, pzErrMsg, ctx, ctx_free);
+}
+
+int dbsync_register_pure_function (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_context*,int,sqlite3_value**), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
+    const int FLAGS_PURE = SQLITE_UTF8 | SQLITE_INNOCUOUS | SQLITE_DETERMINISTIC;
+    DEBUG_DBFUNCTION("dbsync_register_pure_function %s", name);
+    return dbsync_register_with_flags(db, name, xfunc, NULL, NULL, nargs, FLAGS_PURE, pzErrMsg, ctx, ctx_free);
 }
 
 int dbsync_register_aggregate (sqlite3 *db, const char *name, void (*xstep)(sqlite3_context*,int,sqlite3_value**), void (*xfinal)(sqlite3_context*), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
@@ -999,7 +1027,7 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     // register functions
     
     // PUBLIC functions
-    rc = dbsync_register_function(db, "cloudsync_version", dbsync_version, 0, pzErrMsg, ctx, cloudsync_context_free);
+    rc = dbsync_register_pure_function(db, "cloudsync_version", dbsync_version, 0, pzErrMsg, ctx, cloudsync_context_free);
     if (rc != SQLITE_OK) return rc;
     
     rc = dbsync_register_function(db, "cloudsync_init", dbsync_init1, 1, pzErrMsg, ctx, NULL);
@@ -1105,10 +1133,10 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     rc = dbsync_register_function(db, "cloudsync_col_value", dbsync_col_value, 3, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_pk_encode", dbsync_pk_encode, -1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_pure_function(db, "cloudsync_pk_encode", dbsync_pk_encode, -1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
-    
-    rc = dbsync_register_function(db, "cloudsync_pk_decode", dbsync_pk_decode, 2, pzErrMsg, ctx, NULL);
+
+    rc = dbsync_register_pure_function(db, "cloudsync_pk_decode", dbsync_pk_decode, 2, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
     rc = dbsync_register_function(db, "cloudsync_seq", dbsync_seq, 0, pzErrMsg, ctx, NULL);

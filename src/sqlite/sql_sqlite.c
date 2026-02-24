@@ -42,9 +42,9 @@ const char * const SQL_SETTINGS_LOAD_TABLE =
 const char * const SQL_CREATE_SETTINGS_TABLE =
     "CREATE TABLE IF NOT EXISTS cloudsync_settings (key TEXT PRIMARY KEY NOT NULL COLLATE NOCASE, value TEXT);";
 
-// format strings (snprintf) are also static SQL templates
+// format strings (sqlite3_snprintf) are also static SQL templates
 const char * const SQL_INSERT_SETTINGS_STR_FORMAT =
-    "INSERT INTO cloudsync_settings (key, value) VALUES ('%s', '%s');";
+    "INSERT INTO cloudsync_settings (key, value) VALUES ('%q', '%q');";
 
 const char * const SQL_INSERT_SETTINGS_INT_FORMAT =
     "INSERT INTO cloudsync_settings (key, value) VALUES ('%s', %lld);";

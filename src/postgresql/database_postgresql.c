@@ -1157,16 +1157,21 @@ int database_create_metatable (cloudsync_context *data, const char *table_name) 
     if (rc != DBRES_OK) { cloudsync_memory_free(meta_ref); return rc; }
 
     // Create indices for performance
-    if (schema) {
-        sql2 = cloudsync_memory_mprintf(
-                 "CREATE INDEX IF NOT EXISTS \"%s_cloudsync_db_version_idx\" "
-                 "ON \"%s\".\"%s_cloudsync\" (db_version);",
-                 table_name, schema, table_name);
-    } else {
-        sql2 = cloudsync_memory_mprintf(
-                 "CREATE INDEX IF NOT EXISTS \"%s_cloudsync_db_version_idx\" "
-                 "ON \"%s_cloudsync\" (db_version);",
-                 table_name, table_name);
+    {
+        char escaped_tbl[512], escaped_sch[512];
+        sql_escape_identifier(table_name, escaped_tbl, sizeof(escaped_tbl));
+        if (schema) {
+            sql_escape_identifier(schema, escaped_sch, sizeof(escaped_sch));
+            sql2 = cloudsync_memory_mprintf(
+                     "CREATE INDEX IF NOT EXISTS \"%s_cloudsync_db_version_idx\" "
+                     "ON \"%s\".\"%s_cloudsync\" (db_version);",
+                     escaped_tbl, escaped_sch, escaped_tbl);
+        } else {
+            sql2 = cloudsync_memory_mprintf(
+                     "CREATE INDEX IF NOT EXISTS \"%s_cloudsync_db_version_idx\" "
+                     "ON \"%s_cloudsync\" (db_version);",
+                     escaped_tbl, escaped_tbl);
+        }
     }
     cloudsync_memory_free(meta_ref);
     if (!sql2) return DBRES_NOMEM;
@@ -1558,24 +1563,27 @@ static void database_build_trigger_when(
         }
     }
 
+    char esc_tbl[512];
+    sql_escape_literal(table_name, esc_tbl, sizeof(esc_tbl));
+
     if (new_filter_str) {
         snprintf(when_new, when_new_size,
             "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false AND (%s))",
-            table_name, new_filter_str);
+            esc_tbl, new_filter_str);
     } else {
         snprintf(when_new, when_new_size,
             "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false)",
-            table_name);
+            esc_tbl);
     }
 
     if (old_filter_str) {
         snprintf(when_old, when_old_size,
             "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false AND (%s))",
-            table_name, old_filter_str);
+            esc_tbl, old_filter_str);
     } else {
         snprintf(when_old, when_old_size,
             "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false)",
-            table_name);
+            esc_tbl);
     }
 
     if (new_filter_str) cloudsync_memory_free(new_filter_str);
@@ -1829,12 +1837,12 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
     for (uint64_t i = 0; i < n; i++) {
         HeapTuple tuple = SPI_tuptable->vals[i];
         bool isnull;
-        Datum datum = SPI_getbinval(tuple, SPI_tuptable->tupdesc, 1, &isnull);
+        SPI_getbinval(tuple, SPI_tuptable->tupdesc, 1, &isnull);
         if (!isnull) {
-            // information_schema.column_name is of type 'name', not 'text'
-            Name namedata = DatumGetName(datum);
-            char *name = (namedata) ? NameStr(*namedata) : NULL;
+            // SPI_getvalue returns a palloc'd string regardless of column type
+            char *name = SPI_getvalue(tuple, SPI_tuptable->tupdesc, 1);
             pk_names[i] = (name) ? cloudsync_string_dup(name) : NULL;
+            if (name) pfree(name);
         }
         
         // Cleanup on allocation failure
