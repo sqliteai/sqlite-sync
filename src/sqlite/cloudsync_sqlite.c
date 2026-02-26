@@ -938,9 +938,21 @@ int dbsync_register_pure_function (sqlite3 *db, const char *name, void (*xfunc)(
     return dbsync_register_with_flags(db, name, xfunc, NULL, NULL, nargs, FLAGS_PURE, pzErrMsg, ctx, ctx_free);
 }
 
+int dbsync_register_trigger_function (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_context*,int,sqlite3_value**), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
+    const int FLAGS_TRIGGER = SQLITE_UTF8 | SQLITE_INNOCUOUS;
+    DEBUG_DBFUNCTION("dbsync_register_trigger_function %s", name);
+    return dbsync_register_with_flags(db, name, xfunc, NULL, NULL, nargs, FLAGS_TRIGGER, pzErrMsg, ctx, ctx_free);
+}
+
 int dbsync_register_aggregate (sqlite3 *db, const char *name, void (*xstep)(sqlite3_context*,int,sqlite3_value**), void (*xfinal)(sqlite3_context*), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
     DEBUG_DBFUNCTION("dbsync_register_aggregate %s", name);
     return dbsync_register(db, name, NULL, xstep, xfinal, nargs, pzErrMsg, ctx, ctx_free);
+}
+
+int dbsync_register_trigger_aggregate (sqlite3 *db, const char *name, void (*xstep)(sqlite3_context*,int,sqlite3_value**), void (*xfinal)(sqlite3_context*), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
+    const int FLAGS_TRIGGER = SQLITE_UTF8 | SQLITE_INNOCUOUS;
+    DEBUG_DBFUNCTION("dbsync_register_trigger_aggregate %s", name);
+    return dbsync_register_with_flags(db, name, NULL, xstep, xfinal, nargs, FLAGS_TRIGGER, pzErrMsg, ctx, ctx_free);
 }
 
 // MARK: - Row Filter -
@@ -1117,17 +1129,17 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     if (rc != SQLITE_OK) return rc;
     #endif
     
-    // PRIVATE functions
-    rc = dbsync_register_function(db, "cloudsync_is_sync", dbsync_is_sync, 1, pzErrMsg, ctx, NULL);
+    // PRIVATE functions (used inside triggers — require SQLITE_INNOCUOUS)
+    rc = dbsync_register_trigger_function(db, "cloudsync_is_sync", dbsync_is_sync, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
-    
-    rc = dbsync_register_function(db, "cloudsync_insert", dbsync_insert, -1, pzErrMsg, ctx, NULL);
+
+    rc = dbsync_register_trigger_function(db, "cloudsync_insert", dbsync_insert, -1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
-    
-    rc = dbsync_register_aggregate(db, "cloudsync_update", dbsync_update_step, dbsync_update_final, 3, pzErrMsg, ctx, NULL);
+
+    rc = dbsync_register_trigger_aggregate(db, "cloudsync_update", dbsync_update_step, dbsync_update_final, 3, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
-    
-    rc = dbsync_register_function(db, "cloudsync_delete", dbsync_delete, -1, pzErrMsg, ctx, NULL);
+
+    rc = dbsync_register_trigger_function(db, "cloudsync_delete", dbsync_delete, -1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
     rc = dbsync_register_function(db, "cloudsync_col_value", dbsync_col_value, 3, pzErrMsg, ctx, NULL);
