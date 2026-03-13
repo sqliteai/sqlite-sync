@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **PostgreSQL support**: The CloudSync extension can now be built and loaded on PostgreSQL, so both SQLiteCloud and PostgreSQL are supported as the cloud backend database of the sync service. The core CRDT functions are shared by the SQLite and PostgreSQL extensions. Includes support for PostgreSQL-native types (UUID primary keys, composite PKs with mixed types, and automatic type casting).
 - **Row-Level Security (RLS)**: Sync payloads are now fully compatible with SQLiteCloud and PostgreSQL Row-Level Security policies. Changes are buffered per primary key and flushed as complete rows, so RLS policies can evaluate all columns at once.
+- **Block-level LWW for text conflict resolution**: Text columns can now be tracked at block level (lines by default) using Last-Writer-Wins. Concurrent edits to different parts of the same text are preserved after sync. New functions: `cloudsync_set_column()` to write individual blocks and `cloudsync_text_materialize()` to reconstruct the full text.
 
 ### Changed
 
@@ -40,6 +41,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   ```
 
 - **Batch merge replaces column-by-column processing**: During sync, changes to the same row are now applied in a single SQL statement instead of one statement per column. This eliminates the previous behavior where UPDATE triggers fired multiple times per row during synchronization.
+- **Network endpoints updated for the CloudSync v2 HTTP service**: Internal network layer now targets the new CloudSync service endpoints, including support for multi-organization routing.
+- **NULL primary key rejection at runtime**: The extension now enforces NULL primary key rejection at runtime, so the explicit `NOT NULL` constraint on primary key columns is no longer a schema requirement.
 
 ### Fixed
 
