@@ -41,7 +41,7 @@
 #define TERMINATE       if (db) { db_exec(db, "SELECT cloudsync_terminate();"); }
 #define ABORT_TEST      abort_test: ERROR_MSG TERMINATE if (db) sqlite3_close(db); return rc;
 
-typedef enum { PRINT, NOPRINT, INTGR, GT0 } expected_type;
+typedef enum { PRINT, NOPRINT, INTGR, GT0, STR } expected_type;
 
 typedef struct {
     expected_type type;
@@ -84,6 +84,15 @@ static int callback(void *data, int argc, char **argv, char **names) {
                     return SQLITE_ERROR;
                 }
 
+            } else goto multiple_columns;
+            break;
+
+        case STR:
+            if(argc == 1){
+                if(!argv[0] || strcmp(argv[0], expect->value.s) != 0){
+                    printf("Error: expected from %s: \"%s\", got \"%s\"\n", names[0], expect->value.s, argv[0] ? argv[0] : "NULL");
+                    return SQLITE_ERROR;
+                }
             } else goto multiple_columns;
             break;
 
@@ -130,6 +139,16 @@ int db_expect_int (sqlite3 *db, const char *sql, int expect) {
 int db_expect_gt0 (sqlite3 *db, const char *sql) {
     expected_t data;
     data.type = GT0;
+
+    int rc = sqlite3_exec(db, sql, callback, &data, NULL);
+    if (rc != SQLITE_OK) printf("Error while executing %s: %s\n", sql, sqlite3_errmsg(db));
+    return rc;
+}
+
+int db_expect_str (sqlite3 *db, const char *sql, const char *expect) {
+    expected_t data;
+    data.type = STR;
+    data.value.s = expect;
 
     int rc = sqlite3_exec(db, sql, callback, &data, NULL);
     if (rc != SQLITE_OK) printf("Error while executing %s: %s\n", sql, sqlite3_errmsg(db));
@@ -205,15 +224,20 @@ int test_init (const char *db_path, int init) {
     rc = db_exec(db, "SELECT cloudsync_init('activities');"); RCHECK
     rc = db_exec(db, "SELECT cloudsync_init('workouts');"); RCHECK
 
-    // init network with connection string + apikey
-    char network_init[512];
+    // init network with JSON connection string
+    char network_init[1024];
     const char* conn_str = getenv("CONNECTION_STRING");
     const char* apikey = getenv("APIKEY");
-    if (!conn_str || !apikey) {
-        fprintf(stderr, "Error: CONNECTION_STRING or APIKEY not set.\n");
+    const char* project_id = getenv("PROJECT_ID");
+    const char* org_id = getenv("ORGANIZATION_ID");
+    const char* database = getenv("DATABASE");
+    if (!conn_str || !apikey || !project_id || !org_id || !database) {
+        fprintf(stderr, "Error: CONNECTION_STRING, APIKEY, PROJECT_ID, ORGANIZATION_ID, or DATABASE not set.\n");
         exit(1);
     }
-    snprintf(network_init, sizeof(network_init), "SELECT cloudsync_network_init('%s?apikey=%s');", conn_str, apikey);
+    snprintf(network_init, sizeof(network_init),
+        "SELECT cloudsync_network_init('{\"address\":\"%s\",\"database\":\"%s\",\"projectID\":\"%s\",\"organizationID\":\"%s\",\"apikey\":\"%s\"}');",
+        conn_str, database, project_id, org_id, apikey);
     rc = db_exec(db, network_init); RCHECK
 
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM activities;", 0); RCHECK
@@ -224,7 +248,7 @@ int test_init (const char *db_path, int init) {
     snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s', '%s');", value, value);
     rc = db_exec(db, sql); RCHECK
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM users;", 1); RCHECK
-    rc = db_expect_gt0(db, "SELECT cloudsync_network_sync(250,10);"); RCHECK
+    rc = db_expect_gt0(db, "SELECT cloudsync_network_sync(250,10) ->> '$.receive.rows';"); RCHECK
     rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM users;"); RCHECK
     rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM activities;"); RCHECK
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM workouts;", 0); RCHECK
@@ -275,15 +299,20 @@ int test_enable_disable(const char *db_path) {
     snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s-should-sync', '%s-should-sync');", value, value);
     rc = db_exec(db, sql); RCHECK
 
-    // init network with connection string + apikey
-    char network_init[512];
+    // init network with JSON connection string
+    char network_init[1024];
     const char* conn_str = getenv("CONNECTION_STRING");
     const char* apikey = getenv("APIKEY");
-    if (!conn_str || !apikey) {
-        fprintf(stderr, "Error: CONNECTION_STRING or APIKEY not set.\n");
+    const char* project_id = getenv("PROJECT_ID");
+    const char* org_id = getenv("ORGANIZATION_ID");
+    const char* database = getenv("DATABASE");
+    if (!conn_str || !apikey || !project_id || !org_id || !database) {
+        fprintf(stderr, "Error: CONNECTION_STRING, APIKEY, PROJECT_ID, ORGANIZATION_ID, or DATABASE not set.\n");
         exit(1);
     }
-    snprintf(network_init, sizeof(network_init), "SELECT cloudsync_network_init('%s?apikey=%s');", conn_str, apikey);
+    snprintf(network_init, sizeof(network_init),
+        "SELECT cloudsync_network_init('{\"address\":\"%s\",\"database\":\"%s\",\"projectID\":\"%s\",\"organizationID\":\"%s\",\"apikey\":\"%s\"}');",
+        conn_str, database, project_id, org_id, apikey);
     rc = db_exec(db, network_init); RCHECK
 
     rc = db_exec(db, "SELECT cloudsync_network_send_changes();"); RCHECK
@@ -305,7 +334,7 @@ int test_enable_disable(const char *db_path) {
     // init network with connection string + apikey
     rc = db_exec(db2, network_init); RCHECK
 
-    rc = db_expect_gt0(db2, "SELECT cloudsync_network_sync(250,10);"); RCHECK
+    rc = db_expect_gt0(db2, "SELECT cloudsync_network_sync(250,10) ->> '$.receive.rows';"); RCHECK
 
     snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM users WHERE name='%s';", value);
     rc = db_expect_int(db2, sql, 0); RCHECK

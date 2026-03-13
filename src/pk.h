@@ -15,6 +15,8 @@
 
 typedef int (*pk_decode_callback) (void *xdata, int index, int type, int64_t ival, double dval, char *pval);
 
+extern char * const PRIKEY_NULL_CONSTRAINT_ERROR;
+
 char  *pk_encode_prikey (dbvalue_t **argv, int argc, char *b, size_t *bsize);
 char  *pk_encode_value (dbvalue_t *value, size_t *bsize);
 char  *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bsize, int skip_idx);

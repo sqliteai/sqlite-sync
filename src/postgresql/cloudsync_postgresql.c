@@ -1122,7 +1122,7 @@ Datum cloudsync_pk_encode (PG_FUNCTION_ARGS) {
 
     size_t pklen = 0;
     char *encoded = pk_encode_prikey((dbvalue_t **)argv, argc, NULL, &pklen);
-    if (!encoded) {
+    if (!encoded || encoded == PRIKEY_NULL_CONSTRAINT_ERROR) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("cloudsync_pk_encode failed to encode primary key")));
     }
 
@@ -1271,6 +1271,10 @@ Datum cloudsync_insert (PG_FUNCTION_ARGS) {
         if (!cleanup.pk) {
             ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Not enough memory to encode the primary key(s)")));
         }
+        if (cleanup.pk == PRIKEY_NULL_CONSTRAINT_ERROR) {
+            cleanup.pk = NULL;
+            ereport(ERROR, (errcode(ERRCODE_NOT_NULL_VIOLATION), errmsg("Insert aborted because primary key in table %s contains NULL values", table_name)));
+        }
 
         // Compute the next database version for tracking changes
         int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
@@ -1359,6 +1363,10 @@ Datum cloudsync_delete (PG_FUNCTION_ARGS) {
         cleanup.pk = pk_encode_prikey((dbvalue_t **)cleanup.argv, cleanup.argc, cleanup.pk_buffer, &pklen);
         if (!cleanup.pk) {
             ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Not enough memory to encode the primary key(s)")));
+        }
+        if (cleanup.pk == PRIKEY_NULL_CONSTRAINT_ERROR) {
+            cleanup.pk = NULL;
+            ereport(ERROR, (errcode(ERRCODE_NOT_NULL_VIOLATION), errmsg("Delete aborted because primary key in table %s contains NULL values", table_name)));
         }
 
         int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
@@ -1560,6 +1568,10 @@ Datum cloudsync_update_finalfn (PG_FUNCTION_ARGS) {
         pk = pk_encode_prikey((dbvalue_t **)payload->new_values, pk_count, buffer, &pklen);
         if (!pk) {
             ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Not enough memory to encode the primary key(s)")));
+        }
+        if (pk == PRIKEY_NULL_CONSTRAINT_ERROR) {
+            pk = NULL;
+            ereport(ERROR, (errcode(ERRCODE_NOT_NULL_VIOLATION), errmsg("Update aborted because primary key in table %s contains NULL values", table_name)));
         }
         if (prikey_changed) {
             oldpk = pk_encode_prikey((dbvalue_t **)payload->old_values, pk_count, buffer2, &oldpklen);
@@ -1972,8 +1984,8 @@ Datum cloudsync_col_value(PG_FUNCTION_ARGS) {
         PG_RETURN_BYTEA_P(result);
     } else if (rc == DBRES_ROW) {
         // copy value before reset invalidates SPI tuple memory
-        const void *blob = database_column_blob(vm, 0);
-        int blob_len = database_column_bytes(vm, 0);
+        size_t blob_len = 0;
+        const void *blob = database_column_blob(vm, 0, &blob_len);
         bytea *result = NULL;
         if (blob && blob_len > 0) {
             result = (bytea *)palloc(VARHDRSZ + blob_len);

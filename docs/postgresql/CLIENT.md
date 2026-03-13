@@ -34,8 +34,8 @@ so CloudSync can sync between a PostgreSQL server and SQLite clients.
 
 ### 1) Primary Keys
 
-- Use **TEXT NOT NULL** primary keys in SQLite.
-- PostgreSQL primary keys can be **TEXT NOT NULL** or **UUID**. If the PK type
+- Use **TEXT** primary keys in SQLite.
+- PostgreSQL primary keys can be **TEXT** or **UUID**. If the PK type
   isn't explicitly mapped to a DBTYPE (like UUID), it will be converted to TEXT
   in the payload so it remains compatible with the SQLite extension.
 - Generate IDs with `cloudsync_uuid()` on both sides.
@@ -43,17 +43,17 @@ so CloudSync can sync between a PostgreSQL server and SQLite clients.
 
 SQLite:
 ```sql
-id TEXT PRIMARY KEY NOT NULL
+id TEXT PRIMARY KEY
 ```
 
 PostgreSQL:
 ```sql
-id TEXT PRIMARY KEY NOT NULL
+id TEXT PRIMARY KEY
 ```
 
 PostgreSQL (UUID):
 ```sql
-id UUID PRIMARY KEY NOT NULL
+id UUID PRIMARY KEY
 ```
 
 ### 2) NOT NULL Columns Must Have DEFAULTs
@@ -99,7 +99,7 @@ Use defaults that serialize the same on both sides:
 SQLite:
 ```sql
 CREATE TABLE notes (
-  id TEXT PRIMARY KEY NOT NULL,
+  id TEXT PRIMARY KEY,
   title TEXT NOT NULL DEFAULT '',
   body TEXT DEFAULT '',
   views INTEGER NOT NULL DEFAULT 0,
@@ -111,7 +111,7 @@ CREATE TABLE notes (
 PostgreSQL:
 ```sql
 CREATE TABLE notes (
-  id TEXT PRIMARY KEY NOT NULL,
+  id TEXT PRIMARY KEY,
   title TEXT NOT NULL DEFAULT '',
   body TEXT DEFAULT '',
   views INTEGER NOT NULL DEFAULT 0,
@@ -136,7 +136,7 @@ SELECT cloudsync_init('notes');
 
 ### Checklist
 
-- [ ] PKs are TEXT + NOT NULL
+- [ ] PKs are TEXT (or UUID in PostgreSQL)
 - [ ] All NOT NULL columns have DEFAULT
 - [ ] Only INTEGER/FLOAT/TEXT/BLOB-compatible types
 - [ ] Same column names and order

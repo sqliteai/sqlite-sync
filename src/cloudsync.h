@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define CLOUDSYNC_VERSION                       "0.9.112"
+#define CLOUDSYNC_VERSION                       "0.9.118"
 #define CLOUDSYNC_MAX_TABLENAME_LEN             512
 
 #define CLOUDSYNC_VALUE_NOTSET                  -1
@@ -27,12 +27,6 @@ extern "C" {
 #define CLOUDSYNC_DEFAULT_ALGO                  "cls"
 
 #define CLOUDSYNC_CHANGES_NCOLS                 9
-
-typedef enum {
-    CLOUDSYNC_PAYLOAD_APPLY_WILL_APPLY          = 1,
-    CLOUDSYNC_PAYLOAD_APPLY_DID_APPLY           = 2,
-    CLOUDSYNC_PAYLOAD_APPLY_CLEANUP             = 3
-} CLOUDSYNC_PAYLOAD_APPLY_STEPS;
 
 // CRDT Algos
 table_algo cloudsync_algo_from_name (const char *algo_name);
@@ -89,7 +83,7 @@ int    cloudsync_payload_encode_step (cloudsync_payload_context *payload, clouds
 int    cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsync_context *data);
 char  *cloudsync_payload_blob (cloudsync_payload_context *payload, int64_t *blob_size, int64_t *nrows);
 size_t cloudsync_payload_context_size (size_t *header_size);
-int    cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int *seq, int64_t *new_db_version, int64_t *new_seq);
+int    cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int64_t *new_db_version);
 int    cloudsync_payload_save (cloudsync_context *data, const char *payload_path, int *blob_size); // available only on Desktop OS (no WASM, no mobile)
 
 // CloudSync table context
@@ -110,15 +104,15 @@ int table_remove (cloudsync_context *data, cloudsync_table_context *table);
 void table_free (cloudsync_table_context *table);
 
 // local merge/apply
-int local_mark_insert_sentinel_meta (cloudsync_table_context *table, const char *pk, size_t pklen, int64_t db_version, int seq);
-int local_update_sentinel (cloudsync_table_context *table, const char *pk, size_t pklen, int64_t db_version, int seq);
-int local_mark_insert_or_update_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, int64_t db_version, int seq);
-int local_mark_delete_meta (cloudsync_table_context *table, const char *pk, size_t pklen, int64_t db_version, int seq);
-int local_drop_meta (cloudsync_table_context *table, const char *pk, size_t pklen);
-int local_update_move_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *pk2, size_t pklen2, int64_t db_version);
+int local_mark_insert_sentinel_meta (cloudsync_table_context *table, const void *pk, size_t pklen, int64_t db_version, int seq);
+int local_update_sentinel (cloudsync_table_context *table, const void *pk, size_t pklen, int64_t db_version, int seq);
+int local_mark_insert_or_update_meta (cloudsync_table_context *table, const void *pk, size_t pklen, const char *col_name, int64_t db_version, int seq);
+int local_mark_delete_meta (cloudsync_table_context *table, const void *pk, size_t pklen, int64_t db_version, int seq);
+int local_drop_meta (cloudsync_table_context *table, const void *pk, size_t pklen);
+int local_update_move_meta (cloudsync_table_context *table, const void *pk, size_t pklen, const void *pk2, size_t pklen2, int64_t db_version);
 
 // used by changes virtual table
-int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, const char *col_name, dbvalue_t *col_value, int64_t col_version, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid);
+int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen, const char *col_name, dbvalue_t *col_value, int64_t col_version, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid);
 int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, int64_t insert_cl, const char *insert_name, dbvalue_t *insert_value, int64_t insert_col_version, int64_t insert_db_version, const char *insert_site_id, int insert_site_id_len, int64_t insert_seq, int64_t *rowid);
 
 // filter rewrite

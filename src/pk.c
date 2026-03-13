@@ -87,6 +87,8 @@
 #define DATABASE_TYPE_MAX_NEGATIVE_INTEGER  6   // was SQLITE_MAX_NEGATIVE_INTEGER
 #define DATABASE_TYPE_NEGATIVE_FLOAT        7   // was SQLITE_NEGATIVE_FLOAT
 
+char * const PRIKEY_NULL_CONSTRAINT_ERROR = "PRIKEY_NULL_CONSTRAINT_ERROR";
+
 // MARK: - Public Callbacks -
 
 int pk_decode_bind_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
@@ -436,7 +438,14 @@ char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bs
         if (!bsize) return NULL;
         // must fit in a single byte
         if (argc > 255) return NULL;
-       
+        
+        // if schema does not enforce NOT NULL on primary keys, check at runtime
+        #ifndef CLOUDSYNC_CHECK_NOTNULL_PRIKEYS
+        for (int i = 0; i < argc; i++) {
+            if (database_value_type(argv[i]) == DBTYPE_NULL) return PRIKEY_NULL_CONSTRAINT_ERROR;
+        }
+        #endif
+        
         // 1 is the number of items in the serialization
         // always 1 byte so max 255 primary keys, even if there is an hard SQLite limit of 128
         size_t blen_curr = *bsize;

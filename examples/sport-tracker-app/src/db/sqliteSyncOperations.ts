@@ -90,12 +90,12 @@ export const initSQLiteSync = (db: any) => {
   // ...or initialize all tables at once 
   //  db.exec('SELECT cloudsync_init("*");');
 
-  // Initialize SQLite Sync with the SQLite Cloud Connection String.
-  // On the SQLite Cloud Dashboard, enable OffSync (SQLite Sync) 
-  // on the remote database and copy the Connection String.
+  // Initialize SQLite Sync with the managedDatabaseId.
+  // On the SQLite Cloud Dashboard, enable OffSync (SQLite Sync)
+  // on the remote database and copy the managedDatabaseId.
   db.exec(
     `SELECT cloudsync_network_init('${
-      import.meta.env.VITE_SQLITECLOUD_CONNECTION_STRING
+      import.meta.env.VITE_SQLITECLOUD_MANAGED_DATABASE_ID
     }')`
   );
 };

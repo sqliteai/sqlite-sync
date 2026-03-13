@@ -59,7 +59,7 @@ Tables must be created on both the local database and SQLite Cloud with identica
 -- Create the main tasks table
 -- Note: Primary key MUST be TEXT (not INTEGER) for global uniqueness
 CREATE TABLE IF NOT EXISTS tasks (
-    id TEXT PRIMARY KEY NOT NULL,
+    id TEXT PRIMARY KEY,
     userid TEXT NOT NULL DEFAULT '',
     title TEXT NOT NULL DEFAULT '',
     description TEXT DEFAULT '',
@@ -84,7 +84,7 @@ SELECT cloudsync_is_enabled('tasks');
    - Execute the same CREATE TABLE statement:
    ```sql
    CREATE TABLE IF NOT EXISTS tasks (
-       id TEXT PRIMARY KEY NOT NULL,
+       id TEXT PRIMARY KEY,
        userid TEXT NOT NULL DEFAULT '',
        title TEXT NOT NULL DEFAULT '',
        description TEXT DEFAULT '',
@@ -104,8 +104,8 @@ SELECT cloudsync_is_enabled('tasks');
 
 ```sql
 -- Configure connection to SQLite Cloud
--- Replace with your actual connection string from Step 1.3
-SELECT cloudsync_network_init('sqlitecloud://your-project-id.sqlite.cloud/todo_app.sqlite');
+-- Replace with your managedDatabaseId from the OffSync page on the SQLiteCloud dashboard
+SELECT cloudsync_network_init('your-managed-database-id');
 
 -- Configure authentication:
 -- Set your API key from Step 1.3
@@ -149,7 +149,7 @@ sqlite3 todo_device_b.db
 ```sql
 -- Create identical table structure
 CREATE TABLE IF NOT EXISTS tasks (
-    id TEXT PRIMARY KEY NOT NULL,
+    id TEXT PRIMARY KEY,
     userid TEXT NOT NULL DEFAULT '',
     title TEXT NOT NULL DEFAULT '',
     description TEXT DEFAULT '',
@@ -163,12 +163,12 @@ CREATE TABLE IF NOT EXISTS tasks (
 SELECT cloudsync_init('tasks');
 
 -- Connect to the same cloud database
-SELECT cloudsync_network_init('sqlitecloud://your-project-id.sqlite.cloud/todo_app.sqlite');
+SELECT cloudsync_network_init('your-managed-database-id');
 SELECT cloudsync_network_set_apikey('your-api-key-here');
 
 -- Pull data from Device A - repeat until data is received
 SELECT cloudsync_network_sync();
--- Keep calling until the function returns > 0 (indicating data was received)
+-- Check "receive.rows" in the JSON result to see if data was received
 SELECT cloudsync_network_sync();
 
 -- Verify data was synced
@@ -199,7 +199,7 @@ SELECT cloudsync_network_sync();
 ```sql
 -- Get updates from Device B - repeat until data is received
 SELECT cloudsync_network_sync();
--- Keep calling until the function returns > 0 (indicating data was received)
+-- Check "receive.rows" in the JSON result to see if data was received
 SELECT cloudsync_network_sync();
 
 -- View all tasks (should now include Device B's additions)
@@ -232,7 +232,7 @@ SELECT cloudsync_network_has_unsent_changes();
 -- When network returns, sync automatically resolves conflicts
 -- Repeat until all changes are synchronized
 SELECT cloudsync_network_sync();
--- Keep calling until the function returns > 0 (indicating data was received/sent)
+-- Check "receive.rows" and "send.status" in the JSON result
 SELECT cloudsync_network_sync();
 ```
 

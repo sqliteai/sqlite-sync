@@ -58,10 +58,14 @@ export const SyncProvider = ({ children }) => {
           
           const result = await Promise.race([queryPromise, timeoutPromise]);
           
-          if (result.rows && result.rows.length > 0 && result.rows[0]['cloudsync_network_check_changes()'] > 0) {
-            console.log(`${result.rows[0]['cloudsync_network_check_changes()']} changes detected, triggering refresh`);
-            // Defer refresh to next tick to avoid blocking current interaction
-            setTimeout(() => triggerRefresh(), 0);
+          const raw = result.rows?.[0]?.['cloudsync_network_check_changes()'];
+          if (raw) {
+            const { receive } = JSON.parse(raw);
+            if (receive.rows > 0) {
+              console.log(`${receive.rows} changes detected in [${receive.tables}], triggering refresh`);
+              // Defer refresh to next tick to avoid blocking current interaction
+              setTimeout(() => triggerRefresh(), 0);
+            }
           }
         } catch (error) {
           console.error('Error checking for changes:', error);

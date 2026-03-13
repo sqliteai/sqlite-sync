@@ -76,7 +76,7 @@ SELECT cloudsync_version();
 
 ```sql
 CREATE TABLE notes (
-  id TEXT PRIMARY KEY NOT NULL,
+  id TEXT PRIMARY KEY,
   body TEXT DEFAULT ''
 );
 

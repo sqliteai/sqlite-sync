@@ -1,0 +1,50 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+
+## [1.0.0] - 2026-03-05
+
+### Added
+
+- **PostgreSQL support**: The CloudSync extension can now be built and loaded on PostgreSQL, so both SQLiteCloud and PostgreSQL are supported as the cloud backend database of the sync service. The core CRDT functions are shared by the SQLite and PostgreSQL extensions. Includes support for PostgreSQL-native types (UUID primary keys, composite PKs with mixed types, and automatic type casting).
+- **Row-Level Security (RLS)**: Sync payloads are now fully compatible with SQLiteCloud and PostgreSQL Row-Level Security policies. Changes are buffered per primary key and flushed as complete rows, so RLS policies can evaluate all columns at once.
+
+### Changed
+
+- **BREAKING: `cloudsync_network_init` now accepts a `managedDatabaseId` instead of a connection string.** The `managedDatabaseId` is returned by the CloudSync service when a new database is registered for sync. For SQLiteCloud projects, it can be obtained from the project's OffSync page on the dashboard.
+
+  Before:
+  ```sql
+  SELECT cloudsync_network_init('sqlitecloud://myproject.sqlite.cloud:8860/mydb.sqlite?apikey=KEY');
+  ```
+
+  After:
+  ```sql
+  SELECT cloudsync_network_init('your-managed-database-id');
+  ```
+
+- **BREAKING: Sync functions now return structured JSON.** `cloudsync_network_send_changes`, `cloudsync_network_check_changes`, and `cloudsync_network_sync` return a JSON object instead of a plain integer. This provides richer status information including sync state, version numbers, row counts, and affected table names.
+
+  Before:
+  ```sql
+  SELECT cloudsync_network_sync();
+  -- 3  (number of rows received)
+  ```
+
+  After:
+  ```sql
+  SELECT cloudsync_network_sync();
+  -- '{"send":{"status":"synced","localVersion":5,"serverVersion":5},"receive":{"rows":3,"tables":["tasks"]}}'
+  ```
+
+- **Batch merge replaces column-by-column processing**: During sync, changes to the same row are now applied in a single SQL statement instead of one statement per column. This eliminates the previous behavior where UPDATE triggers fired multiple times per row during synchronization.
+
+### Fixed
+
+- **Improved error reporting**: Sync network functions now surface the actual server error message instead of generic error codes.
+- **Schema hash verification**: Normalized schema comparison now uses only column name (lowercase), type (SQLite affinity), and primary key flag, preventing false mismatches caused by formatting differences.
+- **SQLite trigger safety**: Internal functions used inside triggers are now marked with `SQLITE_INNOCUOUS`, fixing `unsafe use of` errors when initializing tables that have triggers.
+- **NULL column binding**: Column value parameters are now correctly bound even when NULL, preventing sync failures on rows with NULL values.
+- **Stability and reliability improvements** across the SQLite and PostgreSQL codebases, including fixes to memory management, error handling, and CRDT version tracking.

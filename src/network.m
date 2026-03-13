@@ -13,60 +13,6 @@ void network_buffer_cleanup (void *xdata) {
     if (xdata) CFRelease(xdata);
 }
 
-bool network_compute_endpoints (sqlite3_context *context, network_data *data, const char *conn_string) {
-    NSString *conn = [NSString stringWithUTF8String:conn_string];
-    NSString *conn_string_https = nil;
-    
-    if ([conn hasPrefix:@"sqlitecloud://"]) {
-        conn_string_https = [conn stringByReplacingCharactersInRange:NSMakeRange(0, [@"sqlitecloud://" length]) withString:@"https://"];
-    } else {
-        conn_string_https = conn;
-    }
-    
-    NSURL *url = [NSURL URLWithString:conn_string_https];
-    if (!url) return false;
-    
-    NSString *scheme = url.scheme;                  // "https"
-    if (!scheme) return false;
-    NSString *host = url.host;                      // "cn5xiooanz.global3.ryujaz.sqlite.cloud"
-    if (!host) return false;
-    
-    NSString *port = url.port.stringValue;
-    NSString *database = url.path;                  // "/chinook-cloudsync.sqlite"
-    if (!database) return false;
-    
-    NSString *query = url.query;                    // "apikey=hWDanFolRT9WDK0p54lufNrIyfgLZgtMw6tb6fbPmpo" (OPTIONAL)
-    NSString *authentication = nil;
-    
-    if (query) {
-        NSURLComponents *components = [NSURLComponents componentsWithString:[@"http://dummy?" stringByAppendingString:query]];
-        NSArray<NSURLQueryItem *> *items = components.queryItems;
-        for (NSURLQueryItem *item in items) {
-            // build new token
-            // apikey: just write the key for retrocompatibility
-            // other keys, like token: add a prefix, i.e. token=
-            
-            if ([item.name isEqualToString:@"apikey"]) {
-                authentication = item.value;
-                break;
-            }
-            if ([item.name isEqualToString:@"token"]) {
-                authentication = [NSString stringWithFormat:@"%@=%@", item.name, item.value];
-                break;
-            }
-        }
-    }
-    
-    char *site_id = network_data_get_siteid(data);
-    char *port_or_default = (port && strcmp(port.UTF8String, "8860") != 0) ? (char *)port.UTF8String : CLOUDSYNC_DEFAULT_ENDPOINT_PORT;
-    
-    NSString *check_endpoint = [NSString stringWithFormat:@"%s://%s:%s/%s%s/%s/%s", scheme.UTF8String, host.UTF8String, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database.UTF8String, site_id, CLOUDSYNC_ENDPOINT_CHECK];
-    NSString *upload_endpoint = [NSString stringWithFormat:@"%s://%s:%s/%s%s/%s/%s", scheme.UTF8String, host.UTF8String, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database.UTF8String, site_id, CLOUDSYNC_ENDPOINT_UPLOAD];
-    NSString *apply_endpoint = [NSString stringWithFormat:@"%s://%s:%s/%s%s/%s/%s", scheme.UTF8String, host.UTF8String, port_or_default, CLOUDSYNC_ENDPOINT_PREFIX, database.UTF8String, site_id, CLOUDSYNC_ENDPOINT_APPLY];
-
-    return network_data_set_endpoints(data, (char *)authentication.UTF8String, (char *)check_endpoint.UTF8String, (char *)upload_endpoint.UTF8String, (char *)apply_endpoint.UTF8String);
-}
-
 bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size) {
     NSString *urlString = [NSString stringWithUTF8String:endpoint];
     NSURL *url = [NSURL URLWithString:urlString];
@@ -80,6 +26,11 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
     if (authentication && authentication[0] != '\0') {
         NSString *authString = [NSString stringWithFormat:@"Bearer %s", authentication];
         [request setValue:authString forHTTPHeaderField:@"Authorization"];
+    }
+
+    char *org_id = network_data_get_orgid(data);
+    if (org_id) {
+        [request setValue:[NSString stringWithUTF8String:org_id] forHTTPHeaderField:@CLOUDSYNC_HEADER_ORG];
     }
 
     NSData *bodyData = [NSData dataWithBytes:blob length:blob_size];
@@ -133,6 +84,11 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
         if (parts.count == 2) {
             [request setValue:parts[1] forHTTPHeaderField:parts[0]];
         }
+    }
+
+    char *org_id = network_data_get_orgid(data);
+    if (org_id) {
+        [request setValue:[NSString stringWithUTF8String:org_id] forHTTPHeaderField:@CLOUDSYNC_HEADER_ORG];
     }
 
     if (authentication) {

@@ -64,7 +64,7 @@ int  database_exec_callback (cloudsync_context *data, const char *sql, database_
 int  database_select_int (cloudsync_context *data, const char *sql, int64_t *value);
 int  database_select_text (cloudsync_context *data, const char *sql, char **value);
 int  database_select_blob (cloudsync_context *data, const char *sql, char **value, int64_t *value_len);
-int  database_select_blob_2int (cloudsync_context *data, const char *sql, char **value, int64_t *value_len, int64_t *value2, int64_t *value3);
+int  database_select_blob_int (cloudsync_context *data, const char *sql, char **value, int64_t *value_len, int64_t *value2);
 int  database_write (cloudsync_context *data, const char *sql, const char **values, DBTYPE types[], int lens[], int count);
 bool database_table_exists (cloudsync_context *data, const char *table_name, const char *schema);
 bool database_internal_table_exists (cloudsync_context *data, const char *name);
@@ -119,7 +119,7 @@ void database_value_free (dbvalue_t *value);
 void *database_value_dup (dbvalue_t *value);
 
 // COLUMN
-const void *database_column_blob (dbvm_t *vm, int index);
+const void *database_column_blob (dbvm_t *vm, int index, size_t *len);
 double database_column_double (dbvm_t *vm, int index);
 int64_t database_column_int (dbvm_t *vm, int index);
 const char *database_column_text (dbvm_t *vm, int index);
@@ -142,6 +142,8 @@ char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_n
 char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name, const char *schema);
 char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_name, const char *schema);
 char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_name, const char *colname, const char *schema);
+char *sql_build_upsert_pk_and_multi_cols (cloudsync_context *data, const char *table_name, const char **colnames, int ncolnames, const char *schema);
+char *sql_build_update_pk_and_multi_cols (cloudsync_context *data, const char *table_name, const char **colnames, int ncolnames, const char *schema);
 char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_name, const char *colname, const char *schema);
 char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, const char *table_name, const char *except_col);
 char *sql_build_delete_cols_not_in_schema_query(const char *schema, const char *table_name, const char *meta_ref, const char *pkcol);
@@ -154,10 +156,7 @@ char *database_table_schema(const char *table_name);
 char *database_build_meta_ref(const char *schema, const char *table_name);
 char *database_build_base_ref(const char *schema, const char *table_name);
 
-// USED ONLY by SQLite Cloud to implement RLS
+// OPAQUE STRUCT used by pk_context functions
 typedef struct cloudsync_pk_decode_bind_context cloudsync_pk_decode_bind_context;
-typedef bool (*cloudsync_payload_apply_callback_t)(void **xdata, cloudsync_pk_decode_bind_context *decoded_change, void *db, void *data, int step, int rc);
-void cloudsync_set_payload_apply_callback(void *db, cloudsync_payload_apply_callback_t callback);
-cloudsync_payload_apply_callback_t cloudsync_get_payload_apply_callback(void *db);
 
 #endif

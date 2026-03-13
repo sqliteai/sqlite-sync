@@ -260,7 +260,7 @@ cleanup:
 void dbsync_pk_encode (sqlite3_context *context, int argc, sqlite3_value **argv) {
     size_t bsize = 0;
     char *buffer = pk_encode_prikey((dbvalue_t **)argv, argc, NULL, &bsize);
-    if (!buffer) {
+    if (!buffer || buffer == PRIKEY_NULL_CONSTRAINT_ERROR) {
         sqlite3_result_null(context);
         return;
     }
@@ -347,6 +347,10 @@ void dbsync_insert (sqlite3_context *context, int argc, sqlite3_value **argv) {
         sqlite3_result_error(context, "Not enough memory to encode the primary key(s).", -1);
         return;
     }
+    if (pk == PRIKEY_NULL_CONSTRAINT_ERROR) {
+        dbsync_set_error(context, "Insert aborted because primary key in table %s contains NULL values.", table_name);
+        return;
+    }
     
     // compute the next database version for tracking changes
     int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
@@ -404,6 +408,11 @@ void dbsync_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
     char *pk = pk_encode_prikey((dbvalue_t **)&argv[1], table_count_pks(table), buffer, &pklen);
     if (!pk) {
         sqlite3_result_error(context, "Not enough memory to encode the primary key(s).", -1);
+        return;
+    }
+    
+    if (pk == PRIKEY_NULL_CONSTRAINT_ERROR) {
+        dbsync_set_error(context, "Delete aborted because primary key in table %s contains NULL values.", table_name);
         return;
     }
     
@@ -542,6 +551,11 @@ void dbsync_update_final (sqlite3_context *context) {
         dbsync_update_payload_free(payload);
         return;
     }
+    if (pk == PRIKEY_NULL_CONSTRAINT_ERROR) {
+        dbsync_set_error(context, "Update aborted because primary key in table %s contains NULL values.", table_name);
+        dbsync_update_payload_free(payload);
+        return;
+    }
     
     if (prikey_changed) {
         // if the primary key has changed, we need to handle the row differently:
@@ -551,6 +565,7 @@ void dbsync_update_final (sqlite3_context *context) {
         // encode the OLD primary key into a buffer
         oldpk = pk_encode_prikey((dbvalue_t **)payload->old_values, table_count_pks(table), buffer2, &oldpklen);
         if (!oldpk) {
+            // no check here about PRIKEY_NULL_CONSTRAINT_ERROR because by design oldpk cannot contain NULL values
             if (pk != buffer) cloudsync_memory_free(pk);
             sqlite3_result_error(context, "Not enough memory to encode the primary key(s).", -1);
             dbsync_update_payload_free(payload);

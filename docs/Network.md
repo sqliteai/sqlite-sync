@@ -35,14 +35,6 @@ This is useful when:
    You must provide implementations for the following C functions:
 
    ```c
-   bool network_compute_endpoints (sqlite3_context *context, network_data *data, const char *conn_string);
-
-   // Parses `conn_string` and fills the `network_data` structure with connection information (e.g. base URL, endpoints, credentials).
-   // Returns `true` on success, `false` on error (you can use `sqlite3_result_error` to report errors to SQLite).
-   
-   ```
-
-   ```c
    bool network_send_buffer (network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size);
 
    // Sends the provided `blob` (binary data) to the specified `endpoint`, using the given `authentication` token or header.

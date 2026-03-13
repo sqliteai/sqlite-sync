@@ -238,7 +238,7 @@ postgres-docker-shell:
 # Build CloudSync into the Supabase CLI postgres image tag
 postgres-supabase-build:
 	@echo "Building CloudSync image for Supabase CLI..."
-	@tmp_dockerfile="$$(mktemp /tmp/cloudsync-supabase-cli.XXXXXX)"; \
+	@tmp_dockerfile="$$(mktemp ./cloudsync-supabase-cli.XXXXXX)"; \
 	src_dockerfile="$(SUPABASE_CLI_DOCKERFILE)"; \
 	supabase_cli_image="$(SUPABASE_CLI_IMAGE)"; \
 	if [ -z "$$supabase_cli_image" ]; then \
@@ -267,6 +267,8 @@ postgres-supabase-build:
 		exit 1; \
 	fi; \
 	echo "Using base image: $$supabase_cli_image"; \
+	echo "Pulling fresh base image to avoid layer accumulation..."; \
+	docker pull "$$supabase_cli_image" 2>/dev/null || true; \
 	docker build --build-arg SUPABASE_POSTGRES_TAG="$(SUPABASE_POSTGRES_TAG)" -f "$$tmp_dockerfile" -t "$$supabase_cli_image" .; \
 	rm -f "$$tmp_dockerfile"; \
 	echo "Build complete: $$supabase_cli_image"

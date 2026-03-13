@@ -25,8 +25,6 @@
 SQLITE_EXTENSION_INIT3
 #endif
 
-#define CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY    "cloudsync_payload_apply_callback"
-
 // MARK: - SQL -
 
 char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta) {
@@ -149,6 +147,126 @@ char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_na
     cloudsync_memory_free(sql);
 
     return (rc == DBRES_OK) ? query : NULL;
+}
+
+char *sql_build_upsert_pk_and_multi_cols (cloudsync_context *data, const char *table_name, const char **colnames, int ncolnames, const char *schema) {
+    UNUSED_PARAMETER(schema);
+    if (ncolnames <= 0 || !colnames) return NULL;
+
+    // Get PK column names via pragma_table_info (same approach as database_pk_names)
+    char **pk_names = NULL;
+    int npks = 0;
+    int rc = database_pk_names(data, table_name, &pk_names, &npks);
+    if (rc != DBRES_OK || npks <= 0 || !pk_names) return NULL;
+
+    // Build column list: "pk1","pk2","col_a","col_b"
+    char *col_list = cloudsync_memory_mprintf("\"%w\"", pk_names[0]);
+    if (!col_list) goto fail;
+    for (int i = 1; i < npks; i++) {
+        char *prev = col_list;
+        col_list = cloudsync_memory_mprintf("%s,\"%w\"", prev, pk_names[i]);
+        cloudsync_memory_free(prev);
+        if (!col_list) goto fail;
+    }
+    for (int i = 0; i < ncolnames; i++) {
+        char *prev = col_list;
+        col_list = cloudsync_memory_mprintf("%s,\"%w\"", prev, colnames[i]);
+        cloudsync_memory_free(prev);
+        if (!col_list) goto fail;
+    }
+
+    // Build bind list: ?,?,?,?
+    int total = npks + ncolnames;
+    char *binds = (char *)cloudsync_memory_alloc(total * 2);
+    if (!binds) { cloudsync_memory_free(col_list); goto fail; }
+    int pos = 0;
+    for (int i = 0; i < total; i++) {
+        if (i > 0) binds[pos++] = ',';
+        binds[pos++] = '?';
+    }
+    binds[pos] = '\0';
+
+    // Build excluded set: "col_a"=EXCLUDED."col_a","col_b"=EXCLUDED."col_b"
+    char *excl = cloudsync_memory_mprintf("\"%w\"=EXCLUDED.\"%w\"", colnames[0], colnames[0]);
+    if (!excl) { cloudsync_memory_free(col_list); cloudsync_memory_free(binds); goto fail; }
+    for (int i = 1; i < ncolnames; i++) {
+        char *prev = excl;
+        excl = cloudsync_memory_mprintf("%s,\"%w\"=EXCLUDED.\"%w\"", prev, colnames[i], colnames[i]);
+        cloudsync_memory_free(prev);
+        if (!excl) { cloudsync_memory_free(col_list); cloudsync_memory_free(binds); goto fail; }
+    }
+
+    // Assemble final SQL
+    char *sql = cloudsync_memory_mprintf(
+        "INSERT INTO \"%w\" (%s) VALUES (%s) ON CONFLICT DO UPDATE SET %s;",
+        table_name, col_list, binds, excl
+    );
+
+    cloudsync_memory_free(col_list);
+    cloudsync_memory_free(binds);
+    cloudsync_memory_free(excl);
+    for (int i = 0; i < npks; i++) cloudsync_memory_free(pk_names[i]);
+    cloudsync_memory_free(pk_names);
+    return sql;
+
+fail:
+    if (pk_names) {
+        for (int i = 0; i < npks; i++) cloudsync_memory_free(pk_names[i]);
+        cloudsync_memory_free(pk_names);
+    }
+    return NULL;
+}
+
+char *sql_build_update_pk_and_multi_cols (cloudsync_context *data, const char *table_name, const char **colnames, int ncolnames, const char *schema) {
+    UNUSED_PARAMETER(schema);
+    if (ncolnames <= 0 || !colnames) return NULL;
+
+    // Get PK column names
+    char **pk_names = NULL;
+    int npks = 0;
+    int rc = database_pk_names(data, table_name, &pk_names, &npks);
+    if (rc != DBRES_OK || npks <= 0 || !pk_names) return NULL;
+
+    // Build SET clause: "col_a"=?npks+1,"col_b"=?npks+2
+    // Uses numbered parameters to match merge_flush_pending bind order:
+    // positions 1..npks are PKs, npks+1..npks+ncolnames are column values.
+    char *set_clause = cloudsync_memory_mprintf("\"%w\"=?%d", colnames[0], npks + 1);
+    if (!set_clause) goto fail;
+    for (int i = 1; i < ncolnames; i++) {
+        char *prev = set_clause;
+        set_clause = cloudsync_memory_mprintf("%s,\"%w\"=?%d", prev, colnames[i], npks + 1 + i);
+        cloudsync_memory_free(prev);
+        if (!set_clause) goto fail;
+    }
+
+    // Build WHERE clause: "pk1"=?1 AND "pk2"=?2
+    char *where_clause = cloudsync_memory_mprintf("\"%w\"=?%d", pk_names[0], 1);
+    if (!where_clause) { cloudsync_memory_free(set_clause); goto fail; }
+    for (int i = 1; i < npks; i++) {
+        char *prev = where_clause;
+        where_clause = cloudsync_memory_mprintf("%s AND \"%w\"=?%d", prev, pk_names[i], 1 + i);
+        cloudsync_memory_free(prev);
+        if (!where_clause) { cloudsync_memory_free(set_clause); goto fail; }
+    }
+
+    // Assemble: UPDATE "table" SET ... WHERE ...
+    char *sql = cloudsync_memory_mprintf(
+        "UPDATE \"%w\" SET %s WHERE %s;",
+        table_name, set_clause, where_clause
+    );
+
+    cloudsync_memory_free(set_clause);
+    cloudsync_memory_free(where_clause);
+    for (int i = 0; i < npks; i++) cloudsync_memory_free(pk_names[i]);
+    cloudsync_memory_free(pk_names);
+    return sql;
+
+fail:
+    if (pk_names) {
+        for (int i = 0; i < npks; i++) cloudsync_memory_free(pk_names[i]);
+        cloudsync_memory_free(pk_names);
+    }
+    return NULL;
 }
 
 char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_name, const char *colname, const char *schema) {
@@ -322,21 +440,20 @@ cleanup_select:
     return rc;
 }
 
-static int database_select3_values (cloudsync_context *data, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
+static int database_select2_values (cloudsync_context *data, const char *sql, char **value, int64_t *len, int64_t *value2) {
     sqlite3 *db = (sqlite3 *)cloudsync_db(data);
     
     // init values and sanity check expected_type
     *value = NULL;
     *value2 = 0;
-    *value3 = 0;
     *len = 0;
     
     sqlite3_stmt *vm = NULL;
     int rc = sqlite3_prepare_v2((sqlite3 *)db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup_select;
     
-    // ensure at least one column
-    if (sqlite3_column_count(vm) < 3) {rc = SQLITE_MISMATCH; goto cleanup_select;}
+    // ensure column count
+    if (sqlite3_column_count(vm) < 2) {rc = SQLITE_MISMATCH; goto cleanup_select;}
     
     rc = sqlite3_step(vm);
     if (rc == SQLITE_DONE) {rc = SQLITE_OK; goto cleanup_select;} // no rows OK
@@ -345,7 +462,6 @@ static int database_select3_values (cloudsync_context *data, const char *sql, ch
     // sanity check column types
     if (sqlite3_column_type(vm, 0) != SQLITE_BLOB) {rc = SQLITE_MISMATCH; goto cleanup_select;}
     if (sqlite3_column_type(vm, 1) != SQLITE_INTEGER) {rc = SQLITE_MISMATCH; goto cleanup_select;}
-    if (sqlite3_column_type(vm, 2) != SQLITE_INTEGER) {rc = SQLITE_MISMATCH; goto cleanup_select;}
     
     // 1st column is BLOB
     const void *blob = (const void *)sqlite3_column_blob(vm, 0);
@@ -359,9 +475,8 @@ static int database_select3_values (cloudsync_context *data, const char *sql, ch
         *len = blob_len;
     }
     
-    // 2nd and 3rd columns are INTEGERS
+    // 2nd column is INTEGER
     *value2 = (int64_t)sqlite3_column_int64(vm, 1);
-    *value3 = (int64_t)sqlite3_column_int64(vm, 2);
     
     rc = SQLITE_OK;
     
@@ -456,8 +571,8 @@ int database_select_blob (cloudsync_context *data, const char *sql, char **value
     return database_select1_value(data, sql, value, len, DBTYPE_BLOB);
 }
 
-int database_select_blob_2int (cloudsync_context *data, const char *sql, char **value, int64_t *len, int64_t *value2, int64_t *value3) {
-    return database_select3_values(data, sql, value, len, value2, value3);
+int database_select_blob_int (cloudsync_context *data, const char *sql, char **value, int64_t *len, int64_t *value2) {
+    return database_select2_values(data, sql, value, len, value2);
 }
 
 const char *database_errmsg (cloudsync_context *data) {
@@ -1174,7 +1289,8 @@ void *database_value_dup (dbvalue_t *value) {
 
 // MARK: - COLUMN -
 
-const void *database_column_blob (dbvm_t *vm, int index) {
+const void *database_column_blob (dbvm_t *vm, int index, size_t *len) {
+    if (len) *len = sqlite3_column_bytes((sqlite3_stmt *)vm, index);
     return sqlite3_column_blob((sqlite3_stmt *)vm, index);
 }
 
@@ -1263,14 +1379,4 @@ uint64_t dbmem_size (void *ptr) {
     return (uint64_t)sqlite3_msize(ptr);
 }
 
-// MARK: - Used to implement Server Side RLS -
 
-cloudsync_payload_apply_callback_t cloudsync_get_payload_apply_callback(void *db) {
-    return (sqlite3_libversion_number() >= 3044000) ? sqlite3_get_clientdata((sqlite3 *)db, CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY) : NULL;
-}
-
-void cloudsync_set_payload_apply_callback(void *db, cloudsync_payload_apply_callback_t callback) {
-    if (sqlite3_libversion_number() >= 3044000) {
-        sqlite3_set_clientdata((sqlite3 *)db, CLOUDSYNC_PAYLOAD_APPLY_CALLBACK_KEY, (void*)callback, NULL);
-    }
-}

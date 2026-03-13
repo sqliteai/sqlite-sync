@@ -84,6 +84,37 @@ typedef enum {
 #define SYNCBIT_SET(_data)                  _data->insync = 1
 #define SYNCBIT_RESET(_data)                _data->insync = 0
 
+// MARK: - Deferred column-batch merge -
+
+typedef struct {
+    const char  *col_name;       // pointer into table_context->col_name[idx] (stable)
+    dbvalue_t   *col_value;      // duplicated via database_value_dup (owned)
+    int64_t     col_version;
+    int64_t     db_version;
+    uint8_t     site_id[UUID_LEN];
+    int         site_id_len;
+    int64_t     seq;
+} merge_pending_entry;
+
+typedef struct {
+    cloudsync_table_context *table;
+    char        *pk;             // malloc'd copy, freed on flush
+    int         pk_len;
+    int64_t     cl;
+    bool        sentinel_pending;
+    bool        row_exists;       // true when the PK already exists locally
+    int         count;
+    int         capacity;
+    merge_pending_entry *entries;
+
+    // Statement cache — reuse the prepared statement when the column
+    // combination and row_exists flag match between consecutive PK flushes.
+    dbvm_t      *cached_vm;
+    bool        cached_row_exists;
+    int         cached_col_count;
+    const char  **cached_col_names; // array of pointers into table_context (not owned)
+} merge_pending_batch;
+
 // MARK: -
 
 struct cloudsync_pk_decode_bind_context {
@@ -142,6 +173,9 @@ struct cloudsync_context {
     int tables_cap;                     // capacity
 
     int skip_decode_idx;                // -1 in sqlite, col_value index in postgresql
+
+    // deferred column-batch merge (active during payload_apply)
+    merge_pending_batch *pending_batch;
 };
 
 struct cloudsync_table_context {
@@ -224,7 +258,7 @@ bool force_uncompressed_blob = false;
 #endif
 
 // Internal prototypes
-int local_mark_insert_or_update_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, int64_t db_version, int seq);
+int local_mark_insert_or_update_meta (cloudsync_table_context *table, const void *pk, size_t pklen, const char *col_name, int64_t db_version, int seq);
 
 // MARK: - CRDT algos -
 
@@ -1203,7 +1237,242 @@ cleanup_merge:
     return rc;
 }
 
-int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, const char *col_name, dbvalue_t *col_value, int64_t col_version, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid) {
+// MARK: - Deferred column-batch merge functions -
+
+static int merge_pending_add (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, const char *col_name, dbvalue_t *col_value, int64_t col_version, int64_t db_version, const char *site_id, int site_len, int64_t seq) {
+    merge_pending_batch *batch = data->pending_batch;
+
+    // Store table and PK on first entry
+    if (batch->table == NULL) {
+        batch->table = table;
+        batch->pk = (char *)cloudsync_memory_alloc(pklen);
+        if (!batch->pk) return cloudsync_set_error(data, "merge_pending_add: out of memory for pk", DBRES_NOMEM);
+        memcpy(batch->pk, pk, pklen);
+        batch->pk_len = pklen;
+    }
+
+    // Ensure capacity
+    if (batch->count >= batch->capacity) {
+        int new_cap = batch->capacity ? batch->capacity * 2 : 8;
+        merge_pending_entry *new_entries = (merge_pending_entry *)cloudsync_memory_realloc(batch->entries, new_cap * sizeof(merge_pending_entry));
+        if (!new_entries) return cloudsync_set_error(data, "merge_pending_add: out of memory for entries", DBRES_NOMEM);
+        batch->entries = new_entries;
+        batch->capacity = new_cap;
+    }
+
+    // Resolve col_name to a stable pointer from the table context
+    // (the incoming col_name may point to VM-owned memory that gets freed on reset)
+    int col_idx = -1;
+    table_column_lookup(table, col_name, true, &col_idx);
+    const char *stable_col_name = (col_idx >= 0) ? table_colname(table, col_idx) : NULL;
+    if (!stable_col_name) return cloudsync_set_error(data, "merge_pending_add: column not found in table context", DBRES_ERROR);
+
+    merge_pending_entry *e = &batch->entries[batch->count];
+    e->col_name = stable_col_name;
+    e->col_value = col_value ? (dbvalue_t *)database_value_dup(col_value) : NULL;
+    e->col_version = col_version;
+    e->db_version = db_version;
+    e->site_id_len = (site_len <= (int)sizeof(e->site_id)) ? site_len : (int)sizeof(e->site_id);
+    memcpy(e->site_id, site_id, e->site_id_len);
+    e->seq = seq;
+
+    batch->count++;
+    return DBRES_OK;
+}
+
+static void merge_pending_free_entries (merge_pending_batch *batch) {
+    if (batch->entries) {
+        for (int i = 0; i < batch->count; i++) {
+            if (batch->entries[i].col_value) {
+                database_value_free(batch->entries[i].col_value);
+                batch->entries[i].col_value = NULL;
+            }
+        }
+    }
+    if (batch->pk) {
+        cloudsync_memory_free(batch->pk);
+        batch->pk = NULL;
+    }
+    batch->table = NULL;
+    batch->pk_len = 0;
+    batch->cl = 0;
+    batch->sentinel_pending = false;
+    batch->row_exists = false;
+    batch->count = 0;
+}
+
+static int merge_flush_pending (cloudsync_context *data) {
+    merge_pending_batch *batch = data->pending_batch;
+    if (!batch) return DBRES_OK;
+
+    int rc = DBRES_OK;
+    bool flush_savepoint = false;
+
+    // Nothing to write — handle sentinel-only case or skip
+    if (batch->count == 0 && !(batch->sentinel_pending && batch->table)) {
+        goto cleanup;
+    }
+
+    // Wrap database operations in a savepoint so that on failure (e.g. RLS
+    // denial) the rollback properly releases all executor resources (open
+    // relations, snapshots, plan cache) acquired during the failed statement.
+    flush_savepoint = (database_begin_savepoint(data, "merge_flush") == DBRES_OK);
+
+    if (batch->count == 0) {
+        // Sentinel with no winning columns (PK-only row)
+        dbvm_t *vm = batch->table->real_merge_sentinel_stmt;
+        rc = pk_decode_prikey(batch->pk, (size_t)batch->pk_len, pk_decode_bind_callback, vm);
+        if (rc < 0) {
+            cloudsync_set_dberror(data);
+            dbvm_reset(vm);
+            goto cleanup;
+        }
+        SYNCBIT_SET(data);
+        rc = databasevm_step(vm);
+        dbvm_reset(vm);
+        SYNCBIT_RESET(data);
+        if (rc == DBRES_DONE) rc = DBRES_OK;
+        if (rc != DBRES_OK) {
+            cloudsync_set_dberror(data);
+            goto cleanup;
+        }
+        goto cleanup;
+    }
+
+    // Check if cached prepared statement can be reused
+    cloudsync_table_context *table = batch->table;
+    dbvm_t *vm = NULL;
+    bool cache_hit = false;
+
+    if (batch->cached_vm &&
+        batch->cached_row_exists == batch->row_exists &&
+        batch->cached_col_count == batch->count) {
+        cache_hit = true;
+        for (int i = 0; i < batch->count; i++) {
+            if (batch->cached_col_names[i] != batch->entries[i].col_name) {
+                cache_hit = false;
+                break;
+            }
+        }
+    }
+
+    if (cache_hit) {
+        vm = batch->cached_vm;
+        dbvm_reset(vm);
+    } else {
+        // Invalidate old cache
+        if (batch->cached_vm) {
+            databasevm_finalize(batch->cached_vm);
+            batch->cached_vm = NULL;
+        }
+
+        // Build multi-column SQL
+        const char **colnames = (const char **)cloudsync_memory_alloc(batch->count * sizeof(const char *));
+        if (!colnames) {
+            rc = cloudsync_set_error(data, "merge_flush_pending: out of memory", DBRES_NOMEM);
+            goto cleanup;
+        }
+        for (int i = 0; i < batch->count; i++) {
+            colnames[i] = batch->entries[i].col_name;
+        }
+
+        char *sql = batch->row_exists
+            ? sql_build_update_pk_and_multi_cols(data, table->name, colnames, batch->count, table->schema)
+            : sql_build_upsert_pk_and_multi_cols(data, table->name, colnames, batch->count, table->schema);
+        cloudsync_memory_free(colnames);
+
+        if (!sql) {
+            rc = cloudsync_set_error(data, "merge_flush_pending: unable to build multi-column upsert SQL", DBRES_ERROR);
+            goto cleanup;
+        }
+
+        rc = databasevm_prepare(data, sql, &vm, 0);
+        cloudsync_memory_free(sql);
+        if (rc != DBRES_OK) {
+            rc = cloudsync_set_error(data, "merge_flush_pending: unable to prepare statement", rc);
+            goto cleanup;
+        }
+
+        // Update cache
+        batch->cached_vm = vm;
+        batch->cached_row_exists = batch->row_exists;
+        batch->cached_col_count = batch->count;
+        // Reallocate cached_col_names if needed
+        if (batch->cached_col_count > 0) {
+            const char **new_names = (const char **)cloudsync_memory_realloc(
+                batch->cached_col_names, batch->count * sizeof(const char *));
+            if (new_names) {
+                for (int i = 0; i < batch->count; i++) {
+                    new_names[i] = batch->entries[i].col_name;
+                }
+                batch->cached_col_names = new_names;
+            }
+        }
+    }
+
+    // Bind PKs (positions 1..npks)
+    int npks = pk_decode_prikey(batch->pk, (size_t)batch->pk_len, pk_decode_bind_callback, vm);
+    if (npks < 0) {
+        cloudsync_set_dberror(data);
+        dbvm_reset(vm);
+        rc = DBRES_ERROR;
+        goto cleanup;
+    }
+
+    // Bind column values (positions npks+1..npks+count)
+    for (int i = 0; i < batch->count; i++) {
+        merge_pending_entry *e = &batch->entries[i];
+        int bind_idx = npks + 1 + i;
+        if (e->col_value) {
+            rc = databasevm_bind_value(vm, bind_idx, e->col_value);
+        } else {
+            rc = databasevm_bind_null(vm, bind_idx);
+        }
+        if (rc != DBRES_OK) {
+            cloudsync_set_dberror(data);
+            dbvm_reset(vm);
+            goto cleanup;
+        }
+    }
+
+    // Execute with SYNCBIT and GOS handling
+    if (table->algo == table_algo_crdt_gos) table->enabled = 0;
+    SYNCBIT_SET(data);
+    rc = databasevm_step(vm);
+    dbvm_reset(vm);
+    SYNCBIT_RESET(data);
+    if (table->algo == table_algo_crdt_gos) table->enabled = 1;
+
+    if (rc != DBRES_DONE) {
+        cloudsync_set_dberror(data);
+        goto cleanup;
+    }
+    rc = DBRES_OK;
+
+    // Call merge_set_winner_clock for each buffered entry
+    int64_t rowid = 0;
+    for (int i = 0; i < batch->count; i++) {
+        merge_pending_entry *e = &batch->entries[i];
+        int clock_rc = merge_set_winner_clock(data, table, batch->pk, batch->pk_len,
+                                               e->col_name, e->col_version, e->db_version,
+                                               (const char *)e->site_id, e->site_id_len,
+                                               e->seq, &rowid);
+        if (clock_rc != DBRES_OK) {
+            rc = clock_rc;
+            goto cleanup;
+        }
+    }
+
+cleanup:
+    merge_pending_free_entries(batch);
+    if (flush_savepoint) {
+        if (rc == DBRES_OK) database_commit_savepoint(data, "merge_flush");
+        else database_rollback_savepoint(data, "merge_flush");
+    }
+    return rc;
+}
+
+int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen, const char *col_name, dbvalue_t *col_value, int64_t col_version, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid) {
     int index;
     dbvm_t *vm = table_column_lookup(table, col_name, true, &index);
     if (vm == NULL) return cloudsync_set_error(data, "Unable to retrieve column merge precompiled statement in merge_insert_col", DBRES_MISUSE);
@@ -1386,7 +1655,7 @@ int merge_did_cid_win (cloudsync_context *data, cloudsync_table_context *table, 
     
     rc = databasevm_step(vm);
     if (rc == DBRES_ROW) {
-        const void *local_site_id = database_column_blob(vm, 0);
+        const void *local_site_id = database_column_blob(vm, 0, NULL);
         if (!local_site_id) {
             dbvm_reset(vm);
             return cloudsync_set_error(data, "NULL site_id in cloudsync table, table is probably corrupted", DBRES_ERROR);
@@ -1408,33 +1677,46 @@ cleanup:
 }
 
 int merge_sentinel_only_insert (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, int64_t cl, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid) {
-    
+
     // reset return value
     *rowid = 0;
-    
-    // bind pk
-    dbvm_t *vm = table->real_merge_sentinel_stmt;
-    int rc = pk_decode_prikey((char *)pk, (size_t)pklen, pk_decode_bind_callback, vm);
-    if (rc < 0) {
-        rc = cloudsync_set_dberror(data);
+
+    if (data->pending_batch == NULL) {
+        // Immediate mode: execute base table INSERT
+        dbvm_t *vm = table->real_merge_sentinel_stmt;
+        int rc = pk_decode_prikey((char *)pk, (size_t)pklen, pk_decode_bind_callback, vm);
+        if (rc < 0) {
+            rc = cloudsync_set_dberror(data);
+            dbvm_reset(vm);
+            return rc;
+        }
+
+        SYNCBIT_SET(data);
+        rc = databasevm_step(vm);
         dbvm_reset(vm);
-        return rc;
+        SYNCBIT_RESET(data);
+        if (rc == DBRES_DONE) rc = DBRES_OK;
+        if (rc != DBRES_OK) {
+            cloudsync_set_dberror(data);
+            return rc;
+        }
+    } else {
+        // Batch mode: skip base table INSERT, the batch flush will create the row
+        merge_pending_batch *batch = data->pending_batch;
+        batch->sentinel_pending = true;
+        if (batch->table == NULL) {
+            batch->table = table;
+            batch->pk = (char *)cloudsync_memory_alloc(pklen);
+            if (!batch->pk) return cloudsync_set_error(data, "merge_sentinel_only_insert: out of memory for pk", DBRES_NOMEM);
+            memcpy(batch->pk, pk, pklen);
+            batch->pk_len = pklen;
+        }
     }
-    
-    // perform real operation and disable triggers
-    SYNCBIT_SET(data);
-    rc = databasevm_step(vm);
-    dbvm_reset(vm);
-    SYNCBIT_RESET(data);
-    if (rc == DBRES_DONE) rc = DBRES_OK;
-    if (rc != DBRES_OK) {
-        cloudsync_set_dberror(data);
-        return rc;
-    }
-    
-    rc = merge_zeroclock_on_resurrect(table, db_version, pk, pklen);
+
+    // Metadata operations always execute regardless of batch mode
+    int rc = merge_zeroclock_on_resurrect(table, db_version, pk, pklen);
     if (rc != DBRES_OK) return rc;
-    
+
     return merge_set_winner_clock(data, table, pk, pklen, NULL, cl, db_version, site_id, site_len, seq, rowid);
 }
 
@@ -1507,9 +1789,20 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
     if (!does_cid_win) return DBRES_OK;
     
     // perform the final column insert or update if the incoming change wins
-    rc = merge_insert_col(data, table, insert_pk, insert_pk_len, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
-    if (rc != DBRES_OK) cloudsync_set_error(data, "Unable to perform merge_insert_col", rc);
-    
+    if (data->pending_batch) {
+        // Propagate row_exists_locally to the batch on the first winning column.
+        // This lets merge_flush_pending choose UPDATE vs INSERT ON CONFLICT,
+        // which matters when RLS policies reference columns not in the payload.
+        if (data->pending_batch->table == NULL) {
+            data->pending_batch->row_exists = row_exists_locally;
+        }
+        rc = merge_pending_add(data, table, insert_pk, insert_pk_len, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq);
+        if (rc != DBRES_OK) cloudsync_set_error(data, "Unable to perform merge_pending_add", rc);
+    } else {
+        rc = merge_insert_col(data, table, insert_pk, insert_pk_len, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
+        if (rc != DBRES_OK) cloudsync_set_error(data, "Unable to perform merge_insert_col", rc);
+    }
+
     return rc;
 }
 
@@ -1942,13 +2235,13 @@ int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name)
 
         rc = databasevm_bind_text(vm, 1, col_name, -1);
         if (rc != DBRES_OK) goto finalize;
-        
+
         while (1) {
             rc = databasevm_step(vm);
             if (rc == DBRES_ROW) {
-                const char *pk = (const char *)database_column_text(vm, 0);
+                size_t pklen = 0;
+                const void *pk = (const char *)database_column_blob(vm, 0, &pklen);
                 if (!pk) { rc = DBRES_ERROR; break; }
-                size_t pklen = strlen(pk);
                 rc = local_mark_insert_or_update_meta(table, pk, pklen, col_name, db_version, cloudsync_bumpseq(data));
             } else if (rc == DBRES_DONE) {
                 rc = DBRES_OK;
@@ -1971,7 +2264,7 @@ finalize:
 
 // MARK: - Local -
 
-int local_update_sentinel (cloudsync_table_context *table, const char *pk, size_t pklen, int64_t db_version, int seq) {
+int local_update_sentinel (cloudsync_table_context *table, const void *pk, size_t pklen, int64_t db_version, int seq) {
     dbvm_t *vm = table->meta_sentinel_update_stmt;
     if (!vm) return -1;
     
@@ -1993,7 +2286,7 @@ cleanup:
     return rc;
 }
 
-int local_mark_insert_sentinel_meta (cloudsync_table_context *table, const char *pk, size_t pklen, int64_t db_version, int seq) {
+int local_mark_insert_sentinel_meta (cloudsync_table_context *table, const void *pk, size_t pklen, int64_t db_version, int seq) {
     dbvm_t *vm = table->meta_sentinel_insert_stmt;
     if (!vm) return -1;
     
@@ -2021,7 +2314,7 @@ cleanup:
     return rc;
 }
 
-int local_mark_insert_or_update_meta_impl (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, int col_version, int64_t db_version, int seq) {
+int local_mark_insert_or_update_meta_impl (cloudsync_table_context *table, const void *pk, size_t pklen, const char *col_name, int col_version, int64_t db_version, int seq) {
     
     dbvm_t *vm = table->meta_row_insert_update_stmt;
     if (!vm) return -1;
@@ -2056,15 +2349,15 @@ cleanup:
     return rc;
 }
 
-int local_mark_insert_or_update_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *col_name, int64_t db_version, int seq) {
+int local_mark_insert_or_update_meta (cloudsync_table_context *table, const void *pk, size_t pklen, const char *col_name, int64_t db_version, int seq) {
     return local_mark_insert_or_update_meta_impl(table, pk, pklen, col_name, 1, db_version, seq);
 }
 
-int local_mark_delete_meta (cloudsync_table_context *table, const char *pk, size_t pklen, int64_t db_version, int seq) {
+int local_mark_delete_meta (cloudsync_table_context *table, const void *pk, size_t pklen, int64_t db_version, int seq) {
     return local_mark_insert_or_update_meta_impl(table, pk, pklen, NULL, 2, db_version, seq);
 }
 
-int local_drop_meta (cloudsync_table_context *table, const char *pk, size_t pklen) {
+int local_drop_meta (cloudsync_table_context *table, const void *pk, size_t pklen) {
     dbvm_t *vm = table->meta_row_drop_stmt;
     if (!vm) return -1;
     
@@ -2080,7 +2373,7 @@ cleanup:
     return rc;
 }
 
-int local_update_move_meta (cloudsync_table_context *table, const char *pk, size_t pklen, const char *pk2, size_t pklen2, int64_t db_version) {
+int local_update_move_meta (cloudsync_table_context *table, const void *pk, size_t pklen, const void *pk2, size_t pklen2, int64_t db_version) {
     /*
       * This function moves non-sentinel metadata entries from an old primary key (OLD.pk)
       * to a new primary key (NEW.pk) when a primary key change occurs.
@@ -2431,78 +2724,108 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     uint16_t ncols = header.ncols;
     uint32_t nrows = header.nrows;
     int64_t last_payload_db_version = -1;
-    bool in_savepoint = false;
     int dbversion = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION);
     int seq = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_SEQ);
     cloudsync_pk_decode_bind_context decoded_context = {.vm = vm};
-    void *payload_apply_xdata = NULL;
-    void *db = data->db;
-    cloudsync_payload_apply_callback_t payload_apply_callback = cloudsync_get_payload_apply_callback(db);
-    
+
+    // Initialize deferred column-batch merge
+    merge_pending_batch batch = {0};
+    data->pending_batch = &batch;
+    bool in_savepoint = false;
+    const void *last_pk = NULL;
+    int64_t last_pk_len = 0;
+    const char *last_tbl = NULL;
+    int64_t last_tbl_len = 0;
+
     for (uint32_t i=0; i<nrows; ++i) {
         size_t seek = 0;
         int res = pk_decode((char *)buffer, buf_len, ncols, &seek, data->skip_decode_idx, cloudsync_payload_decode_callback, &decoded_context);
         if (res == -1) {
+            merge_flush_pending(data);
+            data->pending_batch = NULL;
+            if (batch.cached_vm) { databasevm_finalize(batch.cached_vm); batch.cached_vm = NULL; }
+            if (batch.cached_col_names) { cloudsync_memory_free(batch.cached_col_names); batch.cached_col_names = NULL; }
+            if (batch.entries) { cloudsync_memory_free(batch.entries); batch.entries = NULL; }
             if (in_savepoint) database_rollback_savepoint(data, "cloudsync_payload_apply");
             rc = DBRES_ERROR;
             goto cleanup;
         }
-        // n is the pk_decode return value, I don't think I should assert here because in any case the next databasevm_step would fail
-        // assert(n == ncols);
-                
-        bool approved = true;
-        if (payload_apply_callback) approved = payload_apply_callback(&payload_apply_xdata, &decoded_context, db, data, CLOUDSYNC_PAYLOAD_APPLY_WILL_APPLY, DBRES_OK);
-        
-        // Apply consecutive rows with the same db_version inside a transaction if no
-        // transaction has already been opened.
-        // The user may have already opened a transaction before applying the payload,
-        // and the `payload_apply_callback` may have already opened a savepoint.
-        // Nested savepoints work, but overlapping savepoints could alter the expected behavior.
-        // This savepoint ensures that the db_version value remains consistent for all
-        // rows with the same original db_version in the payload.
 
+        // Detect PK/table/db_version boundary to flush pending batch
+        bool pk_changed = (last_pk != NULL &&
+                           (last_pk_len != decoded_context.pk_len ||
+                            memcmp(last_pk, decoded_context.pk, last_pk_len) != 0));
+        bool tbl_changed = (last_tbl != NULL &&
+                            (last_tbl_len != decoded_context.tbl_len ||
+                             memcmp(last_tbl, decoded_context.tbl, last_tbl_len) != 0));
         bool db_version_changed = (last_payload_db_version != decoded_context.db_version);
 
-        // Release existing savepoint if db_version changed
+        // Flush pending batch before any boundary change
+        if (pk_changed || tbl_changed || db_version_changed) {
+            int flush_rc = merge_flush_pending(data);
+            if (flush_rc != DBRES_OK) {
+                rc = flush_rc;
+                // continue processing remaining rows
+            }
+        }
+
+        // Per-db_version savepoints group rows with the same source db_version
+        // into one transaction. In SQLite autocommit mode, the RELEASE triggers
+        // the commit hook which bumps data->db_version and resets seq, ensuring
+        // unique (db_version, seq) tuples across groups. In PostgreSQL SPI,
+        // database_in_transaction() is always true so this block is inactive —
+        // the inner per-PK savepoint in merge_flush_pending handles RLS instead.
         if (in_savepoint && db_version_changed) {
             rc = database_commit_savepoint(data, "cloudsync_payload_apply");
             if (rc != DBRES_OK) {
+                merge_pending_free_entries(&batch);
+                data->pending_batch = NULL;
                 cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to release a savepoint", rc);
                 goto cleanup;
             }
             in_savepoint = false;
         }
 
-        // Start new savepoint if needed
-        bool in_transaction = database_in_transaction(data);
-        if (!in_transaction && db_version_changed) {
+        if (!in_savepoint && db_version_changed && !database_in_transaction(data)) {
             rc = database_begin_savepoint(data, "cloudsync_payload_apply");
             if (rc != DBRES_OK) {
+                merge_pending_free_entries(&batch);
+                data->pending_batch = NULL;
                 cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to start a transaction", rc);
                 goto cleanup;
             }
-            last_payload_db_version = decoded_context.db_version;
             in_savepoint = true;
         }
-        
-        if (approved) {
-            rc = databasevm_step(vm);
-            if (rc != DBRES_DONE) {
-                // don't "break;", the error can be due to a RLS policy.
-                // in case of error we try to apply the following changes
-                // DEBUG_ALWAYS("cloudsync_payload_apply error on db_version %PRId64/%PRId64: (%d) %s\n", decoded_context.db_version, decoded_context.seq, rc, database_errmsg(data));
-            }
+
+        // Track db_version for batch-flush boundary detection
+        if (db_version_changed) {
+            last_payload_db_version = decoded_context.db_version;
         }
-        
-        if (payload_apply_callback) {
-            payload_apply_callback(&payload_apply_xdata, &decoded_context, db, data, CLOUDSYNC_PAYLOAD_APPLY_DID_APPLY, rc);
+
+        // Update PK/table tracking
+        last_pk = decoded_context.pk;
+        last_pk_len = decoded_context.pk_len;
+        last_tbl = decoded_context.tbl;
+        last_tbl_len = decoded_context.tbl_len;
+
+        rc = databasevm_step(vm);
+        if (rc != DBRES_DONE) {
+            // don't "break;", the error can be due to a RLS policy.
+            // in case of error we try to apply the following changes
         }
-        
+
         buffer += seek;
         buf_len -= seek;
         dbvm_reset(vm);
     }
-    
+
+    // Final flush after loop
+    {
+        int flush_rc = merge_flush_pending(data);
+        if (flush_rc != DBRES_OK && rc == DBRES_OK) rc = flush_rc;
+    }
+    data->pending_batch = NULL;
+
     if (in_savepoint) {
         int rc1 = database_commit_savepoint(data, "cloudsync_payload_apply");
         if (rc1 != DBRES_OK) rc = rc1;
@@ -2511,10 +2834,6 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     // save last error (unused if function returns OK)
     if (rc != DBRES_OK && rc != DBRES_DONE) {
         cloudsync_set_dberror(data);
-    }
-    
-    if (payload_apply_callback) {
-        payload_apply_callback(&payload_apply_xdata, &decoded_context, db, data, CLOUDSYNC_PAYLOAD_APPLY_CLEANUP, rc);
     }
 
     if (rc == DBRES_DONE) rc = DBRES_OK;
@@ -2532,15 +2851,20 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     }
 
 cleanup:
+    // cleanup merge_pending_batch
+    if (batch.cached_vm) { databasevm_finalize(batch.cached_vm); batch.cached_vm = NULL; }
+    if (batch.cached_col_names) { cloudsync_memory_free(batch.cached_col_names); batch.cached_col_names = NULL; }
+    if (batch.entries) { cloudsync_memory_free(batch.entries); batch.entries = NULL; }  
+
     // cleanup vm
     if (vm) databasevm_finalize(vm);
-    
+
     // cleanup memory
     if (clone) cloudsync_memory_free(clone);
-    
+
     // error already saved in (save last error)
     if (rc != DBRES_OK) return rc;
-    
+
     // return the number of processed rows
     if (pnrows) *pnrows = nrows;
     return DBRES_OK;
@@ -2548,21 +2872,18 @@ cleanup:
 
 // MARK: - Payload load/store -
 
-int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int *seq, int64_t *new_db_version, int64_t *new_seq) {
+int cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int64_t *new_db_version) {
     // retrieve current db_version and seq
     *db_version = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_SEND_DBVERSION);
     if (*db_version < 0) return DBRES_ERROR;
-
-    *seq = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_SEND_SEQ);
-    if (*seq < 0) return DBRES_ERROR;
     
     // retrieve BLOB
     char sql[1024];
     snprintf(sql, sizeof(sql), "WITH max_db_version AS (SELECT MAX(db_version) AS max_db_version FROM cloudsync_changes WHERE site_id=cloudsync_siteid()) "
-                               "SELECT * FROM (SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) AS payload, max_db_version AS max_db_version, MAX(IIF(db_version = max_db_version, seq, 0)) FROM cloudsync_changes, max_db_version WHERE site_id=cloudsync_siteid() AND (db_version>%d OR (db_version=%d AND seq>%d))) WHERE payload IS NOT NULL", *db_version, *db_version, *seq);
+                               "SELECT * FROM (SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) AS payload, max_db_version AS max_db_version FROM cloudsync_changes, max_db_version WHERE site_id=cloudsync_siteid() AND db_version>%d) WHERE payload IS NOT NULL", *db_version);
     
     int64_t len = 0;
-    int rc = database_select_blob_2int(data, sql, blob, &len, new_db_version, new_seq);
+    int rc = database_select_blob_int(data, sql, blob, &len, new_db_version);
     *blob_size = (int)len;
     if (rc != DBRES_OK) return rc;
     
@@ -2580,12 +2901,11 @@ int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, i
     
     // retrieve payload
     char *blob = NULL;
-    int blob_size = 0, db_version = 0, seq = 0;
-    int64_t new_db_version = 0, new_seq = 0;
-    int rc = cloudsync_payload_get(data, &blob, &blob_size, &db_version, &seq, &new_db_version, &new_seq);
+    int blob_size = 0, db_version = 0;
+    int64_t new_db_version = 0;
+    int rc = cloudsync_payload_get(data, &blob, &blob_size, &db_version, &new_db_version);
     if (rc != DBRES_OK) {
         if (db_version < 0) return cloudsync_set_error(data, "Unable to retrieve db_version", rc);
-        else if (seq < 0) return cloudsync_set_error(data, "Unable to retrieve seq", rc);
         return cloudsync_set_error(data, "Unable to retrieve changes in cloudsync_payload_save", rc);
     }
     
@@ -2600,18 +2920,6 @@ int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, i
     cloudsync_memory_free(blob);
     if (res == false) {
         return cloudsync_set_error(data, "Unable to write payload to file path", DBRES_IOERR);
-    }
-    
-    // TODO: dbutils_settings_set_key_value remove context and return error here (in case of error)
-    // update db_version and seq
-    char buf[256];
-    if (new_db_version != db_version) {
-        snprintf(buf, sizeof(buf), "%" PRId64, new_db_version);
-        dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
-    }
-    if (new_seq != seq) {
-        snprintf(buf, sizeof(buf), "%" PRId64, new_seq);
-        dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_SEQ, buf);
     }
     
     // returns blob size
@@ -2678,6 +2986,7 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
     }
         
     // if user declared explicit primary key(s) then make sure they are all declared as NOT NULL
+    #if CLOUDSYNC_CHECK_NOTNULL_PRIKEYS
     if (npri_keys > 0) {
         int npri_keys_notnull = database_count_pk(data, name, true, cloudsync_schema(data));
         if (npri_keys_notnull < 0) return cloudsync_set_dberror(data);
@@ -2686,6 +2995,7 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
             return cloudsync_set_error(data, buffer, DBRES_ERROR);
         }
     }
+    #endif
     
     // check for columns declared as NOT NULL without a DEFAULT value.
     // Otherwise, col_merge_stmt would fail if changes to other columns are inserted first.

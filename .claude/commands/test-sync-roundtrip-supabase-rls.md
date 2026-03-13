@@ -1,22 +1,33 @@
-# Sync Roundtrip Test with RLS
+# Sync Roundtrip Test with local Postgres database and RLS policies
 
 Execute a full roundtrip sync test between multiple local SQLite databases and the local Supabase Docker PostgreSQL instance, verifying that Row Level Security (RLS) policies are correctly enforced during sync.
 
 ## Prerequisites
-- Supabase Docker container running (PostgreSQL on port 54322)
-- HTTP sync server running on http://localhost:8091/postgres
+- Supabase instance running (local Docker or remote)
 - Built cloudsync extension (`make` to build `dist/cloudsync.dylib`)
 
 ## Test Procedure
 
-### Step 1: Get DDL from User
+### Step 1: Get Connection Parameters
+
+Ask the user for the following parameters:
+
+1. **CloudSync server address** — propose `https://cloudsync.sqlite.ai` as default (this is the built-in default). If the user provides a different address, save it as `CUSTOM_ADDRESS` and use `cloudsync_network_init_custom` instead of `cloudsync_network_init`.
+
+2. **PostgreSQL connection string**: Propose `postgresql://supabase_admin:postgres@127.0.0.1:54322/postgres` as default. Save as `PG_CONN`. Use this for all `psql` connections throughout the test.
+
+3. **Supabase API key** (used for JWT token generation): Propose `sb_secret_N7UND0UgjKTVK-Uodkm0Hg_xSvEMPvz` as default. Save as `SUPABASE_APIKEY`.
+
+Derive `AUTH_URL` from the PostgreSQL connection string by extracting the host and using port `54321` (Supabase GoTrue). For example, if `PG_CONN` is `postgresql://user:pass@10.0.0.5:54322/postgres`, then `AUTH_URL` is `http://10.0.0.5:54321`. For `127.0.0.1`, use `http://127.0.0.1:54321`.
+
+### Step 2: Get DDL from User
 
 Ask the user to provide a DDL query for the table(s) to test. It can be in PostgreSQL or SQLite format. Offer the following options:
 
 **Option 1: Simple TEXT primary key with user_id for RLS**
 ```sql
 CREATE TABLE test_sync (
-    id TEXT PRIMARY KEY NOT NULL,
+    id TEXT PRIMARY KEY,
     user_id UUID NOT NULL,
     name TEXT,
     value INTEGER
@@ -36,14 +47,14 @@ CREATE TABLE test_uuid (
 **Option 3: Two tables scenario with user ownership**
 ```sql
 CREATE TABLE authors (
-    id TEXT PRIMARY KEY NOT NULL,
+    id TEXT PRIMARY KEY,
     user_id UUID NOT NULL,
     name TEXT,
     email TEXT
 );
 
 CREATE TABLE books (
-    id TEXT PRIMARY KEY NOT NULL,
+    id TEXT PRIMARY KEY,
     user_id UUID NOT NULL,
     title TEXT,
     author_id TEXT,
@@ -53,7 +64,7 @@ CREATE TABLE books (
 
 **Note:** Tables should include a `user_id` column (UUID type) for RLS policies to filter by authenticated user.
 
-### Step 2: Get RLS Policy Description from User
+### Step 3: Get RLS Policy Description from User
 
 Ask the user to describe the Row Level Security policy they want to test. Offer the following common patterns:
 
@@ -66,7 +77,7 @@ Ask the user to describe the Row Level Security policy they want to test. Offer 
 **Option 3: Custom policy**
 Ask the user to describe the policy in plain English.
 
-### Step 3: Convert DDL
+### Step 4: Convert DDL
 
 Convert the provided DDL to both SQLite and PostgreSQL compatible formats if needed. Key differences:
 - SQLite uses `INTEGER PRIMARY KEY` for auto-increment, PostgreSQL uses `SERIAL` or `BIGSERIAL`
@@ -75,11 +86,11 @@ Convert the provided DDL to both SQLite and PostgreSQL compatible formats if nee
 - For UUID primary keys, SQLite uses `TEXT`, PostgreSQL uses `UUID`
 - For `user_id UUID`, SQLite uses `TEXT`
 
-### Step 4: Setup PostgreSQL with RLS
+### Step 5: Setup PostgreSQL with RLS
 
 Connect to Supabase PostgreSQL and prepare the environment:
 ```bash
-psql postgresql://supabase_admin:postgres@127.0.0.1:54322/postgres
+psql <PG_CONN>
 ```
 
 Inside psql:
@@ -112,31 +123,25 @@ Inside psql:
 8. Create RLS policies based on the user's description. Example for "user can only access their own rows":
    ```sql
    -- SELECT: User can see rows they own
-   -- Helper function fallback handles ON CONFLICT edge cases where user_id resolves to EXCLUDED row
    CREATE POLICY "select_own_rows" ON <table_name>
        FOR SELECT USING (
            auth.uid() = user_id
-           OR auth.uid() = <table_name>_get_owner(id)
        );
 
-   -- INSERT: Allow if user_id matches auth.uid() OR is default (cloudsync staging)
+   -- INSERT: Allow if user_id matches auth.uid()
    CREATE POLICY "insert_own_rows" ON <table_name>
        FOR INSERT WITH CHECK (
            auth.uid() = user_id
-           OR user_id = '00000000-0000-0000-0000-000000000000'::uuid
        );
 
-   -- UPDATE: Check ownership via explicit lookup, allow default for staging
+   -- UPDATE: Check ownership via explicit lookup
    CREATE POLICY "update_own_rows" ON <table_name>
        FOR UPDATE
        USING (
            auth.uid() = user_id
-           OR auth.uid() = <table_name>_get_owner(id)
-           OR user_id = '00000000-0000-0000-0000-000000000000'::uuid
        )
        WITH CHECK (
            auth.uid() = user_id
-           OR user_id = '00000000-0000-0000-0000-000000000000'::uuid
        );
 
    -- DELETE: User can only delete rows they own
@@ -148,22 +153,29 @@ Inside psql:
 9. Initialize cloudsync: `SELECT cloudsync_init('<table_name>');`
 10. Insert some initial test data (optional, can be done via SQLite clients)
 
-**Why these specific policies?**
-CloudSync uses `INSERT...ON CONFLICT DO UPDATE` for field-by-field synchronization. During conflict detection, PostgreSQL's RLS may compare `auth.uid()` against the EXCLUDED row's `user_id` (which has the default value) instead of the existing row's `user_id`. The helper function explicitly looks up the existing row's owner to work around this issue. See `docs/postgresql/RLS.md` for detailed explanation.
+### Step 5b: Get Managed Database ID
 
-### Step 5: Get JWT Tokens for Two Users
+Now that the database and tables are created and cloudsync is initialized, ask the user for:
+
+1. **Managed Database ID** — the `managedDatabaseId` returned by the CloudSync service. Save as `MANAGED_DB_ID`.
+
+For the network init call throughout the test, use:
+- Default address: `SELECT cloudsync_network_init('<MANAGED_DB_ID>');`
+- Custom address: `SELECT cloudsync_network_init_custom('<CUSTOM_ADDRESS>', '<MANAGED_DB_ID>');`
+
+### Step 6: Get JWT Tokens for Two Users
 
 Get JWT tokens for both test users by running the token script twice:
 
 **User 1: claude1@sqlitecloud.io**
 ```bash
-cd ../cloudsync && go run scripts/get_supabase_token.go -project-ref=supabase-local -email=claude1@sqlitecloud.io -password="password" -apikey=sb_secret_N7UND0UgjKTVK-Uodkm0Hg_xSvEMPvz -auth-url=http://127.0.0.1:54321
+cd ../cloudsync && go run scripts/get_supabase_token.go -project-ref=supabase-local -email=claude1@sqlitecloud.io -password="password" -apikey=<SUPABASE_APIKEY> -auth-url=<AUTH_URL>
 ```
 Save as `JWT_USER1`.
 
 **User 2: claude2@sqlitecloud.io**
 ```bash
-cd ../cloudsync && go run scripts/get_supabase_token.go -project-ref=supabase-local -email=claude2@sqlitecloud.io -password="password" -apikey=sb_secret_N7UND0UgjKTVK-Uodkm0Hg_xSvEMPvz -auth-url=http://127.0.0.1:54321
+cd ../cloudsync && go run scripts/get_supabase_token.go -project-ref=supabase-local -email=claude2@sqlitecloud.io -password="password" -apikey=<SUPABASE_APIKEY> -auth-url=<AUTH_URL>
 ```
 Save as `JWT_USER2`.
 
@@ -171,12 +183,12 @@ Also extract the user IDs from the JWT tokens (the `sub` claim) for use in INSER
 - `USER1_ID` = UUID from JWT_USER1
 - `USER2_ID` = UUID from JWT_USER2
 
-### Step 6: Setup Four SQLite Databases
+### Step 7: Setup Four SQLite Databases
 
 Create four temporary SQLite databases using the Homebrew version (IMPORTANT: system sqlite3 cannot load extensions):
 
 ```bash
-SQLITE_BIN="/opt/homebrew/Cellar/sqlite/3.50.4/bin/sqlite3"
+SQLITE_BIN="/opt/homebrew/Cellar/sqlite/3.51.2_1/bin/sqlite3"
 # or find it with: ls /opt/homebrew/Cellar/sqlite/*/bin/sqlite3 | head -1
 ```
 
@@ -188,7 +200,7 @@ $SQLITE_BIN /tmp/sync_test_user1_a.db
 .load dist/cloudsync.dylib
 <CREATE_TABLE_query_sqlite>
 SELECT cloudsync_init('<table_name>');
-SELECT cloudsync_network_init('http://localhost:8091/postgres');
+SELECT cloudsync_network_init('<MANAGED_DB_ID>');  -- or cloudsync_network_init_custom('<CUSTOM_ADDRESS>', '<MANAGED_DB_ID>') if using a non-default address
 SELECT cloudsync_network_set_token('<JWT_USER1>');
 ```
 
@@ -200,7 +212,7 @@ $SQLITE_BIN /tmp/sync_test_user1_b.db
 .load dist/cloudsync.dylib
 <CREATE_TABLE_query_sqlite>
 SELECT cloudsync_init('<table_name>');
-SELECT cloudsync_network_init('http://localhost:8091/postgres');
+SELECT cloudsync_network_init('<MANAGED_DB_ID>');  -- or cloudsync_network_init_custom('<CUSTOM_ADDRESS>', '<MANAGED_DB_ID>') if using a non-default address
 SELECT cloudsync_network_set_token('<JWT_USER1>');
 ```
 
@@ -212,7 +224,7 @@ $SQLITE_BIN /tmp/sync_test_user2_a.db
 .load dist/cloudsync.dylib
 <CREATE_TABLE_query_sqlite>
 SELECT cloudsync_init('<table_name>');
-SELECT cloudsync_network_init('http://localhost:8091/postgres');
+SELECT cloudsync_network_init('<MANAGED_DB_ID>');  -- or cloudsync_network_init_custom('<CUSTOM_ADDRESS>', '<MANAGED_DB_ID>') if using a non-default address
 SELECT cloudsync_network_set_token('<JWT_USER2>');
 ```
 
@@ -224,11 +236,11 @@ $SQLITE_BIN /tmp/sync_test_user2_b.db
 .load dist/cloudsync.dylib
 <CREATE_TABLE_query_sqlite>
 SELECT cloudsync_init('<table_name>');
-SELECT cloudsync_network_init('http://localhost:8091/postgres');
+SELECT cloudsync_network_init('<MANAGED_DB_ID>');  -- or cloudsync_network_init_custom('<CUSTOM_ADDRESS>', '<MANAGED_DB_ID>') if using a non-default address
 SELECT cloudsync_network_set_token('<JWT_USER2>');
 ```
 
-### Step 7: Insert Test Data
+### Step 8: Insert Test Data
 
 Insert distinct test data in each database. Use the extracted user IDs for the `user_id` column:
 
@@ -254,7 +266,7 @@ INSERT INTO <table_name> (id, user_id, name, value) VALUES ('u2_a_2', '<USER2_ID
 INSERT INTO <table_name> (id, user_id, name, value) VALUES ('u2_b_1', '<USER2_ID>', 'User2 DeviceB Row1', 400);
 ```
 
-### Step 8: Execute Sync on All Databases
+### Step 9: Execute Sync on All Databases
 
 For each of the four SQLite databases, execute the sync operations:
 
@@ -264,7 +276,7 @@ SELECT cloudsync_network_send_changes();
 
 -- Check for changes from server (repeat with 2-3 second delays)
 SELECT cloudsync_network_check_changes();
--- Repeat check_changes 3-5 times with delays until it returns 0 or stabilizes
+-- Repeat check_changes 3-5 times with delays until it returns more than 0 received rows or stabilizes
 ```
 
 **Recommended sync order:**
@@ -274,7 +286,7 @@ SELECT cloudsync_network_check_changes();
 4. Sync Database 2B (send + check)
 5. Re-sync all databases (check_changes) to ensure full propagation
 
-### Step 9: Verify RLS Enforcement
+### Step 10: Verify RLS Enforcement
 
 After syncing all databases, verify that each database contains only the expected rows based on the RLS policy:
 
@@ -303,7 +315,7 @@ SELECT COUNT(*) FROM <table_name>;
 SELECT user_id, COUNT(*) FROM <table_name> GROUP BY user_id;
 ```
 
-### Step 10: Test Write RLS Policy Enforcement
+### Step 11: Test Write RLS Policy Enforcement
 
 Test that the server-side RLS policy blocks unauthorized writes by attempting to insert a row with a `user_id` that doesn't match the authenticated user's JWT token.
 
@@ -349,7 +361,7 @@ SELECT * FROM <table_name> WHERE id = 'malicious_1';
 1. The malicious row appears in PostgreSQL (RLS bypass vulnerability)
 2. The malicious row syncs to User 2's databases (data leakage)
 
-### Step 11: Cleanup
+### Step 12: Cleanup
 
 In each SQLite database before closing:
 ```sql
@@ -482,14 +494,14 @@ Ensure column types are compatible between SQLite and PostgreSQL:
 ```sql
 -- WRONG: Separate sessions won't work
 -- Session 1:
-SELECT cloudsync_network_init('http://localhost:8091/postgres');
+SELECT cloudsync_network_init('<MANAGED_DB_ID>');  -- or cloudsync_network_init_custom('<CUSTOM_ADDRESS>', '<MANAGED_DB_ID>') if using a non-default address
 SELECT cloudsync_network_set_token('...');
 -- Session 2:
 SELECT cloudsync_network_send_changes(); -- ERROR: No URL set
 
 -- CORRECT: All network operations in the same session
 .load dist/cloudsync.dylib
-SELECT cloudsync_network_init('http://localhost:8091/postgres');
+SELECT cloudsync_network_init('<MANAGED_DB_ID>');  -- or cloudsync_network_init_custom('<CUSTOM_ADDRESS>', '<MANAGED_DB_ID>') if using a non-default address
 SELECT cloudsync_network_set_token('...');
 SELECT cloudsync_network_send_changes();
 SELECT cloudsync_terminate();
@@ -527,6 +539,6 @@ INSERT INTO todos (id, ...) VALUES ('11111111-1111-1111-1111-111111111111', ...)
 
 Execute all SQL queries without asking for user permission on:
 - SQLite test databases in `/tmp/` (e.g., `/tmp/sync_test_*.db`)
-- PostgreSQL via `psql postgresql://supabase_admin:postgres@127.0.0.1:54322/postgres`
+- PostgreSQL via `psql <PG_CONN>`
 
 These are local test environments and do not require confirmation for each query.

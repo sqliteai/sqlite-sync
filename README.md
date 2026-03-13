@@ -50,21 +50,24 @@ The sync layer is tightly integrated with [**SQLite Cloud**](https://sqlitecloud
 
 ## Row-Level Security
 
-Thanks to the underlying SQLite Cloud infrastructure, **SQLite Sync supports Row-Level Security (RLS)**—allowing you to define **precise access control at the row level**:
+Thanks to the underlying SQLite Cloud infrastructure, **SQLite Sync supports Row-Level Security (RLS)**—allowing you to use a **single shared cloud database** while each client only sees and modifies its own data. RLS policies are enforced on the server, so the security boundary is at the database level, not in application code.
 
 - Control not just who can read or write a table, but **which specific rows** they can access.
-- Enforce security policies on the server—no need for client-side filtering.
+- Each device syncs only the rows it is authorized to see—no full dataset download, no client-side filtering.
 
 For example:
 
 - User A can only see and edit their own data.
 - User B can access a different set of rows—even within the same shared table.
 
-**Benefits of RLS**:
+**Benefits**:
 
-- **Data isolation**: Ensure users only access what they’re authorized to see.
-- **Built-in privacy**: Security policies are enforced at the database level.
-- **Simplified development**: Reduce or eliminate complex permission logic in your application code.
+- **Single database, multiple tenants**: One cloud database serves all users. RLS policies partition data per user or role, eliminating the need to provision separate databases.
+- **Efficient sync**: Each client downloads only its authorized rows, reducing bandwidth and local storage.
+- **Server-enforced security**: Policies are evaluated on the server during sync. A compromised or modified client cannot bypass access controls.
+- **Simplified development**: No need to implement permission logic in your application—define policies once in the database and they apply everywhere.
+
+For more information, see the [SQLite Cloud RLS documentation](https://docs.sqlitecloud.io/docs/rls).
 
 ### What Can You Build with SQLite Sync?
 
@@ -102,7 +105,12 @@ SQLite Sync is ideal for building collaborative and distributed apps across web,
 
 ## Documentation
 
-For detailed information on all available functions, their parameters, and examples, refer to the [comprehensive API Reference](./API.md).
+For detailed information on all available functions, their parameters, and examples, refer to the [comprehensive API Reference](./API.md). The API includes:
+
+- **Configuration Functions** — initialize, enable, and disable sync on tables
+- **Helper Functions** — version info, site IDs, UUID generation
+- **Schema Alteration Functions** — safely alter synced tables
+- **Network Functions** — connect, authenticate, send/receive changes, and monitor sync status
 
 ## Installation
 
@@ -256,7 +264,7 @@ sqlite3 myapp.db
 
 -- Create a table (primary key MUST be TEXT for global uniqueness)
 CREATE TABLE IF NOT EXISTS my_data (
-    id TEXT PRIMARY KEY NOT NULL,
+    id TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT '',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -279,17 +287,19 @@ UPDATE my_data SET value = 'Updated: Hello from device A!' WHERE value LIKE 'Hel
 SELECT * FROM my_data ORDER BY created_at;
 
 -- Configure network connection before using the network sync functions
-SELECT cloudsync_network_init('sqlitecloud://your-project-id.sqlite.cloud/database.sqlite');
+-- The managedDatabaseId is obtained from the OffSync page on the SQLiteCloud dashboard
+SELECT cloudsync_network_init('your-managed-database-id');
 SELECT cloudsync_network_set_apikey('your-api-key-here');
 -- Or use token authentication (required for Row-Level Security)
 -- SELECT cloudsync_network_set_token('your_auth_token');
 
--- Sync with cloud: send local changes, then check the remote server for new changes 
+-- Sync with cloud: send local changes, then check the remote server for new changes
 -- and, if a package with changes is ready to be downloaded, applies them to the local database
 SELECT cloudsync_network_sync();
--- Keep calling periodically. The function returns > 0 if data was received
--- In production applications, you would typically call this periodically
--- rather than manually (e.g., every few seconds)
+-- Returns a JSON string with sync status, e.g.:
+-- '{"send":{"status":"synced","localVersion":5,"serverVersion":5},"receive":{"rows":3,"tables":["my_data"]}}'
+-- Keep calling periodically. In production applications, you would typically
+-- call this periodically rather than manually (e.g., every few seconds)
 SELECT cloudsync_network_sync();
 
 -- Before closing the database connection
@@ -304,7 +314,7 @@ SELECT cloudsync_terminate();
 -- Load extension and create identical table structure
 .load ./cloudsync
 CREATE TABLE IF NOT EXISTS my_data (
-    id TEXT PRIMARY KEY NOT NULL,
+    id TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT '',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -314,9 +324,9 @@ SELECT cloudsync_init('my_data');
 SELECT cloudsync_network_init('sqlitecloud://your-project-id.sqlite.cloud/database.sqlite');
 SELECT cloudsync_network_set_apikey('your-api-key-here');
 
--- Sync to get data from the first device 
+-- Sync to get data from the first device
 SELECT cloudsync_network_sync();
--- repeat until data is received (returns > 0)
+-- Repeat — check receive.rows in the JSON result to see if data was received
 SELECT cloudsync_network_sync();
 
 -- View synchronized data
@@ -363,12 +373,12 @@ When designing your database schema for SQLite Sync, follow these best practices
 - **Use globally unique identifiers**: Always use TEXT primary keys with UUIDs, ULIDs, or similar globally unique identifiers
 - **Avoid auto-incrementing integers**: Integer primary keys can cause conflicts across multiple devices
 - **Use `cloudsync_uuid()`**: The built-in function generates UUIDv7 identifiers optimized for distributed systems
-- **All primary keys must be explicitly declared as `NOT NULL`**.
+- **Note:** Any write operation that includes a NULL value for a primary key column will be rejected with an error, even if SQLite would normally allow it due to a legacy behavior.
 
 ```sql
 -- ✅ Recommended: Globally unique TEXT primary key
 CREATE TABLE users (
-    id TEXT PRIMARY KEY NOT NULL,          -- Use cloudsync_uuid()
+    id TEXT PRIMARY KEY,                    -- Use cloudsync_uuid()
     name TEXT NOT NULL,
     email TEXT UNIQUE NOT NULL
 );
