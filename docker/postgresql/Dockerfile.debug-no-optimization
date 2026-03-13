@@ -51,6 +51,7 @@ ENV LD_LIBRARY_PATH="/usr/local/pgsql/lib:${LD_LIBRARY_PATH}"
 
 # Copy entire source tree (needed for includes and makefiles)
 COPY src/ ./src/
+COPY modules/ ./modules/
 COPY docker/ ./docker/
 COPY Makefile .
 
@@ -65,11 +66,11 @@ RUN set -eux; \
     make postgres-build PG_DEBUG=1 \
     PG_CFLAGS="-fPIC -Wall -Wextra -Wno-unused-parameter -std=c11 -g -O0 -fno-omit-frame-pointer ${ASAN_CFLAGS}" \
     PG_LDFLAGS="-shared ${ASAN_LDFLAGS}" \
-    PG_CPPFLAGS="-I$(pg_config --includedir-server) -Isrc -Isrc/postgresql -DCLOUDSYNC_POSTGRESQL_BUILD -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE" && \
+    PG_CPPFLAGS="-I$(pg_config --includedir-server) -Isrc -Isrc/postgresql -Imodules/fractional-indexing -DCLOUDSYNC_POSTGRESQL_BUILD -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE" && \
     make postgres-install PG_DEBUG=1 \
     PG_CFLAGS="-fPIC -Wall -Wextra -Wno-unused-parameter -std=c11 -g -O0 -fno-omit-frame-pointer ${ASAN_CFLAGS}" \
     PG_LDFLAGS="-shared ${ASAN_LDFLAGS}" \
-    PG_CPPFLAGS="-I$(pg_config --includedir-server) -Isrc -Isrc/postgresql -DCLOUDSYNC_POSTGRESQL_BUILD -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE" && \
+    PG_CPPFLAGS="-I$(pg_config --includedir-server) -Isrc -Isrc/postgresql -Imodules/fractional-indexing -DCLOUDSYNC_POSTGRESQL_BUILD -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE" && \
     make postgres-clean
 
 # Verify installation

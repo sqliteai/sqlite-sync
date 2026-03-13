@@ -67,4 +67,11 @@ extern const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL;
 extern const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL_FILTERED;
 extern const char * const SQL_CHANGES_INSERT_ROW;
 
+// BLOCKS (block-level LWW)
+extern const char * const SQL_BLOCKS_CREATE_TABLE;
+extern const char * const SQL_BLOCKS_UPSERT;
+extern const char * const SQL_BLOCKS_SELECT;
+extern const char * const SQL_BLOCKS_DELETE;
+extern const char * const SQL_BLOCKS_LIST_ALIVE;
+
 #endif

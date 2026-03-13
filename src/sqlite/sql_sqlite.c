@@ -37,7 +37,7 @@ const char * const SQL_SETTINGS_LOAD_GLOBAL =
     "SELECT key, value FROM cloudsync_settings;";
 
 const char * const SQL_SETTINGS_LOAD_TABLE =
-    "SELECT lower(tbl_name), lower(col_name), key, value FROM cloudsync_table_settings ORDER BY tbl_name;";
+    "SELECT lower(tbl_name), lower(col_name), key, value FROM cloudsync_table_settings ORDER BY tbl_name, col_name;";
 
 const char * const SQL_CREATE_SETTINGS_TABLE =
     "CREATE TABLE IF NOT EXISTS cloudsync_settings (key TEXT PRIMARY KEY NOT NULL COLLATE NOCASE, value TEXT);";
@@ -276,3 +276,28 @@ const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL_FILTERED =
 const char * const SQL_CHANGES_INSERT_ROW =
     "INSERT INTO cloudsync_changes(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) "
     "VALUES (?,?,?,?,?,?,?,?,?);";
+
+// MARK: Blocks (block-level LWW)
+
+const char * const SQL_BLOCKS_CREATE_TABLE =
+    "CREATE TABLE IF NOT EXISTS %s ("
+    "pk BLOB NOT NULL, "
+    "col_name TEXT NOT NULL, "
+    "col_value BLOB, "
+    "PRIMARY KEY (pk, col_name)) WITHOUT ROWID";
+
+const char * const SQL_BLOCKS_UPSERT =
+    "INSERT OR REPLACE INTO %s (pk, col_name, col_value) VALUES (?1, ?2, ?3)";
+
+const char * const SQL_BLOCKS_SELECT =
+    "SELECT col_value FROM %s WHERE pk = ?1 AND col_name = ?2";
+
+const char * const SQL_BLOCKS_DELETE =
+    "DELETE FROM %s WHERE pk = ?1 AND col_name = ?2";
+
+const char * const SQL_BLOCKS_LIST_ALIVE =
+    "SELECT b.col_value FROM %s b "
+    "JOIN %s m ON b.pk = m.pk AND b.col_name = m.col_name "
+    "WHERE b.pk = ?1 AND b.col_name LIKE ?2 "
+    "AND m.pk = ?3 AND m.col_name LIKE ?4 AND m.col_version %% 2 = 1 "
+    "ORDER BY b.col_name";

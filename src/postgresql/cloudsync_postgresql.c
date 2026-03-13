@@ -32,6 +32,7 @@
 
 // CloudSync headers (after PostgreSQL headers)
 #include "../cloudsync.h"
+#include "../block.h"
 #include "../database.h"
 #include "../dbutils.h"
 #include "../pk.h"
@@ -129,6 +130,9 @@ void _PG_init (void) {
     
     // Initialize memory debugger (NOOP in production)
     cloudsync_memory_init(1);
+
+    // Set fractional-indexing allocator to use cloudsync memory
+    block_init_allocator();
 }
 
 void _PG_fini (void) {
@@ -597,7 +601,25 @@ Datum cloudsync_set_column (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
-        dbutils_table_settings_set_key_value(data, tbl, col, key, value);
+        // Handle block column setup: cloudsync_set_column('tbl', 'col', 'algo', 'block')
+        if (key && value && strcmp(key, "algo") == 0 && strcmp(value, "block") == 0) {
+            int rc = cloudsync_setup_block_column(data, tbl, col, NULL);
+            if (rc != DBRES_OK) {
+                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+            }
+        } else {
+            // Handle delimiter setting: cloudsync_set_column('tbl', 'col', 'delimiter', '\n\n')
+            if (key && strcmp(key, "delimiter") == 0) {
+                cloudsync_table_context *table = table_lookup(data, tbl);
+                if (table) {
+                    int col_idx = table_col_index(table, col);
+                    if (col_idx >= 0 && table_col_algo(table, col_idx) == col_algo_block) {
+                        table_set_col_delimiter(table, col_idx, value);
+                    }
+                }
+            }
+            dbutils_table_settings_set_key_value(data, tbl, col, key, value);
+        }
     }
     PG_CATCH();
     {
@@ -1120,6 +1142,10 @@ Datum cloudsync_pk_encode (PG_FUNCTION_ARGS) {
                 errmsg("cloudsync_pk_encode requires at least one primary key value")));
     }
 
+    // Normalize all values to text for consistent PK encoding
+    // (PG triggers cast PK values to ::text; SQL callers must match)
+    pgvalues_normalize_to_text(argv, argc);
+
     size_t pklen = 0;
     char *encoded = pk_encode_prikey((dbvalue_t **)argv, argc, NULL, &pklen);
     if (!encoded || encoded == PRIKEY_NULL_CONSTRAINT_ERROR) {
@@ -1258,6 +1284,9 @@ Datum cloudsync_insert (PG_FUNCTION_ARGS) {
         // Extract PK values from VARIADIC "any" (args starting from index 1)
         cleanup.argv = pgvalues_from_args(fcinfo, 1, &cleanup.argc);
 
+        // Normalize PK values to text for consistent encoding
+        pgvalues_normalize_to_text(cleanup.argv, cleanup.argc);
+
         // Verify we have the correct number of PK columns
         int expected_pks = table_count_pks(table);
         if (cleanup.argc != expected_pks) {
@@ -1295,8 +1324,56 @@ Datum cloudsync_insert (PG_FUNCTION_ARGS) {
         if (rc == DBRES_OK) {
             // Process each non-primary key column for insert or update
             for (int i = 0; i < table_count_cols(table); i++) {
-                rc = local_mark_insert_or_update_meta(table, cleanup.pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
-                if (rc != DBRES_OK) break;
+                if (table_col_algo(table, i) == col_algo_block) {
+                    // Block column: read value from base table, split into blocks, store each block
+                    dbvm_t *val_vm = table_column_lookup(table, table_colname(table, i), false, NULL);
+                    if (!val_vm) { rc = DBRES_ERROR; break; }
+
+                    int bind_rc = pk_decode_prikey(cleanup.pk, pklen, pk_decode_bind_callback, (void *)val_vm);
+                    if (bind_rc < 0) { databasevm_reset(val_vm); rc = DBRES_ERROR; break; }
+
+                    int step_rc = databasevm_step(val_vm);
+                    if (step_rc == DBRES_ROW) {
+                        const char *text = database_column_text(val_vm, 0);
+                        const char *delim = table_col_delimiter(table, i);
+                        const char *col = table_colname(table, i);
+
+                        block_list_t *blocks = block_split(text ? text : "", delim);
+                        if (blocks) {
+                            char **positions = block_initial_positions(blocks->count);
+                            if (positions) {
+                                for (int b = 0; b < blocks->count; b++) {
+                                    char *block_cn = block_build_colname(col, positions[b]);
+                                    if (block_cn) {
+                                        rc = local_mark_insert_or_update_meta(table, cleanup.pk, pklen, block_cn, db_version, cloudsync_bumpseq(data));
+
+                                        // Store block value in blocks table
+                                        dbvm_t *wvm = table_block_value_write_stmt(table);
+                                        if (wvm && rc == DBRES_OK) {
+                                            databasevm_bind_blob(wvm, 1, cleanup.pk, (int)pklen);
+                                            databasevm_bind_text(wvm, 2, block_cn, -1);
+                                            databasevm_bind_text(wvm, 3, blocks->entries[b].content, -1);
+                                            databasevm_step(wvm);
+                                            databasevm_reset(wvm);
+                                        }
+
+                                        cloudsync_memory_free(block_cn);
+                                    }
+                                    cloudsync_memory_free(positions[b]);
+                                    if (rc != DBRES_OK) break;
+                                }
+                                cloudsync_memory_free(positions);
+                            }
+                            block_list_free(blocks);
+                        }
+                    }
+                    databasevm_reset(val_vm);
+                    if (step_rc == DBRES_ROW || step_rc == DBRES_DONE) { if (rc == DBRES_OK) continue; }
+                    if (rc != DBRES_OK) break;
+                } else {
+                    rc = local_mark_insert_or_update_meta(table, cleanup.pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
+                    if (rc != DBRES_OK) break;
+                }
             }
         }
 
@@ -1352,6 +1429,9 @@ Datum cloudsync_delete (PG_FUNCTION_ARGS) {
 
         // Extract PK values from VARIADIC "any" (args starting from index 1)
         cleanup.argv = pgvalues_from_args(fcinfo, 1, &cleanup.argc);
+
+        // Normalize PK values to text for consistent encoding
+        pgvalues_normalize_to_text(cleanup.argv, cleanup.argc);
 
         int expected_pks = table_count_pks(table);
         if (cleanup.argc != expected_pks) {
@@ -1595,8 +1675,99 @@ Datum cloudsync_update_finalfn (PG_FUNCTION_ARGS) {
             if (col_index >= payload->count) break;
 
             if (dbutils_value_compare((dbvalue_t *)payload->old_values[col_index], (dbvalue_t *)payload->new_values[col_index]) != 0) {
-                rc = local_mark_insert_or_update_meta(table, pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
-                if (rc != DBRES_OK) goto cleanup;
+                if (table_col_algo(table, i) == col_algo_block) {
+                    // Block column: diff old and new text, emit per-block metadata changes
+                    const char *new_text = (const char *)database_value_text(payload->new_values[col_index]);
+                    const char *delim = table_col_delimiter(table, i);
+                    const char *col = table_colname(table, i);
+
+                    // Read existing blocks from blocks table
+                    block_list_t *old_blocks = block_list_create_empty();
+                    char *like_pattern = block_build_colname(col, "%");
+                    if (like_pattern && old_blocks) {
+                        char *list_sql = cloudsync_memory_mprintf(
+                            "SELECT col_name, col_value FROM %s WHERE pk = $1 AND col_name LIKE $2 ORDER BY col_name COLLATE \"C\"",
+                            table_blocks_ref(table));
+                        if (list_sql) {
+                            dbvm_t *list_vm = NULL;
+                            if (databasevm_prepare(data, list_sql, &list_vm, 0) == DBRES_OK) {
+                                databasevm_bind_blob(list_vm, 1, pk, (int)pklen);
+                                databasevm_bind_text(list_vm, 2, like_pattern, -1);
+                                while (databasevm_step(list_vm) == DBRES_ROW) {
+                                    const char *bcn = database_column_text(list_vm, 0);
+                                    const char *bval = database_column_text(list_vm, 1);
+                                    const char *pos = block_extract_position_id(bcn);
+                                    if (pos && old_blocks) {
+                                        block_list_add(old_blocks, bval ? bval : "", pos);
+                                    }
+                                }
+                                databasevm_finalize(list_vm);
+                            }
+                            cloudsync_memory_free(list_sql);
+                        }
+                    }
+
+                    // Split new text into parts (NULL text = all blocks removed)
+                    block_list_t *new_blocks = new_text ? block_split(new_text, delim) : block_list_create_empty();
+                    if (new_blocks && old_blocks) {
+                        // Build array of new content strings (NULL when count is 0)
+                        const char **new_parts = NULL;
+                        if (new_blocks->count > 0) {
+                            new_parts = (const char **)cloudsync_memory_alloc(
+                                (uint64_t)(new_blocks->count * sizeof(char *)));
+                            if (new_parts) {
+                                for (int b = 0; b < new_blocks->count; b++) {
+                                    new_parts[b] = new_blocks->entries[b].content;
+                                }
+                            }
+                        }
+
+                        if (new_parts || new_blocks->count == 0) {
+                            block_diff_t *diff = block_diff(old_blocks->entries, old_blocks->count,
+                                                             new_parts, new_blocks->count);
+                            if (diff) {
+                                for (int d = 0; d < diff->count; d++) {
+                                    block_diff_entry_t *de = &diff->entries[d];
+                                    char *block_cn = block_build_colname(col, de->position_id);
+                                    if (!block_cn) continue;
+
+                                    if (de->type == BLOCK_DIFF_ADDED || de->type == BLOCK_DIFF_MODIFIED) {
+                                        rc = local_mark_insert_or_update_meta(table, pk, pklen, block_cn,
+                                                                              db_version, cloudsync_bumpseq(data));
+                                        // Store block value
+                                        if (rc == DBRES_OK && table_block_value_write_stmt(table)) {
+                                            dbvm_t *wvm = table_block_value_write_stmt(table);
+                                            databasevm_bind_blob(wvm, 1, pk, (int)pklen);
+                                            databasevm_bind_text(wvm, 2, block_cn, -1);
+                                            databasevm_bind_text(wvm, 3, de->content, -1);
+                                            databasevm_step(wvm);
+                                            databasevm_reset(wvm);
+                                        }
+                                    } else if (de->type == BLOCK_DIFF_REMOVED) {
+                                        // Mark block as deleted in metadata (even col_version)
+                                        rc = local_mark_delete_block_meta(table, pk, pklen, block_cn,
+                                                                          db_version, cloudsync_bumpseq(data));
+                                        // Remove from blocks table
+                                        if (rc == DBRES_OK) {
+                                            block_delete_value_external(data, table, pk, pklen, block_cn);
+                                        }
+                                    }
+                                    cloudsync_memory_free(block_cn);
+                                    if (rc != DBRES_OK) break;
+                                }
+                                block_diff_free(diff);
+                            }
+                            if (new_parts) cloudsync_memory_free((void *)new_parts);
+                        }
+                    }
+                    if (new_blocks) block_list_free(new_blocks);
+                    if (old_blocks) block_list_free(old_blocks);
+                    if (like_pattern) cloudsync_memory_free(like_pattern);
+                    if (rc != DBRES_OK) goto cleanup;
+                } else {
+                    rc = local_mark_insert_or_update_meta(table, pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
+                    if (rc != DBRES_OK) goto cleanup;
+                }
             }
         }
 
@@ -1957,7 +2128,42 @@ Datum cloudsync_col_value(PG_FUNCTION_ARGS) {
     if (!table) {
         ereport(ERROR, (errmsg("Unable to retrieve table name %s in clousdsync_col_value.", table_name)));
     }
-    
+
+    // Block column: if col_name contains \x1F, read from blocks table
+    if (block_is_block_colname(col_name) && table_has_block_cols(table)) {
+        dbvm_t *bvm = table_block_value_read_stmt(table);
+        if (!bvm) {
+            bytea *null_encoded = cloudsync_encode_null_value();
+            PG_RETURN_BYTEA_P(null_encoded);
+        }
+
+        bytea *encoded_pk_b = PG_GETARG_BYTEA_P(2);
+        size_t b_pk_len = (size_t)VARSIZE_ANY_EXHDR(encoded_pk_b);
+        int brc = databasevm_bind_blob(bvm, 1, VARDATA_ANY(encoded_pk_b), (uint64_t)b_pk_len);
+        if (brc != DBRES_OK) { databasevm_reset(bvm); ereport(ERROR, (errmsg("cloudsync_col_value block bind error"))); }
+        brc = databasevm_bind_text(bvm, 2, col_name, -1);
+        if (brc != DBRES_OK) { databasevm_reset(bvm); ereport(ERROR, (errmsg("cloudsync_col_value block bind error"))); }
+
+        brc = databasevm_step(bvm);
+        if (brc == DBRES_ROW) {
+            size_t blob_len = 0;
+            const void *blob = database_column_blob(bvm, 0, &blob_len);
+            bytea *result = NULL;
+            if (blob && blob_len > 0) {
+                result = (bytea *)palloc(VARHDRSZ + blob_len);
+                SET_VARSIZE(result, VARHDRSZ + blob_len);
+                memcpy(VARDATA(result), blob, blob_len);
+            }
+            databasevm_reset(bvm);
+            if (result) PG_RETURN_BYTEA_P(result);
+            PG_RETURN_NULL();
+        } else {
+            databasevm_reset(bvm);
+            bytea *null_encoded = cloudsync_encode_null_value();
+            PG_RETURN_BYTEA_P(null_encoded);
+        }
+    }
+
     // extract the right col_value vm associated to the column name
     dbvm_t *vm = table_column_lookup(table, col_name, false, NULL);
     if (!vm) {
@@ -2000,6 +2206,73 @@ Datum cloudsync_col_value(PG_FUNCTION_ARGS) {
     databasevm_reset(vm);
     ereport(ERROR, (errmsg("cloudsync_col_value error: %s", cloudsync_errmsg(data))));
     PG_RETURN_NULL(); // unreachable, silences compiler
+}
+
+// MARK: - Block-level LWW -
+
+PG_FUNCTION_INFO_V1(cloudsync_text_materialize);
+Datum cloudsync_text_materialize (PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1)) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("cloudsync_text_materialize: table_name and col_name cannot be NULL")));
+    }
+
+    const char *table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *col_name = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+    cloudsync_context *data = get_cloudsync_context();
+    cloudsync_pg_cleanup_state cleanup = {0};
+
+    int spi_rc = SPI_connect();
+    if (spi_rc != SPI_OK_CONNECT) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
+    }
+    cleanup.spi_connected = true;
+
+    PG_ENSURE_ERROR_CLEANUP(cloudsync_pg_cleanup, PointerGetDatum(&cleanup));
+    {
+        cloudsync_table_context *table = table_lookup(data, table_name);
+        if (!table) {
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                            errmsg("Unable to retrieve table name %s in cloudsync_text_materialize", table_name)));
+        }
+
+        int col_idx = table_col_index(table, col_name);
+        if (col_idx < 0 || table_col_algo(table, col_idx) != col_algo_block) {
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                            errmsg("Column %s in table %s is not configured as block-level", col_name, table_name)));
+        }
+
+        // Extract PK values from VARIADIC "any" (args starting from index 2)
+        cleanup.argv = pgvalues_from_args(fcinfo, 2, &cleanup.argc);
+
+        // Normalize PK values to text for consistent encoding
+        pgvalues_normalize_to_text(cleanup.argv, cleanup.argc);
+
+        int expected_pks = table_count_pks(table);
+        if (cleanup.argc != expected_pks) {
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                            errmsg("Expected %d primary key values, got %d", expected_pks, cleanup.argc)));
+        }
+
+        size_t pklen = sizeof(cleanup.pk_buffer);
+        cleanup.pk = pk_encode_prikey((dbvalue_t **)cleanup.argv, cleanup.argc, cleanup.pk_buffer, &pklen);
+        if (!cleanup.pk || cleanup.pk == PRIKEY_NULL_CONSTRAINT_ERROR) {
+            if (cleanup.pk == PRIKEY_NULL_CONSTRAINT_ERROR) cleanup.pk = NULL;
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                            errmsg("Failed to encode primary key(s)")));
+        }
+
+        int rc = block_materialize_column(data, table, cleanup.pk, (int)pklen, col_name);
+        if (rc != DBRES_OK) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("%s", cloudsync_errmsg(data))));
+        }
+    }
+    PG_END_ENSURE_ERROR_CLEANUP(cloudsync_pg_cleanup, PointerGetDatum(&cleanup));
+
+    cloudsync_pg_cleanup(0, PointerGetDatum(&cleanup));
+    PG_RETURN_BOOL(true);
 }
 
 // Track SRF execution state across calls
@@ -2149,6 +2422,20 @@ static char * build_union_sql (void) {
             }
             SPI_freetuptable(SPI_tuptable);
             
+            // Check if blocks table exists for this table
+            char blocks_tbl_name[1024];
+            snprintf(blocks_tbl_name, sizeof(blocks_tbl_name), "%s_cloudsync_blocks", base);
+            StringInfoData btq;
+            initStringInfo(&btq);
+            appendStringInfo(&btq,
+                "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE c.relname = %s AND n.nspname = %s AND c.relkind = 'r'",
+                quote_literal_cstr(blocks_tbl_name), nsp_lit);
+            int btrc = SPI_execute(btq.data, true, 1);
+            bool has_blocks_table = (btrc == SPI_OK_SELECT && SPI_processed > 0);
+            if (SPI_tuptable) { SPI_freetuptable(SPI_tuptable); SPI_tuptable = NULL; }
+            pfree(btq.data);
+
             /* Collect all base-table columns to build CASE over t1.col_name */
             StringInfoData colq;
             initStringInfo(&colq);
@@ -2169,13 +2456,22 @@ static char * build_union_sql (void) {
                 ereport(ERROR, (errmsg("cloudsync: unable to resolve columns for %s.%s", nsp, base)));
             }
             uint64 ncols = SPI_processed;
-            
+
             StringInfoData caseexpr;
             initStringInfo(&caseexpr);
             appendStringInfoString(&caseexpr,
                                    "CASE "
                                    "WHEN t1.col_name = '" CLOUDSYNC_TOMBSTONE_VALUE "' THEN " CLOUDSYNC_NULL_VALUE_BYTEA " "
                                    "WHEN b.ctid IS NULL THEN " CLOUDSYNC_RLS_RESTRICTED_VALUE_BYTEA " "
+                                   );
+            if (has_blocks_table) {
+                appendStringInfo(&caseexpr,
+                    "WHEN t1.col_name LIKE '%%' || chr(31) || '%%' THEN "
+                    "(SELECT cloudsync_encode_value(blk.col_value) FROM %s.\"%s_cloudsync_blocks\" blk "
+                    "WHERE blk.pk = t1.pk AND blk.col_name = t1.col_name) ",
+                    quote_identifier(nsp), base);
+            }
+            appendStringInfoString(&caseexpr,
                                    "ELSE CASE t1.col_name "
                                    );
 

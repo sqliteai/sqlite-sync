@@ -28,7 +28,7 @@ const char * const SQL_TABLE_SETTINGS_DELETE_ALL_FOR_TABLE =
 
 const char * const SQL_TABLE_SETTINGS_REPLACE =
     "INSERT INTO cloudsync_table_settings (tbl_name, col_name, key, value) VALUES ($1, $2, $3, $4) "
-    "ON CONFLICT (tbl_name, key) DO UPDATE SET col_name = EXCLUDED.col_name, value = EXCLUDED.value;";
+    "ON CONFLICT (tbl_name, col_name, key) DO UPDATE SET value = EXCLUDED.value;";
 
 const char * const SQL_TABLE_SETTINGS_DELETE_ONE =
     "DELETE FROM cloudsync_table_settings WHERE (tbl_name=$1 AND col_name=$2 AND key=$3);";
@@ -40,7 +40,7 @@ const char * const SQL_SETTINGS_LOAD_GLOBAL =
     "SELECT key, value FROM cloudsync_settings;";
 
 const char * const SQL_SETTINGS_LOAD_TABLE =
-    "SELECT lower(tbl_name), lower(col_name), key, value FROM cloudsync_table_settings ORDER BY tbl_name;";
+    "SELECT lower(tbl_name), lower(col_name), key, value FROM cloudsync_table_settings ORDER BY tbl_name, col_name;";
 
 const char * const SQL_CREATE_SETTINGS_TABLE =
     "CREATE TABLE IF NOT EXISTS cloudsync_settings (key TEXT PRIMARY KEY NOT NULL, value TEXT);"
@@ -75,7 +75,7 @@ const char * const SQL_INSERT_SITE_ID_ROWID =
     "INSERT INTO cloudsync_site_id (id, site_id) VALUES ($1, $2);";
 
 const char * const SQL_CREATE_TABLE_SETTINGS_TABLE =
-    "CREATE TABLE IF NOT EXISTS cloudsync_table_settings (tbl_name TEXT NOT NULL, col_name TEXT NOT NULL, key TEXT, value TEXT, PRIMARY KEY(tbl_name,key));";
+    "CREATE TABLE IF NOT EXISTS cloudsync_table_settings (tbl_name TEXT NOT NULL, col_name TEXT NOT NULL, key TEXT NOT NULL, value TEXT, PRIMARY KEY(tbl_name,col_name,key));";
 
 const char * const SQL_CREATE_SCHEMA_VERSIONS_TABLE =
     "CREATE TABLE IF NOT EXISTS cloudsync_schema_versions (hash BIGINT PRIMARY KEY, seq INTEGER NOT NULL)";
@@ -408,3 +408,29 @@ const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL_FILTERED =
     "SELECT 1 FROM %s _cstemp2 "
     "WHERE _cstemp2.pk = _cstemp1.pk AND _cstemp2.col_name = $1"
     ");";
+
+// MARK: Blocks (block-level LWW)
+
+const char * const SQL_BLOCKS_CREATE_TABLE =
+    "CREATE TABLE IF NOT EXISTS %s ("
+    "pk BYTEA NOT NULL, "
+    "col_name TEXT COLLATE \"C\" NOT NULL, "
+    "col_value TEXT, "
+    "PRIMARY KEY (pk, col_name))";
+
+const char * const SQL_BLOCKS_UPSERT =
+    "INSERT INTO %s (pk, col_name, col_value) VALUES ($1, $2, $3) "
+    "ON CONFLICT (pk, col_name) DO UPDATE SET col_value = EXCLUDED.col_value";
+
+const char * const SQL_BLOCKS_SELECT =
+    "SELECT col_value FROM %s WHERE pk = $1 AND col_name = $2";
+
+const char * const SQL_BLOCKS_DELETE =
+    "DELETE FROM %s WHERE pk = $1 AND col_name = $2";
+
+const char * const SQL_BLOCKS_LIST_ALIVE =
+    "SELECT b.col_value FROM %s b "
+    "JOIN %s m ON b.pk = m.pk AND b.col_name = m.col_name "
+    "WHERE b.pk = $1 AND b.col_name LIKE $2 "
+    "AND m.pk = $3 AND m.col_name LIKE $4 AND m.col_version %% 2 = 1 "
+    "ORDER BY b.col_name COLLATE \"C\"";

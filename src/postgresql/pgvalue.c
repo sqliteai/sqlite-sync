@@ -169,3 +169,30 @@ pgvalue_t **pgvalues_from_args(FunctionCallInfo fcinfo, int start_arg, int *out_
     if (out_count) *out_count = count;
     return values;
 }
+
+void pgvalues_normalize_to_text(pgvalue_t **values, int count) {
+    // Convert all non-text pgvalues to text representation.
+    // This ensures PK encoding is consistent regardless of whether the caller
+    // passes native types (e.g., integer 1) or text representations (e.g., '1').
+    // The UPDATE trigger casts all values to ::text, so INSERT trigger and
+    // SQL functions must do the same for PK encoding consistency.
+    if (!values) return;
+
+    for (int i = 0; i < count; i++) {
+        pgvalue_t *v = values[i];
+        if (!v || v->isnull) continue;
+        if (pgvalue_is_text_type(v->typeid)) continue;
+
+        // Convert to text using the type's output function
+        const char *cstr = database_value_text((dbvalue_t *)v);
+        if (!cstr) continue;
+
+        // Create a new text datum
+        text *t = cstring_to_text(cstr);
+        pgvalue_t *new_v = pgvalue_create(PointerGetDatum(t), TEXTOID, -1, v->collation, false);
+        if (new_v) {
+            pgvalue_free(v);
+            values[i] = new_v;
+        }
+    }
+}

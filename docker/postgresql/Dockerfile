@@ -14,6 +14,7 @@ WORKDIR /tmp/cloudsync
 
 # Copy entire source tree (needed for includes and makefiles)
 COPY src/ ./src/
+COPY modules/ ./modules/
 COPY docker/ ./docker/
 COPY Makefile .
 

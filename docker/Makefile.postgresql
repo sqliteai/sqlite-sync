@@ -20,7 +20,9 @@ PG_CORE_SRC = \
 	src/dbutils.c \
 	src/pk.c \
 	src/utils.c \
-	src/lz4.c
+	src/lz4.c \
+	src/block.c \
+	modules/fractional-indexing/fractional_indexing.c
 
 # PostgreSQL-specific implementation
 PG_IMPL_SRC = \
@@ -35,7 +37,7 @@ PG_OBJS = $(PG_ALL_SRC:.c=.o)
 
 # Compiler flags
 # Define POSIX macros as compiler flags to ensure they're defined before any includes
-PG_CPPFLAGS = -I$(PG_INCLUDEDIR) -Isrc -Isrc/postgresql -DCLOUDSYNC_POSTGRESQL_BUILD -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE
+PG_CPPFLAGS = -I$(PG_INCLUDEDIR) -Isrc -Isrc/postgresql -Imodules/fractional-indexing -DCLOUDSYNC_POSTGRESQL_BUILD -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE
 PG_CFLAGS = -fPIC -Wall -Wextra -Wno-unused-parameter -std=c11 -O2
 PG_DEBUG ?= 0
 ifeq ($(PG_DEBUG),1)

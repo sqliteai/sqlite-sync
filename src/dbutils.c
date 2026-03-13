@@ -357,19 +357,33 @@ int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values,
 
     for (int i=0; i+3<ncols; i+=4) {
         const char *table_name = values[i];
-        // const char *col_name = values[i+1];
+        const char *col_name = values[i+1];
         const char *key = values[i+2];
         const char *value = values[i+3];
-        if (strcmp(key, "algo")!=0) continue;
 
-        table_algo algo = cloudsync_algo_from_name(value);
-        char fbuf[2048];
-        int frc = dbutils_table_settings_get_value(data, table_name, "*", "filter", fbuf, sizeof(fbuf));
-        const char *filt = (frc == DBRES_OK && fbuf[0]) ? fbuf : NULL;
-        if (database_create_triggers(data, table_name, algo, filt) != DBRES_OK) return DBRES_MISUSE;
-        if (table_add_to_context(data, algo, table_name) == false) return DBRES_MISUSE;
+        // Table-level algo setting (col_name == "*")
+        if (strcmp(key, "algo") == 0 && col_name && strcmp(col_name, "*") == 0) {
+            table_algo algo = cloudsync_algo_from_name(value);
+            char fbuf[2048];
+            int frc = dbutils_table_settings_get_value(data, table_name, "*", "filter", fbuf, sizeof(fbuf));
+            const char *filt = (frc == DBRES_OK && fbuf[0]) ? fbuf : NULL;
+            if (database_create_triggers(data, table_name, algo, filt) != DBRES_OK) return DBRES_MISUSE;
+            if (table_add_to_context(data, algo, table_name) == false) return DBRES_MISUSE;
+            DEBUG_SETTINGS("load tbl_name: %s value: %s", key, value);
+            continue;
+        }
 
-        DEBUG_SETTINGS("load tbl_name: %s value: %s", key, value);
+        // Column-level algo=block setting (col_name != "*")
+        if (strcmp(key, "algo") == 0 && value && strcmp(value, "block") == 0 &&
+            col_name && strcmp(col_name, "*") != 0) {
+            // Read optional delimiter
+            char dbuf[256];
+            int drc = dbutils_table_settings_get_value(data, table_name, col_name, "delimiter", dbuf, sizeof(dbuf));
+            const char *delim = (drc == DBRES_OK && dbuf[0]) ? dbuf : NULL;
+            cloudsync_setup_block_column(data, table_name, col_name, delim);
+            DEBUG_SETTINGS("load block column: %s.%s delimiter: %s", table_name, col_name, delim ? delim : "(default)");
+            continue;
+        }
     }
 
     return 0;

@@ -68,6 +68,8 @@ typedef struct {
     // Params
     int             nparams;
     Oid             types[MAX_PARAMS];
+    Oid             prepared_types[MAX_PARAMS]; // types used when plan was SPI_prepare'd
+    int             prepared_nparams;           // nparams at prepare time
     Datum           values[MAX_PARAMS];
     char            nulls[MAX_PARAMS];
     bool            executed_nonselect; // non-select executed already
@@ -431,6 +433,17 @@ char *database_build_base_ref (const char *schema, const char *table_name) {
         return cloudsync_memory_mprintf("\"%s\".\"%s\"", escaped_schema, escaped_table);
     }
     return cloudsync_memory_mprintf("\"%s\"", escaped_table);
+}
+
+char *database_build_blocks_ref (const char *schema, const char *table_name) {
+    char escaped_table[512];
+    sql_escape_identifier(table_name, escaped_table, sizeof(escaped_table));
+    if (schema) {
+        char escaped_schema[512];
+        sql_escape_identifier(schema, escaped_schema, sizeof(escaped_schema));
+        return cloudsync_memory_mprintf("\"%s\".\"%s_cloudsync_blocks\"", escaped_schema, escaped_table);
+    }
+    return cloudsync_memory_mprintf("\"%s_cloudsync_blocks\"", escaped_table);
 }
 
 // Schema-aware SQL builder for PostgreSQL: deletes columns not in schema or pkcol.
@@ -1314,7 +1327,7 @@ static int database_create_insert_trigger_internal (cloudsync_context *data, con
 
     char sql[2048];
     snprintf(sql, sizeof(sql),
-             "SELECT string_agg('NEW.' || quote_ident(kcu.column_name), ',' ORDER BY kcu.ordinal_position) "
+             "SELECT string_agg('NEW.' || quote_ident(kcu.column_name) || '::text', ',' ORDER BY kcu.ordinal_position) "
              "FROM information_schema.table_constraints tc "
              "JOIN information_schema.key_column_usage kcu "
              "  ON tc.constraint_name = kcu.constraint_name "
@@ -1582,7 +1595,7 @@ static int database_create_delete_trigger_internal (cloudsync_context *data, con
 
     char sql[2048];
     snprintf(sql, sizeof(sql),
-             "SELECT string_agg('OLD.' || quote_ident(kcu.column_name), ',' ORDER BY kcu.ordinal_position) "
+             "SELECT string_agg('OLD.' || quote_ident(kcu.column_name) || '::text', ',' ORDER BY kcu.ordinal_position) "
              "FROM information_schema.table_constraints tc "
              "JOIN information_schema.key_column_usage kcu "
              "  ON tc.constraint_name = kcu.constraint_name "
@@ -2047,9 +2060,13 @@ int databasevm_step0 (pg_stmt_t *stmt) {
             ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                 errmsg("Unable to prepare SQL statement")));
         }
-        
+
         SPI_keepplan(stmt->plan);
         stmt->plan_is_prepared = true;
+
+        // Save the types used for this plan so we can detect type changes
+        memcpy(stmt->prepared_types, stmt->types, sizeof(Oid) * stmt->nparams);
+        stmt->prepared_nparams = stmt->nparams;
     }
     PG_CATCH();
     {
@@ -2086,6 +2103,26 @@ int databasevm_step (dbvm_t *vm) {
     cloudsync_context *data = stmt->data;
     cloudsync_reset_error(data);
     
+    // If plan is prepared but parameter types have changed since preparation,
+    // free the old plan and re-prepare with new types. This happens when the same
+    // prepared statement is reused with different PK encodings (e.g., integer vs text).
+    if (stmt->plan_is_prepared && stmt->plan) {
+        bool types_changed = (stmt->nparams != stmt->prepared_nparams);
+        if (!types_changed) {
+            for (int i = 0; i < stmt->nparams; i++) {
+                if (stmt->types[i] != stmt->prepared_types[i]) {
+                    types_changed = true;
+                    break;
+                }
+            }
+        }
+        if (types_changed) {
+            SPI_freeplan(stmt->plan);
+            stmt->plan = NULL;
+            stmt->plan_is_prepared = false;
+        }
+    }
+
     if (!stmt->plan_is_prepared) {
         int rc = databasevm_step0(stmt);
         if (rc != DBRES_OK) return rc;

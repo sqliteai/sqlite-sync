@@ -22,6 +22,7 @@
 #include "sql.h"
 #include "utils.h"
 #include "dbutils.h"
+#include "block.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -188,6 +189,14 @@ struct cloudsync_table_context {
     dbvm_t      **col_merge_stmt;               // array of merge insert stmt (indexed by col_name)
     dbvm_t      **col_value_stmt;               // array of column value stmt (indexed by col_name)
     int         *col_id;                        // array of column id
+    col_algo_t  *col_algo;                      // per-column algorithm (normal or block)
+    char        **col_delimiter;                // per-column delimiter for block splitting (NULL = default "\n")
+    bool        has_block_cols;                 // quick check: does this table have any block columns?
+    dbvm_t      *block_value_read_stmt;         // SELECT col_value FROM blocks table
+    dbvm_t      *block_value_write_stmt;        // INSERT OR REPLACE into blocks table
+    dbvm_t      *block_value_delete_stmt;       // DELETE from blocks table
+    dbvm_t      *block_list_stmt;               // SELECT block entries for materialization
+    char        *blocks_ref;                    // schema-qualified blocks table name
     int         ncols;                          // number of non primary key cols
     int         npks;                           // number of primary key cols
     bool        enabled;                        // flag to check if a table is enabled or disabled
@@ -731,8 +740,23 @@ void table_free (cloudsync_table_context *table) {
         if (table->col_id) {
             cloudsync_memory_free(table->col_id);
         }
+        if (table->col_algo) {
+            cloudsync_memory_free(table->col_algo);
+        }
+        if (table->col_delimiter) {
+            for (int i=0; i<table->ncols; ++i) {
+                if (table->col_delimiter[i]) cloudsync_memory_free(table->col_delimiter[i]);
+            }
+            cloudsync_memory_free(table->col_delimiter);
+        }
     }
-    
+
+    if (table->block_value_read_stmt) databasevm_finalize(table->block_value_read_stmt);
+    if (table->block_value_write_stmt) databasevm_finalize(table->block_value_write_stmt);
+    if (table->block_value_delete_stmt) databasevm_finalize(table->block_value_delete_stmt);
+    if (table->block_list_stmt) databasevm_finalize(table->block_list_stmt);
+    if (table->blocks_ref) cloudsync_memory_free(table->blocks_ref);
+
     if (table->name) cloudsync_memory_free(table->name);
     if (table->schema) cloudsync_memory_free(table->schema);
     if (table->meta_ref) cloudsync_memory_free(table->meta_ref);
@@ -1064,6 +1088,12 @@ bool table_add_to_context (cloudsync_context *data, table_algo algo, const char 
         
         table->col_value_stmt = (dbvm_t **)cloudsync_memory_alloc((uint64_t)(sizeof(void *) * ncols));
         if (!table->col_value_stmt) goto abort_add_table;
+
+        table->col_algo = (col_algo_t *)cloudsync_memory_zeroalloc((uint64_t)(sizeof(col_algo_t) * ncols));
+        if (!table->col_algo) goto abort_add_table;
+
+        table->col_delimiter = (char **)cloudsync_memory_zeroalloc((uint64_t)(sizeof(char *) * ncols));
+        if (!table->col_delimiter) goto abort_add_table;
 
         // Pass empty string when schema is NULL; SQL will fall back to current_schema()
         const char *schema = table->schema ? table->schema : "";
@@ -1604,17 +1634,29 @@ int merge_did_cid_win (cloudsync_context *data, cloudsync_table_context *table, 
     }
     
     // rc == DBRES_ROW and col_version == local_version, need to compare values
-    
+
     // retrieve col_value precompiled statement
-    dbvm_t *vm = table_column_lookup(table, col_name, false, NULL);
-    if (!vm) return cloudsync_set_error(data, "Unable to retrieve column value precompiled statement in merge_did_cid_win", DBRES_ERROR);
-    
-    // bind primary key values
-    rc = pk_decode_prikey((char *)pk, (size_t)pklen, pk_decode_bind_callback, (void *)vm);
-    if (rc < 0) {
-        rc = cloudsync_set_dberror(data);
-        dbvm_reset(vm);
-        return rc;
+    bool is_block_col = block_is_block_colname(col_name) && table_has_block_cols(table);
+    dbvm_t *vm;
+    if (is_block_col) {
+        // Block column: read value from blocks table (pk + col_name bindings)
+        vm = table_block_value_read_stmt(table);
+        if (!vm) return cloudsync_set_error(data, "Unable to retrieve block value read statement in merge_did_cid_win", DBRES_ERROR);
+        rc = databasevm_bind_blob(vm, 1, (const void *)pk, pklen);
+        if (rc != DBRES_OK) { dbvm_reset(vm); return cloudsync_set_dberror(data); }
+        rc = databasevm_bind_text(vm, 2, col_name, -1);
+        if (rc != DBRES_OK) { dbvm_reset(vm); return cloudsync_set_dberror(data); }
+    } else {
+        vm = table_column_lookup(table, col_name, false, NULL);
+        if (!vm) return cloudsync_set_error(data, "Unable to retrieve column value precompiled statement in merge_did_cid_win", DBRES_ERROR);
+
+        // bind primary key values
+        rc = pk_decode_prikey((char *)pk, (size_t)pklen, pk_decode_bind_callback, (void *)vm);
+        if (rc < 0) {
+            rc = cloudsync_set_dberror(data);
+            dbvm_reset(vm);
+            return rc;
+        }
     }
         
     // execute vm
@@ -1720,6 +1762,195 @@ int merge_sentinel_only_insert (cloudsync_context *data, cloudsync_table_context
     return merge_set_winner_clock(data, table, pk, pklen, NULL, cl, db_version, site_id, site_len, seq, rowid);
 }
 
+// MARK: - Block-level merge helpers -
+
+// Store a block value in the blocks table
+static int block_store_value (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen, const char *block_colname, dbvalue_t *col_value) {
+    dbvm_t *vm = table->block_value_write_stmt;
+    if (!vm) return cloudsync_set_error(data, "block_store_value: blocks table not initialized", DBRES_MISUSE);
+
+    int rc = databasevm_bind_blob(vm, 1, pk, pklen);
+    if (rc != DBRES_OK) goto cleanup;
+    rc = databasevm_bind_text(vm, 2, block_colname, -1);
+    if (rc != DBRES_OK) goto cleanup;
+    if (col_value) {
+        rc = databasevm_bind_value(vm, 3, col_value);
+    } else {
+        rc = databasevm_bind_null(vm, 3);
+    }
+    if (rc != DBRES_OK) goto cleanup;
+
+    rc = databasevm_step(vm);
+    if (rc == DBRES_DONE) rc = DBRES_OK;
+
+cleanup:
+    if (rc != DBRES_OK) cloudsync_set_dberror(data);
+    databasevm_reset(vm);
+    return rc;
+}
+
+// Delete a block value from the blocks table
+static int block_delete_value (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen, const char *block_colname) {
+    dbvm_t *vm = table->block_value_delete_stmt;
+    if (!vm) return cloudsync_set_error(data, "block_delete_value: blocks table not initialized", DBRES_MISUSE);
+
+    int rc = databasevm_bind_blob(vm, 1, pk, pklen);
+    if (rc != DBRES_OK) goto cleanup;
+    rc = databasevm_bind_text(vm, 2, block_colname, -1);
+    if (rc != DBRES_OK) goto cleanup;
+
+    rc = databasevm_step(vm);
+    if (rc == DBRES_DONE) rc = DBRES_OK;
+
+cleanup:
+    if (rc != DBRES_OK) cloudsync_set_dberror(data);
+    databasevm_reset(vm);
+    return rc;
+}
+
+// Materialize all alive blocks for a base column into the base table
+int block_materialize_column (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen, const char *base_col_name) {
+    if (!table->block_list_stmt) return cloudsync_set_error(data, "block_materialize_column: blocks table not initialized", DBRES_MISUSE);
+
+    // Find column index and delimiter
+    int col_idx = -1;
+    for (int i = 0; i < table->ncols; i++) {
+        if (strcasecmp(table->col_name[i], base_col_name) == 0) {
+            col_idx = i;
+            break;
+        }
+    }
+    if (col_idx < 0) return cloudsync_set_error(data, "block_materialize_column: column not found", DBRES_ERROR);
+    const char *delimiter = table->col_delimiter[col_idx] ? table->col_delimiter[col_idx] : BLOCK_DEFAULT_DELIMITER;
+
+    // Build the LIKE pattern for block col_names: "base_col\x1F%"
+    char *like_pattern = block_build_colname(base_col_name, "%");
+    if (!like_pattern) return DBRES_NOMEM;
+
+    // Query alive blocks from blocks table joined with metadata
+    // block_list_stmt: SELECT b.col_value FROM blocks b JOIN meta m
+    //   ON b.pk = m.pk AND b.col_name = m.col_name
+    //   WHERE b.pk = ? AND b.col_name LIKE ? AND m.col_version % 2 = 1
+    //   ORDER BY b.col_name
+    dbvm_t *vm = table->block_list_stmt;
+    int rc = databasevm_bind_blob(vm, 1, pk, pklen);
+    if (rc != DBRES_OK) { cloudsync_memory_free(like_pattern); databasevm_reset(vm); return rc; }
+    rc = databasevm_bind_text(vm, 2, like_pattern, -1);
+    if (rc != DBRES_OK) { cloudsync_memory_free(like_pattern); databasevm_reset(vm); return rc; }
+    // Bind pk again for the join condition (parameter 3)
+    rc = databasevm_bind_blob(vm, 3, pk, pklen);
+    if (rc != DBRES_OK) { cloudsync_memory_free(like_pattern); databasevm_reset(vm); return rc; }
+    rc = databasevm_bind_text(vm, 4, like_pattern, -1);
+    if (rc != DBRES_OK) { cloudsync_memory_free(like_pattern); databasevm_reset(vm); return rc; }
+
+    // Collect block values
+    const char **block_values = NULL;
+    int block_count = 0;
+    int block_cap = 0;
+
+    while ((rc = databasevm_step(vm)) == DBRES_ROW) {
+        const char *value = database_column_text(vm, 0);
+        if (block_count >= block_cap) {
+            int new_cap = block_cap ? block_cap * 2 : 16;
+            const char **new_arr = (const char **)cloudsync_memory_realloc((void *)block_values, (uint64_t)(new_cap * sizeof(char *)));
+            if (!new_arr) { rc = DBRES_NOMEM; break; }
+            block_values = new_arr;
+            block_cap = new_cap;
+        }
+        block_values[block_count] = value ? cloudsync_string_dup(value) : cloudsync_string_dup("");
+        block_count++;
+    }
+    databasevm_reset(vm);
+    cloudsync_memory_free(like_pattern);
+
+    if (rc != DBRES_DONE && rc != DBRES_OK && rc != DBRES_ROW) {
+        // Free collected values
+        for (int i = 0; i < block_count; i++) cloudsync_memory_free((void *)block_values[i]);
+        if (block_values) cloudsync_memory_free((void *)block_values);
+        return cloudsync_set_dberror(data);
+    }
+
+    // Materialize text (NULL when no alive blocks)
+    char *text = (block_count > 0) ? block_materialize_text(block_values, block_count, delimiter) : NULL;
+    for (int i = 0; i < block_count; i++) cloudsync_memory_free((void *)block_values[i]);
+    if (block_values) cloudsync_memory_free((void *)block_values);
+    if (block_count > 0 && !text) return DBRES_NOMEM;
+
+    // Update the base table column via the col_merge_stmt (with triggers disabled)
+    dbvm_t *merge_vm = table->col_merge_stmt[col_idx];
+    if (!merge_vm) { cloudsync_memory_free(text); return DBRES_ERROR; }
+
+    // Bind PKs
+    rc = pk_decode_prikey((char *)pk, (size_t)pklen, pk_decode_bind_callback, merge_vm);
+    if (rc < 0) { cloudsync_memory_free(text); databasevm_reset(merge_vm); return DBRES_ERROR; }
+
+    // Bind the text value twice (INSERT value + ON CONFLICT UPDATE value)
+    int npks = table->npks;
+    if (text) {
+        rc = databasevm_bind_text(merge_vm, npks + 1, text, -1);
+        if (rc != DBRES_OK) { cloudsync_memory_free(text); databasevm_reset(merge_vm); return rc; }
+        rc = databasevm_bind_text(merge_vm, npks + 2, text, -1);
+        if (rc != DBRES_OK) { cloudsync_memory_free(text); databasevm_reset(merge_vm); return rc; }
+    } else {
+        rc = databasevm_bind_null(merge_vm, npks + 1);
+        if (rc != DBRES_OK) { databasevm_reset(merge_vm); return rc; }
+        rc = databasevm_bind_null(merge_vm, npks + 2);
+        if (rc != DBRES_OK) { databasevm_reset(merge_vm); return rc; }
+    }
+
+    // Execute with triggers disabled
+    table->enabled = 0;
+    SYNCBIT_SET(data);
+    rc = databasevm_step(merge_vm);
+    databasevm_reset(merge_vm);
+    SYNCBIT_RESET(data);
+    table->enabled = 1;
+
+    cloudsync_memory_free(text);
+
+    if (rc == DBRES_DONE) rc = DBRES_OK;
+    if (rc != DBRES_OK) return cloudsync_set_dberror(data);
+    return DBRES_OK;
+}
+
+// Accessor for has_block_cols flag
+bool table_has_block_cols (cloudsync_table_context *table) {
+    return table && table->has_block_cols;
+}
+
+// Get block column algo for a given column index
+col_algo_t table_col_algo (cloudsync_table_context *table, int index) {
+    if (!table || !table->col_algo || index < 0 || index >= table->ncols) return col_algo_normal;
+    return table->col_algo[index];
+}
+
+// Get block delimiter for a given column index
+const char *table_col_delimiter (cloudsync_table_context *table, int index) {
+    if (!table || !table->col_delimiter || index < 0 || index >= table->ncols) return BLOCK_DEFAULT_DELIMITER;
+    return table->col_delimiter[index] ? table->col_delimiter[index] : BLOCK_DEFAULT_DELIMITER;
+}
+
+// Block column struct accessors (for use outside cloudsync.c where struct is opaque)
+dbvm_t *table_block_value_read_stmt (cloudsync_table_context *table) { return table ? table->block_value_read_stmt : NULL; }
+dbvm_t *table_block_value_write_stmt (cloudsync_table_context *table) { return table ? table->block_value_write_stmt : NULL; }
+dbvm_t *table_block_list_stmt (cloudsync_table_context *table) { return table ? table->block_list_stmt : NULL; }
+const char *table_blocks_ref (cloudsync_table_context *table) { return table ? table->blocks_ref : NULL; }
+
+void table_set_col_delimiter (cloudsync_table_context *table, int col_idx, const char *delimiter) {
+    if (!table || !table->col_delimiter || col_idx < 0 || col_idx >= table->ncols) return;
+    if (table->col_delimiter[col_idx]) cloudsync_memory_free(table->col_delimiter[col_idx]);
+    table->col_delimiter[col_idx] = delimiter ? cloudsync_string_dup(delimiter) : NULL;
+}
+
+// Find column index by name
+int table_col_index (cloudsync_table_context *table, const char *col_name) {
+    if (!table || !col_name) return -1;
+    for (int i = 0; i < table->ncols; i++) {
+        if (strcasecmp(table->col_name[i], col_name) == 0) return i;
+    }
+    return -1;
+}
+
 int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, int64_t insert_cl, const char *insert_name, dbvalue_t *insert_value, int64_t insert_col_version, int64_t insert_db_version, const char *insert_site_id, int insert_site_id_len, int64_t insert_seq, int64_t *rowid) {
     // Handle DWS and AWS algorithms here
     // Delete-Wins Set (DWS): table_algo_crdt_dws
@@ -1787,7 +2018,37 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
     // check if the incoming change wins and should be applied
     bool does_cid_win = ((needs_resurrect) || (!row_exists_locally) || (flag));
     if (!does_cid_win) return DBRES_OK;
-    
+
+    // Block-level LWW: if the incoming col_name is a block entry (contains \x1F),
+    // bypass the normal base-table write and instead store the value in the blocks table.
+    // The base table column will be materialized from all alive blocks.
+    if (block_is_block_colname(insert_name) && table->has_block_cols) {
+        // Store or delete block value in blocks table depending on tombstone status
+        if (insert_col_version % 2 == 0) {
+            // Tombstone: remove from blocks table
+            rc = block_delete_value(data, table, insert_pk, insert_pk_len, insert_name);
+        } else {
+            rc = block_store_value(data, table, insert_pk, insert_pk_len, insert_name, insert_value);
+        }
+        if (rc != DBRES_OK) return cloudsync_set_error(data, "Unable to store/delete block value", rc);
+
+        // Set winner clock in metadata
+        rc = merge_set_winner_clock(data, table, insert_pk, insert_pk_len, insert_name,
+                                    insert_col_version, insert_db_version,
+                                    insert_site_id, insert_site_id_len, insert_seq, rowid);
+        if (rc != DBRES_OK) return cloudsync_set_error(data, "Unable to set winner clock for block", rc);
+
+        // Materialize the full column from blocks into the base table
+        char *base_col = block_extract_base_colname(insert_name);
+        if (base_col) {
+            rc = block_materialize_column(data, table, insert_pk, insert_pk_len, base_col);
+            cloudsync_memory_free(base_col);
+            if (rc != DBRES_OK) return cloudsync_set_error(data, "Unable to materialize block column", rc);
+        }
+
+        return DBRES_OK;
+    }
+
     // perform the final column insert or update if the incoming change wins
     if (data->pending_batch) {
         // Propagate row_exists_locally to the batch on the first winning column.
@@ -1804,6 +2065,88 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
     }
 
     return rc;
+}
+
+// MARK: - Block column setup -
+
+int cloudsync_setup_block_column (cloudsync_context *data, const char *table_name, const char *col_name, const char *delimiter) {
+    cloudsync_table_context *table = table_lookup(data, table_name);
+    if (!table) return cloudsync_set_error(data, "cloudsync_setup_block_column: table not found", DBRES_ERROR);
+
+    // Find column index
+    int col_idx = table_col_index(table, col_name);
+    if (col_idx < 0) {
+        char buf[1024];
+        snprintf(buf, sizeof(buf), "cloudsync_setup_block_column: column '%s' not found in table '%s'", col_name, table_name);
+        return cloudsync_set_error(data, buf, DBRES_ERROR);
+    }
+
+    // Set column algo
+    table->col_algo[col_idx] = col_algo_block;
+    table->has_block_cols = true;
+
+    // Set delimiter (can be NULL for default)
+    if (table->col_delimiter[col_idx]) {
+        cloudsync_memory_free(table->col_delimiter[col_idx]);
+        table->col_delimiter[col_idx] = NULL;
+    }
+    if (delimiter) {
+        table->col_delimiter[col_idx] = cloudsync_string_dup(delimiter);
+    }
+
+    // Create blocks table if not already done
+    if (!table->blocks_ref) {
+        table->blocks_ref = database_build_blocks_ref(table->schema, table->name);
+        if (!table->blocks_ref) return DBRES_NOMEM;
+
+        // CREATE TABLE IF NOT EXISTS
+        char *sql = cloudsync_memory_mprintf(SQL_BLOCKS_CREATE_TABLE, table->blocks_ref);
+        if (!sql) return DBRES_NOMEM;
+
+        int rc = database_exec(data, sql);
+        cloudsync_memory_free(sql);
+        if (rc != DBRES_OK) return cloudsync_set_error(data, "Unable to create blocks table", rc);
+
+        // Prepare block statements
+        // Write: upsert into blocks (pk, col_name, col_value)
+        sql = cloudsync_memory_mprintf(SQL_BLOCKS_UPSERT, table->blocks_ref);
+        if (!sql) return DBRES_NOMEM;
+        rc = databasevm_prepare(data, sql, (void **)&table->block_value_write_stmt, DBFLAG_PERSISTENT);
+        cloudsync_memory_free(sql);
+        if (rc != DBRES_OK) return rc;
+
+        // Read: SELECT col_value FROM blocks WHERE pk = ? AND col_name = ?
+        sql = cloudsync_memory_mprintf(SQL_BLOCKS_SELECT, table->blocks_ref);
+        if (!sql) return DBRES_NOMEM;
+        rc = databasevm_prepare(data, sql, (void **)&table->block_value_read_stmt, DBFLAG_PERSISTENT);
+        cloudsync_memory_free(sql);
+        if (rc != DBRES_OK) return rc;
+
+        // Delete: DELETE FROM blocks WHERE pk = ? AND col_name = ?
+        sql = cloudsync_memory_mprintf(SQL_BLOCKS_DELETE, table->blocks_ref);
+        if (!sql) return DBRES_NOMEM;
+        rc = databasevm_prepare(data, sql, (void **)&table->block_value_delete_stmt, DBFLAG_PERSISTENT);
+        cloudsync_memory_free(sql);
+        if (rc != DBRES_OK) return rc;
+
+        // List alive blocks for materialization
+        sql = cloudsync_memory_mprintf(SQL_BLOCKS_LIST_ALIVE, table->blocks_ref, table->meta_ref);
+        if (!sql) return DBRES_NOMEM;
+        rc = databasevm_prepare(data, sql, (void **)&table->block_list_stmt, DBFLAG_PERSISTENT);
+        cloudsync_memory_free(sql);
+        if (rc != DBRES_OK) return rc;
+    }
+
+    // Persist settings
+    int rc = dbutils_table_settings_set_key_value(data, table_name, col_name, "algo", "block");
+    if (rc != DBRES_OK) return rc;
+
+    if (delimiter) {
+        rc = dbutils_table_settings_set_key_value(data, table_name, col_name, "delimiter", delimiter);
+        if (rc != DBRES_OK) return rc;
+    }
+
+    return DBRES_OK;
 }
 
 // MARK: - Private -
@@ -2351,6 +2694,15 @@ cleanup:
 
 int local_mark_insert_or_update_meta (cloudsync_table_context *table, const void *pk, size_t pklen, const char *col_name, int64_t db_version, int seq) {
     return local_mark_insert_or_update_meta_impl(table, pk, pklen, col_name, 1, db_version, seq);
+}
+
+int local_mark_delete_block_meta (cloudsync_table_context *table, const void *pk, size_t pklen, const char *block_colname, int64_t db_version, int seq) {
+    // Mark a block as deleted by setting col_version = 2 (even = deleted)
+    return local_mark_insert_or_update_meta_impl(table, pk, pklen, block_colname, 2, db_version, seq);
+}
+
+int block_delete_value_external (cloudsync_context *data, cloudsync_table_context *table, const void *pk, size_t pklen, const char *block_colname) {
+    return block_delete_value(data, table, pk, (int)pklen, block_colname);
 }
 
 int local_mark_delete_meta (cloudsync_table_context *table, const void *pk, size_t pklen, int64_t db_version, int seq) {

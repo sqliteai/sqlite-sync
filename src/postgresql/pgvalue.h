@@ -39,5 +39,6 @@ bool pgvalue_is_text_type(Oid typeid);
 int pgvalue_dbtype(pgvalue_t *v);
 pgvalue_t **pgvalues_from_array(ArrayType *array, int *out_count);
 pgvalue_t **pgvalues_from_args(FunctionCallInfo fcinfo, int start_arg, int *out_count);
+void pgvalues_normalize_to_text(pgvalue_t **values, int count);
 
 #endif // CLOUDSYNC_PGVALUE_H

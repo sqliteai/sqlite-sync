@@ -155,6 +155,7 @@ char *sql_build_insert_missing_pks_query(const char *schema, const char *table_n
 char *database_table_schema(const char *table_name);
 char *database_build_meta_ref(const char *schema, const char *table_name);
 char *database_build_base_ref(const char *schema, const char *table_name);
+char *database_build_blocks_ref(const char *schema, const char *table_name);
 
 // OPAQUE STRUCT used by pk_context functions
 typedef struct cloudsync_pk_decode_bind_context cloudsync_pk_decode_bind_context;

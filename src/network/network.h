@@ -8,7 +8,7 @@
 #ifndef __CLOUDSYNC_NETWORK__
 #define __CLOUDSYNC_NETWORK__
 
-#include "cloudsync.h"
+#include "../cloudsync.h"
 
 #ifndef SQLITE_CORE
 #include "sqlite3ext.h"

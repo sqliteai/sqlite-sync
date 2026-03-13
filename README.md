@@ -16,10 +16,12 @@ In simple terms, CRDTs make it possible for multiple users to **edit shared data
 - [Key Features](#key-features)
 - [Built-in Network Layer](#built-in-network-layer)
 - [Row-Level Security](#row-level-security)
+- [Block-Level LWW](#block-level-lww)
 - [What Can You Build with SQLite Sync?](#what-can-you-build-with-sqlite-sync)
 - [Documentation](#documentation)
 - [Installation](#installation)
 - [Getting Started](#getting-started)
+- [Block-Level LWW Example](#block-level-lww-example)
 - [Database Schema Recommendations](#database-schema-recommendations)
   - [Primary Key Requirements](#primary-key-requirements)
   - [Column Constraint Guidelines](#column-constraint-guidelines)
@@ -32,6 +34,7 @@ In simple terms, CRDTs make it possible for multiple users to **edit shared data
 
 - **Offline-First by Design**: Works seamlessly even when devices are offline. Changes are queued locally and synced automatically when connectivity is restored.
 - **CRDT-Based Conflict Resolution**: Merges updates deterministically and efficiently, ensuring eventual consistency across all replicas without the need for complex merge logic.
+- **Block-Level LWW for Text**: Fine-grained conflict resolution for text columns. Instead of overwriting the entire cell, changes are tracked and merged at the line (or paragraph) level, so concurrent edits to different parts of the same text are preserved.
 - **Embedded Network Layer**: No external libraries or sync servers required. SQLiteSync handles connection setup, message encoding, retries, and state reconciliation internally.
 - **Drop-in Simplicity**: Just load the extension into SQLite and start syncing. No need to implement custom protocols or state machines.
 - **Efficient and Resilient**: Optimized binary encoding, automatic batching, and robust retry logic make synchronization fast and reliable even on flaky networks.
@@ -68,6 +71,30 @@ For example:
 - **Simplified development**: No need to implement permission logic in your application—define policies once in the database and they apply everywhere.
 
 For more information, see the [SQLite Cloud RLS documentation](https://docs.sqlitecloud.io/docs/rls).
+
+## Block-Level LWW
+
+Standard CRDT sync resolves conflicts at the **cell level**: if two devices edit the same column of the same row, one value wins entirely. This works well for short values like names or statuses, but for longer text content — documents, notes, descriptions — it means the entire text is replaced even if the edits were in different parts.
+
+**Block-Level LWW** (Last-Writer-Wins) solves this by splitting text columns into **blocks** (lines by default) and tracking each block independently. When two devices edit different lines of the same text, **both edits are preserved** after sync. Only when two devices edit the *same* line does LWW conflict resolution apply.
+
+### How It Works
+
+1. **Enable block tracking** on a text column using `cloudsync_set_column()`.
+2. On INSERT or UPDATE, SQLite Sync automatically splits the text into blocks using the configured delimiter (default: newline `\n`).
+3. Each block gets a unique fractional index position, enabling insertions between existing blocks without reindexing.
+4. During sync, changes are merged block-by-block rather than replacing the whole cell.
+5. Use `cloudsync_text_materialize()` to reconstruct the full text from blocks on demand, or read the column directly (it is updated automatically after merge).
+
+### Key Properties
+
+- **Non-conflicting edits are preserved**: Two users editing different lines of the same document both see their changes after sync.
+- **Same-line conflicts use LWW**: If two users edit the same line, the last writer wins — consistent with standard CRDT behavior.
+- **Custom delimiters**: Use paragraph separators (`\n\n`), sentence boundaries, or any string as the block delimiter.
+- **Mixed columns**: A table can have both regular LWW columns and block-level LWW columns side by side.
+- **Transparent reads**: The base column always contains the current full text. Block tracking is an internal mechanism; your queries work unchanged.
+
+For setup instructions and a complete example, see [Block-Level LWW Example](#block-level-lww-example). For API details, see the [API Reference](./API.md).
 
 ### What Can You Build with SQLite Sync?
 
@@ -108,6 +135,7 @@ SQLite Sync is ideal for building collaborative and distributed apps across web,
 For detailed information on all available functions, their parameters, and examples, refer to the [comprehensive API Reference](./API.md). The API includes:
 
 - **Configuration Functions** — initialize, enable, and disable sync on tables
+- **Block-Level LWW Functions** — configure block tracking on text columns and materialize text from blocks
 - **Helper Functions** — version info, site IDs, UUID generation
 - **Schema Alteration Functions** — safely alter synced tables
 - **Network Functions** — connect, authenticate, send/receive changes, and monitor sync status
@@ -352,9 +380,114 @@ SELECT cloudsync_terminate();
 
 See the [examples](./examples/simple-todo-db/) directory for a comprehensive walkthrough including:
 - Multi-device collaboration
-- Offline scenarios  
+- Offline scenarios
 - Row-level security setup
 - Conflict resolution demonstrations
+
+## Block-Level LWW Example
+
+This example shows how to enable block-level text sync on a notes table, so that concurrent edits to different lines are merged instead of overwritten.
+
+### Setup
+
+```sql
+-- Load the extension
+.load ./cloudsync
+
+-- Create a table with a text column for long-form content
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT ''
+);
+
+-- Initialize sync on the table
+SELECT cloudsync_init('notes');
+
+-- Enable block-level LWW on the "body" column
+SELECT cloudsync_set_column('notes', 'body', 'algo', 'block');
+```
+
+After this setup, every INSERT or UPDATE to the `body` column automatically splits the text into blocks (one per line) and tracks each block independently.
+
+### Two-Device Scenario
+
+```sql
+-- Device A: create a note
+INSERT INTO notes (id, title, body) VALUES (
+    'note-001',
+    'Meeting Notes',
+    'Line 1: Welcome
+Line 2: Agenda
+Line 3: Action items'
+);
+
+-- Sync Device A -> Cloud -> Device B
+-- (Both devices now have the same 3-line note)
+```
+
+```sql
+-- Device A (offline): edit line 1
+UPDATE notes SET body = 'Line 1: Welcome everyone
+Line 2: Agenda
+Line 3: Action items' WHERE id = 'note-001';
+
+-- Device B (offline): edit line 3
+UPDATE notes SET body = 'Line 1: Welcome
+Line 2: Agenda
+Line 3: Action items - DONE' WHERE id = 'note-001';
+```
+
+```sql
+-- After both devices sync, the merged result is:
+-- 'Line 1: Welcome everyone
+--  Line 2: Agenda
+--  Line 3: Action items - DONE'
+--
+-- Both edits are preserved because they affected different lines.
+```
+
+### Custom Delimiter
+
+For paragraph-level tracking (useful for long-form documents), set a custom delimiter:
+
+```sql
+-- Use double newline as delimiter (paragraph separator)
+SELECT cloudsync_set_column('notes', 'body', 'delimiter', '
+
+');
+```
+
+### Materializing Text
+
+After a merge, the `body` column contains the reconstructed text automatically. You can also manually trigger materialization:
+
+```sql
+-- Reconstruct body from blocks for a specific row
+SELECT cloudsync_text_materialize('notes', 'body', 'note-001');
+
+-- Then read normally
+SELECT body FROM notes WHERE id = 'note-001';
+```
+
+### Mixed Columns
+
+Block-level LWW can be enabled on specific columns while other columns use standard cell-level LWW:
+
+```sql
+CREATE TABLE docs (
+    id TEXT PRIMARY KEY NOT NULL,
+    title TEXT NOT NULL DEFAULT '',    -- standard LWW (cell-level)
+    body TEXT NOT NULL DEFAULT '',     -- block LWW (line-level)
+    status TEXT NOT NULL DEFAULT ''    -- standard LWW (cell-level)
+);
+
+SELECT cloudsync_init('docs');
+SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');
+
+-- Now: concurrent edits to "title" or "status" use normal LWW,
+-- while concurrent edits to "body" merge at the line level.
+```
 
 ## 📦 Integrations
 

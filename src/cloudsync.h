@@ -12,12 +12,13 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "database.h"
+#include "block.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define CLOUDSYNC_VERSION                       "0.9.118"
+#define CLOUDSYNC_VERSION                       "0.9.200"
 #define CLOUDSYNC_MAX_TABLENAME_LEN             512
 
 #define CLOUDSYNC_VALUE_NOTSET                  -1
@@ -103,11 +104,28 @@ const char *table_schema (cloudsync_table_context *table);
 int table_remove (cloudsync_context *data, cloudsync_table_context *table);
 void table_free (cloudsync_table_context *table);
 
+// Block-level LWW support
+bool table_has_block_cols (cloudsync_table_context *table);
+col_algo_t table_col_algo (cloudsync_table_context *table, int index);
+const char *table_col_delimiter (cloudsync_table_context *table, int index);
+int table_col_index (cloudsync_table_context *table, const char *col_name);
+int block_materialize_column (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen, const char *base_col_name);
+int cloudsync_setup_block_column (cloudsync_context *data, const char *table_name, const char *col_name, const char *delimiter);
+
+// Block column accessors (avoids accessing opaque struct from outside cloudsync.c)
+dbvm_t *table_block_value_read_stmt (cloudsync_table_context *table);
+dbvm_t *table_block_value_write_stmt (cloudsync_table_context *table);
+dbvm_t *table_block_list_stmt (cloudsync_table_context *table);
+const char *table_blocks_ref (cloudsync_table_context *table);
+void table_set_col_delimiter (cloudsync_table_context *table, int col_idx, const char *delimiter);
+
 // local merge/apply
 int local_mark_insert_sentinel_meta (cloudsync_table_context *table, const void *pk, size_t pklen, int64_t db_version, int seq);
 int local_update_sentinel (cloudsync_table_context *table, const void *pk, size_t pklen, int64_t db_version, int seq);
 int local_mark_insert_or_update_meta (cloudsync_table_context *table, const void *pk, size_t pklen, const char *col_name, int64_t db_version, int seq);
 int local_mark_delete_meta (cloudsync_table_context *table, const void *pk, size_t pklen, int64_t db_version, int seq);
+int local_mark_delete_block_meta (cloudsync_table_context *table, const void *pk, size_t pklen, const char *block_colname, int64_t db_version, int seq);
+int block_delete_value_external (cloudsync_context *data, cloudsync_table_context *table, const void *pk, size_t pklen, const char *block_colname);
 int local_drop_meta (cloudsync_table_context *table, const void *pk, size_t pklen);
 int local_update_move_meta (cloudsync_table_context *table, const void *pk, size_t pklen, const void *pk2, size_t pklen2, int64_t db_version);
 

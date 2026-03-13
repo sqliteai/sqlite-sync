@@ -7850,6 +7850,2300 @@ finalize:
     return result;
 }
 
+// MARK: - Block-level LWW Tests -
+
+static int64_t do_select_int(sqlite3 *db, const char *sql) {
+    sqlite3_stmt *stmt = NULL;
+    int64_t val = -1;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            val = sqlite3_column_int64(stmt, 0);
+        }
+    }
+    if (stmt) sqlite3_finalize(stmt);
+    return val;
+}
+
+static char *do_select_text(sqlite3 *db, const char *sql) {
+    sqlite3_stmt *stmt = NULL;
+    char *val = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *t = (const char *)sqlite3_column_text(stmt, 0);
+            if (t) val = sqlite3_mprintf("%s", t);
+        }
+    }
+    if (stmt) sqlite3_finalize(stmt);
+    return val;
+}
+
+bool do_test_block_lww_insert(int nclients, bool print_result, bool cleanup_databases) {
+    // Test: INSERT into a table with a block column properly splits text into blocks
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) { printf("block_insert: CREATE TABLE failed: %s\n", sqlite3_errmsg(db[i])); goto fail; }
+
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) { printf("block_insert: cloudsync_init failed: %s\n", sqlite3_errmsg(db[i])); goto fail; }
+
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) { printf("block_insert: set_column failed: %s\n", sqlite3_errmsg(db[i])); goto fail; }
+    }
+
+    // Insert a document with 3 lines
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Line 1\nLine 2\nLine 3');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_insert: INSERT failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    // Verify blocks were created in the blocks table
+    int64_t block_count = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc1');");
+    if (block_count != 3) {
+        printf("block_insert: expected 3 blocks, got %" PRId64 "\n", block_count);
+        goto fail;
+    }
+
+    // Verify metadata entries for blocks (col_name contains \x1F)
+    int64_t meta_count = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync WHERE col_name LIKE 'body' || x'1f' || '%';");
+    if (meta_count != 3) {
+        printf("block_insert: expected 3 block metadata entries, got %" PRId64 "\n", meta_count);
+        goto fail;
+    }
+
+    // Verify no metadata entry for the whole 'body' column
+    int64_t whole_meta = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync WHERE col_name = 'body';");
+    if (whole_meta != 0) {
+        printf("block_insert: expected 0 whole-column metadata entries, got %" PRId64 "\n", whole_meta);
+        goto fail;
+    }
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return true;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+bool do_test_block_lww_update(int nclients, bool print_result, bool cleanup_databases) {
+    // Test: UPDATE on a block column performs block diff
+    sqlite3 *db[1] = {NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    db[0] = do_create_database_file(0, timestamp, test_counter++);
+    if (!db[0]) return false;
+
+    rc = sqlite3_exec(db[0], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Insert initial text
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'AAA\nBBB\nCCC');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_update: INSERT failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    int64_t blocks_before = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks;");
+
+    // Update: change middle line and add a new line
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'AAA\nXXX\nCCC\nDDD' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_update: UPDATE failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    int64_t blocks_after = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks;");
+
+    // Should have 4 blocks after update (AAA, XXX, CCC, DDD)
+    if (blocks_after != 4) {
+        printf("block_update: expected 4 blocks after update, got %" PRId64 " (before: %" PRId64 ")\n", blocks_after, blocks_before);
+        goto fail;
+    }
+
+    close_db(db[0]);
+    return true;
+
+fail:
+    if (db[0]) close_db(db[0]);
+    return false;
+}
+
+bool do_test_block_lww_sync(int nclients, bool print_result, bool cleanup_databases) {
+    // Test: Two sites edit different blocks of the same document; after sync, both edits are preserved
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Site 0 inserts the initial document
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Line A\nLine B\nLine C');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_sync: INSERT db[0] failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    // Sync initial state: db[0] -> db[1] so both have the same document
+    if (!do_merge_using_payload(db[0], db[1], false, true)) { printf("block_sync: initial merge 0->1 failed\n"); goto fail; }
+
+    // Site 0: edit first line
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'EDITED A\nLine B\nLine C' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_sync: UPDATE db[0] failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    // Site 1: edit third line
+    rc = sqlite3_exec(db[1], "UPDATE docs SET body = 'Line A\nLine B\nEDITED C' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_sync: UPDATE db[1] failed: %s\n", sqlite3_errmsg(db[1])); goto fail; }
+
+    // Sync: db[0] -> db[1] (send site 0's edits)
+    if (!do_merge_using_payload(db[0], db[1], true, true)) { printf("block_sync: merge 0->1 failed\n"); goto fail; }
+    // Sync: db[1] -> db[0] (send site 1's edits)
+    if (!do_merge_using_payload(db[1], db[0], true, true)) { printf("block_sync: merge 1->0 failed\n"); goto fail; }
+
+    // Both databases should now have the merged result: "EDITED A\nLine B\nEDITED C"
+    char *body0 = do_select_text(db[0], "SELECT body FROM docs WHERE id = 'doc1';");
+    char *body1 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+
+    bool ok = true;
+    if (!body0 || !body1) {
+        printf("block_sync: could not read body from one or both databases\n");
+        ok = false;
+    } else if (strcmp(body0, body1) != 0) {
+        printf("block_sync: bodies don't match after sync:\n  db[0]: %s\n  db[1]: %s\n", body0, body1);
+        ok = false;
+    } else {
+        // Check that both edits were preserved
+        if (!strstr(body0, "EDITED A")) {
+            printf("block_sync: missing 'EDITED A' in result: %s\n", body0);
+            ok = false;
+        }
+        if (!strstr(body0, "EDITED C")) {
+            printf("block_sync: missing 'EDITED C' in result: %s\n", body0);
+            ok = false;
+        }
+        if (!strstr(body0, "Line B")) {
+            printf("block_sync: missing 'Line B' in result: %s\n", body0);
+            ok = false;
+        }
+    }
+
+    if (body0) sqlite3_free(body0);
+    if (body1) sqlite3_free(body1);
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+bool do_test_block_lww_delete(int nclients, bool print_result, bool cleanup_databases) {
+    // Test: DELETE on a row with block columns marks tombstone and block metadata is dropped
+    sqlite3 *db[1] = {NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    db[0] = do_create_database_file(0, timestamp, test_counter++);
+    if (!db[0]) return false;
+
+    rc = sqlite3_exec(db[0], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Insert a document
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Line A\nLine B\nLine C');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_delete: INSERT failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    // Verify blocks and metadata exist
+    int64_t blocks_before = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks;");
+    if (blocks_before != 3) {
+        printf("block_delete: expected 3 blocks before delete, got %" PRId64 "\n", blocks_before);
+        goto fail;
+    }
+    int64_t meta_before = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync WHERE col_name LIKE 'body' || x'1f' || '%';");
+    if (meta_before != 3) {
+        printf("block_delete: expected 3 block metadata before delete, got %" PRId64 "\n", meta_before);
+        goto fail;
+    }
+
+    // Delete the row
+    rc = sqlite3_exec(db[0], "DELETE FROM docs WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_delete: DELETE failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    // Verify metadata tombstone exists (delete sentinel)
+    int64_t tombstone = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync WHERE col_name = '__[RIP]__' AND col_version % 2 = 0;");
+    if (tombstone != 1) {
+        printf("block_delete: expected 1 delete tombstone, got %" PRId64 "\n", tombstone);
+        goto fail;
+    }
+
+    // Verify block metadata was dropped (local_drop_meta removes non-tombstone metadata)
+    int64_t meta_after = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync WHERE col_name LIKE 'body' || x'1f' || '%';");
+    if (meta_after != 0) {
+        printf("block_delete: expected 0 block metadata after delete, got %" PRId64 "\n", meta_after);
+        goto fail;
+    }
+
+    // Row should be gone from base table
+    int64_t row_count = do_select_int(db[0], "SELECT count(*) FROM docs WHERE id = 'doc1';");
+    if (row_count != 0) {
+        printf("block_delete: row still in base table after delete\n");
+        goto fail;
+    }
+
+    close_db(db[0]);
+    return true;
+
+fail:
+    if (db[0]) close_db(db[0]);
+    return false;
+}
+
+bool do_test_block_lww_materialize(int nclients, bool print_result, bool cleanup_databases) {
+    // Test: cloudsync_text_materialize reconstructs text from blocks after sync
+    // Sync to a second db where body column is empty, then materialize there
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert multi-line text on db[0]
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Alpha\nBravo\nCharlie\nDelta\nEcho');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_materialize: INSERT failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    // Sync to db[1] — body column on db[1] will be populated by payload_apply but
+    // materialize should reconstruct correctly from blocks
+    if (!do_merge_using_payload(db[0], db[1], false, true)) { printf("block_materialize: merge failed\n"); goto fail; }
+
+    // Materialize on db[1] should reconstruct from blocks
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_materialize: materialize failed: %s\n", sqlite3_errmsg(db[1])); goto fail; }
+
+    char *body = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+    if (!body) {
+        printf("block_materialize: body is NULL after materialize\n");
+        goto fail;
+    }
+    if (strcmp(body, "Alpha\nBravo\nCharlie\nDelta\nEcho") != 0) {
+        printf("block_materialize: body mismatch: %s\n", body);
+        sqlite3_free(body);
+        goto fail;
+    }
+    sqlite3_free(body);
+
+    // Also test materialize on db[0] (where body already matches)
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_materialize: materialize on db[0] failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    char *body0 = do_select_text(db[0], "SELECT body FROM docs WHERE id = 'doc1';");
+    if (!body0 || strcmp(body0, "Alpha\nBravo\nCharlie\nDelta\nEcho") != 0) {
+        printf("block_materialize: body0 mismatch: %s\n", body0 ? body0 : "NULL");
+        if (body0) sqlite3_free(body0);
+        goto fail;
+    }
+    sqlite3_free(body0);
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return true;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+bool do_test_block_lww_empty_text(int nclients, bool print_result, bool cleanup_databases) {
+    // Test: INSERT with empty body creates a single empty block
+    sqlite3 *db[1] = {NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    db[0] = do_create_database_file(0, timestamp, test_counter++);
+    if (!db[0]) return false;
+
+    rc = sqlite3_exec(db[0], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Insert empty text
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', '');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_empty: INSERT failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    // Should have exactly 1 block (empty content)
+    int64_t block_count = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks;");
+    if (block_count != 1) {
+        printf("block_empty: expected 1 block for empty text, got %" PRId64 "\n", block_count);
+        goto fail;
+    }
+
+    // Insert NULL text
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc2', NULL);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_empty: INSERT NULL failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    // NULL body should also create 1 block (treated as empty)
+    int64_t null_blocks = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc2');");
+    if (null_blocks != 1) {
+        printf("block_empty: expected 1 block for NULL text, got %" PRId64 "\n", null_blocks);
+        goto fail;
+    }
+
+    // Update from empty to multi-line
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'Line1\nLine2' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_empty: UPDATE from empty failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    int64_t updated_blocks = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc1');");
+    if (updated_blocks != 2) {
+        printf("block_empty: expected 2 blocks after update from empty, got %" PRId64 "\n", updated_blocks);
+        goto fail;
+    }
+
+    close_db(db[0]);
+    return true;
+
+fail:
+    if (db[0]) close_db(db[0]);
+    return false;
+}
+
+bool do_test_block_lww_conflict(int nclients, bool print_result, bool cleanup_databases) {
+    // Test: Two sites edit the SAME line concurrently; LWW picks the later write
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Site 0 inserts initial document
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Same\nMiddle\nEnd');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_conflict: INSERT db[0] failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    // Sync initial state: db[0] -> db[1]
+    if (!do_merge_values(db[0], db[1], false)) { printf("block_conflict: initial merge failed\n"); goto fail; }
+
+    // Site 0: edit first line
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'Site0\nMiddle\nEnd' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_conflict: UPDATE db[0] failed\n"); goto fail; }
+
+    // Site 1: also edit first line (conflict!)
+    rc = sqlite3_exec(db[1], "UPDATE docs SET body = 'Site1\nMiddle\nEnd' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_conflict: UPDATE db[1] failed\n"); goto fail; }
+
+    // Sync both ways using row-by-row merge
+    if (!do_merge_values(db[0], db[1], true)) { printf("block_conflict: merge 0->1 failed\n"); goto fail; }
+    if (!do_merge_values(db[1], db[0], true)) { printf("block_conflict: merge 1->0 failed\n"); goto fail; }
+
+    // Materialize on both databases to reconstruct body from blocks
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_conflict: materialize db[0] failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_conflict: materialize db[1] failed: %s\n", sqlite3_errmsg(db[1])); goto fail; }
+
+    // Both databases should converge (same value)
+    char *body0 = do_select_text(db[0], "SELECT body FROM docs WHERE id = 'doc1';");
+    char *body1 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+
+    bool ok = true;
+    if (!body0 || !body1) {
+        printf("block_conflict: could not read body from databases\n");
+        ok = false;
+    } else if (strcmp(body0, body1) != 0) {
+        printf("block_conflict: bodies don't match after sync:\n  db[0]: %s\n  db[1]: %s\n", body0, body1);
+        ok = false;
+    } else {
+        // Should contain either "Site0" or "Site1" (LWW picks one), plus unchanged lines
+        if (!strstr(body0, "Middle")) {
+            printf("block_conflict: missing 'Middle' in result: %s\n", body0);
+            ok = false;
+        }
+        if (!strstr(body0, "End")) {
+            printf("block_conflict: missing 'End' in result: %s\n", body0);
+            ok = false;
+        }
+        // One of the conflicting edits should win
+        if (!strstr(body0, "Site0") && !strstr(body0, "Site1")) {
+            printf("block_conflict: neither 'Site0' nor 'Site1' in result: %s\n", body0);
+            ok = false;
+        }
+    }
+
+    if (body0) sqlite3_free(body0);
+    if (body1) sqlite3_free(body1);
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+bool do_test_block_lww_multi_update(int nclients, bool print_result, bool cleanup_databases) {
+    // Test: Multiple successive updates correctly maintain block state
+    sqlite3 *db[1] = {NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    db[0] = do_create_database_file(0, timestamp, test_counter++);
+    if (!db[0]) return false;
+
+    rc = sqlite3_exec(db[0], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Insert initial text (3 lines)
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'A\nB\nC');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_multi: INSERT failed\n"); goto fail; }
+
+    // Update 1: remove middle line (3 -> 2 blocks)
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'A\nC' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_multi: UPDATE 1 failed\n"); goto fail; }
+
+    int64_t blocks1 = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks;");
+    if (blocks1 != 2) { printf("block_multi: expected 2 blocks after update 1, got %" PRId64 "\n", blocks1); goto fail; }
+
+    // Update 2: add two lines (2 -> 4 blocks)
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'A\nX\nC\nY' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_multi: UPDATE 2 failed\n"); goto fail; }
+
+    int64_t blocks2 = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks;");
+    if (blocks2 != 4) { printf("block_multi: expected 4 blocks after update 2, got %" PRId64 "\n", blocks2); goto fail; }
+
+    // Update 3: change everything to a single line (4 -> 1 block)
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'SINGLE' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_multi: UPDATE 3 failed\n"); goto fail; }
+
+    int64_t blocks3 = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks;");
+    if (blocks3 != 1) { printf("block_multi: expected 1 block after update 3, got %" PRId64 "\n", blocks3); goto fail; }
+
+    // Materialize and verify
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_multi: materialize failed\n"); goto fail; }
+
+    char *body = do_select_text(db[0], "SELECT body FROM docs WHERE id = 'doc1';");
+    if (!body || strcmp(body, "SINGLE") != 0) {
+        printf("block_multi: expected 'SINGLE', got '%s'\n", body ? body : "NULL");
+        if (body) sqlite3_free(body);
+        goto fail;
+    }
+    sqlite3_free(body);
+
+    close_db(db[0]);
+    return true;
+
+fail:
+    if (db[0]) close_db(db[0]);
+    return false;
+}
+
+bool do_test_block_lww_reinsert(int nclients, bool print_result, bool cleanup_databases) {
+    // Test: DELETE then re-INSERT recreates blocks properly
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert, delete, then re-insert with different content
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Old1\nOld2');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_reinsert: initial INSERT failed\n"); goto fail; }
+
+    rc = sqlite3_exec(db[0], "DELETE FROM docs WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_reinsert: DELETE failed\n"); goto fail; }
+
+    // Block metadata should be dropped (blocks table entries are orphaned by design)
+    int64_t meta_after_del = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync WHERE col_name LIKE 'body' || x'1f' || '%';");
+    if (meta_after_del != 0) {
+        printf("block_reinsert: expected 0 block metadata after delete, got %" PRId64 "\n", meta_after_del);
+        goto fail;
+    }
+
+    // Re-insert with new content
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'New1\nNew2\nNew3');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_reinsert: re-INSERT failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    // Check block metadata was recreated (3 new block entries)
+    int64_t meta_after_reinsert = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync WHERE col_name LIKE 'body' || x'1f' || '%';");
+    if (meta_after_reinsert != 3) {
+        printf("block_reinsert: expected 3 block metadata after re-insert, got %" PRId64 "\n", meta_after_reinsert);
+        goto fail;
+    }
+
+    // Sync to db[1] and verify
+    if (!do_merge_using_payload(db[0], db[1], false, true)) { printf("block_reinsert: merge failed\n"); goto fail; }
+
+    // Materialize on db[1]
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_reinsert: materialize on db[1] failed: %s\n", sqlite3_errmsg(db[1])); goto fail; }
+
+    char *body1 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+    if (!body1 || strcmp(body1, "New1\nNew2\nNew3") != 0) {
+        printf("block_reinsert: body mismatch on db[1]: %s\n", body1 ? body1 : "NULL");
+        if (body1) sqlite3_free(body1);
+        goto fail;
+    }
+    sqlite3_free(body1);
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return true;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+bool do_test_block_lww_add_lines(int nclients, bool print_result, bool cleanup_databases) {
+    // Test: Both sites add lines at different positions; after sync, all lines are present
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Site 0 inserts initial doc
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Line1\nLine2');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Sync initial: 0 -> 1
+    if (!do_merge_using_payload(db[0], db[1], false, true)) goto fail;
+
+    // Site 0: append a line at the end
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'Line1\nLine2\nAppended0' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Site 1: insert a line in the middle
+    rc = sqlite3_exec(db[1], "UPDATE docs SET body = 'Line1\nInserted1\nLine2' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Sync both ways
+    if (!do_merge_using_payload(db[0], db[1], true, true)) goto fail;
+    if (!do_merge_using_payload(db[1], db[0], true, true)) goto fail;
+
+    // Both should converge
+    char *body0 = do_select_text(db[0], "SELECT body FROM docs WHERE id = 'doc1';");
+    char *body1 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+
+    bool ok = true;
+    if (!body0 || !body1) {
+        printf("block_add_lines: could not read body\n");
+        ok = false;
+    } else if (strcmp(body0, body1) != 0) {
+        printf("block_add_lines: bodies don't match:\n  db[0]: %s\n  db[1]: %s\n", body0, body1);
+        ok = false;
+    } else {
+        // All original and added lines should be present
+        if (!strstr(body0, "Line1")) { printf("block_add_lines: missing Line1\n"); ok = false; }
+        if (!strstr(body0, "Line2")) { printf("block_add_lines: missing Line2\n"); ok = false; }
+        if (!strstr(body0, "Appended0")) { printf("block_add_lines: missing Appended0\n"); ok = false; }
+        if (!strstr(body0, "Inserted1")) { printf("block_add_lines: missing Inserted1\n"); ok = false; }
+    }
+
+    if (body0) sqlite3_free(body0);
+    if (body1) sqlite3_free(body1);
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test 1: Non-conflicting edits on different blocks — both edits preserved
+bool do_test_block_lww_noconflict(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Site 0 inserts initial document with 3 lines
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Line1\nLine2\nLine3');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Sync initial: 0 -> 1
+    if (!do_merge_values(db[0], db[1], false)) goto fail;
+
+    // Site 0: edit first line only
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'EditedByA\nLine2\nLine3' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Site 1: edit third line only (no conflict — different block)
+    rc = sqlite3_exec(db[1], "UPDATE docs SET body = 'Line1\nLine2\nEditedByB' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Sync both ways
+    if (!do_merge_values(db[0], db[1], true)) goto fail;
+    if (!do_merge_values(db[1], db[0], true)) goto fail;
+
+    // Materialize on both
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    char *body0 = do_select_text(db[0], "SELECT body FROM docs WHERE id = 'doc1';");
+    char *body1 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+
+    bool ok = true;
+    if (!body0 || !body1 || strcmp(body0, body1) != 0) {
+        printf("noconflict: bodies diverged: [%s] vs [%s]\n", body0 ? body0 : "NULL", body1 ? body1 : "NULL");
+        ok = false;
+    } else {
+        // BOTH edits should be preserved (this is the key value of block-level LWW)
+        if (!strstr(body0, "EditedByA")) { printf("noconflict: missing EditedByA\n"); ok = false; }
+        if (!strstr(body0, "Line2")) { printf("noconflict: missing Line2\n"); ok = false; }
+        if (!strstr(body0, "EditedByB")) { printf("noconflict: missing EditedByB\n"); ok = false; }
+    }
+
+    if (body0) sqlite3_free(body0);
+    if (body1) sqlite3_free(body1);
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test 2: Concurrent add + edit — Site A adds a line, Site B modifies an existing line
+bool do_test_block_lww_add_and_edit(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Initial doc
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Alpha\nBravo');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    if (!do_merge_values(db[0], db[1], false)) goto fail;
+
+    // Site 0: add a new line at the end
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'Alpha\nBravo\nCharlie' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Site 1: modify first line
+    rc = sqlite3_exec(db[1], "UPDATE docs SET body = 'AlphaEdited\nBravo' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Sync both ways
+    if (!do_merge_values(db[0], db[1], true)) goto fail;
+    if (!do_merge_values(db[1], db[0], true)) goto fail;
+
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    char *body0 = do_select_text(db[0], "SELECT body FROM docs WHERE id = 'doc1';");
+    char *body1 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+
+    bool ok = true;
+    if (!body0 || !body1 || strcmp(body0, body1) != 0) {
+        printf("add_and_edit: bodies diverged: [%s] vs [%s]\n", body0 ? body0 : "NULL", body1 ? body1 : "NULL");
+        ok = false;
+    } else {
+        // The added line and the edit should both be present
+        if (!strstr(body0, "Charlie")) { printf("add_and_edit: missing Charlie (added line)\n"); ok = false; }
+        if (!strstr(body0, "Bravo")) { printf("add_and_edit: missing Bravo\n"); ok = false; }
+        // First line: either AlphaEdited wins (from site 1) or Alpha (from site 0) — depends on LWW
+        // But the added line Charlie must survive regardless
+    }
+
+    if (body0) sqlite3_free(body0);
+    if (body1) sqlite3_free(body1);
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test 3: Three-way sync — 3 databases with overlapping edits converge
+bool do_test_block_lww_three_way(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[3] = {NULL, NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 3; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Site 0 creates initial doc
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'L1\nL2\nL3\nL4');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Sync 0 -> 1, 0 -> 2
+    if (!do_merge_values(db[0], db[1], false)) goto fail;
+    if (!do_merge_values(db[0], db[2], false)) goto fail;
+
+    // Site 0: edit line 1
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'S0\nL2\nL3\nL4' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Site 1: edit line 2
+    rc = sqlite3_exec(db[1], "UPDATE docs SET body = 'L1\nS1\nL3\nL4' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Site 2: edit line 4
+    rc = sqlite3_exec(db[2], "UPDATE docs SET body = 'L1\nL2\nL3\nS2' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Full mesh sync: each site sends to every other site
+    for (int src = 0; src < 3; src++) {
+        for (int dst = 0; dst < 3; dst++) {
+            if (src == dst) continue;
+            if (!do_merge_values(db[src], db[dst], true)) { printf("three_way: merge %d->%d failed\n", src, dst); goto fail; }
+        }
+    }
+
+    // Materialize all
+    for (int i = 0; i < 3; i++) {
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) { printf("three_way: materialize db[%d] failed\n", i); goto fail; }
+    }
+
+    // All three should converge
+    char *body[3];
+    for (int i = 0; i < 3; i++) {
+        body[i] = do_select_text(db[i], "SELECT body FROM docs WHERE id = 'doc1';");
+    }
+
+    bool ok = true;
+    if (!body[0] || !body[1] || !body[2]) { printf("three_way: NULL body\n"); ok = false; }
+    else if (strcmp(body[0], body[1]) != 0 || strcmp(body[1], body[2]) != 0) {
+        printf("three_way: not converged:\n  [0]: %s\n  [1]: %s\n  [2]: %s\n", body[0], body[1], body[2]);
+        ok = false;
+    } else {
+        // All three non-conflicting edits should be preserved
+        if (!strstr(body[0], "S0")) { printf("three_way: missing S0\n"); ok = false; }
+        if (!strstr(body[0], "S1")) { printf("three_way: missing S1\n"); ok = false; }
+        if (!strstr(body[0], "L3")) { printf("three_way: missing L3\n"); ok = false; }
+        if (!strstr(body[0], "S2")) { printf("three_way: missing S2\n"); ok = false; }
+    }
+
+    for (int i = 0; i < 3; i++) { if (body[i]) sqlite3_free(body[i]); }
+    for (int i = 0; i < 3; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 3; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test 4: Mixed block + normal columns — both work independently
+bool do_test_block_lww_mixed_columns(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, body TEXT, title TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('notes');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        // body is block-level LWW, title is normal LWW
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('notes', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Site 0: insert row with multi-line body and title
+    rc = sqlite3_exec(db[0], "INSERT INTO notes (id, body, title) VALUES ('n1', 'Line1\nLine2\nLine3', 'My Title');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Sync 0 -> 1
+    if (!do_merge_values(db[0], db[1], false)) goto fail;
+
+    // Site 0: edit block column (body line 1) AND normal column (title)
+    rc = sqlite3_exec(db[0], "UPDATE notes SET body = 'EditedLine1\nLine2\nLine3', title = 'Title From A' WHERE id = 'n1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Site 1: edit a different block (body line 3) AND normal column (title — will conflict via LWW)
+    rc = sqlite3_exec(db[1], "UPDATE notes SET body = 'Line1\nLine2\nEditedLine3', title = 'Title From B' WHERE id = 'n1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Sync both ways
+    if (!do_merge_values(db[0], db[1], true)) goto fail;
+    if (!do_merge_values(db[1], db[0], true)) goto fail;
+
+    // Materialize block column
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_text_materialize('notes', 'body', 'n1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('notes', 'body', 'n1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    char *body0 = do_select_text(db[0], "SELECT body FROM notes WHERE id = 'n1';");
+    char *body1 = do_select_text(db[1], "SELECT body FROM notes WHERE id = 'n1';");
+    char *title0 = do_select_text(db[0], "SELECT title FROM notes WHERE id = 'n1';");
+    char *title1 = do_select_text(db[1], "SELECT title FROM notes WHERE id = 'n1';");
+
+    bool ok = true;
+
+    // Bodies should converge
+    if (!body0 || !body1 || strcmp(body0, body1) != 0) {
+        printf("mixed_columns: body diverged\n");
+        ok = false;
+    } else {
+        // Both non-conflicting block edits should be preserved
+        if (!strstr(body0, "EditedLine1")) { printf("mixed_columns: missing EditedLine1\n"); ok = false; }
+        if (!strstr(body0, "Line2")) { printf("mixed_columns: missing Line2\n"); ok = false; }
+        if (!strstr(body0, "EditedLine3")) { printf("mixed_columns: missing EditedLine3\n"); ok = false; }
+    }
+
+    // Titles should converge (normal LWW — one wins)
+    if (!title0 || !title1 || strcmp(title0, title1) != 0) {
+        printf("mixed_columns: title diverged: [%s] vs [%s]\n", title0 ? title0 : "NULL", title1 ? title1 : "NULL");
+        ok = false;
+    }
+
+    if (body0) sqlite3_free(body0);
+    if (body1) sqlite3_free(body1);
+    if (title0) sqlite3_free(title0);
+    if (title1) sqlite3_free(title1);
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test 5: NULL to text transition — INSERT with NULL body, then UPDATE to multi-line text
+bool do_test_block_lww_null_to_text(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert with NULL body on site 0
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', NULL);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("null_to_text: INSERT NULL failed\n"); goto fail; }
+
+    // Sync to site 1
+    if (!do_merge_values(db[0], db[1], false)) { printf("null_to_text: initial sync failed\n"); goto fail; }
+
+    // Update to multi-line text on site 0
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'Hello\nWorld\nFoo' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("null_to_text: UPDATE failed\n"); goto fail; }
+
+    // Verify blocks created
+    int64_t blocks = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc1');");
+    if (blocks != 3) { printf("null_to_text: expected 3 blocks, got %" PRId64 "\n", blocks); goto fail; }
+
+    // Sync update to site 1
+    if (!do_merge_values(db[0], db[1], true)) { printf("null_to_text: sync update failed\n"); goto fail; }
+
+    // Materialize on site 1
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("null_to_text: materialize failed\n"); goto fail; }
+
+    char *body = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+    if (!body || strcmp(body, "Hello\nWorld\nFoo") != 0) {
+        printf("null_to_text: expected 'Hello\\nWorld\\nFoo', got '%s'\n", body ? body : "NULL");
+        if (body) sqlite3_free(body);
+        goto fail;
+    }
+    sqlite3_free(body);
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return true;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test 6: Interleaved inserts — multiple rounds of inserting between existing lines
+bool do_test_block_lww_interleaved(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Start with 2 lines
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'A\nB');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    if (!do_merge_values(db[0], db[1], false)) goto fail;
+
+    // Round 1: Site 0 inserts between A and B
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'A\nC\nB' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    if (!do_merge_values(db[0], db[1], true)) goto fail;
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Round 2: Site 1 inserts between A and C
+    rc = sqlite3_exec(db[1], "UPDATE docs SET body = 'A\nD\nC\nB' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    if (!do_merge_values(db[1], db[0], true)) goto fail;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Round 3: Site 0 inserts between D and C
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'A\nD\nE\nC\nB' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    if (!do_merge_values(db[0], db[1], true)) goto fail;
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Verify final state on both sites
+    char *body0 = do_select_text(db[0], "SELECT body FROM docs WHERE id = 'doc1';");
+    char *body1 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+
+    bool ok = true;
+    if (!body0 || !body1 || strcmp(body0, body1) != 0) {
+        printf("interleaved: diverged: [%s] vs [%s]\n", body0 ? body0 : "NULL", body1 ? body1 : "NULL");
+        ok = false;
+    } else {
+        // All 5 lines should be present
+        if (!strstr(body0, "A")) { printf("interleaved: missing A\n"); ok = false; }
+        if (!strstr(body0, "D")) { printf("interleaved: missing D\n"); ok = false; }
+        if (!strstr(body0, "E")) { printf("interleaved: missing E\n"); ok = false; }
+        if (!strstr(body0, "C")) { printf("interleaved: missing C\n"); ok = false; }
+        if (!strstr(body0, "B")) { printf("interleaved: missing B\n"); ok = false; }
+
+        // Verify 5 blocks
+        int64_t blocks = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc1');");
+        if (blocks != 5) { printf("interleaved: expected 5 blocks, got %" PRId64 "\n", blocks); ok = false; }
+    }
+
+    if (body0) sqlite3_free(body0);
+    if (body1) sqlite3_free(body1);
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test 7: Custom delimiter — paragraph separator instead of newline
+bool do_test_block_lww_custom_delimiter(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        // Set custom delimiter: double newline (paragraph separator)
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'delimiter', '\n\n');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) { printf("custom_delim: set delimiter failed: %s\n", sqlite3_errmsg(db[i])); goto fail; }
+    }
+
+    // Insert text with double-newline separated paragraphs
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Para one line1\nline2\n\nPara two\n\nPara three');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Should produce 3 blocks (3 paragraphs)
+    int64_t blocks = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc1');");
+    if (blocks != 3) { printf("custom_delim: expected 3 blocks, got %" PRId64 "\n", blocks); goto fail; }
+
+    // Sync and materialize
+    if (!do_merge_values(db[0], db[1], false)) goto fail;
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    char *body = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+    if (!body || strcmp(body, "Para one line1\nline2\n\nPara two\n\nPara three") != 0) {
+        printf("custom_delim: mismatch: [%s]\n", body ? body : "NULL");
+        if (body) sqlite3_free(body);
+        goto fail;
+    }
+    sqlite3_free(body);
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return true;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test 8: Large text — many lines to verify position ID distribution
+bool do_test_block_lww_large_text(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Build a 200-line text
+    #define LARGE_NLINES 200
+    char large_text[LARGE_NLINES * 20];
+    int offset = 0;
+    for (int i = 0; i < LARGE_NLINES; i++) {
+        if (i > 0) large_text[offset++] = '\n';
+        offset += snprintf(large_text + offset, sizeof(large_text) - offset, "Line %03d content", i);
+    }
+
+    // Insert via prepared statement to avoid SQL escaping issues
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db[0], "INSERT INTO docs (id, body) VALUES ('bigdoc', ?);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    sqlite3_bind_text(stmt, 1, large_text, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) { printf("large_text: INSERT failed\n"); goto fail; }
+
+    // Verify block count
+    int64_t blocks = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('bigdoc');");
+    if (blocks != LARGE_NLINES) { printf("large_text: expected %d blocks, got %" PRId64 "\n", LARGE_NLINES, blocks); goto fail; }
+
+    // Verify all position IDs are unique and ordered
+    int64_t distinct_positions = do_select_int(db[0],
+        "SELECT count(DISTINCT col_name) FROM docs_cloudsync WHERE col_name LIKE 'body' || x'1f' || '%';");
+    if (distinct_positions != LARGE_NLINES) {
+        printf("large_text: expected %d distinct positions, got %" PRId64 "\n", LARGE_NLINES, distinct_positions);
+        goto fail;
+    }
+
+    // Sync and materialize
+    if (!do_merge_using_payload(db[0], db[1], false, true)) { printf("large_text: sync failed\n"); goto fail; }
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'bigdoc');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("large_text: materialize failed\n"); goto fail; }
+
+    char *body = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'bigdoc';");
+    if (!body || strcmp(body, large_text) != 0) {
+        printf("large_text: roundtrip mismatch\n");
+        if (body) sqlite3_free(body);
+        goto fail;
+    }
+    sqlite3_free(body);
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return true;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test 9: Rapid sequential updates — many updates on same row in quick succession
+bool do_test_block_lww_rapid_updates(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert initial
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Start');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // 50 rapid updates, progressively adding lines
+    sqlite3_stmt *upd = NULL;
+    rc = sqlite3_prepare_v2(db[0], "UPDATE docs SET body = ? WHERE id = 'doc1';", -1, &upd, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    #define RAPID_ROUNDS 50
+    char rapid_text[RAPID_ROUNDS * 20];
+    int roff = 0;
+    for (int i = 0; i < RAPID_ROUNDS; i++) {
+        if (i > 0) rapid_text[roff++] = '\n';
+        roff += snprintf(rapid_text + roff, sizeof(rapid_text) - roff, "Update%d", i);
+
+        sqlite3_bind_text(upd, 1, rapid_text, roff, SQLITE_STATIC);
+        rc = sqlite3_step(upd);
+        if (rc != SQLITE_DONE) { printf("rapid: UPDATE %d failed\n", i); sqlite3_finalize(upd); goto fail; }
+        sqlite3_reset(upd);
+    }
+    sqlite3_finalize(upd);
+
+    // Verify final block count matches line count
+    int64_t blocks = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc1');");
+    if (blocks != RAPID_ROUNDS) {
+        printf("rapid: expected %d blocks, got %" PRId64 "\n", RAPID_ROUNDS, blocks);
+        goto fail;
+    }
+
+    // Sync and verify roundtrip
+    if (!do_merge_using_payload(db[0], db[1], false, true)) { printf("rapid: sync failed\n"); goto fail; }
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("rapid: materialize failed\n"); goto fail; }
+
+    char *body0 = do_select_text(db[0], "SELECT body FROM docs WHERE id = 'doc1';");
+    char *body1 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+
+    bool ok = true;
+    if (!body0 || !body1 || strcmp(body0, body1) != 0) {
+        printf("rapid: roundtrip mismatch\n");
+        ok = false;
+    } else {
+        // Check first and last lines
+        if (!strstr(body0, "Update0")) { printf("rapid: missing Update0\n"); ok = false; }
+        if (!strstr(body0, "Update49")) { printf("rapid: missing Update49\n"); ok = false; }
+    }
+
+    if (body0) sqlite3_free(body0);
+    if (body1) sqlite3_free(body1);
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: Unicode/multibyte content in blocks (emoji, CJK, accented chars)
+bool do_test_block_lww_unicode(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert multi-line text with unicode content
+    const char *unicode_text = "Hello \xC3\xA9\xC3\xA0\xC3\xBC" "\n"  // accented: éàü
+                               "\xE4\xB8\xAD\xE6\x96\x87\xE6\xB5\x8B\xE8\xAF\x95" "\n" // CJK: 中文测试
+                               "\xF0\x9F\x98\x80\xF0\x9F\x8E\x89\xF0\x9F\x9A\x80";       // emoji: 😀🎉🚀
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', ?);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    sqlite3_bind_text(stmt, 1, unicode_text, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) goto fail;
+
+    // Should have 3 blocks
+    int64_t blocks = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc1');");
+    if (blocks != 3) { printf("unicode: expected 3 blocks, got %" PRId64 "\n", blocks); goto fail; }
+
+    // Sync and materialize
+    if (!do_merge_using_payload(db[0], db[1], false, true)) { printf("unicode: sync failed\n"); goto fail; }
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("unicode: materialize failed\n"); goto fail; }
+
+    char *body = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+    if (!body || strcmp(body, unicode_text) != 0) {
+        printf("unicode: roundtrip mismatch\n");
+        if (body) sqlite3_free(body);
+        goto fail;
+    }
+
+    // Update: edit the emoji line
+    const char *updated_text = "Hello \xC3\xA9\xC3\xA0\xC3\xBC" "\n"
+                               "\xE4\xB8\xAD\xE6\x96\x87\xE6\xB5\x8B\xE8\xAF\x95" "\n"
+                               "\xF0\x9F\x92\xAF\xF0\x9F\x94\xA5";  // changed emoji: 💯🔥
+    sqlite3_free(body);
+
+    stmt = NULL;
+    rc = sqlite3_prepare_v2(db[0], "UPDATE docs SET body = ? WHERE id = 'doc1';", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    sqlite3_bind_text(stmt, 1, updated_text, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) goto fail;
+
+    // Sync update
+    if (!do_merge_using_payload(db[0], db[1], true, true)) { printf("unicode: sync update failed\n"); goto fail; }
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    body = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+    if (!body || strcmp(body, updated_text) != 0) {
+        printf("unicode: update roundtrip mismatch\n");
+        if (body) sqlite3_free(body);
+        goto fail;
+    }
+    sqlite3_free(body);
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return true;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: Special characters (tabs, carriage returns, etc.) in blocks
+bool do_test_block_lww_special_chars(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Text with tabs, carriage returns, and other special chars within lines
+    const char *special_text = "col1\tcol2\tcol3\n"       // tabs within line
+                               "line with\r\nembedded\n"   // \r before \n delimiter
+                               "back\\slash \"quotes\"";    // backslash and quotes
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', ?);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    sqlite3_bind_text(stmt, 1, special_text, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) goto fail;
+
+    // Should split on \n: "col1\tcol2\tcol3", "line with\r", "embedded", "back\\slash \"quotes\""
+    int64_t blocks = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc1');");
+    if (blocks != 4) { printf("special: expected 4 blocks, got %" PRId64 "\n", blocks); goto fail; }
+
+    // Sync and verify roundtrip
+    if (!do_merge_using_payload(db[0], db[1], false, true)) { printf("special: sync failed\n"); goto fail; }
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    char *body = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+    if (!body || strcmp(body, special_text) != 0) {
+        printf("special: roundtrip mismatch\n");
+        if (body) sqlite3_free(body);
+        goto fail;
+    }
+    sqlite3_free(body);
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return true;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: Concurrent delete vs edit on different blocks
+// Site A deletes the row, Site B edits a line. After sync, delete wins.
+bool do_test_block_lww_delete_vs_edit(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert initial doc
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Line1\nLine2\nLine3');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Sync to site 1
+    if (!do_merge_values(db[0], db[1], false)) goto fail;
+
+    // Site 0: DELETE the row
+    rc = sqlite3_exec(db[0], "DELETE FROM docs WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Site 1: Edit line 2
+    rc = sqlite3_exec(db[1], "UPDATE docs SET body = 'Line1\nEdited\nLine3' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Sync both ways
+    if (!do_merge_values(db[0], db[1], true)) goto fail;
+    if (!do_merge_values(db[1], db[0], true)) goto fail;
+
+    // Both should converge: either row deleted or row exists with some content
+    int64_t rows0 = do_select_int(db[0], "SELECT count(*) FROM docs WHERE id = 'doc1';");
+    int64_t rows1 = do_select_int(db[1], "SELECT count(*) FROM docs WHERE id = 'doc1';");
+
+    bool ok = true;
+    if (rows0 != rows1) {
+        printf("delete_vs_edit: row count diverged: db0=%" PRId64 " db1=%" PRId64 "\n", rows0, rows1);
+        ok = false;
+    }
+
+    // If the row still exists, materialize and verify convergence
+    if (rows0 > 0 && rows1 > 0) {
+        sqlite3_exec(db[0], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+        sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+
+        char *body0 = do_select_text(db[0], "SELECT body FROM docs WHERE id = 'doc1';");
+        char *body1 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+        if (body0 && body1 && strcmp(body0, body1) != 0) {
+            printf("delete_vs_edit: bodies diverged\n");
+            ok = false;
+        }
+        if (body0) sqlite3_free(body0);
+        if (body1) sqlite3_free(body1);
+    }
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: Two block columns on same table
+bool do_test_block_lww_two_block_cols(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT, notes TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'notes', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert with both block columns
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body, notes) VALUES ('doc1', 'B1\nB2\nB3', 'N1\nN2');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("two_block_cols: INSERT failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    // Verify blocks created for both columns
+    int64_t body_blocks = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync WHERE col_name LIKE 'body' || x'1f' || '%';");
+    int64_t notes_blocks = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync WHERE col_name LIKE 'notes' || x'1f' || '%';");
+    if (body_blocks != 3) { printf("two_block_cols: expected 3 body blocks, got %" PRId64 "\n", body_blocks); goto fail; }
+    if (notes_blocks != 2) { printf("two_block_cols: expected 2 notes blocks, got %" PRId64 "\n", notes_blocks); goto fail; }
+
+    // Sync to site 1
+    if (!do_merge_values(db[0], db[1], false)) goto fail;
+
+    // Site 0: edit body line 1
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'B1_edited\nB2\nB3' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Site 1: edit notes line 2
+    rc = sqlite3_exec(db[1], "UPDATE docs SET notes = 'N1\nN2_edited' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Sync both ways
+    if (!do_merge_values(db[0], db[1], true)) goto fail;
+    if (!do_merge_values(db[1], db[0], true)) goto fail;
+
+    // Materialize both columns on both sites
+    for (int i = 0; i < 2; i++) {
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) { printf("two_block_cols: materialize body db[%d] failed\n", i); goto fail; }
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_text_materialize('docs', 'notes', 'doc1');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) { printf("two_block_cols: materialize notes db[%d] failed\n", i); goto fail; }
+    }
+
+    char *body0 = do_select_text(db[0], "SELECT body FROM docs WHERE id = 'doc1';");
+    char *body1 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+    char *notes0 = do_select_text(db[0], "SELECT notes FROM docs WHERE id = 'doc1';");
+    char *notes1 = do_select_text(db[1], "SELECT notes FROM docs WHERE id = 'doc1';");
+
+    bool ok = true;
+    if (!body0 || !body1 || strcmp(body0, body1) != 0) {
+        printf("two_block_cols: body diverged\n"); ok = false;
+    } else if (!strstr(body0, "B1_edited")) {
+        printf("two_block_cols: body edit missing\n"); ok = false;
+    }
+
+    if (!notes0 || !notes1 || strcmp(notes0, notes1) != 0) {
+        printf("two_block_cols: notes diverged\n"); ok = false;
+    } else if (!strstr(notes0, "N2_edited")) {
+        printf("two_block_cols: notes edit missing\n"); ok = false;
+    }
+
+    if (body0) sqlite3_free(body0);
+    if (body1) sqlite3_free(body1);
+    if (notes0) sqlite3_free(notes0);
+    if (notes1) sqlite3_free(notes1);
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: Update text to NULL (text->NULL transition)
+bool do_test_block_lww_text_to_null(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert multi-line text
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Line1\nLine2\nLine3');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    int64_t blocks_before = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc1');");
+    if (blocks_before != 3) { printf("text_to_null: expected 3 blocks before, got %" PRId64 "\n", blocks_before); goto fail; }
+
+    // Update to NULL
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = NULL WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("text_to_null: UPDATE to NULL failed\n"); goto fail; }
+
+    // Verify body is NULL
+    int64_t is_null = do_select_int(db[0], "SELECT body IS NULL FROM docs WHERE id = 'doc1';");
+    if (is_null != 1) { printf("text_to_null: body not NULL after update\n"); goto fail; }
+
+    // Sync and verify
+    if (!do_merge_values(db[0], db[1], false)) { printf("text_to_null: sync failed\n"); goto fail; }
+
+    // Materialize on site 1
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    int64_t is_null_b = do_select_int(db[1], "SELECT body IS NULL FROM docs WHERE id = 'doc1';");
+    if (is_null_b != 1) { printf("text_to_null: body not NULL on site 1 after sync\n"); goto fail; }
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return true;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: Payload-based sync for block columns (vs row-by-row do_merge_values)
+bool do_test_block_lww_payload_sync(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert and first sync via payload
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Alpha\nBravo\nCharlie');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    if (!do_merge_using_payload(db[0], db[1], false, true)) { printf("payload_sync: initial merge failed\n"); goto fail; }
+
+    // Edit on both sites
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'Alpha_A\nBravo\nCharlie' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[1], "UPDATE docs SET body = 'Alpha\nBravo\nCharlie_B' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Sync via payload both ways
+    if (!do_merge_using_payload(db[0], db[1], true, true)) { printf("payload_sync: merge 0->1 failed\n"); goto fail; }
+    if (!do_merge_using_payload(db[1], db[0], true, true)) { printf("payload_sync: merge 1->0 failed\n"); goto fail; }
+
+    // Materialize
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    char *body0 = do_select_text(db[0], "SELECT body FROM docs WHERE id = 'doc1';");
+    char *body1 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+
+    bool ok = true;
+    if (!body0 || !body1 || strcmp(body0, body1) != 0) {
+        printf("payload_sync: bodies diverged\n"); ok = false;
+    } else {
+        if (!strstr(body0, "Alpha_A")) { printf("payload_sync: missing Alpha_A\n"); ok = false; }
+        if (!strstr(body0, "Bravo")) { printf("payload_sync: missing Bravo\n"); ok = false; }
+        if (!strstr(body0, "Charlie_B")) { printf("payload_sync: missing Charlie_B\n"); ok = false; }
+    }
+
+    if (body0) sqlite3_free(body0);
+    if (body1) sqlite3_free(body1);
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: Idempotent apply — applying the same payload twice is a no-op
+bool do_test_block_lww_idempotent(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert and sync
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Line1\nLine2\nLine3');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    if (!do_merge_using_payload(db[0], db[1], false, true)) goto fail;
+
+    // Edit on site 0
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'Edited1\nLine2\nLine3' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Apply payload to site 1 TWICE
+    if (!do_merge_using_payload(db[0], db[1], true, true)) { printf("idempotent: first apply failed\n"); goto fail; }
+    if (!do_merge_using_payload(db[0], db[1], true, true)) { printf("idempotent: second apply failed\n"); goto fail; }
+
+    // Materialize
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    char *body = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+    bool ok = true;
+    if (!body || strcmp(body, "Edited1\nLine2\nLine3") != 0) {
+        printf("idempotent: body mismatch: [%s]\n", body ? body : "NULL");
+        ok = false;
+    }
+
+    // Verify block count is still 3 (no duplicates from double apply)
+    int64_t blocks = do_select_int(db[1], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc1');");
+    if (blocks != 3) { printf("idempotent: expected 3 blocks, got %" PRId64 "\n", blocks); ok = false; }
+
+    if (body) sqlite3_free(body);
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: Block position ordering — after edits, materialized text has correct line order
+bool do_test_block_lww_ordering(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert initial doc: A B C D E
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'A\nB\nC\nD\nE');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    if (!do_merge_values(db[0], db[1], false)) goto fail;
+
+    // Site 0: insert X between B and C, remove D -> A B X C E
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'A\nB\nX\nC\nE' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Site 1: insert Y between D and E -> A B C D Y E
+    rc = sqlite3_exec(db[1], "UPDATE docs SET body = 'A\nB\nC\nD\nY\nE' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Sync
+    if (!do_merge_values(db[0], db[1], true)) goto fail;
+    if (!do_merge_values(db[1], db[0], true)) goto fail;
+
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    char *body0 = do_select_text(db[0], "SELECT body FROM docs WHERE id = 'doc1';");
+    char *body1 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+
+    bool ok = true;
+    if (!body0 || !body1 || strcmp(body0, body1) != 0) {
+        printf("ordering: bodies diverged: [%s] vs [%s]\n", body0 ? body0 : "NULL", body1 ? body1 : "NULL");
+        ok = false;
+    } else {
+        // Verify ordering: A must come before B, B before C, etc.
+        // All lines that survived should maintain relative order
+        const char *pA = strstr(body0, "A");
+        const char *pB = strstr(body0, "B");
+        const char *pC = strstr(body0, "C");
+        const char *pE = strstr(body0, "E");
+
+        if (!pA || !pB || !pC || !pE) {
+            printf("ordering: missing original lines\n"); ok = false;
+        } else {
+            if (pA >= pB) { printf("ordering: A not before B\n"); ok = false; }
+            if (pB >= pC) { printf("ordering: B not before C\n"); ok = false; }
+            if (pC >= pE) { printf("ordering: C not before E\n"); ok = false; }
+        }
+
+        // X (inserted between B and C) should appear between B and C
+        const char *pX = strstr(body0, "X");
+        if (pX) {
+            if (pX <= pB || pX >= pC) { printf("ordering: X not between B and C\n"); ok = false; }
+        }
+
+        // Y should appear somewhere after C
+        const char *pY = strstr(body0, "Y");
+        if (pY) {
+            if (pY <= pC) { printf("ordering: Y not after C\n"); ok = false; }
+        }
+    }
+
+    if (body0) sqlite3_free(body0);
+    if (body1) sqlite3_free(body1);
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: Composite primary key (text + int) with block column
+bool do_test_block_lww_composite_pk(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (owner TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT, PRIMARY KEY(owner, seq));", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert on site 0
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (owner, seq, body) VALUES ('alice', 1, 'Line1\nLine2\nLine3');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("composite_pk: INSERT failed\n"); goto fail; }
+
+    int64_t blocks = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('alice', 1);");
+    if (blocks != 3) { printf("composite_pk: expected 3 blocks, got %" PRId64 "\n", blocks); goto fail; }
+
+    // Sync to site 1
+    if (!do_merge_using_payload(db[0], db[1], false, true)) { printf("composite_pk: sync failed\n"); goto fail; }
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'alice', 1);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("composite_pk: materialize failed: %s\n", sqlite3_errmsg(db[1])); goto fail; }
+
+    char *body = do_select_text(db[1], "SELECT body FROM docs WHERE owner = 'alice' AND seq = 1;");
+    if (!body || strcmp(body, "Line1\nLine2\nLine3") != 0) {
+        printf("composite_pk: body mismatch: [%s]\n", body ? body : "NULL");
+        if (body) sqlite3_free(body);
+        goto fail;
+    }
+    sqlite3_free(body);
+
+    // Edit on site 1, sync back
+    rc = sqlite3_exec(db[1], "UPDATE docs SET body = 'Line1\nEdited2\nLine3' WHERE owner = 'alice' AND seq = 1;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    if (!do_merge_using_payload(db[1], db[0], true, true)) { printf("composite_pk: reverse sync failed\n"); goto fail; }
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_text_materialize('docs', 'body', 'alice', 1);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    char *body0 = do_select_text(db[0], "SELECT body FROM docs WHERE owner = 'alice' AND seq = 1;");
+    if (!body0 || strcmp(body0, "Line1\nEdited2\nLine3") != 0) {
+        printf("composite_pk: reverse body mismatch: [%s]\n", body0 ? body0 : "NULL");
+        if (body0) sqlite3_free(body0);
+        goto fail;
+    }
+    sqlite3_free(body0);
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return true;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: Empty string body (not NULL) — should produce 1 block with empty content
+bool do_test_block_lww_empty_vs_null(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert empty string (NOT NULL)
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', '');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    int64_t blocks = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc1');");
+    if (blocks != 1) { printf("empty_vs_null: expected 1 block for empty string, got %" PRId64 "\n", blocks); goto fail; }
+
+    // Insert NULL
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc2', NULL);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    int64_t blocks_null = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc2');");
+    if (blocks_null != 1) { printf("empty_vs_null: expected 1 block for NULL, got %" PRId64 "\n", blocks_null); goto fail; }
+
+    // Sync both to site 1
+    if (!do_merge_using_payload(db[0], db[1], false, true)) { printf("empty_vs_null: sync failed\n"); goto fail; }
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc2');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // doc1 (empty string): body should be empty string, NOT NULL
+    char *body1 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+    int64_t is_null1 = do_select_int(db[1], "SELECT body IS NULL FROM docs WHERE id = 'doc1';");
+    if (is_null1 != 0) { printf("empty_vs_null: doc1 body should NOT be NULL\n"); if (body1) sqlite3_free(body1); goto fail; }
+    if (!body1 || strcmp(body1, "") != 0) { printf("empty_vs_null: doc1 body should be empty, got [%s]\n", body1 ? body1 : "NULL"); if (body1) sqlite3_free(body1); goto fail; }
+    sqlite3_free(body1);
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return true;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: DELETE row then re-insert with different block content (resurrection)
+bool do_test_block_lww_delete_reinsert(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert and sync
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'Old1\nOld2\nOld3');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    if (!do_merge_using_payload(db[0], db[1], false, true)) goto fail;
+
+    // Delete the row
+    rc = sqlite3_exec(db[0], "DELETE FROM docs WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("del_reinsert: DELETE failed\n"); goto fail; }
+
+    // Sync delete
+    if (!do_merge_using_payload(db[0], db[1], true, true)) { printf("del_reinsert: delete sync failed\n"); goto fail; }
+
+    // Verify row gone on site 1
+    int64_t count = do_select_int(db[1], "SELECT count(*) FROM docs WHERE id = 'doc1';");
+    if (count != 0) { printf("del_reinsert: row should be deleted on site 1, count=%" PRId64 "\n", count); goto fail; }
+
+    // Re-insert with different content
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'New1\nNew2');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("del_reinsert: re-INSERT failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    // Sync re-insert
+    if (!do_merge_using_payload(db[0], db[1], true, true)) { printf("del_reinsert: reinsert sync failed\n"); goto fail; }
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    char *body = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+    if (!body || strcmp(body, "New1\nNew2") != 0) {
+        printf("del_reinsert: body mismatch after reinsert: [%s]\n", body ? body : "NULL");
+        if (body) sqlite3_free(body);
+        goto fail;
+    }
+    sqlite3_free(body);
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return true;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: INTEGER primary key with block column
+bool do_test_block_lww_integer_pk(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE notes (id INTEGER NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) { printf("int_pk: CREATE TABLE failed on %d: %s\n", i, sqlite3_errmsg(db[i])); goto fail; }
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('notes', 'CLS', 1);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) { printf("int_pk: init failed on %d: %s\n", i, sqlite3_errmsg(db[i])); goto fail; }
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('notes', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) { printf("int_pk: set_column failed on %d: %s\n", i, sqlite3_errmsg(db[i])); goto fail; }
+    }
+
+    // Insert on site 0
+    rc = sqlite3_exec(db[0], "INSERT INTO notes (id, body) VALUES (42, 'First\nSecond\nThird');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("int_pk: INSERT failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    int64_t blocks = do_select_int(db[0], "SELECT count(*) FROM notes_cloudsync_blocks WHERE pk = cloudsync_pk_encode(42);");
+    if (blocks != 3) { printf("int_pk: expected 3 blocks, got %" PRId64 "\n", blocks); goto fail; }
+
+    // Sync to site 1
+    if (!do_merge_using_payload(db[0], db[1], false, true)) { printf("int_pk: sync failed\n"); goto fail; }
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('notes', 'body', 42);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("int_pk: materialize failed: %s\n", sqlite3_errmsg(db[1])); goto fail; }
+
+    // Debug: check row exists
+    int64_t row_count = do_select_int(db[1], "SELECT count(*) FROM notes WHERE id = 42;");
+    if (row_count != 1) { printf("int_pk: row not found on site 1, count=%" PRId64 "\n", row_count); goto fail; }
+
+    char *body = do_select_text(db[1], "SELECT body FROM notes WHERE id = 42;");
+    if (!body || strcmp(body, "First\nSecond\nThird") != 0) {
+        printf("int_pk: body mismatch: [%s]\n", body ? body : "NULL");
+        if (body) sqlite3_free(body);
+        goto fail;
+    }
+    sqlite3_free(body);
+
+    // Edit and sync back
+    rc = sqlite3_exec(db[1], "UPDATE notes SET body = 'First\nEdited\nThird' WHERE id = 42;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("int_pk: UPDATE failed: %s\n", sqlite3_errmsg(db[1])); goto fail; }
+    if (!do_merge_using_payload(db[1], db[0], true, true)) { printf("int_pk: reverse sync failed\n"); goto fail; }
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_text_materialize('notes', 'body', 42);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("int_pk: reverse mat failed: %s\n", sqlite3_errmsg(db[0])); goto fail; }
+
+    char *body0 = do_select_text(db[0], "SELECT body FROM notes WHERE id = 42;");
+    if (!body0 || strcmp(body0, "First\nEdited\nThird") != 0) {
+        printf("int_pk: reverse body mismatch: [%s]\n", body0 ? body0 : "NULL");
+        if (body0) sqlite3_free(body0);
+        goto fail;
+    }
+    sqlite3_free(body0);
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return true;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: Multiple rows with block columns in a single sync
+bool do_test_block_lww_multi_row(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert 3 rows
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('r1', 'R1-Line1\nR1-Line2');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('r2', 'R2-Alpha\nR2-Beta\nR2-Gamma');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('r3', 'R3-Only');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Edit r1 and r3
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'R1-Edited\nR1-Line2' WHERE id = 'r1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'R3-Changed' WHERE id = 'r3';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Sync all in one payload
+    if (!do_merge_using_payload(db[0], db[1], false, true)) { printf("multi_row: sync failed\n"); goto fail; }
+
+    // Materialize all
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'r1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'r2');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'r3');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    bool ok = true;
+    char *b1 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'r1';");
+    if (!b1 || strcmp(b1, "R1-Edited\nR1-Line2") != 0) { printf("multi_row: r1 mismatch [%s]\n", b1 ? b1 : "NULL"); ok = false; }
+    if (b1) sqlite3_free(b1);
+
+    char *b2 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'r2';");
+    if (!b2 || strcmp(b2, "R2-Alpha\nR2-Beta\nR2-Gamma") != 0) { printf("multi_row: r2 mismatch [%s]\n", b2 ? b2 : "NULL"); ok = false; }
+    if (b2) sqlite3_free(b2);
+
+    char *b3 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'r3';");
+    if (!b3 || strcmp(b3, "R3-Changed") != 0) { printf("multi_row: r3 mismatch [%s]\n", b3 ? b3 : "NULL"); ok = false; }
+    if (b3) sqlite3_free(b3);
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: Concurrent add at non-overlapping positions (top vs bottom)
+bool do_test_block_lww_nonoverlap_add(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Insert initial: A B C
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'A\nB\nC');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    if (!do_merge_values(db[0], db[1], false)) goto fail;
+
+    // Site 0: add line at top -> X A B C
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'X\nA\nB\nC' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Site 1: add line at bottom -> A B C Y
+    rc = sqlite3_exec(db[1], "UPDATE docs SET body = 'A\nB\nC\nY' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    // Bidirectional sync
+    if (!do_merge_values(db[0], db[1], true)) goto fail;
+    if (!do_merge_values(db[1], db[0], true)) goto fail;
+
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    char *body0 = do_select_text(db[0], "SELECT body FROM docs WHERE id = 'doc1';");
+    char *body1 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+
+    bool ok = true;
+    if (!body0 || !body1 || strcmp(body0, body1) != 0) {
+        printf("nonoverlap: bodies diverged: [%s] vs [%s]\n", body0 ? body0 : "NULL", body1 ? body1 : "NULL");
+        ok = false;
+    } else {
+        // X should be present, Y should be present, original A B C should be present
+        if (!strstr(body0, "X")) { printf("nonoverlap: X missing\n"); ok = false; }
+        if (!strstr(body0, "Y")) { printf("nonoverlap: Y missing\n"); ok = false; }
+        if (!strstr(body0, "A")) { printf("nonoverlap: A missing\n"); ok = false; }
+        if (!strstr(body0, "B")) { printf("nonoverlap: B missing\n"); ok = false; }
+        if (!strstr(body0, "C")) { printf("nonoverlap: C missing\n"); ok = false; }
+
+        // Order: X before A, Y after C
+        const char *pX = strstr(body0, "X");
+        const char *pA = strstr(body0, "A");
+        const char *pC = strstr(body0, "C");
+        const char *pY = strstr(body0, "Y");
+        if (pX && pA && pX >= pA) { printf("nonoverlap: X not before A\n"); ok = false; }
+        if (pC && pY && pY <= pC) { printf("nonoverlap: Y not after C\n"); ok = false; }
+    }
+
+    if (body0) sqlite3_free(body0);
+    if (body1) sqlite3_free(body1);
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return ok;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: Very long single line (10K chars, single block)
+bool do_test_block_lww_long_line(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Build a 10,000-char single line
+    {
+        char *long_line = (char *)malloc(10001);
+        if (!long_line) goto fail;
+        for (int i = 0; i < 10000; i++) long_line[i] = 'A' + (i % 26);
+        long_line[10000] = '\0';
+
+        char *sql = sqlite3_mprintf("INSERT INTO docs (id, body) VALUES ('doc1', '%q');", long_line);
+        rc = sqlite3_exec(db[0], sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
+
+        if (rc != SQLITE_OK) { printf("long_line: INSERT failed: %s\n", sqlite3_errmsg(db[0])); free(long_line); goto fail; }
+
+        // Should have 1 block (no newlines)
+        int64_t blocks = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc1');");
+        if (blocks != 1) { printf("long_line: expected 1 block, got %" PRId64 "\n", blocks); free(long_line); goto fail; }
+
+        // Sync to site 1
+        if (!do_merge_using_payload(db[0], db[1], false, true)) { printf("long_line: sync failed\n"); free(long_line); goto fail; }
+        rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) { free(long_line); goto fail; }
+
+        char *body = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+        bool match = (body && strcmp(body, long_line) == 0);
+        if (!match) printf("long_line: body mismatch (len=%zu vs expected 10000)\n", body ? strlen(body) : 0);
+        if (body) sqlite3_free(body);
+        free(long_line);
+        if (!match) goto fail;
+    }
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return true;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
+// Test: Whitespace and empty lines (delimiter edge cases)
+bool do_test_block_lww_whitespace(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    // Text with empty lines, whitespace-only lines, trailing newline
+    const char *text = "Line1\n\n  spaces  \n\t\ttabs\n\nLine6\n";
+    char *sql = sqlite3_mprintf("INSERT INTO docs (id, body) VALUES ('doc1', '%q');", text);
+    rc = sqlite3_exec(db[0], sql, NULL, NULL, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) { printf("whitespace: INSERT failed\n"); goto fail; }
+
+    // Count blocks: "Line1", "", "  spaces  ", "\t\ttabs", "", "Line6", "" (trailing newline produces empty last block)
+    int64_t blocks = do_select_int(db[0], "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc1');");
+    if (blocks != 7) { printf("whitespace: expected 7 blocks, got %" PRId64 "\n", blocks); goto fail; }
+
+    // Sync to site 1
+    if (!do_merge_using_payload(db[0], db[1], false, true)) { printf("whitespace: sync failed\n"); goto fail; }
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    char *body = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+    if (!body || strcmp(body, text) != 0) {
+        printf("whitespace: body mismatch: [%s] vs [%s]\n", body ? body : "NULL", text);
+        if (body) sqlite3_free(body);
+        goto fail;
+    }
+    sqlite3_free(body);
+
+    // Edit: remove empty lines -> "Line1\n  spaces  \n\t\ttabs\nLine6"
+    rc = sqlite3_exec(db[0], "UPDATE docs SET body = 'Line1\n  spaces  \n\t\ttabs\nLine6' WHERE id = 'doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    if (!do_merge_using_payload(db[0], db[1], true, true)) goto fail;
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    char *body2 = do_select_text(db[1], "SELECT body FROM docs WHERE id = 'doc1';");
+    if (!body2 || strcmp(body2, "Line1\n  spaces  \n\t\ttabs\nLine6") != 0) {
+        printf("whitespace: body2 mismatch: [%s]\n", body2 ? body2 : "NULL");
+        if (body2) sqlite3_free(body2);
+        goto fail;
+    }
+    sqlite3_free(body2);
+
+    for (int i = 0; i < 2; i++) { close_db(db[i]); db[i] = NULL; }
+    return true;
+
+fail:
+    for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+    return false;
+}
+
 int test_report(const char *description, bool result){
     printf("%-30s %s\n", description, (result) ? "OK" : "FAILED");
     return result ? 0 : 1;
@@ -7975,6 +10269,43 @@ int main (int argc, const char * argv[]) {
 
     // test row-level filter
     result += test_report("Test Row Filter:", do_test_row_filter(2, print_result, cleanup_databases));
+
+    // test block-level LWW
+    result += test_report("Test Block LWW Insert:", do_test_block_lww_insert(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Update:", do_test_block_lww_update(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Sync:", do_test_block_lww_sync(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Delete:", do_test_block_lww_delete(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Materialize:", do_test_block_lww_materialize(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Empty:", do_test_block_lww_empty_text(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Conflict:", do_test_block_lww_conflict(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Multi-Update:", do_test_block_lww_multi_update(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Reinsert:", do_test_block_lww_reinsert(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Add Lines:", do_test_block_lww_add_lines(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW NoConflict:", do_test_block_lww_noconflict(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Add+Edit:", do_test_block_lww_add_and_edit(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Three-Way:", do_test_block_lww_three_way(3, print_result, cleanup_databases));
+    result += test_report("Test Block LWW MixedCols:", do_test_block_lww_mixed_columns(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW NULL->Text:", do_test_block_lww_null_to_text(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Interleave:", do_test_block_lww_interleaved(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW CustomDelim:", do_test_block_lww_custom_delimiter(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Large Text:", do_test_block_lww_large_text(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Rapid Upd:", do_test_block_lww_rapid_updates(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Unicode:", do_test_block_lww_unicode(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW SpecialChars:", do_test_block_lww_special_chars(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Del vs Edit:", do_test_block_lww_delete_vs_edit(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW TwoBlockCols:", do_test_block_lww_two_block_cols(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Text->NULL:", do_test_block_lww_text_to_null(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW PayloadSync:", do_test_block_lww_payload_sync(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Idempotent:", do_test_block_lww_idempotent(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Ordering:", do_test_block_lww_ordering(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW CompositePK:", do_test_block_lww_composite_pk(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW EmptyVsNull:", do_test_block_lww_empty_vs_null(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW DelReinsert:", do_test_block_lww_delete_reinsert(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW IntegerPK:", do_test_block_lww_integer_pk(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW MultiRow:", do_test_block_lww_multi_row(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW NonOverlap:", do_test_block_lww_nonoverlap_add(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW LongLine:", do_test_block_lww_long_line(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Whitespace:", do_test_block_lww_whitespace(2, print_result, cleanup_databases));
 
 finalize:
     if (rc != SQLITE_OK) printf("%s (%d)\n", (db) ? sqlite3_errmsg(db) : "N/A", rc);

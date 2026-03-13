@@ -11,6 +11,9 @@ This document provides a reference for the SQLite functions provided by the `sql
   - [`cloudsync_is_enabled()`](#cloudsync_is_enabledtable_name)
   - [`cloudsync_cleanup()`](#cloudsync_cleanuptable_name)
   - [`cloudsync_terminate()`](#cloudsync_terminate)
+- [Block-Level LWW Functions](#block-level-lww-functions)
+  - [`cloudsync_set_column()`](#cloudsync_set_columntable_name-col_name-key-value)
+  - [`cloudsync_text_materialize()`](#cloudsync_text_materializetable_name-col_name-pk_values)
 - [Helper Functions](#helper-functions)
   - [`cloudsync_version()`](#cloudsync_version)
   - [`cloudsync_siteid()`](#cloudsync_siteid)
@@ -169,6 +172,68 @@ SELECT cloudsync_cleanup('my_table');
 ```sql
 -- Before closing the database connection
 SELECT cloudsync_terminate();
+```
+
+---
+
+## Block-Level LWW Functions
+
+### `cloudsync_set_column(table_name, col_name, key, value)`
+
+**Description:** Configures per-column settings for a synchronized table. This function is primarily used to enable **block-level LWW** on text columns, allowing fine-grained conflict resolution at the line (or paragraph) level instead of the entire cell.
+
+When block-level LWW is enabled on a column, INSERT and UPDATE operations automatically split the text into blocks using a delimiter (default: newline `\n`) and track each block independently. During sync, changes are merged block-by-block, so concurrent edits to different parts of the same text are preserved.
+
+**Parameters:**
+
+- `table_name` (TEXT): The name of the synchronized table.
+- `col_name` (TEXT): The name of the text column to configure.
+- `key` (TEXT): The setting key. Supported keys:
+  - `'algo'` — Set the column algorithm. Use value `'block'` to enable block-level LWW.
+  - `'delimiter'` — Set the block delimiter string. Only applies to columns with block-level LWW enabled.
+- `value` (TEXT): The setting value.
+
+**Returns:** None.
+
+**Example:**
+
+```sql
+-- Enable block-level LWW on a column (splits text by newline by default)
+SELECT cloudsync_set_column('notes', 'body', 'algo', 'block');
+
+-- Set a custom delimiter (e.g., double newline for paragraph-level tracking)
+SELECT cloudsync_set_column('notes', 'body', 'delimiter', '
+
+');
+```
+
+---
+
+### `cloudsync_text_materialize(table_name, col_name, pk_values...)`
+
+**Description:** Reconstructs the full text of a block-level LWW column from its individual blocks and writes the result back to the base table column. This is useful after a merge operation to ensure the column contains the up-to-date materialized text.
+
+After a sync/merge, the column is updated automatically. This function is primarily useful for manual materialization or debugging.
+
+**Parameters:**
+
+- `table_name` (TEXT): The name of the table.
+- `col_name` (TEXT): The name of the block-level LWW column.
+- `pk_values...` (variadic): The primary key values identifying the row. For composite primary keys, pass each key value as a separate argument in declaration order.
+
+**Returns:** `1` on success.
+
+**Example:**
+
+```sql
+-- Materialize the body column for a specific row
+SELECT cloudsync_text_materialize('notes', 'body', 'note-001');
+
+-- With a composite primary key (e.g., PRIMARY KEY (tenant_id, doc_id))
+SELECT cloudsync_text_materialize('docs', 'body', 'tenant-1', 'doc-001');
+
+-- Read the materialized text
+SELECT body FROM notes WHERE id = 'note-001';
 ```
 
 ---

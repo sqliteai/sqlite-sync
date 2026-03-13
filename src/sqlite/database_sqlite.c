@@ -318,6 +318,11 @@ char *database_build_base_ref (const char *schema, const char *table_name) {
     return cloudsync_string_dup(table_name);
 }
 
+char *database_build_blocks_ref (const char *schema, const char *table_name) {
+    // schema unused in SQLite
+    return cloudsync_memory_mprintf("%s_cloudsync_blocks", table_name);
+}
+
 // SQLite version: schema parameter unused (SQLite has no schemas).
 char *sql_build_delete_cols_not_in_schema_query (const char *schema, const char *table_name, const char *meta_ref, const char *pkcol) {
     UNUSED_PARAMETER(schema);

@@ -9,11 +9,12 @@
 #include "cloudsync_changes_sqlite.h"
 #include "../pk.h"
 #include "../cloudsync.h"
+#include "../block.h"
 #include "../database.h"
 #include "../dbutils.h"
 
 #ifndef CLOUDSYNC_OMIT_NETWORK
-#include "../network.h"
+#include "../network/network.h"
 #endif
 
 #ifndef SQLITE_CORE
@@ -139,13 +140,34 @@ void dbsync_set (sqlite3_context *context, int argc, sqlite3_value **argv) {
 
 void dbsync_set_column (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_set_column");
-    
+
     const char *tbl = (const char *)database_value_text(argv[0]);
     const char *col = (const char *)database_value_text(argv[1]);
     const char *key = (const char *)database_value_text(argv[2]);
     const char *value = (const char *)database_value_text(argv[3]);
-    
+
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+
+    // Handle block column setup: cloudsync_set_column('tbl', 'col', 'algo', 'block')
+    if (key && value && strcmp(key, "algo") == 0 && strcmp(value, "block") == 0) {
+        int rc = cloudsync_setup_block_column(data, tbl, col, NULL);
+        if (rc != DBRES_OK) {
+            sqlite3_result_error(context, cloudsync_errmsg(data), -1);
+        }
+        return;
+    }
+
+    // Handle delimiter setting: cloudsync_set_column('tbl', 'col', 'delimiter', '\n\n')
+    if (key && strcmp(key, "delimiter") == 0) {
+        cloudsync_table_context *table = table_lookup(data, tbl);
+        if (table) {
+            int col_idx = table_col_index(table, col);
+            if (col_idx >= 0 && table_col_algo(table, col_idx) == col_algo_block) {
+                table_set_col_delimiter(table, col_idx, value);
+            }
+        }
+    }
+
     dbutils_table_settings_set_key_value(data, tbl, col, key, value);
 }
 
@@ -218,7 +240,7 @@ void dbsync_col_value (sqlite3_context *context, int argc, sqlite3_value **argv)
         sqlite3_result_null(context);
         return;
     }
-    
+
     // lookup table
     const char *table_name = (const char *)database_value_text(argv[0]);
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
@@ -227,18 +249,42 @@ void dbsync_col_value (sqlite3_context *context, int argc, sqlite3_value **argv)
         dbsync_set_error(context, "Unable to retrieve table name %s in clousdsync_colvalue.", table_name);
         return;
     }
-    
+
+    // Block column: if col_name contains \x1F, read from blocks table
+    if (block_is_block_colname(col_name) && table_has_block_cols(table)) {
+        dbvm_t *bvm = table_block_value_read_stmt(table);
+        if (!bvm) {
+            sqlite3_result_null(context);
+            return;
+        }
+        int rc = databasevm_bind_blob(bvm, 1, database_value_blob(argv[2]), database_value_bytes(argv[2]));
+        if (rc != DBRES_OK) { databasevm_reset(bvm); sqlite3_result_error(context, database_errmsg(data), -1); return; }
+        rc = databasevm_bind_text(bvm, 2, col_name, -1);
+        if (rc != DBRES_OK) { databasevm_reset(bvm); sqlite3_result_error(context, database_errmsg(data), -1); return; }
+
+        rc = databasevm_step(bvm);
+        if (rc == SQLITE_ROW) {
+            sqlite3_result_value(context, database_column_value(bvm, 0));
+        } else if (rc == SQLITE_DONE) {
+            sqlite3_result_null(context);
+        } else {
+            sqlite3_result_error(context, database_errmsg(data), -1);
+        }
+        databasevm_reset(bvm);
+        return;
+    }
+
     // extract the right col_value vm associated to the column name
     sqlite3_stmt *vm = table_column_lookup(table, col_name, false, NULL);
     if (!vm) {
         sqlite3_result_error(context, "Unable to retrieve column value precompiled statement in clousdsync_colvalue.", -1);
         return;
     }
-    
+
     // bind primary key values
     int rc = pk_decode_prikey((char *)database_value_blob(argv[2]), (size_t)database_value_bytes(argv[2]), pk_decode_bind_callback, (void *)vm);
     if (rc < 0) goto cleanup;
-    
+
     // execute vm
     rc = databasevm_step(vm);
     if (rc == SQLITE_DONE) {
@@ -249,7 +295,7 @@ void dbsync_col_value (sqlite3_context *context, int argc, sqlite3_value **argv)
         rc = SQLITE_OK;
         sqlite3_result_value(context, database_column_value(vm, 0));
     }
-    
+
 cleanup:
     if (rc != SQLITE_OK) {
         sqlite3_result_error(context, database_errmsg(data), -1);
@@ -372,11 +418,59 @@ void dbsync_insert (sqlite3_context *context, int argc, sqlite3_value **argv) {
     
     // process each non-primary key column for insert or update
     for (int i=0; i<table_count_cols(table); ++i) {
-        // mark the column as inserted or updated in the metadata
-        rc = local_mark_insert_or_update_meta(table, pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
-        if (rc != SQLITE_OK) goto cleanup;
+        if (table_col_algo(table, i) == col_algo_block) {
+            // Block column: read value from base table, split into blocks, store each block
+            sqlite3_stmt *val_vm = (sqlite3_stmt *)table_column_lookup(table, table_colname(table, i), false, NULL);
+            if (!val_vm) goto cleanup;
+
+            rc = pk_decode_prikey(pk, pklen, pk_decode_bind_callback, (void *)val_vm);
+            if (rc < 0) { databasevm_reset((dbvm_t *)val_vm); goto cleanup; }
+
+            rc = databasevm_step((dbvm_t *)val_vm);
+            if (rc == DBRES_ROW) {
+                const char *text = database_column_text((dbvm_t *)val_vm, 0);
+                const char *delim = table_col_delimiter(table, i);
+                const char *col = table_colname(table, i);
+
+                block_list_t *blocks = block_split(text ? text : "", delim);
+                if (blocks) {
+                    char **positions = block_initial_positions(blocks->count);
+                    if (positions) {
+                        for (int b = 0; b < blocks->count; b++) {
+                            char *block_cn = block_build_colname(col, positions[b]);
+                            if (block_cn) {
+                                rc = local_mark_insert_or_update_meta(table, pk, pklen, block_cn, db_version, cloudsync_bumpseq(data));
+
+                                // Store block value in blocks table
+                                dbvm_t *wvm = table_block_value_write_stmt(table);
+                                if (wvm && rc == SQLITE_OK) {
+                                    databasevm_bind_blob(wvm, 1, pk, (int)pklen);
+                                    databasevm_bind_text(wvm, 2, block_cn, -1);
+                                    databasevm_bind_text(wvm, 3, blocks->entries[b].content, -1);
+                                    databasevm_step(wvm);
+                                    databasevm_reset(wvm);
+                                }
+
+                                cloudsync_memory_free(block_cn);
+                            }
+                            cloudsync_memory_free(positions[b]);
+                            if (rc != SQLITE_OK) break;
+                        }
+                        cloudsync_memory_free(positions);
+                    }
+                    block_list_free(blocks);
+                }
+            }
+            databasevm_reset((dbvm_t *)val_vm);
+            if (rc == DBRES_ROW || rc == DBRES_DONE) rc = SQLITE_OK;
+            if (rc != SQLITE_OK) goto cleanup;
+        } else {
+            // Regular column: mark as inserted or updated in the metadata
+            rc = local_mark_insert_or_update_meta(table, pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
+            if (rc != SQLITE_OK) goto cleanup;
+        }
     }
-    
+
 cleanup:
     if (rc != SQLITE_OK) sqlite3_result_error(context, database_errmsg(data), -1);
     // free memory if the primary key was dynamically allocated
@@ -596,10 +690,103 @@ void dbsync_update_final (sqlite3_context *context) {
         int col_index = table_count_pks(table) + i;  // Regular columns start after primary keys
 
         if (dbutils_value_compare(payload->old_values[col_index], payload->new_values[col_index]) != 0) {
-            // if a column value has changed, mark it as updated in the metadata
-            // columns are in cid order
-            rc = local_mark_insert_or_update_meta(table, pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
-            if (rc != SQLITE_OK) goto cleanup;
+            if (table_col_algo(table, i) == col_algo_block) {
+                // Block column: diff old and new text, emit per-block metadata changes
+                const char *new_text = (const char *)database_value_text(payload->new_values[col_index]);
+                const char *delim = table_col_delimiter(table, i);
+                const char *col = table_colname(table, i);
+
+                // Read existing blocks from blocks table
+                block_list_t *old_blocks = block_list_create_empty();
+                if (table_block_list_stmt(table)) {
+                    char *like_pattern = block_build_colname(col, "%");
+                    if (like_pattern) {
+                        // Query blocks table directly for existing block names and values
+                        char *list_sql = cloudsync_memory_mprintf(
+                            "SELECT col_name, col_value FROM %s WHERE pk = ?1 AND col_name LIKE ?2 ORDER BY col_name",
+                            table_blocks_ref(table));
+                        if (list_sql) {
+                            dbvm_t *list_vm = NULL;
+                            if (databasevm_prepare(data, list_sql, &list_vm, 0) == DBRES_OK) {
+                                databasevm_bind_blob(list_vm, 1, pk, (int)pklen);
+                                databasevm_bind_text(list_vm, 2, like_pattern, -1);
+                                while (databasevm_step(list_vm) == DBRES_ROW) {
+                                    const char *bcn = database_column_text(list_vm, 0);
+                                    const char *bval = database_column_text(list_vm, 1);
+                                    const char *pos = block_extract_position_id(bcn);
+                                    if (pos && old_blocks) {
+                                        block_list_add(old_blocks, bval ? bval : "", pos);
+                                    }
+                                }
+                                databasevm_finalize(list_vm);
+                            }
+                            cloudsync_memory_free(list_sql);
+                        }
+                        cloudsync_memory_free(like_pattern);
+                    }
+                }
+
+                // Split new text into parts (NULL text = all blocks removed)
+                block_list_t *new_blocks = new_text ? block_split(new_text, delim) : block_list_create_empty();
+                if (new_blocks && old_blocks) {
+                    // Build array of new content strings (NULL when count is 0)
+                    const char **new_parts = NULL;
+                    if (new_blocks->count > 0) {
+                        new_parts = (const char **)cloudsync_memory_alloc(
+                            (uint64_t)(new_blocks->count * sizeof(char *)));
+                        if (new_parts) {
+                            for (int b = 0; b < new_blocks->count; b++) {
+                                new_parts[b] = new_blocks->entries[b].content;
+                            }
+                        }
+                    }
+
+                    if (new_parts || new_blocks->count == 0) {
+                        block_diff_t *diff = block_diff(old_blocks->entries, old_blocks->count,
+                                                         new_parts, new_blocks->count);
+                        if (diff) {
+                            for (int d = 0; d < diff->count; d++) {
+                                block_diff_entry_t *de = &diff->entries[d];
+                                char *block_cn = block_build_colname(col, de->position_id);
+                                if (!block_cn) continue;
+
+                                if (de->type == BLOCK_DIFF_ADDED || de->type == BLOCK_DIFF_MODIFIED) {
+                                    rc = local_mark_insert_or_update_meta(table, pk, pklen, block_cn,
+                                                                          db_version, cloudsync_bumpseq(data));
+                                    // Store block value
+                                    if (rc == SQLITE_OK && table_block_value_write_stmt(table)) {
+                                        dbvm_t *wvm = table_block_value_write_stmt(table);
+                                        databasevm_bind_blob(wvm, 1, pk, (int)pklen);
+                                        databasevm_bind_text(wvm, 2, block_cn, -1);
+                                        databasevm_bind_text(wvm, 3, de->content, -1);
+                                        databasevm_step(wvm);
+                                        databasevm_reset(wvm);
+                                    }
+                                } else if (de->type == BLOCK_DIFF_REMOVED) {
+                                    // Mark block as deleted in metadata (even col_version)
+                                    rc = local_mark_delete_block_meta(table, pk, pklen, block_cn,
+                                                                      db_version, cloudsync_bumpseq(data));
+                                    // Remove from blocks table
+                                    if (rc == SQLITE_OK) {
+                                        block_delete_value_external(data, table, pk, pklen, block_cn);
+                                    }
+                                }
+                                cloudsync_memory_free(block_cn);
+                                if (rc != SQLITE_OK) break;
+                            }
+                            block_diff_free(diff);
+                        }
+                        if (new_parts) cloudsync_memory_free((void *)new_parts);
+                    }
+                }
+                if (new_blocks) block_list_free(new_blocks);
+                if (old_blocks) block_list_free(old_blocks);
+                if (rc != SQLITE_OK) goto cleanup;
+            } else {
+                // Regular column: mark as updated in the metadata (columns are in cid order)
+                rc = local_mark_insert_or_update_meta(table, pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
+                if (rc != SQLITE_OK) goto cleanup;
+            }
         }
     }
     
@@ -970,6 +1157,62 @@ int dbsync_register_trigger_aggregate (sqlite3 *db, const char *name, void (*xst
     return dbsync_register_with_flags(db, name, NULL, xstep, xfinal, nargs, FLAGS_TRIGGER, pzErrMsg, ctx, ctx_free);
 }
 
+// MARK: - Block-level LWW -
+
+void dbsync_text_materialize (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_text_materialize");
+
+    // argv[0] -> table name
+    // argv[1] -> column name
+    // argv[2..N] -> primary key values
+
+    if (argc < 3) {
+        sqlite3_result_error(context, "cloudsync_text_materialize requires at least 3 arguments: table, column, pk...", -1);
+        return;
+    }
+
+    const char *table_name = (const char *)database_value_text(argv[0]);
+    const char *col_name = (const char *)database_value_text(argv[1]);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+
+    cloudsync_table_context *table = table_lookup(data, table_name);
+    if (!table) {
+        dbsync_set_error(context, "Unable to retrieve table name %s in cloudsync_text_materialize.", table_name);
+        return;
+    }
+
+    int col_idx = table_col_index(table, col_name);
+    if (col_idx < 0 || table_col_algo(table, col_idx) != col_algo_block) {
+        dbsync_set_error(context, "Column %s in table %s is not configured as block-level.", col_name, table_name);
+        return;
+    }
+
+    // Encode primary keys
+    int npks = table_count_pks(table);
+    if (argc - 2 != npks) {
+        sqlite3_result_error(context, "Wrong number of primary key values for cloudsync_text_materialize.", -1);
+        return;
+    }
+
+    char buffer[1024];
+    size_t pklen = sizeof(buffer);
+    char *pk = pk_encode_prikey((dbvalue_t **)&argv[2], npks, buffer, &pklen);
+    if (!pk || pk == PRIKEY_NULL_CONSTRAINT_ERROR) {
+        sqlite3_result_error(context, "Failed to encode primary key(s).", -1);
+        return;
+    }
+
+    // Materialize the column
+    int rc = block_materialize_column(data, table, pk, (int)pklen, col_name);
+    if (rc != DBRES_OK) {
+        sqlite3_result_error(context, cloudsync_errmsg(data), -1);
+    } else {
+        sqlite3_result_int(context, 1);
+    }
+
+    if (pk != buffer) cloudsync_memory_free(pk);
+}
+
 // MARK: - Row Filter -
 
 void dbsync_set_filter (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -1043,7 +1286,10 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     
     // init memory debugger (NOOP in production)
     cloudsync_memory_init(1);
-    
+
+    // set fractional-indexing allocator to use cloudsync memory
+    block_init_allocator();
+
     // init context
     void *ctx = cloudsync_context_create(db);
     if (!ctx) {
@@ -1167,6 +1413,9 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     if (rc != SQLITE_OK) return rc;
     
     rc = dbsync_register_function(db, "cloudsync_seq", dbsync_seq, 0, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbsync_register_function(db, "cloudsync_text_materialize", dbsync_text_materialize, -1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
 
     // NETWORK LAYER

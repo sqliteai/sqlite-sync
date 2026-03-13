@@ -12,9 +12,9 @@
 #include <stdlib.h>
 
 #include "network.h"
-#include "utils.h"
-#include "dbutils.h"
-#include "cloudsync.h"
+#include "../utils.h"
+#include "../dbutils.h"
+#include "../cloudsync.h"
 #include "network_private.h"
 
 #define JSMN_STATIC

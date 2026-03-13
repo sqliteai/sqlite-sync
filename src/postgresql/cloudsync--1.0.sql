@@ -290,6 +290,16 @@ AS 'MODULE_PATHNAME', 'pg_cloudsync_table_schema'
 LANGUAGE C VOLATILE;
 
 -- ============================================================================
+-- Block-level LWW Functions
+-- ============================================================================
+
+-- Materialize block-level column into base table
+CREATE OR REPLACE FUNCTION cloudsync_text_materialize(table_name text, col_name text, VARIADIC pk_values "any")
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'cloudsync_text_materialize'
+LANGUAGE C VOLATILE;
+
+-- ============================================================================
 -- Type Casts
 -- ============================================================================
 

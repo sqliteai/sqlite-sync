@@ -32,7 +32,7 @@ MAKEFLAGS += -j$(CPUS)
 
 # Compiler and flags
 CC = gcc
-CFLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(SRC_DIR)/sqlite -I$(SRC_DIR)/postgresql -I$(SQLITE_DIR) -I$(CURL_DIR)/include
+CFLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(SRC_DIR)/sqlite -I$(SRC_DIR)/postgresql -I$(SRC_DIR)/network -I$(SQLITE_DIR) -I$(CURL_DIR)/include -Imodules/fractional-indexing
 T_CFLAGS = $(CFLAGS) -DSQLITE_CORE -DCLOUDSYNC_UNITTEST -DCLOUDSYNC_OMIT_NETWORK -DCLOUDSYNC_OMIT_PRINT_RESULT
 COVERAGE = false
 ifndef NATIVE_NETWORK
@@ -46,7 +46,9 @@ POSTGRES_IMPL_DIR = $(SRC_DIR)/postgresql
 DIST_DIR = dist
 TEST_DIR = test
 SQLITE_DIR = sqlite
-VPATH = $(SRC_DIR):$(SQLITE_IMPL_DIR):$(POSTGRES_IMPL_DIR):$(SQLITE_DIR):$(TEST_DIR)
+FI_DIR = modules/fractional-indexing
+NETWORK_DIR = $(SRC_DIR)/network
+VPATH = $(SRC_DIR):$(SQLITE_IMPL_DIR):$(POSTGRES_IMPL_DIR):$(NETWORK_DIR):$(SQLITE_DIR):$(TEST_DIR):$(FI_DIR)
 BUILD_RELEASE = build/release
 BUILD_TEST = build/test
 BUILD_DIRS = $(BUILD_TEST) $(BUILD_RELEASE)
@@ -62,17 +64,19 @@ ifeq ($(PLATFORM),android)
 endif
 
 # Multi-platform source files (at src/ root) - exclude database_*.c as they're in subdirs
-CORE_SRC = $(filter-out $(SRC_DIR)/database_%.c, $(wildcard $(SRC_DIR)/*.c))
+CORE_SRC = $(filter-out $(SRC_DIR)/database_%.c, $(wildcard $(SRC_DIR)/*.c)) $(wildcard $(NETWORK_DIR)/*.c)
 # SQLite-specific files
 SQLITE_SRC = $(wildcard $(SQLITE_IMPL_DIR)/*.c)
+# Fractional indexing submodule
+FI_SRC = $(FI_DIR)/fractional_indexing.c
 # Combined for SQLite extension build
-SRC_FILES = $(CORE_SRC) $(SQLITE_SRC)
+SRC_FILES = $(CORE_SRC) $(SQLITE_SRC) $(FI_SRC)
 
 TEST_SRC = $(wildcard $(TEST_DIR)/*.c)
 TEST_FILES = $(SRC_FILES) $(TEST_SRC) $(wildcard $(SQLITE_DIR)/*.c)
 RELEASE_OBJ = $(patsubst %.c, $(BUILD_RELEASE)/%.o, $(notdir $(SRC_FILES)))
 TEST_OBJ = $(patsubst %.c, $(BUILD_TEST)/%.o, $(notdir $(TEST_FILES)))
-COV_FILES = $(filter-out $(SRC_DIR)/lz4.c $(SRC_DIR)/network.c $(SQLITE_IMPL_DIR)/sql_sqlite.c $(POSTGRES_IMPL_DIR)/database_postgresql.c, $(SRC_FILES))
+COV_FILES = $(filter-out $(SRC_DIR)/lz4.c $(NETWORK_DIR)/network.c $(SQLITE_IMPL_DIR)/sql_sqlite.c $(POSTGRES_IMPL_DIR)/database_postgresql.c $(FI_SRC), $(SRC_FILES))
 CURL_LIB = $(CURL_DIR)/$(PLATFORM)/libcurl.a
 TEST_TARGET = $(patsubst %.c,$(DIST_DIR)/%$(EXE), $(notdir $(TEST_SRC)))
 
@@ -128,7 +132,7 @@ else ifeq ($(PLATFORM),android)
 	CURL_CONFIG = --host $(ARCH)-linux-$(ANDROID_ABI) --with-openssl=$(CURDIR)/$(OPENSSL_INSTALL_DIR) LDFLAGS="-L$(CURDIR)/$(OPENSSL_INSTALL_DIR)/lib" LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(CC) CXX=$(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
 	TARGET := $(DIST_DIR)/cloudsync.so
 	CFLAGS += -fPIC -I$(OPENSSL_INSTALL_DIR)/include
-	LDFLAGS += -shared -fPIC -L$(OPENSSL_INSTALL_DIR)/lib -lssl -lcrypto
+	LDFLAGS += -shared -fPIC -L$(OPENSSL_INSTALL_DIR)/lib -lssl -lcrypto -lm
 	STRIP = $(BIN)/llvm-strip --strip-unneeded $@
 else ifeq ($(PLATFORM),ios)
 	TARGET := $(DIST_DIR)/cloudsync.dylib
@@ -148,8 +152,8 @@ else ifeq ($(PLATFORM),ios-sim)
 	STRIP = strip -x -S $@
 else # linux
 	TARGET := $(DIST_DIR)/cloudsync.so
-	LDFLAGS += -shared -lssl -lcrypto
-	T_LDFLAGS += -lpthread
+	LDFLAGS += -shared -lssl -lcrypto -lm
+	T_LDFLAGS += -lpthread -lm
 	CURL_CONFIG = --with-openssl
 	STRIP = strip --strip-unneeded $@
 endif
@@ -164,7 +168,7 @@ endif
 
 # Native network support only for Apple platforms
 ifdef NATIVE_NETWORK
-	RELEASE_OBJ += $(patsubst %.m, $(BUILD_RELEASE)/%_m.o, $(notdir $(wildcard $(SRC_DIR)/*.m)))
+	RELEASE_OBJ += $(patsubst %.m, $(BUILD_RELEASE)/%_m.o, $(notdir $(wildcard $(NETWORK_DIR)/*.m)))
 	LDFLAGS += -framework Foundation
 	CFLAGS += -DCLOUDSYNC_OMIT_CURL
 
