@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define CLOUDSYNC_VERSION                       "0.9.200"
+#define CLOUDSYNC_VERSION                       "0.9.201"
 #define CLOUDSYNC_MAX_TABLENAME_LEN             512
 
 #define CLOUDSYNC_VALUE_NOTSET                  -1

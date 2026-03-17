@@ -2273,16 +2273,10 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
         return cloudsync_set_error(data, buffer, DBRES_MISUSE);
     }
     
-    // create a savepoint to manage the alter operations as a transaction
-    int rc = database_begin_savepoint(data, "cloudsync_alter");
-    if (rc != DBRES_OK) {
-        return cloudsync_set_error(data, "Unable to create cloudsync_begin_alter savepoint", DBRES_MISUSE);
-    }
-    
     // retrieve primary key(s)
     char **names = NULL;
     int nrows = 0;
-    rc = database_pk_names(data, table_name, &names, &nrows);
+    int rc = database_pk_names(data, table_name, &names, &nrows);
     if (rc != DBRES_OK) {
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), "Unable to get primary keys for table %s", table_name);
@@ -2311,7 +2305,6 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     return DBRES_OK;
     
 rollback_begin_alter:
-    database_rollback_savepoint(data, "cloudsync_alter");
     if (names) table_pknames_free(names, nrows);
     return rc;
 }
@@ -2430,18 +2423,9 @@ int cloudsync_commit_alter (cloudsync_context *data, const char *table_name) {
     rc = cloudsync_init_table(data, table_name, cloudsync_algo_name(algo_current), true);
     if (rc != DBRES_OK) goto rollback_finalize_alter;
 
-    // release savepoint
-    rc = database_commit_savepoint(data, "cloudsync_alter");
-    if (rc != DBRES_OK) {
-        cloudsync_set_dberror(data);
-        goto rollback_finalize_alter;
-    }
-    
-    cloudsync_update_schema_hash(data);
     return DBRES_OK;
-    
+
 rollback_finalize_alter:
-    database_rollback_savepoint(data, "cloudsync_alter");
     if (table) table_set_pknames(table, NULL);
     return rc;
 }

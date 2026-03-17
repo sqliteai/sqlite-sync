@@ -763,26 +763,27 @@ Datum pg_cloudsync_begin_alter (PG_FUNCTION_ARGS) {
     const char *table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
     cloudsync_context *data = get_cloudsync_context();
     int rc = DBRES_OK;
-    bool spi_connected = false;
 
-    int spi_rc = SPI_connect();
-    if (spi_rc != SPI_OK_CONNECT) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
+    if (SPI_connect() != SPI_OK_CONNECT) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed")));
     }
-    spi_connected = true;
 
     PG_TRY();
     {
+        database_begin_savepoint(data, "cloudsync_alter");
         rc = cloudsync_begin_alter(data, table_name);
+        if (rc != DBRES_OK) {
+            database_rollback_savepoint(data, "cloudsync_alter");
+        }
     }
     PG_CATCH();
     {
-        if (spi_connected) SPI_finish();
+        SPI_finish();
         PG_RE_THROW();
     }
     PG_END_TRY();
 
-    if (spi_connected) SPI_finish();
+    SPI_finish();
     if (rc != DBRES_OK) {
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
@@ -792,6 +793,14 @@ Datum pg_cloudsync_begin_alter (PG_FUNCTION_ARGS) {
 }
 
 // cloudsync_commit_alter - Commit schema alteration
+//
+// This wrapper manages SPI in two phases to avoid the PostgreSQL warning
+// "subtransaction left non-empty SPI stack". The subtransaction was opened
+// by a prior cloudsync_begin_alter call, so SPI_connect() here creates a
+// connection at the subtransaction level. We must disconnect SPI before
+// cloudsync_commit_alter releases that subtransaction, then reconnect
+// for post-commit work (cloudsync_update_schema_hash).
+// Prepared statements survive SPI_finish via SPI_keepplan/TopMemoryContext.
 PG_FUNCTION_INFO_V1(pg_cloudsync_commit_alter);
 Datum pg_cloudsync_commit_alter (PG_FUNCTION_ARGS) {
     if (PG_ARGISNULL(0)) {
@@ -801,13 +810,11 @@ Datum pg_cloudsync_commit_alter (PG_FUNCTION_ARGS) {
     const char *table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
     cloudsync_context *data = get_cloudsync_context();
     int rc = DBRES_OK;
-    bool spi_connected = false;
 
-    int spi_rc = SPI_connect();
-    if (spi_rc != SPI_OK_CONNECT) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
+    // Phase 1: SPI work before savepoint release
+    if (SPI_connect() != SPI_OK_CONNECT) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed")));
     }
-    spi_connected = true;
 
     PG_TRY();
     {
@@ -815,15 +822,43 @@ Datum pg_cloudsync_commit_alter (PG_FUNCTION_ARGS) {
     }
     PG_CATCH();
     {
-        if (spi_connected) SPI_finish();
+        SPI_finish();
         PG_RE_THROW();
     }
     PG_END_TRY();
 
-    if (spi_connected) SPI_finish();
+    // Disconnect SPI before savepoint boundary
+    SPI_finish();
+
     if (rc != DBRES_OK) {
+        // Rollback savepoint (SPI disconnected, no warning)
+        database_rollback_savepoint(data, "cloudsync_alter");
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
     }
+
+    // Release savepoint (SPI disconnected, no warning)
+    rc = database_commit_savepoint(data, "cloudsync_alter");
+    if (rc != DBRES_OK) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to release cloudsync_alter savepoint: %s", database_errmsg(data))));
+    }
+
+    // Phase 2: reconnect SPI for post-commit work
+    if (SPI_connect() != SPI_OK_CONNECT) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed after savepoint release")));
+    }
+
+    PG_TRY();
+    {
+        cloudsync_update_schema_hash(data);
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    SPI_finish();
     PG_RETURN_BOOL(true);
 }
 

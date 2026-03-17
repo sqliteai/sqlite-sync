@@ -919,15 +919,20 @@ void dbsync_init1 (sqlite3_context *context, int argc, sqlite3_value **argv) {
 
 void dbsync_begin_alter (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("dbsync_begin_alter");
-     
-    //retrieve table argument
+
     const char *table_name = (const char *)database_value_text(argv[0]);
-    
-    // retrieve context
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    
-    int rc = cloudsync_begin_alter(data, table_name);
+
+    int rc = database_begin_savepoint(data, "cloudsync_alter");
     if (rc != DBRES_OK) {
+        sqlite3_result_error(context, "Unable to create cloudsync_alter savepoint", -1);
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+
+    rc = cloudsync_begin_alter(data, table_name);
+    if (rc != DBRES_OK) {
+        database_rollback_savepoint(data, "cloudsync_alter");
         sqlite3_result_error(context, cloudsync_errmsg(data), -1);
         sqlite3_result_error_code(context, rc);
     }
@@ -944,9 +949,20 @@ void dbsync_commit_alter (sqlite3_context *context, int argc, sqlite3_value **ar
     
     int rc = cloudsync_commit_alter(data, table_name);
     if (rc != DBRES_OK) {
+        database_rollback_savepoint(data, "cloudsync_alter");
         sqlite3_result_error(context, cloudsync_errmsg(data), -1);
         sqlite3_result_error_code(context, rc);
+        return;
     }
+
+    rc = database_commit_savepoint(data, "cloudsync_alter");
+    if (rc != DBRES_OK) {
+        sqlite3_result_error(context, database_errmsg(data), -1);
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+
+    cloudsync_update_schema_hash(data);
 }
 
 // MARK: - Payload -
