@@ -66,9 +66,17 @@ For the network init call throughout the test, use:
 - Default address: `SELECT cloudsync_network_init('<MANAGED_DB_ID>');`
 - Custom address: `SELECT cloudsync_network_init_custom('<CUSTOM_ADDRESS>', '<MANAGED_DB_ID>');`
 
-### Step 4: Get Auth Tokens (if RLS enabled)
+### Step 4: Set Up Authentication
 
-Create tokens for the test users. Create as many users as needed for the number of concurrent databases (assign 2 databases per user, or 1 per user if NUM_DBS <= 2).
+Authentication depends on the RLS mode:
+
+**If RLS is disabled:** Use the project `APIKEY` (already extracted from the connection string). After each `cloudsync_network_init`/`cloudsync_network_init_custom` call, authenticate with:
+```sql
+SELECT cloudsync_network_set_apikey('<APIKEY>');
+```
+No tokens are needed. Skip token creation entirely.
+
+**If RLS is enabled:** Create tokens for the test users. Create as many users as needed for the number of concurrent databases (assign 2 databases per user, or 1 per user if NUM_DBS <= 2).
 
 For each user N:
 ```bash
@@ -78,9 +86,12 @@ curl -s -X "POST" "https://<HOST>/v2/tokens" \
    -d '{"name": "claude<N>@sqlitecloud.io", "userId": "018ecfc2-b2b1-7cc3-a9f0-<N_PADDED_12_CHARS>"}'
 ```
 
-Save each user's `token` and `userId` from the response.
+Save each user's `token` and `userId` from the response. After each `cloudsync_network_init`/`cloudsync_network_init_custom` call, authenticate with:
+```sql
+SELECT cloudsync_network_set_token('<TOKEN>');
+```
 
-If RLS is disabled, skip this step — tokens are not required.
+**IMPORTANT:** Using a token when RLS is disabled will cause the server to silently reject all sent changes (send appears to succeed but data is not persisted remotely). Always use `cloudsync_network_set_apikey` when RLS is off.
 
 ### Step 5: Run the Concurrent Stress Test
 
@@ -95,9 +106,9 @@ Create a bash script at `/tmp/stress_test_concurrent.sh` that:
 2. **Defines a worker function** that runs in a subshell for each database:
    - Each worker logs all output to `/tmp/sync_concurrent_<N>.log`
    - Each iteration does:
-     a. **DELETE all rows** → `send_changes()` → `check_changes()`
-     b. **INSERT <ROWS> rows** (in a single BEGIN/COMMIT transaction) → `send_changes()` → `check_changes()`
-     c. **UPDATE all rows** → `send_changes()` → `check_changes()`
+     a. **DELETE all rows** → `cloudsync_network_sync(100, 10)`
+     b. **INSERT <ROWS> rows** (in a single BEGIN/COMMIT transaction) → `cloudsync_network_sync(100, 10)`
+     c. **UPDATE all rows** → `cloudsync_network_sync(100, 10)`
    - Each session must: `.load` the extension, call `cloudsync_network_init()`, `cloudsync_network_set_token()` (if RLS), do the work, call `cloudsync_terminate()`
    - Include labeled output lines like `[DB<N>][iter <I>] deleted/inserted/updated, count=<C>` for grep-ability
 
