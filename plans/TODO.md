@@ -1,2 +1,0 @@
-- I need to call cloudsync_update_schema_hash to update the last schema hash when upgrading the library from the 0.8.* version
-- Fix cloudsync_begin_alter and cloudsync_commit_alter for PostgreSQL, and we could call them automatically with a trigger on ALTER TABLE
