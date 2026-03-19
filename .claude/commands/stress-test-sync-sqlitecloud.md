@@ -106,11 +106,16 @@ Create a bash script at `/tmp/stress_test_concurrent.sh` that:
 2. **Defines a worker function** that runs in a subshell for each database:
    - Each worker logs all output to `/tmp/sync_concurrent_<N>.log`
    - Each iteration does:
-     a. **DELETE all rows** → `cloudsync_network_sync(100, 10)`
-     b. **INSERT <ROWS> rows** (in a single BEGIN/COMMIT transaction) → `cloudsync_network_sync(100, 10)`
-     c. **UPDATE all rows** → `cloudsync_network_sync(100, 10)`
-   - Each session must: `.load` the extension, call `cloudsync_network_init()`, `cloudsync_network_set_token()` (if RLS), do the work, call `cloudsync_terminate()`
-   - Include labeled output lines like `[DB<N>][iter <I>] deleted/inserted/updated, count=<C>` for grep-ability
+     a. **UPDATE all/some rows** (e.g., `UPDATE <table> SET value = value + 1;`)
+     b. **DELETE a few rows** (e.g., `DELETE FROM <table> WHERE rowid IN (SELECT rowid FROM <table> ORDER BY RANDOM() LIMIT 10);`)
+     c. **Sync using the 3-step send/check/check pattern:**
+        1. `SELECT cloudsync_network_send_changes();` — send local changes to the server
+        2. `SELECT cloudsync_network_check_changes();` — ask the server to prepare a payload of remote changes
+        3. Sleep 1 second (outside sqlite3, between two separate sqlite3 invocations)
+        4. `SELECT cloudsync_network_check_changes();` — download the prepared payload, if any
+   - Each sqlite3 session must: `.load` the extension, call `cloudsync_network_init()`/`cloudsync_network_init_custom()`, `cloudsync_network_set_apikey()`/`cloudsync_network_set_token()` (depending on RLS mode), do the work, call `cloudsync_terminate()`
+   - **Timing**: Log the wall-clock execution time (in milliseconds) for each `cloudsync_network_send_changes()`, `cloudsync_network_check_changes()` call. Use bash `date +%s%3N` before and after each sqlite3 invocation that calls a network function, and compute the delta. Log lines like: `[DB<N>][iter <I>] send_changes: 123ms`, `[DB<N>][iter <I>] check_changes_1: 45ms`, `[DB<N>][iter <I>] check_changes_2: 67ms`
+   - Include labeled output lines like `[DB<N>][iter <I>] updated count=<C>, deleted count=<D>` for grep-ability
 
 3. **Launches all workers in parallel** using `&` and collects PIDs
 
@@ -124,9 +129,11 @@ Create a bash script at `/tmp/stress_test_concurrent.sh` that:
 6. **Prints final verdict**: PASS (0 errors) or FAIL (errors detected)
 
 **Important script details:**
-- Use `echo -e` to pipe generated INSERT SQL (with `\n` separators) into sqlite3
-- Row IDs should be unique across databases and iterations: `db<N>_r<I>_<J>`
+- Use `echo -e` to pipe generated SQL (with `\n` separators) into sqlite3
+- During database initialization (Step 1), insert `ROWS` initial rows per database in a single transaction so each DB starts with data to update/delete. Row IDs should be unique across databases: `db<N>_r<J>`
 - User IDs for rows must match the token's userId for RLS to work
+- The sync pattern requires **separate sqlite3 invocations** for send_changes and each check_changes call (with a 1-second sleep between the two check_changes calls), so that timing can be measured per-call from bash
+- **stderr capture**: All sqlite3 invocations must redirect both stdout and stderr to the log file. Use `>> "$LOG" 2>&1` (in this order — stdout redirect first, then stderr to stdout). For timed calls that capture output in a variable, redirect stderr to the log file separately: `RESULT=$(echo -e "$SQL" | $SQLITE3 "$DB" 2>> "$LOG")` and then echo `$RESULT` to the log as well. This ensures "Runtime error" messages from sqlite3 are never lost.
 - Use `/bin/bash` (not `/bin/sh`) for arrays and process management
 
 Run the script with a 10-minute timeout.
@@ -140,13 +147,25 @@ After the test completes, provide a detailed breakdown:
 3. **Timeline analysis**: do errors cluster at specific iterations or spread evenly?
 4. **Read full log files** if errors are found — show the first and last 30 lines of each log with errors
 
-### Step 7: Optional — Verify Data Integrity
+### Step 7: Final Sync and Data Integrity Verification
 
-If the test passes (or even if some errors occurred), verify the final state:
+After all workers have terminated, perform a **final sync on every local database** to ensure all databases converge to the same state. Then verify data integrity.
 
-1. Check each local SQLite database for row count
-2. Check SQLiteCloud (as admin) for total row count
-3. If RLS is enabled, verify no cross-user data leakage
+1. **Final sync loop** (max 10 retries): Repeat the following until all local databases have the same row count, or the retry limit is reached:
+   a. For each local database (sequentially):
+      - Load the extension, call `cloudsync_network_init`/`cloudsync_network_init_custom`, authenticate with `cloudsync_network_set_apikey`/`cloudsync_network_set_token`
+      - Run `SELECT cloudsync_network_sync(100, 10);` to sync remaining changes
+      - Call `cloudsync_terminate()`
+   b. After syncing all databases, query `SELECT COUNT(*) FROM <table>` on each database
+   c. If all row counts are identical, convergence is achieved — break out of the loop
+   d. Otherwise, log the round number and the distinct row counts, then repeat from (a)
+   e. If the retry limit is reached without convergence, report it as a failure
+
+2. **Row count verification**: Report the final row counts. All databases should have the same number of rows. Also check SQLiteCloud (as admin) for total row count.
+
+3. **Row content verification**: Pick one random row ID from the first database (`SELECT id FROM <table> ORDER BY RANDOM() LIMIT 1;`). Then query that same row (`SELECT id, user_id, name, value FROM <table> WHERE id = '<random_id>';`) on **every** local database. Compare the results — all databases must return identical column values for that row. Report the row ID, the expected values, and any mismatches.
+
+4. If RLS is enabled, verify no cross-user data leakage.
 
 ## Output Format
 
@@ -157,8 +176,8 @@ Report the test results including:
 | Concurrent databases | N |
 | Rows per iteration | ROWS |
 | Iterations per database | ITERATIONS |
-| Total CRUD operations | N × ITERATIONS × (DELETE_ALL + ROWS inserts + ROWS updates) |
-| Total sync operations | N × ITERATIONS × 6 (3 sends + 3 checks) |
+| Total CRUD operations | N × ITERATIONS × (UPDATE_ALL + DELETE_FEW) |
+| Total sync operations | N × ITERATIONS × 3 (1 send_changes + 2 check_changes) |
 | Duration | start to finish time |
 | Total errors | count |
 | Error types | categorized list |
@@ -175,13 +194,15 @@ If errors are found, include:
 The test **PASSES** if:
 1. All workers complete all iterations
 2. Zero `error`, `locked`, `SQLITE_BUSY`, or HTTP 500 responses in any log
-3. Final row counts are consistent
+3. After the final sync, all local databases have the same row count
+4. A randomly selected row has identical content across all local databases
 
 The test **FAILS** if:
 1. Any worker crashes or fails to complete
 2. Any `database is locked` or `SQLITE_BUSY` errors appear
 3. Server returns 500 errors under concurrent load
-4. Data corruption or inconsistent row counts
+4. Row counts differ across local databases after the final sync loop exhausts all retries
+5. Row content differs across local databases (data corruption)
 
 ## Important Notes
 
