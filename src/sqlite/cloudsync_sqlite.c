@@ -1459,6 +1459,11 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
             return SQLITE_ERROR;
         }
         
+        // update schema hash if upgrading from an older version
+        if (dbutils_settings_check_version(data, NULL) != 0) {
+            cloudsync_update_schema_hash(data);
+        }
+
         // make sure to update internal version to current version
         dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
     }

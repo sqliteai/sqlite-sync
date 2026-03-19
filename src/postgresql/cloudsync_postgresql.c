@@ -73,6 +73,11 @@ static void cloudsync_pg_context_init (cloudsync_context *data) {
                 ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("An error occurred while trying to initialize context")));
             }
 
+            // update schema hash if upgrading from an older version
+            if (dbutils_settings_check_version(data, NULL) != 0) {
+                cloudsync_update_schema_hash(data);
+            }
+
             // make sure to update internal version to current version
             dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
         }
