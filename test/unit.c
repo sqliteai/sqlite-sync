@@ -6436,6 +6436,226 @@ finalize:
 }
 
 // Test concurrent merge attempts
+bool do_test_payload_apply_concurrent_write (int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[MAX_SIMULATED_CLIENTS] = {NULL};
+    sqlite3 *db_target2 = NULL;
+    sqlite3_stmt *select_stmt = NULL;
+    sqlite3_stmt *apply_stmt = NULL;
+    bool result = false;
+    int rc = SQLITE_OK;
+
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    if (nclients < 2) nclients = 2;
+    if (nclients > 2) nclients = 2; // this test uses exactly 2 databases
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+
+    // create two file-based databases: db[0]=src, db[1]=target
+    for (int i = 0; i < nclients; ++i) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (db[i] == NULL) return false;
+
+        rc = sqlite3_exec(db[i], "CREATE TABLE concurrent_tbl (id TEXT PRIMARY KEY, val TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('concurrent_tbl', 'cls', 1);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // insert data on src (db[0])
+    rc = sqlite3_exec(db[0], "INSERT INTO concurrent_tbl VALUES ('row1', 'hello');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO concurrent_tbl VALUES ('row2', 'world');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // extract payload from db[0]
+    const char *encode_sql = "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes WHERE site_id=cloudsync_siteid();";
+    rc = sqlite3_prepare_v2(db[0], encode_sql, -1, &select_stmt, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    rc = sqlite3_step(select_stmt);
+    if (rc != SQLITE_ROW) goto finalize;
+
+    const void *payload_data = sqlite3_column_blob(select_stmt, 0);
+    int payload_size = sqlite3_column_bytes(select_stmt, 0);
+    if (payload_data == NULL || payload_size == 0) goto finalize;
+
+    // copy payload since we'll need it after finalizing select_stmt
+    void *payload_copy = malloc(payload_size);
+    if (payload_copy == NULL) goto finalize;
+    memcpy(payload_copy, payload_data, payload_size);
+    sqlite3_finalize(select_stmt);
+    select_stmt = NULL;
+
+    // open second connection to same file as db[1] (target)
+    {
+        char buf[256];
+        do_build_database_path(buf, 1, timestamp, saved_counter + 1);
+        rc = sqlite3_open(buf, &db_target2);
+        if (rc != SQLITE_OK) {
+            printf("Error opening db_target2: %s\n", sqlite3_errmsg(db_target2));
+            free(payload_copy);
+            goto finalize;
+        }
+        sqlite3_exec(db_target2, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+        sqlite3_cloudsync_init(db_target2, NULL, NULL);
+    }
+
+    // on db[1] (target): begin immediate to hold write lock
+    rc = sqlite3_exec(db[1], "BEGIN IMMEDIATE;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("BEGIN IMMEDIATE failed: %s\n", sqlite3_errmsg(db[1]));
+        free(payload_copy);
+        goto finalize;
+    }
+    rc = sqlite3_exec(db[1], "INSERT INTO concurrent_tbl VALUES ('blocker', 'blocking');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("Blocker INSERT failed: %s\n", sqlite3_errmsg(db[1]));
+        free(payload_copy);
+        goto finalize;
+    }
+
+    // on db_target2: try to apply payload — should fail with BUSY
+    rc = sqlite3_prepare_v2(db_target2, "SELECT cloudsync_payload_decode(?);", -1, &apply_stmt, NULL);
+    if (rc != SQLITE_OK) {
+        printf("Prepare apply failed: %s\n", sqlite3_errmsg(db_target2));
+        free(payload_copy);
+        goto finalize;
+    }
+    rc = sqlite3_bind_blob(apply_stmt, 1, payload_copy, payload_size, SQLITE_STATIC);
+    if (rc != SQLITE_OK) {
+        printf("Bind failed: %s\n", sqlite3_errmsg(db_target2));
+        free(payload_copy);
+        goto finalize;
+    }
+
+    // set a short busy timeout so it doesn't wait forever (0 = fail immediately)
+    sqlite3_busy_timeout(db_target2, 0);
+
+    rc = sqlite3_step(apply_stmt);
+    if (rc == SQLITE_ROW || rc == SQLITE_DONE) {
+        printf("Expected BUSY error but apply succeeded (rc=%d)\n", rc);
+        free(payload_copy);
+        goto finalize;
+    }
+
+    // verify we got a BUSY-related error
+    int errcode = sqlite3_errcode(db_target2);
+    if (errcode != SQLITE_BUSY && errcode != SQLITE_LOCKED) {
+        printf("Expected SQLITE_BUSY or SQLITE_LOCKED but got error %d: %s\n", errcode, sqlite3_errmsg(db_target2));
+        free(payload_copy);
+        goto finalize;
+    }
+
+    if (print_result) {
+        printf("  Step 1: Apply blocked as expected (errcode=%d: %s)\n", errcode, sqlite3_errmsg(db_target2));
+    }
+
+    // release the write lock on db[1]
+    rc = sqlite3_exec(db[1], "COMMIT;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("COMMIT failed: %s\n", sqlite3_errmsg(db[1]));
+        free(payload_copy);
+        goto finalize;
+    }
+
+    // retry: reset and step again — should succeed now
+    sqlite3_reset(apply_stmt);
+    sqlite3_busy_timeout(db_target2, 5000); // give it time now
+
+    rc = sqlite3_step(apply_stmt);
+    if (rc != SQLITE_ROW) {
+        printf("Expected SQLITE_ROW on retry but got %d: %s\n", rc, sqlite3_errmsg(db_target2));
+        free(payload_copy);
+        goto finalize;
+    }
+
+    if (print_result) {
+        printf("  Step 2: Apply succeeded after lock released\n");
+    }
+
+    sqlite3_finalize(apply_stmt);
+    apply_stmt = NULL;
+    free(payload_copy);
+    payload_copy = NULL;
+
+    // verify: db_target2 should have row1, row2 (from payload) + blocker (from db[1])
+    {
+        sqlite3_stmt *count_stmt = NULL;
+        rc = sqlite3_prepare_v2(db_target2, "SELECT COUNT(*) FROM concurrent_tbl;", -1, &count_stmt, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_step(count_stmt);
+        if (rc != SQLITE_ROW) { sqlite3_finalize(count_stmt); goto finalize; }
+        int count = sqlite3_column_int(count_stmt, 0);
+        sqlite3_finalize(count_stmt);
+        if (count != 3) {
+            printf("Expected 3 rows but got %d\n", count);
+            goto finalize;
+        }
+        if (print_result) {
+            printf("  Step 3: Target has %d rows (expected 3)\n", count);
+        }
+    }
+
+    // full consistency: merge all databases using payload
+    // first close db_target2 to avoid lock conflicts during merge
+    close_db(db_target2);
+    db_target2 = NULL;
+
+    // merge db[0] <-> db[1] in both directions
+    if (do_merge_using_payload(db[0], db[1], false, true) == false) {
+        printf("Merge src->target failed\n");
+        goto finalize;
+    }
+    if (do_merge_using_payload(db[1], db[0], false, true) == false) {
+        printf("Merge target->src failed\n");
+        goto finalize;
+    }
+
+    // verify consistency
+    {
+        const char *sql = "SELECT * FROM concurrent_tbl ORDER BY id;";
+        bool cmp = do_compare_queries(db[0], sql, db[1], sql, -1, -1, print_result);
+        if (!cmp) {
+            printf("Consistency check failed between src and target\n");
+            goto finalize;
+        }
+    }
+
+    if (print_result) {
+        printf("  Step 4: Full consistency verified\n");
+    }
+
+    result = true;
+
+finalize:
+    if (select_stmt) sqlite3_finalize(select_stmt);
+    if (apply_stmt) sqlite3_finalize(apply_stmt);
+    if (db_target2) close_db(db_target2);
+    for (int i = 0; i < nclients; ++i) {
+        if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK))
+            printf("do_test_payload_apply_concurrent_write error: %s\n", sqlite3_errmsg(db[i]));
+        if (db[i]) {
+            if (sqlite3_get_autocommit(db[i]) == 0) {
+                result = false;
+                printf("do_test_payload_apply_concurrent_write error: db %d is in transaction\n", i);
+            }
+            int counter = close_db(db[i]);
+            if (counter > 0) {
+                result = false;
+                printf("do_test_payload_apply_concurrent_write error: db %d has %d unterminated statements\n", i, counter);
+            }
+        }
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
 bool do_test_merge_concurrent_attempts (int nclients, bool print_result, bool cleanup_databases) {
     sqlite3 *db[MAX_SIMULATED_CLIENTS] = {NULL};
     bool result = false;
@@ -10254,6 +10474,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Merge Index Consistency:", do_test_merge_index_consistency(2, print_result, cleanup_databases));
     result += test_report("Merge JSON Columns:", do_test_merge_json_columns(2, print_result, cleanup_databases));
     result += test_report("Merge Concurrent Attempts:", do_test_merge_concurrent_attempts(3, print_result, cleanup_databases));
+    result += test_report("Payload Apply Lock Test:", do_test_payload_apply_concurrent_write(2, print_result, cleanup_databases));
     result += test_report("Merge Composite PK 10 Clients:", do_test_merge_composite_pk_10_clients(10, print_result, cleanup_databases));
     result += test_report("PriKey NULL Test:", do_test_prikey(2, print_result, cleanup_databases));
     result += test_report("Test Double Init:", do_test_double_init(2, cleanup_databases));

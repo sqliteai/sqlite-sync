@@ -46,6 +46,7 @@
 \ir 36_block_lww_round3.sql
 \ir 37_block_lww_round4.sql
 \ir 38_block_lww_round5.sql
+\ir 39_concurrent_write_apply.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'
