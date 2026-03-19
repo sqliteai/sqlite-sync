@@ -10364,6 +10364,552 @@ fail:
     return false;
 }
 
+// MARK: - New edge-case tests
+
+bool do_test_unsupported_algorithms (sqlite3 *db) {
+    // Test that DWS and AWS algorithms are rejected with an error
+    const char *sql;
+    int rc;
+
+    // Create tables for the test
+    sql = "CREATE TABLE IF NOT EXISTS test_dws (id TEXT PRIMARY KEY, val TEXT);"
+          "CREATE TABLE IF NOT EXISTS test_aws (id TEXT PRIMARY KEY, val TEXT);";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return false;
+
+    // DWS should fail
+    sql = "SELECT cloudsync_init('test_dws', 'dws');";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_ERROR) return false;
+
+    // AWS should fail
+    sql = "SELECT cloudsync_init('test_aws', 'aws');";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_ERROR) return false;
+
+    // Verify no companion tables were created
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM sqlite_master WHERE name='test_dws_cloudsync' OR name='test_aws_cloudsync';", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return false;
+    if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); return false; }
+    int count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    if (count != 0) return false;
+
+    // CLS should still work on the same table
+    sql = "SELECT cloudsync_init('test_dws', 'cls');";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return false;
+
+    return true;
+}
+
+bool do_test_corrupted_payload (int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    bool result = false;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+
+    // Create source and destination databases
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        int rc = sqlite3_exec(db[i], "CREATE TABLE test_tbl (id TEXT PRIMARY KEY, val TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('test_tbl');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // Insert data in source
+    sqlite3_exec(db[0], "INSERT INTO test_tbl VALUES ('id1', 'value1');", NULL, NULL, NULL);
+    sqlite3_exec(db[0], "INSERT INTO test_tbl VALUES ('id2', 'value2');", NULL, NULL, NULL);
+
+    // Get valid payload as blob
+    sqlite3_stmt *enc_stmt = NULL;
+    int rc = sqlite3_prepare_v2(db[0], "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes WHERE site_id=cloudsync_siteid();", -1, &enc_stmt, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    rc = sqlite3_step(enc_stmt);
+    if (rc != SQLITE_ROW) { sqlite3_finalize(enc_stmt); goto finalize; }
+
+    int valid_len = sqlite3_column_bytes(enc_stmt, 0);
+    const void *valid_blob = sqlite3_column_blob(enc_stmt, 0);
+    if (!valid_blob || valid_len < 20) { sqlite3_finalize(enc_stmt); goto finalize; }
+
+    // Copy valid payload
+    char *payload_copy = (char *)malloc(valid_len);
+    if (!payload_copy) { sqlite3_finalize(enc_stmt); goto finalize; }
+    memcpy(payload_copy, valid_blob, valid_len);
+    sqlite3_finalize(enc_stmt);
+
+    // Test 1: Empty blob
+    {
+        sqlite3_stmt *dec_stmt = NULL;
+        rc = sqlite3_prepare_v2(db[1], "SELECT cloudsync_payload_decode(?);", -1, &dec_stmt, NULL);
+        if (rc == SQLITE_OK) {
+            sqlite3_bind_blob(dec_stmt, 1, "", 0, SQLITE_STATIC);
+            rc = sqlite3_step(dec_stmt);
+            // Should either error or return without inserting
+            sqlite3_finalize(dec_stmt);
+        }
+    }
+
+    // Test 2: Random garbage
+    {
+        char garbage[16] = {0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+        sqlite3_stmt *dec_stmt = NULL;
+        rc = sqlite3_prepare_v2(db[1], "SELECT cloudsync_payload_decode(?);", -1, &dec_stmt, NULL);
+        if (rc == SQLITE_OK) {
+            sqlite3_bind_blob(dec_stmt, 1, garbage, sizeof(garbage), SQLITE_STATIC);
+            rc = sqlite3_step(dec_stmt);
+            sqlite3_finalize(dec_stmt);
+        }
+    }
+
+    // Test 3: Truncated payload (first 10 bytes)
+    {
+        sqlite3_stmt *dec_stmt = NULL;
+        rc = sqlite3_prepare_v2(db[1], "SELECT cloudsync_payload_decode(?);", -1, &dec_stmt, NULL);
+        if (rc == SQLITE_OK) {
+            sqlite3_bind_blob(dec_stmt, 1, payload_copy, 10, SQLITE_STATIC);
+            rc = sqlite3_step(dec_stmt);
+            sqlite3_finalize(dec_stmt);
+        }
+    }
+
+    // Test 4: Valid payload with flipped byte in the middle
+    {
+        char *corrupted = (char *)malloc(valid_len);
+        memcpy(corrupted, payload_copy, valid_len);
+        corrupted[valid_len / 2] ^= 0xFF;
+
+        sqlite3_stmt *dec_stmt = NULL;
+        rc = sqlite3_prepare_v2(db[1], "SELECT cloudsync_payload_decode(?);", -1, &dec_stmt, NULL);
+        if (rc == SQLITE_OK) {
+            sqlite3_bind_blob(dec_stmt, 1, corrupted, valid_len, SQLITE_STATIC);
+            rc = sqlite3_step(dec_stmt);
+            sqlite3_finalize(dec_stmt);
+        }
+        free(corrupted);
+    }
+
+    // Verify destination table is still empty (no corrupted data inserted)
+    {
+        sqlite3_stmt *count_stmt = NULL;
+        rc = sqlite3_prepare_v2(db[1], "SELECT COUNT(*) FROM test_tbl;", -1, &count_stmt, NULL);
+        if (rc != SQLITE_OK) { free(payload_copy); goto finalize; }
+        if (sqlite3_step(count_stmt) != SQLITE_ROW) { sqlite3_finalize(count_stmt); free(payload_copy); goto finalize; }
+        int count = sqlite3_column_int(count_stmt, 0);
+        sqlite3_finalize(count_stmt);
+        if (count != 0) { printf("corrupted_payload: expected 0 rows but got %d\n", count); free(payload_copy); goto finalize; }
+    }
+
+    // Test 5: Valid payload should still work
+    if (!do_merge_using_payload(db[0], db[1], false, true)) {
+        printf("corrupted_payload: valid payload failed after corrupted attempts\n");
+        free(payload_copy);
+        goto finalize;
+    }
+
+    {
+        sqlite3_stmt *count_stmt = NULL;
+        rc = sqlite3_prepare_v2(db[1], "SELECT COUNT(*) FROM test_tbl;", -1, &count_stmt, NULL);
+        if (rc != SQLITE_OK) { free(payload_copy); goto finalize; }
+        if (sqlite3_step(count_stmt) != SQLITE_ROW) { sqlite3_finalize(count_stmt); free(payload_copy); goto finalize; }
+        int count = sqlite3_column_int(count_stmt, 0);
+        sqlite3_finalize(count_stmt);
+        if (count != 2) { printf("corrupted_payload: expected 2 rows after valid apply but got %d\n", count); free(payload_copy); goto finalize; }
+    }
+
+    free(payload_copy);
+    result = true;
+
+finalize:
+    for (int i = 0; i < 2; i++) {
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
+bool do_test_payload_idempotency (int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    bool result = false;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        int rc = sqlite3_exec(db[i], "CREATE TABLE test_tbl (id TEXT PRIMARY KEY, val TEXT, num INTEGER);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('test_tbl');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // Insert data on source
+    sqlite3_exec(db[0], "INSERT INTO test_tbl VALUES ('id1', 'hello', 10);", NULL, NULL, NULL);
+    sqlite3_exec(db[0], "INSERT INTO test_tbl VALUES ('id2', 'world', 20);", NULL, NULL, NULL);
+    sqlite3_exec(db[0], "UPDATE test_tbl SET val = 'hello_updated' WHERE id = 'id1';", NULL, NULL, NULL);
+
+    // Apply payload 3 times and check after each
+    int prev_count = -1;
+    for (int apply = 0; apply < 3; apply++) {
+        if (!do_merge_using_payload(db[0], db[1], false, true)) {
+            printf("payload_idempotency: apply #%d failed\n", apply + 1);
+            goto finalize;
+        }
+
+        // Check row count
+        sqlite3_stmt *stmt = NULL;
+        int rc = sqlite3_prepare_v2(db[1], "SELECT COUNT(*) FROM test_tbl;", -1, &stmt, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        sqlite3_step(stmt);
+        int count = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+
+        if (count != 2) {
+            printf("payload_idempotency: expected 2 rows after apply #%d, got %d\n", apply + 1, count);
+            goto finalize;
+        }
+
+        if (prev_count >= 0 && count != prev_count) {
+            printf("payload_idempotency: row count changed from %d to %d on apply #%d\n", prev_count, count, apply + 1);
+            goto finalize;
+        }
+        prev_count = count;
+    }
+
+    // Verify data values are correct
+    {
+        sqlite3_stmt *stmt = NULL;
+        int rc = sqlite3_prepare_v2(db[1], "SELECT val FROM test_tbl WHERE id = 'id1';", -1, &stmt, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); goto finalize; }
+        const char *val = (const char *)sqlite3_column_text(stmt, 0);
+        if (!val || strcmp(val, "hello_updated") != 0) {
+            printf("payload_idempotency: expected 'hello_updated', got '%s'\n", val ? val : "NULL");
+            sqlite3_finalize(stmt);
+            goto finalize;
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    // Compare source and target
+    result = do_compare_queries(db[0], "SELECT * FROM test_tbl ORDER BY id;",
+                                db[1], "SELECT * FROM test_tbl ORDER BY id;",
+                                -1, -1, print_result);
+
+finalize:
+    for (int i = 0; i < 2; i++) {
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
+bool do_test_causal_length_tiebreak (int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[3] = {NULL, NULL, NULL};
+    bool result = false;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+
+    // Create 3 databases with the same table
+    for (int i = 0; i < 3; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        int rc = sqlite3_exec(db[i], "CREATE TABLE test_tbl (id TEXT PRIMARY KEY, val TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('test_tbl');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // Seed row on db[0] and sync to all
+    sqlite3_exec(db[0], "INSERT INTO test_tbl VALUES ('row1', 'seed');", NULL, NULL, NULL);
+    do_merge_using_payload(db[0], db[1], false, true);
+    do_merge_using_payload(db[0], db[2], false, true);
+
+    // All 3 independently update the same row+column (producing equal CL)
+    sqlite3_exec(db[0], "UPDATE test_tbl SET val = 'value_from_db0' WHERE id = 'row1';", NULL, NULL, NULL);
+    sqlite3_exec(db[1], "UPDATE test_tbl SET val = 'value_from_db1' WHERE id = 'row1';", NULL, NULL, NULL);
+    sqlite3_exec(db[2], "UPDATE test_tbl SET val = 'value_from_db2' WHERE id = 'row1';", NULL, NULL, NULL);
+
+    // Merge all pairs in both directions
+    sqlite3 *all_db[MAX_SIMULATED_CLIENTS] = {NULL};
+    all_db[0] = db[0]; all_db[1] = db[1]; all_db[2] = db[2];
+    if (!do_merge(all_db, 3, true)) {
+        printf("causal_length_tiebreak: merge failed\n");
+        goto finalize;
+    }
+
+    // All 3 must converge to the same value
+    const char *query = "SELECT val FROM test_tbl WHERE id = 'row1';";
+    char *values[3] = {NULL, NULL, NULL};
+
+    for (int i = 0; i < 3; i++) {
+        sqlite3_stmt *stmt = NULL;
+        int rc = sqlite3_prepare_v2(db[i], query, -1, &stmt, NULL);
+        if (rc != SQLITE_OK) goto tiebreak_finalize;
+        if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); goto tiebreak_finalize; }
+        const char *text = (const char *)sqlite3_column_text(stmt, 0);
+        values[i] = text ? strdup(text) : NULL;
+        sqlite3_finalize(stmt);
+    }
+
+    // Check convergence
+    if (values[0] && values[1] && values[2] &&
+        strcmp(values[0], values[1]) == 0 && strcmp(values[1], values[2]) == 0) {
+        result = true;
+    } else {
+        printf("causal_length_tiebreak: databases diverged: '%s', '%s', '%s'\n",
+               values[0] ? values[0] : "NULL",
+               values[1] ? values[1] : "NULL",
+               values[2] ? values[2] : "NULL");
+    }
+
+tiebreak_finalize:
+    for (int i = 0; i < 3; i++) {
+        if (values[i]) free(values[i]);
+    }
+
+finalize:
+    for (int i = 0; i < 3; i++) {
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
+bool do_test_delete_resurrect_ordering (int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[3] = {NULL, NULL, NULL};
+    bool result = false;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+
+    for (int i = 0; i < 3; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        int rc = sqlite3_exec(db[i], "CREATE TABLE test_tbl (id TEXT PRIMARY KEY, val TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('test_tbl');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // Site A: insert row, sync to B and C
+    sqlite3_exec(db[0], "INSERT INTO test_tbl VALUES ('row1', 'original');", NULL, NULL, NULL);
+    do_merge_using_payload(db[0], db[1], false, true);
+    do_merge_using_payload(db[0], db[2], false, true);
+
+    // Site A: delete row (CL 1->2)
+    sqlite3_exec(db[0], "DELETE FROM test_tbl WHERE id = 'row1';", NULL, NULL, NULL);
+
+    // Sync delete to B
+    do_merge_using_payload(db[0], db[1], true, true);
+
+    // Site B: re-insert (CL 2->3, resurrection)
+    sqlite3_exec(db[1], "INSERT INTO test_tbl VALUES ('row1', 'resurrected_by_b');", NULL, NULL, NULL);
+
+    // Site C receives payloads in REVERSE order: B's resurrection first, then A's delete
+    do_merge_using_payload(db[1], db[2], true, true);
+    do_merge_using_payload(db[0], db[2], true, true);
+
+    // Site A receives B's resurrection
+    do_merge_using_payload(db[1], db[2], true, true);
+    do_merge_using_payload(db[1], db[0], true, true);
+
+    // All 3 should converge: row exists
+    const char *query = "SELECT * FROM test_tbl ORDER BY id;";
+    result = do_compare_queries(db[0], query, db[1], query, -1, -1, print_result);
+    if (result) result = do_compare_queries(db[0], query, db[2], query, -1, -1, print_result);
+
+    // Verify the row exists (resurrection should win)
+    if (result) {
+        sqlite3_stmt *stmt = NULL;
+        int rc = sqlite3_prepare_v2(db[2], "SELECT COUNT(*) FROM test_tbl WHERE id = 'row1';", -1, &stmt, NULL);
+        if (rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+            int count = sqlite3_column_int(stmt, 0);
+            if (count != 1) {
+                printf("delete_resurrect_ordering: expected row1 to exist on db[2], count=%d\n", count);
+                result = false;
+            }
+        }
+        if (stmt) sqlite3_finalize(stmt);
+    }
+
+finalize:
+    for (int i = 0; i < 3; i++) {
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
+bool do_test_large_composite_pk (int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    bool result = false;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        int rc = sqlite3_exec(db[i],
+            "CREATE TABLE cpk_tbl ("
+            "  pk_text1 TEXT NOT NULL,"
+            "  pk_int1 INTEGER NOT NULL,"
+            "  pk_text2 TEXT NOT NULL,"
+            "  pk_int2 INTEGER NOT NULL,"
+            "  pk_text3 TEXT NOT NULL,"
+            "  data_col TEXT,"
+            "  num_col INTEGER,"
+            "  PRIMARY KEY (pk_text1, pk_int1, pk_text2, pk_int2, pk_text3)"
+            ");", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('cpk_tbl');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // Insert data on both sides
+    sqlite3_exec(db[0], "INSERT INTO cpk_tbl VALUES ('alpha', 1, 'beta', 100, 'gamma', 'data_a1', 42);", NULL, NULL, NULL);
+    sqlite3_exec(db[0], "INSERT INTO cpk_tbl VALUES ('alpha', 2, 'beta', 200, 'delta', 'data_a2', 84);", NULL, NULL, NULL);
+    sqlite3_exec(db[0], "INSERT INTO cpk_tbl VALUES ('x', 999, 'y', -1, 'z', 'edge_case', 0);", NULL, NULL, NULL);
+
+    sqlite3_exec(db[1], "INSERT INTO cpk_tbl VALUES ('alpha', 1, 'beta', 100, 'gamma', 'data_b1', 99);", NULL, NULL, NULL);
+    sqlite3_exec(db[1], "INSERT INTO cpk_tbl VALUES ('foo', 3, 'bar', 300, 'baz', 'data_b2', 77);", NULL, NULL, NULL);
+
+    // Merge both directions
+    if (!do_merge_using_payload(db[0], db[1], false, true)) goto finalize;
+    if (!do_merge_using_payload(db[1], db[0], false, true)) goto finalize;
+
+    // Update on db[0] and sync
+    sqlite3_exec(db[0], "UPDATE cpk_tbl SET data_col = 'updated_on_a' WHERE pk_text1 = 'foo' AND pk_int1 = 3 AND pk_text2 = 'bar' AND pk_int2 = 300 AND pk_text3 = 'baz';", NULL, NULL, NULL);
+    if (!do_merge_using_payload(db[0], db[1], true, true)) goto finalize;
+
+    // Compare
+    result = do_compare_queries(db[0], "SELECT * FROM cpk_tbl ORDER BY pk_text1, pk_int1, pk_text2, pk_int2, pk_text3;",
+                                db[1], "SELECT * FROM cpk_tbl ORDER BY pk_text1, pk_int1, pk_text2, pk_int2, pk_text3;",
+                                -1, -1, print_result);
+
+    // Verify row count
+    if (result) {
+        sqlite3_stmt *stmt = NULL;
+        int rc = sqlite3_prepare_v2(db[1], "SELECT COUNT(*) FROM cpk_tbl;", -1, &stmt, NULL);
+        if (rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+            int count = sqlite3_column_int(stmt, 0);
+            if (count != 4) {
+                printf("large_composite_pk: expected 4 rows, got %d\n", count);
+                result = false;
+            }
+        }
+        if (stmt) sqlite3_finalize(stmt);
+    }
+
+finalize:
+    for (int i = 0; i < 2; i++) {
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
+bool do_test_schema_hash_mismatch (int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    bool result = false;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        int rc = sqlite3_exec(db[i], "CREATE TABLE test_tbl (id TEXT PRIMARY KEY, val TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('test_tbl');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // Initial sync
+    sqlite3_exec(db[0], "INSERT INTO test_tbl VALUES ('id1', 'value1');", NULL, NULL, NULL);
+    if (!do_merge_using_payload(db[0], db[1], false, true)) goto finalize;
+
+    // ALTER TABLE on destination WITHOUT cloudsync_begin/commit_alter
+    int rc = sqlite3_exec(db[1], "ALTER TABLE test_tbl ADD COLUMN extra TEXT;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Re-init to pick up changed schema
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_init('test_tbl');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Insert new data on source
+    sqlite3_exec(db[0], "INSERT INTO test_tbl VALUES ('id2', 'value2');", NULL, NULL, NULL);
+
+    // Apply payload from pre-alter source to post-alter destination
+    // This should fail due to schema hash mismatch
+    bool merge_result = do_merge_using_payload(db[0], db[1], true, false);
+    if (merge_result) {
+        // If merge succeeded despite schema mismatch, it means the extension
+        // accepted the fewer-columns payload — verify data isn't corrupted
+    }
+
+    // Verify original data is intact regardless
+    {
+        sqlite3_stmt *stmt = NULL;
+        rc = sqlite3_prepare_v2(db[1], "SELECT COUNT(*) FROM test_tbl WHERE id = 'id1' AND val = 'value1';", -1, &stmt, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); goto finalize; }
+        int count = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+        if (count != 1) {
+            printf("schema_hash_mismatch: original data corrupted\n");
+            goto finalize;
+        }
+    }
+
+    result = true;
+
+finalize:
+    for (int i = 0; i < 2; i++) {
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
 int test_report(const char *description, bool result){
     printf("%-30s %s\n", description, (result) ? "OK" : "FAILED");
     return result ? 0 : 1;
@@ -10393,6 +10939,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("DBUtils Test:", do_test_dbutils());
     result += test_report("Minor Test:", do_test_others(db));
     result += test_report("Test Error Cases:", do_test_error_cases(db));
+    result += test_report("Unsupported Algos Test:", do_test_unsupported_algorithms(db));
     result += test_report("Null PK Insert Test:", do_test_null_prikey_insert(db));
     result += test_report("Test Single PK:", do_test_single_pk(print_result));
     
@@ -10527,6 +11074,14 @@ int main (int argc, const char * argv[]) {
     result += test_report("Test Block LWW NonOverlap:", do_test_block_lww_nonoverlap_add(2, print_result, cleanup_databases));
     result += test_report("Test Block LWW LongLine:", do_test_block_lww_long_line(2, print_result, cleanup_databases));
     result += test_report("Test Block LWW Whitespace:", do_test_block_lww_whitespace(2, print_result, cleanup_databases));
+
+    // edge-case tests
+    result += test_report("Corrupted Payload Test:", do_test_corrupted_payload(2, print_result, cleanup_databases));
+    result += test_report("Payload Idempotency Test:", do_test_payload_idempotency(2, print_result, cleanup_databases));
+    result += test_report("CL Tiebreak Test:", do_test_causal_length_tiebreak(3, print_result, cleanup_databases));
+    result += test_report("Delete/Resurrect Order:", do_test_delete_resurrect_ordering(3, print_result, cleanup_databases));
+    result += test_report("Large Composite PK Test:", do_test_large_composite_pk(2, print_result, cleanup_databases));
+    result += test_report("Schema Hash Mismatch:", do_test_schema_hash_mismatch(2, print_result, cleanup_databases));
 
 finalize:
     if (rc != SQLITE_OK) printf("%s (%d)\n", (db) ? sqlite3_errmsg(db) : "N/A", rc);

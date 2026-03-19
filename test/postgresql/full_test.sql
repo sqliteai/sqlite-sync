@@ -47,6 +47,13 @@
 \ir 37_block_lww_round4.sql
 \ir 38_block_lww_round5.sql
 \ir 39_concurrent_write_apply.sql
+\ir 40_unsupported_algorithms.sql
+\ir 41_corrupted_payload.sql
+\ir 42_payload_idempotency.sql
+\ir 43_delete_resurrect_ordering.sql
+\ir 44_large_composite_pk.sql
+\ir 45_pg_specific_types.sql
+\ir 46_schema_hash_mismatch.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'
