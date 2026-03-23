@@ -14,6 +14,11 @@ PG_INCLUDEDIR := $(shell $(PG_CONFIG) --includedir-server 2>/dev/null)
 EXTENSION = cloudsync
 EXTVERSION = 1.0
 
+# Detect OS for platform-specific settings
+ifneq ($(OS),Windows_NT)
+UNAME_S := $(shell uname -s)
+endif
+
 # Platform-specific PostgreSQL settings
 ifeq ($(OS),Windows_NT)
     PG_EXTENSION_LIB = $(EXTENSION).dll
@@ -22,7 +27,12 @@ ifeq ($(OS),Windows_NT)
 else
     PG_EXTENSION_LIB = $(EXTENSION).so
     PG_CFLAGS = -fPIC -Wall -Wextra -Wno-unused-parameter -std=c11 -O2
-    PG_LDFLAGS = -shared
+    ifeq ($(UNAME_S),Darwin)
+        # macOS: allow undefined symbols resolved at load time by PostgreSQL
+        PG_LDFLAGS = -shared -undefined dynamic_lookup
+    else
+        PG_LDFLAGS = -shared
+    endif
 endif
 
 # Source files - core platform-agnostic code
@@ -53,7 +63,6 @@ PG_EXTRA_CFLAGS ?=
 PG_CPPFLAGS = -I$(PG_INCLUDEDIR) -Isrc -Isrc/postgresql -Imodules/fractional-indexing -DCLOUDSYNC_POSTGRESQL_BUILD $(PG_EXTRA_CFLAGS)
 ifneq ($(OS),Windows_NT)
 PG_CPPFLAGS += -D_POSIX_C_SOURCE=200809L
-UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 PG_CPPFLAGS += -D_DARWIN_C_SOURCE
 else
