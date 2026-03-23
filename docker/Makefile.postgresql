@@ -52,7 +52,13 @@ PG_OBJS = $(PG_ALL_SRC:.c=.o)
 PG_EXTRA_CFLAGS ?=
 PG_CPPFLAGS = -I$(PG_INCLUDEDIR) -Isrc -Isrc/postgresql -Imodules/fractional-indexing -DCLOUDSYNC_POSTGRESQL_BUILD $(PG_EXTRA_CFLAGS)
 ifneq ($(OS),Windows_NT)
-PG_CPPFLAGS += -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE
+PG_CPPFLAGS += -D_POSIX_C_SOURCE=200809L
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+PG_CPPFLAGS += -D_DARWIN_C_SOURCE
+else
+PG_CPPFLAGS += -D_GNU_SOURCE
+endif
 endif
 PG_DEBUG ?= 0
 ifeq ($(PG_DEBUG),1)
