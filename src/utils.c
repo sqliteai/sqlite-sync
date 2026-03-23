@@ -18,7 +18,7 @@
 #define file_close      _close
 #else
 #include <unistd.h>
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(CLOUDSYNC_POSTGRESQL_BUILD)
 #include <Security/Security.h>
 #elif !defined(__ANDROID__)
 #include <sys/random.h>
@@ -57,9 +57,12 @@ int cloudsync_uuid_v7 (uint8_t value[UUID_LEN]) {
     // fill the buffer with high-quality random data
     #ifdef _WIN32
     if (BCryptGenRandom(NULL, (BYTE*)value, UUID_LEN, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != STATUS_SUCCESS) return -1;
-    #elif defined(__APPLE__)
+    #elif defined(__APPLE__) && !defined(CLOUDSYNC_POSTGRESQL_BUILD)
     // Use SecRandomCopyBytes for macOS/iOS
     if (SecRandomCopyBytes(kSecRandomDefault, UUID_LEN, value) != errSecSuccess) return -1;
+    #elif defined(__APPLE__) && defined(CLOUDSYNC_POSTGRESQL_BUILD)
+    // PostgreSQL build: use getentropy to avoid Security.framework type conflicts
+    if (getentropy(value, UUID_LEN) != 0) return -1;
     #elif defined(__ANDROID__)
     //arc4random_buf doesn't have a return value to check for success
     arc4random_buf(value, UUID_LEN);

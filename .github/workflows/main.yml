@@ -285,10 +285,6 @@ jobs:
           - os: macos-13
             arch: x86_64
             name: macos
-          - os: windows-2022
-            arch: x86_64
-            name: windows
-
     steps:
 
       - uses: actions/checkout@v4.2.2
@@ -307,12 +303,6 @@ jobs:
         if: matrix.name == 'macos'
         run: brew install postgresql@17 gettext
 
-      - uses: msys2/setup-msys2@v2.27.0
-        if: matrix.name == 'windows'
-        with:
-          msystem: ucrt64
-          install: mingw-w64-ucrt-x86_64-gcc make mingw-w64-ucrt-x86_64-postgresql
-
       - name: build and package postgresql extension (linux)
         if: matrix.name == 'linux'
         run: make postgres-package
@@ -320,11 +310,6 @@ jobs:
       - name: build and package postgresql extension (macos)
         if: matrix.name == 'macos'
         run: make postgres-package PG_CONFIG=$(brew --prefix postgresql@17)/bin/pg_config PG_EXTRA_CFLAGS="-I$(brew --prefix gettext)/include"
-
-      - name: build and package postgresql extension (windows)
-        if: matrix.name == 'windows'
-        shell: msys2 {0}
-        run: make postgres-package
 
       - uses: actions/upload-artifact@v4.6.2
         with:
