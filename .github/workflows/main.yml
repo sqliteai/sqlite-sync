@@ -305,7 +305,7 @@ jobs:
 
       - name: macos install postgresql
         if: matrix.name == 'macos'
-        run: brew install postgresql@17
+        run: brew install postgresql@17 gettext
 
       - uses: msys2/setup-msys2@v2.27.0
         if: matrix.name == 'windows'
@@ -319,7 +319,7 @@ jobs:
 
       - name: build and package postgresql extension (macos)
         if: matrix.name == 'macos'
-        run: make postgres-package PG_CONFIG=$(brew --prefix postgresql@17)/bin/pg_config
+        run: make postgres-package PG_CONFIG=$(brew --prefix postgresql@17)/bin/pg_config PG_EXTRA_CFLAGS="-I$(brew --prefix gettext)/include"
 
       - name: build and package postgresql extension (windows)
         if: matrix.name == 'windows'
