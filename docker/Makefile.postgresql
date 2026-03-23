@@ -111,7 +111,7 @@ postgres-build: postgres-check
 		$(CC) $(PG_CPPFLAGS) $(PG_CFLAGS) -c $$src -o $${src%.c}.o || exit 1; \
 	done
 	@echo "Linking $(PG_EXTENSION_LIB)..."
-	$(CC) $(PG_LDFLAGS) -o $(PG_EXTENSION_LIB) $(PG_OBJS)
+	$(CC) $(PG_LDFLAGS) $(PG_EXTRA_CFLAGS) -o $(PG_EXTENSION_LIB) $(PG_OBJS)
 	@echo "Build complete: $(PG_EXTENSION_LIB)"
 
 # Install extension to PostgreSQL

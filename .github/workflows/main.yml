@@ -282,7 +282,7 @@ jobs:
           - os: macos-15
             arch: arm64
             name: macos
-          - os: macos-13
+          - os: macos-15
             arch: x86_64
             name: macos
     steps:
@@ -309,7 +309,7 @@ jobs:
 
       - name: build and package postgresql extension (macos)
         if: matrix.name == 'macos'
-        run: make postgres-package PG_CONFIG=$(brew --prefix postgresql@17)/bin/pg_config PG_EXTRA_CFLAGS="-I$(brew --prefix gettext)/include"
+        run: make postgres-package PG_CONFIG=$(brew --prefix postgresql@17)/bin/pg_config PG_EXTRA_CFLAGS="-I$(brew --prefix gettext)/include ${{ matrix.arch == 'x86_64' && '-arch x86_64' || '' }}"
 
       - uses: actions/upload-artifact@v4.6.2
         with:
