@@ -14,6 +14,17 @@ PG_INCLUDEDIR := $(shell $(PG_CONFIG) --includedir-server 2>/dev/null)
 EXTENSION = cloudsync
 EXTVERSION = 1.0
 
+# Platform-specific PostgreSQL settings
+ifeq ($(OS),Windows_NT)
+    PG_EXTENSION_LIB = $(EXTENSION).dll
+    PG_CFLAGS = -Wall -Wextra -Wno-unused-parameter -std=c11 -O2
+    PG_LDFLAGS = -shared -L$(shell $(PG_CONFIG) --libdir) -lpostgres
+else
+    PG_EXTENSION_LIB = $(EXTENSION).so
+    PG_CFLAGS = -fPIC -Wall -Wextra -Wno-unused-parameter -std=c11 -O2
+    PG_LDFLAGS = -shared
+endif
+
 # Source files - core platform-agnostic code
 PG_CORE_SRC = \
 	src/cloudsync.c \
@@ -38,15 +49,16 @@ PG_OBJS = $(PG_ALL_SRC:.c=.o)
 # Compiler flags
 # Define POSIX macros as compiler flags to ensure they're defined before any includes
 PG_CPPFLAGS = -I$(PG_INCLUDEDIR) -Isrc -Isrc/postgresql -Imodules/fractional-indexing -DCLOUDSYNC_POSTGRESQL_BUILD -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE
-PG_CFLAGS = -fPIC -Wall -Wextra -Wno-unused-parameter -std=c11 -O2
 PG_DEBUG ?= 0
 ifeq ($(PG_DEBUG),1)
+ifeq ($(OS),Windows_NT)
+PG_CFLAGS = -Wall -Wextra -Wno-unused-parameter -std=c11 -g -O0 -fno-omit-frame-pointer
+else
 PG_CFLAGS = -fPIC -Wall -Wextra -Wno-unused-parameter -std=c11 -g -O0 -fno-omit-frame-pointer
 endif
-PG_LDFLAGS = -shared
+endif
 
 # Output files
-PG_EXTENSION_SO = $(EXTENSION).so
 PG_EXTENSION_SQL = src/postgresql/$(EXTENSION)--$(EXTVERSION).sql
 PG_EXTENSION_CONTROL = docker/postgresql/$(EXTENSION).control
 
@@ -54,7 +66,7 @@ PG_EXTENSION_CONTROL = docker/postgresql/$(EXTENSION).control
 # PostgreSQL Build Targets
 # ============================================================================
 
-.PHONY: postgres-check postgres-build postgres-install postgres-clean postgres-test \
+.PHONY: postgres-check postgres-build postgres-install postgres-package postgres-clean postgres-test \
         postgres-docker-build postgres-docker-build-asan postgres-docker-run postgres-docker-run-asan postgres-docker-stop postgres-docker-rebuild \
         postgres-docker-debug-build postgres-docker-debug-run postgres-docker-debug-rebuild \
         postgres-docker-shell postgres-dev-rebuild postgres-help unittest-pg \
@@ -78,16 +90,16 @@ postgres-build: postgres-check
 		echo "  CC $$src"; \
 		$(CC) $(PG_CPPFLAGS) $(PG_CFLAGS) -c $$src -o $${src%.c}.o || exit 1; \
 	done
-	@echo "Linking $(PG_EXTENSION_SO)..."
-	$(CC) $(PG_LDFLAGS) -o $(PG_EXTENSION_SO) $(PG_OBJS)
-	@echo "Build complete: $(PG_EXTENSION_SO)"
+	@echo "Linking $(PG_EXTENSION_LIB)..."
+	$(CC) $(PG_LDFLAGS) -o $(PG_EXTENSION_LIB) $(PG_OBJS)
+	@echo "Build complete: $(PG_EXTENSION_LIB)"
 
 # Install extension to PostgreSQL
 postgres-install: postgres-build
 	@echo "Installing CloudSync extension to PostgreSQL..."
 	@echo "Installing shared library to $(PG_PKGLIBDIR)/"
 	install -d $(PG_PKGLIBDIR)
-	install -m 755 $(PG_EXTENSION_SO) $(PG_PKGLIBDIR)/
+	install -m 755 $(PG_EXTENSION_LIB) $(PG_PKGLIBDIR)/
 	@echo "Installing SQL script to $(PG_SHAREDIR)/extension/"
 	install -d $(PG_SHAREDIR)/extension
 	install -m 644 $(PG_EXTENSION_SQL) $(PG_SHAREDIR)/extension/
@@ -98,10 +110,21 @@ postgres-install: postgres-build
 	@echo "To use the extension, run in psql:"
 	@echo "  CREATE EXTENSION $(EXTENSION);"
 
+# Package extension files for distribution
+PG_DIST_DIR = dist/postgresql
+
+postgres-package: postgres-build
+	@echo "Packaging PostgreSQL extension..."
+	@mkdir -p $(PG_DIST_DIR)
+	cp $(PG_EXTENSION_LIB) $(PG_DIST_DIR)/
+	cp $(PG_EXTENSION_SQL) $(PG_DIST_DIR)/
+	cp $(PG_EXTENSION_CONTROL) $(PG_DIST_DIR)/
+	@echo "Package ready in $(PG_DIST_DIR)/"
+
 # Clean PostgreSQL build artifacts
 postgres-clean:
 	@echo "Cleaning PostgreSQL build artifacts..."
-	rm -f $(PG_OBJS) $(PG_EXTENSION_SO)
+	rm -f $(PG_OBJS) $(PG_EXTENSION_LIB)
 	@echo "Clean complete"
 
 # Test extension (requires running PostgreSQL)

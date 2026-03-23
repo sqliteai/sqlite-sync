@@ -265,10 +265,77 @@ jobs:
           docker cp test/postgresql cloudsync-postgres:/tmp/cloudsync/test/postgresql
           docker exec cloudsync-postgres psql -U postgres -d postgres -f /tmp/cloudsync/test/postgresql/full_test.sql
 
+  postgres-build:
+    runs-on: ${{ matrix.os }}
+    name: postgresql-${{ matrix.name }}-${{ matrix.arch }} build
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: linux
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            name: linux
+          - os: macos-15
+            arch: arm64
+            name: macos
+          - os: macos-13
+            arch: x86_64
+            name: macos
+          - os: windows-2022
+            arch: x86_64
+            name: windows
+
+    steps:
+
+      - uses: actions/checkout@v4.2.2
+        with:
+          submodules: true
+
+      - name: linux install postgresql dev headers
+        if: matrix.name == 'linux'
+        run: |
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
+          sudo apt-get update
+          sudo apt-get install -y postgresql-server-dev-17
+
+      - name: macos install postgresql
+        if: matrix.name == 'macos'
+        run: brew install postgresql@17
+
+      - uses: msys2/setup-msys2@v2.27.0
+        if: matrix.name == 'windows'
+        with:
+          msystem: ucrt64
+          install: mingw-w64-ucrt-x86_64-gcc make mingw-w64-ucrt-x86_64-postgresql
+
+      - name: build and package postgresql extension (linux)
+        if: matrix.name == 'linux'
+        run: make postgres-package
+
+      - name: build and package postgresql extension (macos)
+        if: matrix.name == 'macos'
+        run: make postgres-package PG_CONFIG=$(brew --prefix postgresql@17)/bin/pg_config
+
+      - name: build and package postgresql extension (windows)
+        if: matrix.name == 'windows'
+        shell: msys2 {0}
+        run: make postgres-package
+
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: cloudsync-postgresql-${{ matrix.name }}-${{ matrix.arch }}
+          path: dist/postgresql/
+          if-no-files-found: error
+
   release:
     runs-on: ubuntu-22.04
     name: release
-    needs: [build, postgres-test]
+    needs: [build, postgres-test, postgres-build]
     if: github.ref == 'refs/heads/main'
 
     env:
