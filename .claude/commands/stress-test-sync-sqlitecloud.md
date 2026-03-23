@@ -19,7 +19,11 @@ Ask the user for the following configuration using a single question set:
    - Medium: 10K rows, 10 iterations, 4 concurrent databases
    - Large: 100K rows, 50 iterations, 4 concurrent databases (Jim's original scenario)
    - Custom: let the user specify rows, iterations, and number of concurrent databases
-4. **RLS mode** — with RLS (requires user tokens) or without RLS
+4. **Operations per iteration** — how many UPDATE and DELETE operations to perform each iteration:
+   - `NUM_UPDATES`: number of UPDATE operations per iteration (default: 1). Each UPDATE runs `UPDATE <table> SET value = value + 1;` affecting all rows.
+   - `NUM_DELETES`: number of DELETE operations per iteration (default: 1). Each DELETE runs `DELETE FROM <table> WHERE rowid IN (SELECT rowid FROM <table> ORDER BY RANDOM() LIMIT 10);` removing 10 random rows. Set to 0 to skip deletes entirely.
+   - Propose defaults of 1 update and 1 delete. The user can set 0 deletes for update-only tests.
+5. **RLS mode** — with RLS (requires user tokens) or without RLS
 5. **Table schema** — offer simple default or custom:
    ```sql
    CREATE TABLE test_sync (id TEXT PRIMARY KEY, user_id TEXT NOT NULL DEFAULT '', name TEXT, value INTEGER);
@@ -34,6 +38,8 @@ Save these as variables:
 - `ROWS` (number of rows per iteration)
 - `ITERATIONS` (number of delete/insert/update cycles)
 - `NUM_DBS` (number of concurrent databases)
+- `NUM_UPDATES` (number of UPDATE operations per iteration, default 1)
+- `NUM_DELETES` (number of DELETE operations per iteration, default 1; 0 to skip)
 
 ### Step 2: Setup SQLiteCloud Database and Table
 
@@ -106,15 +112,15 @@ Create a bash script at `/tmp/stress_test_concurrent.sh` that:
 2. **Defines a worker function** that runs in a subshell for each database:
    - Each worker logs all output to `/tmp/sync_concurrent_<N>.log`
    - Each iteration does:
-     a. **UPDATE all/some rows** (e.g., `UPDATE <table> SET value = value + 1;`)
-     b. **DELETE a few rows** (e.g., `DELETE FROM <table> WHERE rowid IN (SELECT rowid FROM <table> ORDER BY RANDOM() LIMIT 10);`)
+     a. **UPDATE** — run `UPDATE <table> SET value = value + 1;` repeated `NUM_UPDATES` times (skip if 0)
+     b. **DELETE** — run `DELETE FROM <table> WHERE rowid IN (SELECT rowid FROM <table> ORDER BY RANDOM() LIMIT 10);` repeated `NUM_DELETES` times (skip if 0)
      c. **Sync using the 3-step send/check/check pattern:**
         1. `SELECT cloudsync_network_send_changes();` — send local changes to the server
         2. `SELECT cloudsync_network_check_changes();` — ask the server to prepare a payload of remote changes
         3. Sleep 1 second (outside sqlite3, between two separate sqlite3 invocations)
         4. `SELECT cloudsync_network_check_changes();` — download the prepared payload, if any
    - Each sqlite3 session must: `.load` the extension, call `cloudsync_network_init()`/`cloudsync_network_init_custom()`, `cloudsync_network_set_apikey()`/`cloudsync_network_set_token()` (depending on RLS mode), do the work, call `cloudsync_terminate()`
-   - **Timing**: Log the wall-clock execution time (in milliseconds) for each `cloudsync_network_send_changes()`, `cloudsync_network_check_changes()` call. Use bash `date +%s%3N` before and after each sqlite3 invocation that calls a network function, and compute the delta. Log lines like: `[DB<N>][iter <I>] send_changes: 123ms`, `[DB<N>][iter <I>] check_changes_1: 45ms`, `[DB<N>][iter <I>] check_changes_2: 67ms`
+   - **Timing**: Log the wall-clock execution time (in milliseconds) for each `cloudsync_network_send_changes()`, `cloudsync_network_check_changes()` call. Define a `now_ms()` helper function at the top of the script and use it before and after each sqlite3 invocation that calls a network function, computing the delta. On **macOS**, `date` does not support `%3N` (nanoseconds) — use `python3 -c 'import time; print(int(time.time()*1000))'` instead. On **Linux**, `date +%s%3N` works fine. The script should detect the platform and define `now_ms()` accordingly. Log lines like: `[DB<N>][iter <I>] send_changes: 123ms`, `[DB<N>][iter <I>] check_changes_1: 45ms`, `[DB<N>][iter <I>] check_changes_2: 67ms`
    - Include labeled output lines like `[DB<N>][iter <I>] updated count=<C>, deleted count=<D>` for grep-ability
 
 3. **Launches all workers in parallel** using `&` and collects PIDs
@@ -151,21 +157,29 @@ After the test completes, provide a detailed breakdown:
 
 After all workers have terminated, perform a **final sync on every local database** to ensure all databases converge to the same state. Then verify data integrity.
 
-1. **Final sync loop** (max 10 retries): Repeat the following until all local databases have the same row count, or the retry limit is reached:
+**IMPORTANT — RLS mode changes what "convergence" means:** When RLS is enabled, each user can only see their own rows. Databases belonging to different users will have different row counts and different data — this is correct behavior. All convergence and integrity checks must therefore be scoped **per user group** (i.e., only compare databases that share the same userId/token).
+
+1. **Final sync loop** (max 10 retries): Repeat the following until convergence is achieved within each user group, or the retry limit is reached:
    a. For each local database (sequentially):
       - Load the extension, call `cloudsync_network_init`/`cloudsync_network_init_custom`, authenticate with `cloudsync_network_set_apikey`/`cloudsync_network_set_token`
       - Run `SELECT cloudsync_network_sync(100, 10);` to sync remaining changes
       - Call `cloudsync_terminate()`
    b. After syncing all databases, query `SELECT COUNT(*) FROM <table>` on each database
-   c. If all row counts are identical, convergence is achieved — break out of the loop
-   d. Otherwise, log the round number and the distinct row counts, then repeat from (a)
-   e. If the retry limit is reached without convergence, report it as a failure
+   c. **If RLS is disabled:** Check that all databases have the same row count. If so, convergence is achieved — break.
+   d. **If RLS is enabled:** Group databases by userId. Within each user group, check that all databases have the same row count. Convergence is achieved when every user group is internally consistent — break. Different user groups are expected to have different row counts.
+   e. Otherwise, log the round number and the distinct row counts (per group if RLS), then repeat from (a)
+   f. If the retry limit is reached without convergence, report it as a failure
 
-2. **Row count verification**: Report the final row counts. All databases should have the same number of rows. Also check SQLiteCloud (as admin) for total row count.
+2. **Row count verification**:
+   - **If RLS is disabled:** Report the final row counts. All databases should have the same number of rows.
+   - **If RLS is enabled:** Report row counts grouped by user. All databases within the same user group should have identical row counts. Different user groups may differ. Also verify that each database only contains rows matching its userId.
+   - In both cases, also check SQLiteCloud (as admin) for total row count.
 
-3. **Row content verification**: Pick one random row ID from the first database (`SELECT id FROM <table> ORDER BY RANDOM() LIMIT 1;`). Then query that same row (`SELECT id, user_id, name, value FROM <table> WHERE id = '<random_id>';`) on **every** local database. Compare the results — all databases must return identical column values for that row. Report the row ID, the expected values, and any mismatches.
+3. **Row content verification**:
+   - **If RLS is disabled:** Pick one random row ID from the first database. Query that row on every local database. All must return identical values.
+   - **If RLS is enabled:** For each user group, pick one random row ID from the first database in that group. Query that row on all databases in the same user group. All databases in the group must return identical values. Do NOT expect databases from other user groups to have this row — they should return empty (RLS blocks cross-user access).
 
-4. If RLS is enabled, verify no cross-user data leakage.
+4. **RLS cross-user leak check** (RLS mode only): For a sample of databases (e.g., one per user group), verify that `SELECT COUNT(*) FROM <table> WHERE user_id != '<expected_user_id>'` returns 0. Report any cross-user data leakage as a test failure.
 
 ## Output Format
 
@@ -194,15 +208,21 @@ If errors are found, include:
 The test **PASSES** if:
 1. All workers complete all iterations
 2. Zero `error`, `locked`, `SQLITE_BUSY`, or HTTP 500 responses in any log
-3. After the final sync, all local databases have the same row count
-4. A randomly selected row has identical content across all local databases
+3. After the final sync, databases converge:
+   - **Without RLS:** all local databases have the same row count
+   - **With RLS:** all databases within each user group have the same row count (different user groups may differ)
+4. Row content is consistent:
+   - **Without RLS:** a randomly selected row has identical content across all local databases
+   - **With RLS:** a randomly selected row has identical content across all databases in the same user group; databases from other user groups correctly return empty for that row
+5. **With RLS:** no cross-user data leakage (each database contains only rows matching its userId)
 
 The test **FAILS** if:
 1. Any worker crashes or fails to complete
 2. Any `database is locked` or `SQLITE_BUSY` errors appear
 3. Server returns 500 errors under concurrent load
-4. Row counts differ across local databases after the final sync loop exhausts all retries
-5. Row content differs across local databases (data corruption)
+4. Row counts differ within the comparison scope (all DBs without RLS, same-user DBs with RLS) after the final sync loop exhausts all retries
+5. Row content differs within the comparison scope (data corruption)
+6. **With RLS:** any database contains rows belonging to a different userId (cross-user data leakage)
 
 ## Important Notes
 
