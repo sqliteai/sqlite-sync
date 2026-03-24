@@ -132,7 +132,7 @@ else ifeq ($(PLATFORM),android)
 	CURL_CONFIG = --host $(ARCH)-linux-$(ANDROID_ABI) --with-openssl=$(CURDIR)/$(OPENSSL_INSTALL_DIR) LDFLAGS="-L$(CURDIR)/$(OPENSSL_INSTALL_DIR)/lib" LIBS="-lssl -lcrypto" AR=$(BIN)/llvm-ar AS=$(BIN)/llvm-as CC=$(CC) CXX=$(BIN)/$(ARCH)-linux-$(ANDROID_ABI)-clang++ LD=$(BIN)/ld RANLIB=$(BIN)/llvm-ranlib STRIP=$(BIN)/llvm-strip
 	TARGET := $(DIST_DIR)/cloudsync.so
 	CFLAGS += -fPIC -I$(OPENSSL_INSTALL_DIR)/include
-	LDFLAGS += -shared -fPIC -L$(OPENSSL_INSTALL_DIR)/lib -lssl -lcrypto -lm
+	LDFLAGS += -shared -fPIC -L$(OPENSSL_INSTALL_DIR)/lib -lssl -lcrypto -lm -Wl,-z,max-page-size=16384
 	STRIP = $(BIN)/llvm-strip --strip-unneeded $@
 else ifeq ($(PLATFORM),ios)
 	TARGET := $(DIST_DIR)/cloudsync.dylib

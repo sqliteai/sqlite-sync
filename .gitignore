@@ -50,4 +50,10 @@ jniLibs/
 .DS_Store
 Thumbs.db
 CLAUDE.md
-*.o
+
+# Dart/Flutter
+.dart_tool/
+pubspec.lock
+.flutter-plugins
+.flutter-plugins-dependencies
+packages/flutter/native_libraries/
