@@ -49,7 +49,7 @@ jniLibs/
 # System
 .DS_Store
 Thumbs.db
-CLAUDE.md
+*.o
 
 # Dart/Flutter
 .dart_tool/
