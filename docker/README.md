@@ -349,6 +349,4 @@ docker rmi sqliteai/sqlite-sync-pg:latest
 
 ## Next Steps
 
-- Read [AGENTS.md](../AGENTS.md) for architecture details
 - See [API.md](../API.md) for CloudSync API documentation
-- Check [test/](../test/) for example usage
