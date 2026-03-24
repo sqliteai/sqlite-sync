@@ -50,7 +50,7 @@ async function getLatestReleaseUrl(asset_pattern) {
   return new Promise((resolve, reject) => {
     const options = {
       hostname: 'api.github.com',
-      path: '/repos/sqliteai/sqlite-sync-dev/releases/latest',
+      path: '/repos/sqliteai/sqlite-sync/releases/latest',
       headers: {
         'User-Agent': 'expo-cloudsync-plugin'
       }

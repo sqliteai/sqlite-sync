@@ -1,6 +1,6 @@
 # SQLite Sync
 
-[![sqlite-sync coverage](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fsqliteai.github.io%2Fsqlite-sync-dev%2F&search=Functions%3A%3C%5C%2Ftd%3E%5Cs*%3Ctd%20class%3D%22headerCovTableEntry(?:Hi|Med|Lo)%22%3E(%5B%5Cd.%5D%2B)%26nbsp%3B%25&replace=%241%25&label=coverage&labelColor=rgb(85%2C%2085%2C%2085)%3B&color=rgb(167%2C%20252%2C%20157)%3B&link=https%3A%2F%2Fsqliteai.github.io%2Fsqlite-sync-dev%2F)](https://sqliteai.github.io/sqlite-sync-dev/)
+[![sqlite-sync coverage](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fsqliteai.github.io%2Fsqlite-sync%2F&search=Functions%3A%3C%5C%2Ftd%3E%5Cs*%3Ctd%20class%3D%22headerCovTableEntry(?:Hi|Med|Lo)%22%3E(%5B%5Cd.%5D%2B)%26nbsp%3B%25&replace=%241%25&label=coverage&labelColor=rgb(85%2C%2085%2C%2085)%3B&color=rgb(167%2C%20252%2C%20157)%3B&link=https%3A%2F%2Fsqliteai.github.io%2Fsqlite-sync%2F)](https://sqliteai.github.io/sqlite-sync/)
 
 **SQLite Sync** is a multi-platform extension that brings a true **local-first experience** to your applications with minimal effort. It extends standard SQLite tables with built-in support for offline work and automatic synchronization, allowing multiple devices to operate independently—even without a network connection—and seamlessly stay in sync. With SQLite Sync, developers can easily build **distributed, collaborative applications** while continuing to rely on the **simplicity, reliability, and performance of SQLite**.
 
@@ -144,7 +144,7 @@ For detailed information on all available functions, their parameters, and examp
 
 ### Pre-built Binaries
 
-Download the appropriate pre-built binary for your platform from the official [Releases](https://github.com/sqliteai/sqlite-sync-dev/releases) page:
+Download the appropriate pre-built binary for your platform from the official [Releases](https://github.com/sqliteai/sqlite-sync/releases) page:
 
 - Linux: x86 and ARM
 - macOS: x86 and ARM
@@ -291,7 +291,7 @@ Here's a quick example to get started with SQLite Sync:
 ### Prerequisites
 
 1. **SQLite Cloud Account**: Sign up at [SQLite Cloud](https://sqlitecloud.io/)
-2. **SQLite Sync Extension**: Download from [Releases](https://github.com/sqliteai/sqlite-sync-dev/releases)
+2. **SQLite Sync Extension**: Download from [Releases](https://github.com/sqliteai/sqlite-sync/releases)
 
 ### SQLite Cloud Setup
 

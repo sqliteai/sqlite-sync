@@ -43,7 +43,7 @@ API_TOKEN="token"
 > - Anyone can inspect your app and extract database credentials
 >
 > **For production apps:**
-> - Use the secure [sport-tracker-app](https://github.com/sqliteai/sqlite-sync-dev/tree/main/examples/sport-tracker-app) pattern with authentication tokens and row-level security
+> - Use the secure [sport-tracker-app](https://github.com/sqliteai/sqlite-sync/tree/main/examples/sport-tracker-app) pattern with authentication tokens and row-level security
 > - Never embed database credentials in client applications
 
 ### 4. Build and run the App
