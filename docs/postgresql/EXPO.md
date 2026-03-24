@@ -33,7 +33,7 @@ ANDROID_CONNECTION_STRING="http://10.0.2.2:8091/postgres"
 API_TOKEN="token"
 ```
 
-5. Fill the `API_TOKEN` variable with the access token from the [`CloudSync`](CLOUDSYNC.md) service.
+5. Fill the `API_TOKEN` variable with the access token.
 
 > **⚠️ SECURITY WARNING**: This example puts database connection strings directly in `.env` files for demonstration purposes only. **Do not use this pattern in production.** 
 >

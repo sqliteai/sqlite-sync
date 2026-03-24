@@ -191,10 +191,10 @@ sqlite3_close(db)
 
 ### Android Package
 
-Add the [following](https://central.sonatype.com/artifact/ai.sqlite/sync.dev) to your Gradle dependencies:
+Add the [following](https://central.sonatype.com/artifact/ai.sqlite/sync) to your Gradle dependencies:
 
 ```gradle
-implementation 'ai.sqlite:sync.dev:0.9.92'
+implementation 'ai.sqlite:sync:1.0.0'
 ```
 
 Here's an example of how to use the package:

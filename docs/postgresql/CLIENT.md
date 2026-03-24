@@ -10,21 +10,6 @@ Under the hood, SQLite Sync uses advanced **CRDT (Conflict-free Replicated Data 
 - When they reconnect, all changes are **merged automatically and without conflicts**.
 - **No data loss. No overwrites. No manual conflict resolution.**
 
-## IMPORTANT
-
-- Make sure to use version **0.9.96 or newer**  
-  (verify with `SELECT cloudsync_version();`)
-
-- Until v0.9.96 is released upstream, always use the development fork:  
-  https://github.com/sqliteai/sqlite-sync-dev  
-  and **NOT** the original repository:  
-  https://github.com/sqliteai/sqlite-sync
-
-- Updated example apps are available [here](https://github.com/sqliteai/sqlite-sync-dev/tree/main/examples):  
-  - sport-tracker app (WASM), see [SPORT_APP_README_SUPABASE.md](SPORT_APP_README_SUPABASE.md) for more details
-  - to-do app (Expo), see [EXPO.md](EXPO.md) for more details
-  - React Native Library: https://github.com/sqliteai/sqlite-sync-react-native
-
 ## Conversion Between SQLite and PostgreSQL Tables
 
 In this version, make sure to **manually create** the same tables in the PostgreSQL database as used in the SQLite client.
@@ -142,11 +127,11 @@ SELECT cloudsync_init('notes');
 - [ ] Same column names and order
 - [ ] Same defaults (semantic match)
 
-Please follow [these Database Schema Recommendations](https://github.com/sqliteai/sqlite-sync-dev?tab=readme-ov-file#database-schema-recommendations)
+Please follow [these Database Schema Recommendations](https://github.com/sqliteai/sqlite-sync?tab=readme-ov-file#database-schema-recommendations)
 
 ## Pre-built Binaries
 
-Download the appropriate pre-built binary for your platform from the official [Releases](https://github.com/sqliteai/sqlite-sync-dev/releases) page:
+Download the appropriate pre-built binary for your platform from the official [Releases](https://github.com/sqliteai/sqlite-sync/releases) page:
 
 - Linux: x86 and ARM
 - macOS: x86 and ARM
@@ -166,9 +151,8 @@ SELECT load_extension('./cloudsync');
 
 ## WASM Version -> React client-side
 
-Make sure to install the extension tagged as **dev** and not **latest**
 ```
-npm i @sqliteai/sqlite-wasm@dev
+npm i @sqliteai/sqlite-wasm
 ```
 
 Then follow the instructions from the [README](https://www.npmjs.com/package/@sqliteai/sqlite-wasm)
@@ -179,10 +163,10 @@ You can [add this repository as a package dependency to your Swift project](http
 
 ## Android Package
 
-Add the [following](https://central.sonatype.com/artifact/ai.sqlite/sync.dev) to your Gradle dependencies:
+Add the [following](https://central.sonatype.com/artifact/ai.sqlite/sync) to your Gradle dependencies:
 
 ```
-implementation 'ai.sqlite:sync.dev:0.9.96'
+implementation 'ai.sqlite:sync:1.0.0'
 ```
 
 ## Expo
@@ -209,9 +193,9 @@ Then follow the instructions from the [README](https://www.npmjs.com/package/@sq
 
 ```js
 npm i better-sqlite3
-npm i @sqliteai/sqlite-sync-dev
+npm i @sqliteai/sqlite-sync
 
-echo "import { getExtensionPath } from '@sqliteai/sqlite-sync-dev';
+echo "import { getExtensionPath } from '@sqliteai/sqlite-sync';
 import Database from 'better-sqlite3';
 
 const db = new Database(':memory:');
