@@ -224,6 +224,8 @@ struct cloudsync_table_context {
     dbvm_t      *real_merge_delete_stmt;
     dbvm_t      *real_merge_sentinel_stmt;
     
+    bool        is_altering;                    // flag to track if a table alteration is in progress
+
     // context
     cloudsync_context *context;
 };
@@ -2264,7 +2266,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     if (cloudsync_context_init(data) == NULL) {
         return DBRES_MISUSE;
     }
-    
+
     // lookup table
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) {
@@ -2272,7 +2274,10 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
         snprintf(buffer, sizeof(buffer), "Unable to find table %s", table_name);
         return cloudsync_set_error(data, buffer, DBRES_MISUSE);
     }
-    
+
+    // idempotent: if already altering, return OK
+    if (table->is_altering) return DBRES_OK;
+
     // retrieve primary key(s)
     char **names = NULL;
     int nrows = 0;
@@ -2283,7 +2288,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
         cloudsync_set_error(data, buffer, DBRES_MISUSE);
         goto rollback_begin_alter;
     }
-    
+
     // sanity check the number of primary keys
     if (nrows != table_count_pks(table)) {
         char buffer[1024];
@@ -2291,7 +2296,7 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
         cloudsync_set_error(data, buffer, DBRES_MISUSE);
         goto rollback_begin_alter;
     }
-    
+
     // drop original triggers
     rc = database_delete_triggers(data, table_name);
     if (rc != DBRES_OK) {
@@ -2300,10 +2305,11 @@ int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
         cloudsync_set_error(data, buffer, DBRES_ERROR);
         goto rollback_begin_alter;
     }
-    
+
     table_set_pknames(table, names);
+    table->is_altering = true;
     return DBRES_OK;
-    
+
 rollback_begin_alter:
     if (names) table_pknames_free(names, nrows);
     return rc;
@@ -2393,13 +2399,13 @@ finalize:
 int cloudsync_commit_alter (cloudsync_context *data, const char *table_name) {
     int rc = DBRES_MISUSE;
     cloudsync_table_context *table = NULL;
-    
+
     // init cloudsync_settings
     if (cloudsync_context_init(data) == NULL) {
         cloudsync_set_error(data, "Unable to initialize cloudsync context", DBRES_MISUSE);
         goto rollback_finalize_alter;
     }
-    
+
     // lookup table
     table = table_lookup(data, table_name);
     if (!table) {
@@ -2408,15 +2414,20 @@ int cloudsync_commit_alter (cloudsync_context *data, const char *table_name) {
         cloudsync_set_error(data, buffer, DBRES_MISUSE);
         goto rollback_finalize_alter;
     }
-    
+
+    // idempotent: if not altering, return OK
+    if (!table->is_altering) return DBRES_OK;
+
     rc = cloudsync_finalize_alter(data, table);
     if (rc != DBRES_OK) goto rollback_finalize_alter;
-    
+
     // the table is outdated, delete it and it will be reloaded in the cloudsync_init_internal
+    // is_altering is reset implicitly because table_free + cloudsync_init_table
+    // will reallocate the table context with zero-initialized memory
     table_remove(data, table);
     table_free(table);
     table = NULL;
-        
+
     // init again cloudsync for the table
     table_algo algo_current = dbutils_table_settings_get_algo(data, table_name);
     if (algo_current == table_algo_none) algo_current = dbutils_table_settings_get_algo(data, "*");
@@ -2426,7 +2437,10 @@ int cloudsync_commit_alter (cloudsync_context *data, const char *table_name) {
     return DBRES_OK;
 
 rollback_finalize_alter:
-    if (table) table_set_pknames(table, NULL);
+    if (table) {
+        table_set_pknames(table, NULL);
+        table->is_altering = false;
+    }
     return rc;
 }
 
