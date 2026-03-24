@@ -10,7 +10,7 @@
  *   node generate-expo-package.js <version> <artifacts-dir> <output-dir>
  *
  * Example:
- *   node generate-expo-package.js 0.9.92 ./artifacts ./expo-package
+ *   node generate-expo-package.js 1.0.0 ./artifacts ./expo-package
  */
 
 const fs = require('fs');
@@ -396,7 +396,7 @@ function main() {
 
   if (args.length < 3) {
     console.error('Usage: node generate-expo-package.js <version> <artifacts-dir> <output-dir>');
-    console.error('Example: node generate-expo-package.js 0.9.92 ./artifacts ./expo-package');
+    console.error('Example: node generate-expo-package.js 1.0.0 ./artifacts ./expo-package');
     process.exit(1);
   }
 
@@ -405,7 +405,7 @@ function main() {
   // Validate version format
   if (!/^\d+\.\d+\.\d+$/.test(version)) {
     console.error(`Error: Invalid version format: ${version}`);
-    console.error('Version must be in semver format (e.g., 0.9.92)');
+    console.error('Version must be in semver format (e.g., 1.0.0)');
     process.exit(1);
   }
 

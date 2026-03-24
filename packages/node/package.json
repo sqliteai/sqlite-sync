@@ -1,6 +1,6 @@
 {
   "name": "@sqliteai/sqlite-sync",
-  "version": "0.9.92",
+  "version": "1.0.0",
   "description": "SQLite Sync extension for Node.js - Sync on-device databases with the cloud",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -53,13 +53,13 @@
     "node": ">=16.0.0"
   },
   "optionalDependencies": {
-    "@sqliteai/sqlite-sync-darwin-arm64": "0.9.92",
-    "@sqliteai/sqlite-sync-darwin-x86_64": "0.9.92",
-    "@sqliteai/sqlite-sync-linux-arm64": "0.9.92",
-    "@sqliteai/sqlite-sync-linux-arm64-musl": "0.9.92",
-    "@sqliteai/sqlite-sync-linux-x86_64": "0.9.92",
-    "@sqliteai/sqlite-sync-linux-x86_64-musl": "0.9.92",
-    "@sqliteai/sqlite-sync-win32-x86_64": "0.9.92"
+    "@sqliteai/sqlite-sync-darwin-arm64": "1.0.0",
+    "@sqliteai/sqlite-sync-darwin-x86_64": "1.0.0",
+    "@sqliteai/sqlite-sync-linux-arm64": "1.0.0",
+    "@sqliteai/sqlite-sync-linux-arm64-musl": "1.0.0",
+    "@sqliteai/sqlite-sync-linux-x86_64": "1.0.0",
+    "@sqliteai/sqlite-sync-linux-x86_64-musl": "1.0.0",
+    "@sqliteai/sqlite-sync-win32-x86_64": "1.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
