@@ -42,12 +42,12 @@
   "license": "SEE LICENSE IN LICENSE.md",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sqliteai/sqlite-sync-dev.git",
+    "url": "git+https://github.com/sqliteai/sqlite-sync-dev.git",
     "directory": "packages/node"
   },
   "homepage": "https://github.com/sqliteai/sqlite-sync-dev#readme",
   "bugs": {
-    "url": "https://github.com/sqliteai/sqlite-sync-dev/issues"
+    "url": "git+https://github.com/sqliteai/sqlite-sync-dev/issues"
   },
   "engines": {
     "node": ">=16.0.0"
