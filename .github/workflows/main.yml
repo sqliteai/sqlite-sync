@@ -385,7 +385,6 @@ jobs:
         with:
           repository: sqliteai/sqlite-wasm
           path: sqlite-wasm
-          ref: dev
           submodules: recursive
           token: ${{ secrets.PAT }}
 
@@ -403,8 +402,8 @@ jobs:
           TMP=sqlite-wasm/package.tmp.json
           jq --arg version "$(cat modules/sqlite/VERSION)-sync.$(cd modules/sqlite-sync && make version)-vector.$(cd modules/sqlite-vector && make version)" '.version = $version' "$PKG" > "$TMP" && mv "$TMP" "$PKG"
           git add "$PKG"
-          git commit -m "Bump sqlite-sync-dev version to ${{ steps.tag.outputs.version }}"
-          git push origin dev
+          git commit -m "Bump sqlite-sync version to ${{ steps.tag.outputs.version }}"
+          git push origin main
 
       - uses: actions/checkout@v4.2.2
         if: steps.tag.outputs.version != ''
@@ -473,23 +472,23 @@ jobs:
           cd platform-packages
           for platform_dir in */; do
             platform_name=$(basename "$platform_dir")
-            echo "  Publishing @sqliteai/sqlite-sync-dev-${platform_name}..."
+            echo "  Publishing @sqliteai/sqlite-sync-${platform_name}..."
             cd "$platform_dir"
             npm publish --provenance --access public --tag latest
             cd ..
-            echo "  ✓ Published @sqliteai/sqlite-sync-dev-${platform_name}"
+            echo "  ✓ Published @sqliteai/sqlite-sync-${platform_name}"
           done
           cd ..
 
           # Publish main package
           echo "Publishing main package to npm..."
           npm publish --provenance --access public --tag latest
-          echo "✓ Published @sqliteai/sqlite-sync-dev@${{ steps.tag.outputs.version }}"
+          echo "✓ Published @sqliteai/sqlite-sync@${{ steps.tag.outputs.version }}"
 
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "✅ Successfully published 8 packages to npm"
-          echo "   Main: @sqliteai/sqlite-sync-dev@${{ steps.tag.outputs.version }}"
+          echo "   Main: @sqliteai/sqlite-sync@${{ steps.tag.outputs.version }}"
           echo "   Platform packages: 7"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -498,13 +497,13 @@ jobs:
         run: |
           cd packages/expo
 
-          echo "Generating @sqliteai/sqlite-sync-expo-dev package..."
+          echo "Generating @sqliteai/sqlite-sync-expo package..."
           node generate-expo-package.js "${{ steps.tag.outputs.version }}" "../../artifacts" "./expo-package"
 
-          echo "Publishing @sqliteai/sqlite-sync-expo-dev to npm..."
+          echo "Publishing @sqliteai/sqlite-sync-expo to npm..."
           cd expo-package
           npm publish --provenance --access public --tag latest
-          echo "✓ Published @sqliteai/sqlite-sync-expo-dev@${{ steps.tag.outputs.version }}"
+          echo "✓ Published @sqliteai/sqlite-sync-expo@${{ steps.tag.outputs.version }}"
 
       - uses: softprops/action-gh-release@v2.2.1
         if: steps.tag.outputs.version != ''
@@ -513,12 +512,12 @@ jobs:
             # Packages
 
             [**Flutter/Dart**](https://pub.dev/packages/sqlite_sync): `flutter pub add sqlite_sync:${{ steps.tag.outputs.version }}` or `dart pub add sqlite_sync:${{ steps.tag.outputs.version }}`
-            [**Node**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-dev): `npm install @sqliteai/sqlite-sync-dev`
-            [**WASM**](https://www.npmjs.com/package/@sqliteai/sqlite-wasm): `npm install @sqliteai/sqlite-wasm@dev`
+            [**Node**](https://www.npmjs.com/package/@sqliteai/sqlite-sync): `npm install @sqliteai/sqlite-sync`
+            [**WASM**](https://www.npmjs.com/package/@sqliteai/sqlite-wasm): `npm install @sqliteai/sqlite-wasm`
             [**React Native**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-react-native): `npm install @sqliteai/sqlite-sync-react-native`
-            [**Expo**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo-dev): `npm install @sqliteai/sqlite-sync-expo-dev`
-            [**Android**](https://central.sonatype.com/artifact/ai.sqlite/sync.dev): `ai.sqlite:sync.dev:${{ steps.tag.outputs.version }}`
-            [**Swift**](https://github.com/sqliteai/sqlite-sync-dev#swift-package): [Installation Guide](https://github.com/sqliteai/sqlite-sync-dev#swift-package)
+            [**Expo**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo): `npm install @sqliteai/sqlite-sync-expo`
+            [**Android**](https://central.sonatype.com/artifact/ai.sqlite/sync): `ai.sqlite:sync:${{ steps.tag.outputs.version }}`
+            [**Swift**](https://github.com/sqliteai/sqlite-sync#swift-package): [Installation Guide](https://github.com/sqliteai/sqlite-sync#swift-package)
 
             ---
 
