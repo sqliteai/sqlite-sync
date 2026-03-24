@@ -3,7 +3,7 @@
 //  cloudsync
 //
 //  Created by Gioele Cantoni on 05/06/25.
-//  Set CONNECTION_STRING, APIKEY and WEBLITE environment variables before running this test.
+//  Set INTEGRATION_TEST_OFFLINE_DATABASE_ID and INTEGRATION_TEST_DATABASE_ID environment variables before running this test.
 //
 
 #include <stdio.h>
@@ -226,18 +226,13 @@ int test_init (const char *db_path, int init) {
 
     // init network with JSON connection string
     char network_init[1024];
-    const char* conn_str = getenv("CONNECTION_STRING");
-    const char* apikey = getenv("APIKEY");
-    const char* project_id = getenv("PROJECT_ID");
-    const char* org_id = getenv("ORGANIZATION_ID");
-    const char* database = getenv("DATABASE");
-    if (!conn_str || !apikey || !project_id || !org_id || !database) {
-        fprintf(stderr, "Error: CONNECTION_STRING, APIKEY, PROJECT_ID, ORGANIZATION_ID, or DATABASE not set.\n");
+    const char* test_db_id = getenv("INTEGRATION_TEST_DATABASE_ID");
+    if (!test_db_id) {
+        fprintf(stderr, "Error: INTEGRATION_TEST_DATABASE_ID not set.\n");
         exit(1);
     }
     snprintf(network_init, sizeof(network_init),
-        "SELECT cloudsync_network_init('{\"address\":\"%s\",\"database\":\"%s\",\"projectID\":\"%s\",\"organizationID\":\"%s\",\"apikey\":\"%s\"}');",
-        conn_str, database, project_id, org_id, apikey);
+        "SELECT cloudsync_network_init('%s');", test_db_id);
     rc = db_exec(db, network_init); RCHECK
 
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM activities;", 0); RCHECK
@@ -301,18 +296,13 @@ int test_enable_disable(const char *db_path) {
 
     // init network with JSON connection string
     char network_init[1024];
-    const char* conn_str = getenv("CONNECTION_STRING");
-    const char* apikey = getenv("APIKEY");
-    const char* project_id = getenv("PROJECT_ID");
-    const char* org_id = getenv("ORGANIZATION_ID");
-    const char* database = getenv("DATABASE");
-    if (!conn_str || !apikey || !project_id || !org_id || !database) {
-        fprintf(stderr, "Error: CONNECTION_STRING, APIKEY, PROJECT_ID, ORGANIZATION_ID, or DATABASE not set.\n");
+    const char* test_db_id = getenv("INTEGRATION_TEST_DATABASE_ID");
+    if (!test_db_id) {
+        fprintf(stderr, "Error: INTEGRATION_TEST_DATABASE_ID not set.\n");
         exit(1);
     }
     snprintf(network_init, sizeof(network_init),
-        "SELECT cloudsync_network_init('{\"address\":\"%s\",\"database\":\"%s\",\"projectID\":\"%s\",\"organizationID\":\"%s\",\"apikey\":\"%s\"}');",
-        conn_str, database, project_id, org_id, apikey);
+        "SELECT cloudsync_network_init('%s');", test_db_id);
     rc = db_exec(db, network_init); RCHECK
 
     rc = db_exec(db, "SELECT cloudsync_network_send_changes();"); RCHECK
@@ -363,16 +353,16 @@ int test_offline_error(const char *db_path) {
     rc = db_exec(db, "INSERT INTO test_table (id, value) VALUES (cloudsync_uuid(), 'test1'), (cloudsync_uuid(), 'test2');");
     RCHECK
 
-    // Initialize network with offline connection string
-    const char* offline_conn_str = getenv("CONNECTION_STRING_OFFLINE_PROJECT");
-    if (!offline_conn_str) {
-        printf("Skipping offline error test: CONNECTION_STRING_OFFLINE_PROJECT not set.\n");
+    // Initialize network with offline database ID
+    const char* offline_db_id = getenv("INTEGRATION_TEST_OFFLINE_DATABASE_ID");
+    if (!offline_db_id) {
+        printf("Skipping offline error test: INTEGRATION_TEST_OFFLINE_DATABASE_ID not set.\n");
         rc = SQLITE_OK;
         goto abort_test;
     }
 
     char network_init[512];
-    snprintf(network_init, sizeof(network_init), "SELECT cloudsync_network_init('%s');", offline_conn_str);
+    snprintf(network_init, sizeof(network_init), "SELECT cloudsync_network_init('%s');", offline_db_id);
     rc = db_exec(db, network_init);
     RCHECK
 

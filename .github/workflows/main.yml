@@ -80,10 +80,8 @@ jobs:
         shell: ${{ matrix.container && 'sh' || 'bash' }}
 
     env:
-      CONNECTION_STRING: ${{ secrets.CONNECTION_STRING }}
-      CONNECTION_STRING_OFFLINE_PROJECT: ${{ secrets.CONNECTION_STRING_OFFLINE_PROJECT }}
-      APIKEY: ${{ secrets.APIKEY }}
-      WEBLITE: ${{ secrets.WEBLITE }}
+      INTEGRATION_TEST_DATABASE_ID: ${{ secrets.INTEGRATION_TEST_DATABASE_ID }}
+      INTEGRATION_TEST_OFFLINE_DATABASE_ID: ${{ secrets.INTEGRATION_TEST_OFFLINE_DATABASE_ID }}
 
     steps:
 
@@ -127,10 +125,8 @@ jobs:
             --platform linux/arm64 \
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
-            -e CONNECTION_STRING="${{ env.CONNECTION_STRING }}" \
-            -e CONNECTION_STRING_OFFLINE_PROJECT="${{ env.CONNECTION_STRING_OFFLINE_PROJECT }}" \
-            -e APIKEY="${{ env.APIKEY }}" \
-            -e WEBLITE="${{ env.WEBLITE }}" \
+            -e INTEGRATION_TEST_DATABASE_ID="${{ env.INTEGRATION_TEST_DATABASE_ID }}" \
+            -e INTEGRATION_TEST_OFFLINE_DATABASE_ID="${{ env.INTEGRATION_TEST_OFFLINE_DATABASE_ID }}" \
             alpine:latest \
             tail -f /dev/null
           docker exec alpine sh -c "apk update && apk add --no-cache gcc make curl sqlite openssl-dev musl-dev linux-headers"
@@ -200,10 +196,8 @@ jobs:
           cat > commands.sh << EOF
             mv -f /data/local/tmp/sqlite3 /system/xbin
             cd /data/local/tmp
-            export CONNECTION_STRING="$CONNECTION_STRING"
-            export CONNECTION_STRING_OFFLINE_PROJECT="$CONNECTION_STRING_OFFLINE_PROJECT"
-            export APIKEY="$APIKEY"
-            export WEBLITE="$WEBLITE"
+            export INTEGRATION_TEST_DATABASE_ID="$INTEGRATION_TEST_DATABASE_ID"
+            export INTEGRATION_TEST_OFFLINE_DATABASE_ID="$INTEGRATION_TEST_OFFLINE_DATABASE_ID"
             $(make test PLATFORM=$PLATFORM ARCH=$ARCH -n)
           EOF
           echo "::endgroup::"
