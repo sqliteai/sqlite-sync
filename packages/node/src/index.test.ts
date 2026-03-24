@@ -28,10 +28,10 @@ describe('Platform Detection', () => {
   it('getPlatformPackageName() returns correct package name format', () => {
     const packageName = getPlatformPackageName();
 
-    expect(packageName.startsWith('@sqliteai/sqlite-sync-dev-')).toBe(true);
+    expect(packageName.startsWith('@sqliteai/sqlite-sync-')).toBe(true);
 
     expect(packageName).toMatch(
-      /^@sqliteai\/sqlite-sync-dev-(darwin|linux|win32)-(arm64|x86_64)(-musl)?$/
+      /^@sqliteai\/sqlite-sync-(darwin|linux|win32)-(arm64|x86_64)(-musl)?$/
     );
   });
 

@@ -217,7 +217,7 @@ SQLiteDatabase db = SQLiteDatabase.openDatabase(config, null, null);
 Install the Expo package:
 
 ```bash
-npm install @sqliteai/sqlite-sync-expo-dev
+npm install @sqliteai/sqlite-sync-expo
 ```
 
 Add to your `app.json`:
@@ -225,7 +225,7 @@ Add to your `app.json`:
 ```json
 {
   "expo": {
-    "plugins": ["@sqliteai/sqlite-sync-expo-dev"]
+    "plugins": ["@sqliteai/sqlite-sync-expo"]
   }
 }
 ```

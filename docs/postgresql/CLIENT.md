@@ -190,10 +190,10 @@ implementation 'ai.sqlite:sync.dev:0.9.96'
 Install the Expo package:
 
 ```
-npm install @sqliteai/sqlite-sync-expo-dev
+npm install @sqliteai/sqlite-sync-expo
 ```
 
-Then follow the instructions from the [README](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo-dev)
+Then follow the instructions from the [README](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo)
 
 ## React Native
 

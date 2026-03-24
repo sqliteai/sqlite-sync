@@ -52,10 +52,10 @@ function tryLoadPlatformPackage(): string | null {
  *
  * @example
  * ```typescript
- * import { getExtensionPath } from '@sqliteai/sqlite-sync-dev';
+ * import { getExtensionPath } from '@sqliteai/sqlite-sync';
  *
  * const extensionPath = getExtensionPath();
- * // On macOS ARM64: /path/to/node_modules/@sqliteai/sqlite-sync-dev-darwin-arm64/cloudsync.dylib
+ * // On macOS ARM64: /path/to/node_modules/@sqliteai/sqlite-sync-darwin-arm64/cloudsync.dylib
  * ```
  */
 export function getExtensionPath(): string {
@@ -101,13 +101,13 @@ export interface ExtensionInfo {
  *
  * @example
  * ```typescript
- * import { getExtensionInfo } from '@sqliteai/sqlite-sync-dev';
+ * import { getExtensionInfo } from '@sqliteai/sqlite-sync';
  *
  * const info = getExtensionInfo();
  * console.log(info);
  * // {
  * //   platform: 'darwin-arm64',
- * //   packageName: '@sqliteai/sqlite-sync-dev-darwin-arm64',
+ * //   packageName: '@sqliteai/sqlite-sync-darwin-arm64',
  * //   binaryName: 'cloudsync.dylib',
  * //   path: '/path/to/cloudsync.dylib'
  * // }

@@ -81,7 +81,7 @@ const PLATFORMS = [
  */
 function generatePackageJson(platform, version) {
   return {
-    name: `@sqliteai/sqlite-sync-dev-${platform.name}`,
+    name: `@sqliteai/sqlite-sync-${platform.name}`,
     version: version,
     description: platform.description,
     main: 'index.js',
@@ -102,7 +102,7 @@ function generatePackageJson(platform, version) {
     license: 'SEE LICENSE IN LICENSE.md',
     repository: {
       type: 'git',
-      url: 'https://github.com/sqliteai/sqlite-sync-dev.git',
+      url: 'https://github.com/sqliteai/sqlite-sync.git',
       directory: 'packages/node',
     },
     engines: {
@@ -127,13 +127,13 @@ module.exports = {
  * Generate README.md for a platform
  */
 function generateReadme(platform, version) {
-  return `# @sqliteai/sqlite-sync-dev-${platform.name}
+  return `# @sqliteai/sqlite-sync-${platform.name}
 
 ${platform.description}
 
 **Version:** ${version}
 
-This is a platform-specific package for [@sqliteai/sqlite-sync-dev](https://www.npmjs.com/package/@sqliteai/sqlite-sync-dev).
+This is a platform-specific package for [@sqliteai/sqlite-sync](https://www.npmjs.com/package/@sqliteai/sqlite-sync).
 
 It is installed automatically as an optional dependency and should not be installed directly.
 
@@ -142,7 +142,7 @@ It is installed automatically as an optional dependency and should not be instal
 Install the main package instead:
 
 \`\`\`bash
-npm install @sqliteai/sqlite-sync-dev
+npm install @sqliteai/sqlite-sync
 \`\`\`
 
 ## Platform

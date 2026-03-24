@@ -17,7 +17,7 @@ apply plugin: 'maven-publish'
 apply plugin: 'signing'
 
 android {
-    namespace 'ai.sqlite.sync.dev'
+    namespace 'ai.sqlite.sync'
     compileSdk 34
 
     defaultConfig {
@@ -57,16 +57,16 @@ afterEvaluate {
         publications {
             release(MavenPublication) {
                 groupId = 'ai.sqlite'
-                artifactId = 'sync.dev'
+                artifactId = 'sync'
                 version = project.hasProperty('VERSION') ? project.VERSION : ['make', 'version'].execute(null, file('../..')).text.trim()
 
                 artifact(project.hasProperty('AAR_PATH') ? project.AAR_PATH : "$buildDir/outputs/aar/android-release.aar")
 
                 // Maven Central metadata
                 pom {
-                    name = 'sqlite-sync-dev'
+                    name = 'sqlite-sync'
                     description = 'A multi-platform extension that brings a true local-first experience to your applications with minimal effort. It extends standard SQLite tables with built-in support for offline work and automatic synchronization, allowing multiple devices to operate independently—even without a network connection—and seamlessly stay in sync. With SQLite Sync, developers can easily build distributed, collaborative applications while continuing to rely on the simplicity, reliability, and performance of SQLite.'
-                    url = 'https://github.com/sqliteai/sqlite-sync-dev'
+                    url = 'https://github.com/sqliteai/sqlite-sync'
 
                     licenses {
                         license {
@@ -86,9 +86,9 @@ afterEvaluate {
                     }
 
                     scm {
-                        connection = 'scm:git:git://github.com/sqliteai/sqlite-sync-dev.git'
-                        developerConnection = 'scm:git:ssh://github.com:sqliteai/sqlite-sync-dev.git'
-                        url = 'https://github.com/sqliteai/sqlite-sync-dev/tree/main'
+                        connection = 'scm:git:git://github.com/sqliteai/sqlite-sync.git'
+                        developerConnection = 'scm:git:ssh://github.com:sqliteai/sqlite-sync.git'
+                        url = 'https://github.com/sqliteai/sqlite-sync/tree/main'
                     }
                 }
             }
