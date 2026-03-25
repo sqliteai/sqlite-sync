@@ -224,16 +224,30 @@ int test_init (const char *db_path, int init) {
     rc = db_exec(db, "SELECT cloudsync_init('activities');"); RCHECK
     rc = db_exec(db, "SELECT cloudsync_init('workouts');"); RCHECK
 
-    // init network with JSON connection string
+    // init network
     char network_init[1024];
     const char* test_db_id = getenv("INTEGRATION_TEST_DATABASE_ID");
     if (!test_db_id) {
         fprintf(stderr, "Error: INTEGRATION_TEST_DATABASE_ID not set.\n");
         exit(1);
     }
-    snprintf(network_init, sizeof(network_init),
-        "SELECT cloudsync_network_init('%s');", test_db_id);
+    const char* custom_address = getenv("INTEGRATION_TEST_CLOUDSYNC_ADDRESS");
+    if (custom_address) {
+        snprintf(network_init, sizeof(network_init),
+            "SELECT cloudsync_network_init_custom('%s', '%s');", custom_address, test_db_id);
+    } else {
+        snprintf(network_init, sizeof(network_init),
+            "SELECT cloudsync_network_init('%s');", test_db_id);
+    }
     rc = db_exec(db, network_init); RCHECK
+
+    const char* apikey = getenv("INTEGRATION_TEST_APIKEY");
+    if (apikey) {
+        char set_apikey[512];
+        snprintf(set_apikey, sizeof(set_apikey),
+            "SELECT cloudsync_network_set_apikey('%s');", apikey);
+        rc = db_exec(db, set_apikey); RCHECK
+    }
 
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM activities;", 0); RCHECK
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM workouts;", 0); RCHECK
@@ -294,16 +308,30 @@ int test_enable_disable(const char *db_path) {
     snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s-should-sync', '%s-should-sync');", value, value);
     rc = db_exec(db, sql); RCHECK
 
-    // init network with JSON connection string
+    // init network
     char network_init[1024];
     const char* test_db_id = getenv("INTEGRATION_TEST_DATABASE_ID");
     if (!test_db_id) {
         fprintf(stderr, "Error: INTEGRATION_TEST_DATABASE_ID not set.\n");
         exit(1);
     }
-    snprintf(network_init, sizeof(network_init),
-        "SELECT cloudsync_network_init('%s');", test_db_id);
+    const char* custom_address = getenv("INTEGRATION_TEST_CLOUDSYNC_ADDRESS");
+    if (custom_address) {
+        snprintf(network_init, sizeof(network_init),
+            "SELECT cloudsync_network_init_custom('%s', '%s');", custom_address, test_db_id);
+    } else {
+        snprintf(network_init, sizeof(network_init),
+            "SELECT cloudsync_network_init('%s');", test_db_id);
+    }
     rc = db_exec(db, network_init); RCHECK
+
+    const char* apikey = getenv("INTEGRATION_TEST_APIKEY");
+    if (apikey) {
+        char set_apikey[512];
+        snprintf(set_apikey, sizeof(set_apikey),
+            "SELECT cloudsync_network_set_apikey('%s');", apikey);
+        rc = db_exec(db, set_apikey); RCHECK
+    }
 
     rc = db_exec(db, "SELECT cloudsync_network_send_changes();"); RCHECK
     rc = db_exec(db, "SELECT cloudsync_cleanup('users');"); RCHECK
@@ -323,6 +351,13 @@ int test_enable_disable(const char *db_path) {
 
     // init network with connection string + apikey
     rc = db_exec(db2, network_init); RCHECK
+
+    if (apikey) {
+        char set_apikey2[512];
+        snprintf(set_apikey2, sizeof(set_apikey2),
+            "SELECT cloudsync_network_set_apikey('%s');", apikey);
+        rc = db_exec(db2, set_apikey2); RCHECK
+    }
 
     rc = db_expect_gt0(db2, "SELECT cloudsync_network_sync(250,10) ->> '$.receive.rows';"); RCHECK
 
@@ -362,9 +397,25 @@ int test_offline_error(const char *db_path) {
     }
 
     char network_init[512];
-    snprintf(network_init, sizeof(network_init), "SELECT cloudsync_network_init('%s');", offline_db_id);
+    const char* custom_address = getenv("INTEGRATION_TEST_CLOUDSYNC_ADDRESS");
+    if (custom_address) {
+        snprintf(network_init, sizeof(network_init),
+            "SELECT cloudsync_network_init_custom('%s', '%s');", custom_address, offline_db_id);
+    } else {
+        snprintf(network_init, sizeof(network_init),
+            "SELECT cloudsync_network_init('%s');", offline_db_id);
+    }
     rc = db_exec(db, network_init);
     RCHECK
+
+    const char* apikey = getenv("INTEGRATION_TEST_APIKEY");
+    if (apikey) {
+        char set_apikey[512];
+        snprintf(set_apikey, sizeof(set_apikey),
+            "SELECT cloudsync_network_set_apikey('%s');", apikey);
+        rc = db_exec(db, set_apikey);
+        RCHECK
+    }
 
     // Try to sync - this should fail with the expected error
     char *errmsg = NULL;
@@ -376,17 +427,35 @@ int test_offline_error(const char *db_path) {
         goto abort_test;
     }
 
-    // Verify the error message contains the expected text
-    const char *expected_error = "cloudsync_network_send_changes unable to upload BLOB changes to remote host";
-    if (!errmsg || strstr(errmsg, expected_error) == NULL) {
-        printf("Error: Expected error message containing '%s', but got '%s'\n",
-               expected_error, errmsg ? errmsg : "NULL");
-        if (errmsg) sqlite3_free(errmsg);
+    // Verify the error JSON contains expected fields using SQLite JSON extraction
+    if (!errmsg) {
+        printf("Error: Expected an error message, but got NULL\n");
         rc = SQLITE_ERROR;
         goto abort_test;
     }
 
-    if (errmsg) sqlite3_free(errmsg);
+    char verify_sql[1024];
+    snprintf(verify_sql, sizeof(verify_sql),
+        "SELECT json_extract('%s', '$.errors[0].status');", errmsg);
+    rc = db_expect_str(db, verify_sql, "500");
+    if (rc != SQLITE_OK) { printf("Offline error: unexpected status in: %s\n", errmsg); sqlite3_free(errmsg); goto abort_test; }
+
+    snprintf(verify_sql, sizeof(verify_sql),
+        "SELECT json_extract('%s', '$.errors[0].code');", errmsg);
+    rc = db_expect_str(db, verify_sql, "internal_server_error");
+    if (rc != SQLITE_OK) { printf("Offline error: unexpected code in: %s\n", errmsg); sqlite3_free(errmsg); goto abort_test; }
+
+    snprintf(verify_sql, sizeof(verify_sql),
+        "SELECT json_extract('%s', '$.errors[0].title');", errmsg);
+    rc = db_expect_str(db, verify_sql, "Internal Server Error");
+    if (rc != SQLITE_OK) { printf("Offline error: unexpected title in: %s\n", errmsg); sqlite3_free(errmsg); goto abort_test; }
+
+    snprintf(verify_sql, sizeof(verify_sql),
+        "SELECT json_extract('%s', '$.errors[0].detail');", errmsg);
+    rc = db_expect_str(db, verify_sql, "failed to resolve token data: failed to resolve db user for api key: db: connect sqlitecloud failed after 3 attempts: Your free node has been paused due to inactivity. To resume usage, please restart your node from your dashboard: https://dashboard.sqlitecloud.io");
+    if (rc != SQLITE_OK) { printf("Offline error: unexpected detail in: %s\n", errmsg); sqlite3_free(errmsg); goto abort_test; }
+
+    sqlite3_free(errmsg);
     rc = SQLITE_OK;
 
 ABORT_TEST

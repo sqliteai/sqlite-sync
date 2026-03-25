@@ -81,6 +81,8 @@ jobs:
 
     env:
       INTEGRATION_TEST_DATABASE_ID: ${{ secrets.INTEGRATION_TEST_DATABASE_ID }}
+      INTEGRATION_TEST_APIKEY: ${{ secrets.INTEGRATION_TEST_APIKEY }}
+      INTEGRATION_TEST_CLOUDSYNC_ADDRESS: ${{ secrets.INTEGRATION_TEST_CLOUDSYNC_ADDRESS }}
       INTEGRATION_TEST_OFFLINE_DATABASE_ID: ${{ secrets.INTEGRATION_TEST_OFFLINE_DATABASE_ID }}
 
     steps:
@@ -126,6 +128,8 @@ jobs:
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
             -e INTEGRATION_TEST_DATABASE_ID="${{ env.INTEGRATION_TEST_DATABASE_ID }}" \
+            -e INTEGRATION_TEST_APIKEY="${{ env.INTEGRATION_TEST_APIKEY }}" \
+            -e INTEGRATION_TEST_CLOUDSYNC_ADDRESS="${{ env.INTEGRATION_TEST_CLOUDSYNC_ADDRESS }}" \
             -e INTEGRATION_TEST_OFFLINE_DATABASE_ID="${{ env.INTEGRATION_TEST_OFFLINE_DATABASE_ID }}" \
             alpine:latest \
             tail -f /dev/null
@@ -194,9 +198,12 @@ jobs:
           echo "::group::prepare the test script"
           make test PLATFORM=$PLATFORM ARCH=$ARCH || echo "It should fail. Running remaining commands in the emulator"
           cat > commands.sh << EOF
+            set -e
             mv -f /data/local/tmp/sqlite3 /system/xbin
             cd /data/local/tmp
             export INTEGRATION_TEST_DATABASE_ID="$INTEGRATION_TEST_DATABASE_ID"
+            export INTEGRATION_TEST_APIKEY="$INTEGRATION_TEST_APIKEY"
+            export INTEGRATION_TEST_CLOUDSYNC_ADDRESS="$INTEGRATION_TEST_CLOUDSYNC_ADDRESS"
             export INTEGRATION_TEST_OFFLINE_DATABASE_ID="$INTEGRATION_TEST_OFFLINE_DATABASE_ID"
             $(make test PLATFORM=$PLATFORM ARCH=$ARCH -n)
           EOF
@@ -212,7 +219,8 @@ jobs:
             adb root
             adb remount
             adb push ${{ github.workspace }}/. /data/local/tmp/
-            adb shell "sh /data/local/tmp/commands.sh"
+            adb shell "sh /data/local/tmp/commands.sh; echo EXIT_CODE=\$?" | tee /tmp/adb_output.log
+            grep -q "EXIT_CODE=0" /tmp/adb_output.log
 
       - name: test sqlite-sync
         if: contains(matrix.name, 'linux') || matrix.name == 'windows' || ( matrix.name == 'macos' && matrix.arch != 'x86_64' )

@@ -1,6 +1,6 @@
 # Sport Tracker app with SQLite Sync 🚵
 
-A Vite/React demonstration app showcasing [**SQLite Sync (Dev)**](https://github.com/sqliteai/sqlite-sync) implementation for **offline-first** data synchronization across multiple devices. This example illustrates how to integrate SQLite AI's sync capabilities into modern web applications with proper authentication via [Access Token](https://docs.sqlitecloud.io/docs/access-tokens) and [Row-Level Security (RLS)](https://docs.sqlitecloud.io/docs/rls).
+A Vite/React demonstration app showcasing [**SQLite Sync**](https://github.com/sqliteai/sqlite-sync) implementation for **offline-first** data synchronization across multiple devices. This example illustrates how to integrate SQLite AI's sync capabilities into modern web applications with proper authentication via [Access Token](https://docs.sqlitecloud.io/docs/access-tokens) and [Row-Level Security (RLS)](https://docs.sqlitecloud.io/docs/rls).
 
 > This app uses the packed WASM version of SQLite with the [SQLite Sync extension enabled](https://www.npmjs.com/package/@sqliteai/sqlite-wasm).
 
