@@ -427,17 +427,35 @@ int test_offline_error(const char *db_path) {
         goto abort_test;
     }
 
-    // Verify the error message contains the expected text
-    const char *expected_error = "cloudsync_network_send_changes unable to upload BLOB changes to remote host";
-    if (!errmsg || strstr(errmsg, expected_error) == NULL) {
-        printf("Error: Expected error message containing '%s', but got '%s'\n",
-               expected_error, errmsg ? errmsg : "NULL");
-        if (errmsg) sqlite3_free(errmsg);
+    // Verify the error JSON contains expected fields using SQLite JSON extraction
+    if (!errmsg) {
+        printf("Error: Expected an error message, but got NULL\n");
         rc = SQLITE_ERROR;
         goto abort_test;
     }
 
-    if (errmsg) sqlite3_free(errmsg);
+    char verify_sql[1024];
+    snprintf(verify_sql, sizeof(verify_sql),
+        "SELECT json_extract('%s', '$.errors[0].status');", errmsg);
+    rc = db_expect_str(db, verify_sql, "500");
+    if (rc != SQLITE_OK) { printf("Offline error: unexpected status in: %s\n", errmsg); sqlite3_free(errmsg); goto abort_test; }
+
+    snprintf(verify_sql, sizeof(verify_sql),
+        "SELECT json_extract('%s', '$.errors[0].code');", errmsg);
+    rc = db_expect_str(db, verify_sql, "internal_server_error");
+    if (rc != SQLITE_OK) { printf("Offline error: unexpected code in: %s\n", errmsg); sqlite3_free(errmsg); goto abort_test; }
+
+    snprintf(verify_sql, sizeof(verify_sql),
+        "SELECT json_extract('%s', '$.errors[0].title');", errmsg);
+    rc = db_expect_str(db, verify_sql, "Internal Server Error");
+    if (rc != SQLITE_OK) { printf("Offline error: unexpected title in: %s\n", errmsg); sqlite3_free(errmsg); goto abort_test; }
+
+    snprintf(verify_sql, sizeof(verify_sql),
+        "SELECT json_extract('%s', '$.errors[0].detail');", errmsg);
+    rc = db_expect_str(db, verify_sql, "failed to resolve token data: failed to resolve db user for api key: db: connect sqlitecloud failed after 3 attempts: Your free node has been paused due to inactivity. To resume usage, please restart your node from your dashboard: https://dashboard.sqlitecloud.io");
+    if (rc != SQLITE_OK) { printf("Offline error: unexpected detail in: %s\n", errmsg); sqlite3_free(errmsg); goto abort_test; }
+
+    sqlite3_free(errmsg);
     rc = SQLITE_OK;
 
 ABORT_TEST
