@@ -198,6 +198,7 @@ jobs:
           echo "::group::prepare the test script"
           make test PLATFORM=$PLATFORM ARCH=$ARCH || echo "It should fail. Running remaining commands in the emulator"
           cat > commands.sh << EOF
+            set -e
             mv -f /data/local/tmp/sqlite3 /system/xbin
             cd /data/local/tmp
             export INTEGRATION_TEST_DATABASE_ID="$INTEGRATION_TEST_DATABASE_ID"
