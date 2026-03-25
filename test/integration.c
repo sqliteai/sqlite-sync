@@ -408,6 +408,15 @@ int test_offline_error(const char *db_path) {
     rc = db_exec(db, network_init);
     RCHECK
 
+    const char* apikey = getenv("INTEGRATION_TEST_APIKEY");
+    if (apikey) {
+        char set_apikey[512];
+        snprintf(set_apikey, sizeof(set_apikey),
+            "SELECT cloudsync_network_set_apikey('%s');", apikey);
+        rc = db_exec(db, set_apikey);
+        RCHECK
+    }
+
     // Try to sync - this should fail with the expected error
     char *errmsg = NULL;
     rc = sqlite3_exec(db, "SELECT cloudsync_network_sync();", NULL, NULL, &errmsg);
