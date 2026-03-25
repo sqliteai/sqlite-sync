@@ -81,6 +81,7 @@ jobs:
 
     env:
       INTEGRATION_TEST_DATABASE_ID: ${{ secrets.INTEGRATION_TEST_DATABASE_ID }}
+      INTEGRATION_TEST_CLOUDSYNC_ADDRESS: ${{ secrets.INTEGRATION_TEST_CLOUDSYNC_ADDRESS }}
       INTEGRATION_TEST_OFFLINE_DATABASE_ID: ${{ secrets.INTEGRATION_TEST_OFFLINE_DATABASE_ID }}
 
     steps:
@@ -126,6 +127,7 @@ jobs:
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
             -e INTEGRATION_TEST_DATABASE_ID="${{ env.INTEGRATION_TEST_DATABASE_ID }}" \
+            -e INTEGRATION_TEST_CLOUDSYNC_ADDRESS="${{ env.INTEGRATION_TEST_CLOUDSYNC_ADDRESS }}" \
             -e INTEGRATION_TEST_OFFLINE_DATABASE_ID="${{ env.INTEGRATION_TEST_OFFLINE_DATABASE_ID }}" \
             alpine:latest \
             tail -f /dev/null
@@ -197,6 +199,7 @@ jobs:
             mv -f /data/local/tmp/sqlite3 /system/xbin
             cd /data/local/tmp
             export INTEGRATION_TEST_DATABASE_ID="$INTEGRATION_TEST_DATABASE_ID"
+            export INTEGRATION_TEST_CLOUDSYNC_ADDRESS="$INTEGRATION_TEST_CLOUDSYNC_ADDRESS"
             export INTEGRATION_TEST_OFFLINE_DATABASE_ID="$INTEGRATION_TEST_OFFLINE_DATABASE_ID"
             $(make test PLATFORM=$PLATFORM ARCH=$ARCH -n)
           EOF

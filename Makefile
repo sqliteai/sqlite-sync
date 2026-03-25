@@ -218,12 +218,8 @@ $(BUILD_TEST)/%.o: %.c
 	$(CC) $(T_CFLAGS) -c $< -o $@
 
 # Run code coverage (--css-file $(CUSTOM_CSS))
-test: $(TARGET) $(TEST_TARGET) unittest
-	@if [ -f .env ]; then \
-		export $$(grep -v '^#' .env | xargs); \
-	fi; \
-	set -e; $(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();" # && \
-	#for t in $(TEST_TARGET); do ./$$t; done
+test: $(TARGET) $(TEST_TARGET) unittest e2e
+	set -e; $(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();"
 ifneq ($(COVERAGE),false)
 	mkdir -p $(COV_DIR)
 	lcov --capture --directory . --output-file $(COV_DIR)/coverage.info $(subst src, --include src,${COV_FILES})
@@ -233,6 +229,13 @@ endif
 # Run only unit tests
 unittest: $(TARGET) $(DIST_DIR)/unit$(EXE)
 	@./$(DIST_DIR)/unit$(EXE)
+
+# Run end-to-end integration tests
+e2e: $(TARGET) $(DIST_DIR)/integration$(EXE)
+	@if [ -f .env ]; then \
+		export $$(grep -v '^#' .env | xargs); \
+	fi; \
+	./$(DIST_DIR)/integration$(EXE)
 
 OPENSSL_TARBALL = $(OPENSSL_DIR)/$(OPENSSL_VERSION).tar.gz
 
@@ -448,4 +451,4 @@ help:
 # Include PostgreSQL extension targets
 include docker/Makefile.postgresql
 
-.PHONY: all clean test unittest extension help version xcframework aar
+.PHONY: all clean test unittest e2e extension help version xcframework aar
