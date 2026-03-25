@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Platform } from 'react-native';
 import { db } from "../db/dbConnection";
-import { ANDROID_MANAGED_DATABASE_ID, MANAGED_DATABASE_ID, API_TOKEN } from "@env";
+import { MANAGED_DATABASE_ID, API_TOKEN } from "@env";
 import { getDylibPath } from "@op-engineering/op-sqlite";
 import { randomUUID } from 'expo-crypto';
 import { useSyncContext } from '../components/SyncContext';
@@ -72,8 +72,8 @@ const useCategories = () => {
       await db.execute('INSERT OR IGNORE INTO tags (uuid, name) VALUES (?, ?)', ['work', 'Work'])
       await db.execute('INSERT OR IGNORE INTO tags (uuid, name) VALUES (?, ?)', ['personal', 'Personal'])
 
-      if ((ANDROID_MANAGED_DATABASE_ID || MANAGED_DATABASE_ID) && API_TOKEN) {
-        await db.execute(`SELECT cloudsync_network_init('${Platform.OS == 'android' && ANDROID_MANAGED_DATABASE_ID ? ANDROID_MANAGED_DATABASE_ID : MANAGED_DATABASE_ID}');`);
+      if (MANAGED_DATABASE_ID && API_TOKEN) {
+        await db.execute(`SELECT cloudsync_network_init('${MANAGED_DATABASE_ID}');`);
         await db.execute(`SELECT cloudsync_network_set_token('${API_TOKEN}');`)
       } else {
         throw new Error('No valid MANAGED_DATABASE_ID or API_TOKEN provided, cloudsync_network_init will not be called');

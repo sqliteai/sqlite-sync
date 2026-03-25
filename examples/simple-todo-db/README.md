@@ -20,11 +20,15 @@ Before using the local CLI, you need to set up your cloud database:
 2. Name your database (e.g., "todo_app.sqlite")
 3. Click **"Create"**
 
-### 1.3 Get Connection Details
-1. Copy the **Connection String** (format: `sqlitecloud://projectid.sqlite.cloud/database.sqlite`)
+### 1.3 Enable OffSync
+1. Click the **OffSync** button next to your database, then **Enable OffSync** and confirm with the **Enable** button
+2. In the **Configuration** tab copy the **Database ID** (format: `db_*`)
+
+### 1.4 Get Auth Details
+1. In your project dashboard, click **Settings**, then **API Keys**
 2. Copy an **API Key**
 
-### 1.4 Configure Row-Level Security (Optional)
+### 1.5 Configure Row-Level Security (Optional)
 1. In your database dashboard, go to **"Security"** → **"Row-Level Security"**
 2. Enable RLS for tables you want to secure
 3. Create policies to control user access (e.g., users can only see their own tasks)
@@ -104,11 +108,11 @@ SELECT cloudsync_is_enabled('tasks');
 
 ```sql
 -- Configure connection to SQLite Cloud
--- Replace with your managedDatabaseId from the OffSync page on the SQLiteCloud dashboard
+-- Replace with your managedDatabaseId from the OffSync page on the SQLiteCloud dashboard from Step 1.3
 SELECT cloudsync_network_init('your-managed-database-id');
 
 -- Configure authentication:
--- Set your API key from Step 1.3
+-- Set your API key from Step 1.4
 SELECT cloudsync_network_set_apikey('your-api-key-here');
 -- Or use token authentication (required for Row-Level Security)
 -- SELECT cloudsync_network_set_token('your_auth_token');

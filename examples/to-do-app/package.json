@@ -1,6 +1,6 @@
 {
   "name": "@sqliteai/todoapp",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "An Expo template for building apps with the SQLite CloudSync extension",
   "repository": {
     "type": "git",

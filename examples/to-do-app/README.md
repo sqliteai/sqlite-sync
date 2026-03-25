@@ -24,10 +24,10 @@ cd MyApp
 
 Rename the `.env.example` into `.env` and fill with your values.
 
-> **⚠️ SECURITY WARNING**: This example puts database connection strings directly in `.env` files for demonstration purposes only. **Do not use this pattern in production.** 
+> **⚠️ SECURITY WARNING**: This example puts database API Keys directly in `.env` files for demonstration purposes only. **Do not use this pattern in production.** 
 >
 > **Why this is unsafe:**
-> - Connection strings contain sensitive credentials
+> - API Keys allow access to sensitive credentials
 > - Client-side apps expose all environment variables to users
 > - Anyone can inspect your app and extract database credentials
 >
