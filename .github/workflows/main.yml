@@ -240,8 +240,12 @@ jobs:
 
   postgres-test:
     runs-on: ubuntu-22.04
-    name: postgresql build + test
+    name: postgresql ${{ matrix.postgres_tag }} build + test
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres_tag: ['17', '15']
 
     steps:
 
@@ -250,7 +254,7 @@ jobs:
           submodules: true
 
       - name: build and start postgresql container
-        run: make postgres-docker-rebuild
+        run: POSTGRES_TAG=${{ matrix.postgres_tag }} make postgres-docker-rebuild
 
       - name: wait for postgresql to be ready
         run: |

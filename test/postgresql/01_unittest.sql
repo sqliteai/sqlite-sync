@@ -17,7 +17,8 @@ CREATE EXTENSION IF NOT EXISTS cloudsync;
 
 -- 'Test version visibility'
 SELECT cloudsync_version() AS version \gset
-\echo [PASS] (:testid) Test cloudsync_version: :version
+SELECT current_setting('server_version') AS pg_version \gset
+\echo [PASS] (:testid) Test cloudsync_version: :version (PostgreSQL :pg_version)
 
 -- Test uuid generation
 SELECT cloudsync_uuid() AS uuid1 \gset

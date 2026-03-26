@@ -1,10 +1,12 @@
 # PostgreSQL Docker image with CloudSync extension pre-installed
-FROM postgres:17
+ARG POSTGRES_TAG=17
+FROM postgres:${POSTGRES_TAG}
 
-# Install build dependencies
+# Derive the major version from PG_MAJOR (set by the official postgres image)
+# and install the matching server-dev package
 RUN apt-get update && apt-get install -y \
     build-essential \
-    postgresql-server-dev-17 \
+    postgresql-server-dev-${PG_MAJOR} \
     git \
     make \
     && rm -rf /var/lib/apt/lists/*

@@ -3,6 +3,8 @@ services:
     build:
       context: ../..
       dockerfile: docker/postgresql/Dockerfile
+      args:
+        POSTGRES_TAG: ${POSTGRES_TAG:-17}
     container_name: cloudsync-postgres
     environment:
       POSTGRES_USER: postgres
