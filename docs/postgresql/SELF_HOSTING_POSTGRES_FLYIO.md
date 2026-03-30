@@ -629,7 +629,7 @@ Configure the JWKS auth server and CloudSync to use asymmetric key verification.
 ```yaml
   auth-jwks:
     environment:
-      ISSUER: http://cloudsync-auth-jwks.<your-app-name>.internal:3002
+      ISSUER: http://<your-app-name>.internal:3002
 ```
 
 The issuer is the **base URL** (CloudSync automatically appends `/.well-known/jwks.json`).
@@ -640,13 +640,13 @@ In the CloudSync dashboard for this PostgreSQL project:
 - Go to **Configuration** tab → **Edit connection settings**
 - Under **JWT allowed issuers**, enter:
   ```
-  http://cloudsync-auth-jwks.<your-app-name>.internal:3002
+  http://<your-app-name>.internal:3002
   ```
 
 CloudSync will:
-1. Receive JWT tokens with `iss: http://cloudsync-auth-jwks.<your-app-name>.internal:3002`
+1. Receive JWT tokens with `iss: http://<your-app-name>.internal:3002`
 2. Validate the issuer matches the allowed list
-3. Fetch the public key from `http://cloudsync-auth-jwks.<your-app-name>.internal:3002/.well-known/jwks.json`
+3. Fetch the public key from `http://<your-app-name>.internal:3002/.well-known/jwks.json`
 4. Verify the token signature
 
 This is how production auth systems (Auth0, Supabase, Firebase) work — no shared secrets needed.
@@ -701,14 +701,14 @@ Enter this in CloudSync dashboard → **Configuration** → **JWT secret**
 For production setups using asymmetric keys:
 
 ```
-http://cloudsync-auth-jwks.<your-app-name>.internal:3002
+http://<your-app-name>.internal:3002
 ```
 
 Enter this in CloudSync dashboard → **Configuration** → **JWT allowed issuers**
 
 CloudSync will automatically fetch the public key from:
 ```
-http://cloudsync-auth-jwks.<your-app-name>.internal:3002/.well-known/jwks.json
+http://<your-app-name>.internal:3002/.well-known/jwks.json
 ```
 
 ---
