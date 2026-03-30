@@ -614,31 +614,42 @@ The CloudSync server needs to validate tokens from your auth server. Configurati
 
 ### Option A: HS256 (shared secret)
 
-Configure these environment variables on the CloudSync server:
+In the CloudSync dashboard, go to your PostgreSQL project → **Configuration** → **Edit connection settings**:
+- Under **JWT secret**, enter your `JWT_SECRET` value from `.env`
+- Click **Save**
 
-```env
-# Use the same JWT_SECRET as your auth server (base64-encoded)
-JWT_SECRET=<your-jwt-secret>
-
-# For development/testing, set the development issuer override
-JWT_DEVELOPMENT_ISSUER_PROJECT_ID=cloudsync-postgres-flyio
-```
-
-Both the auth server and CloudSync must use the secret as the same raw string (not base64-decoded).
+Both the auth server and CloudSync must use the same raw secret string (not base64-decoded).
 
 ### Option B: RS256 (JWKS)
 
-Configure the CloudSync server to fetch the public key from your JWKS endpoint:
+Configure the JWKS auth server and CloudSync to use asymmetric key verification.
 
-```env
-# JWKS endpoint URL — CloudSync fetches public keys from here to verify RS256 tokens
-JWKS_URL=http://cloudsync-postgres-test.internal:3002/.well-known/jwks.json
+**1. Update docker-compose.yml - JWKS auth server ISSUER:**
 
-# Must match the ISSUER env var on the JWKS auth server
-JWT_ISSUER=cloudsync-auth-jwks
+```yaml
+  auth-jwks:
+    environment:
+      ISSUER: http://cloudsync-auth-jwks.<your-app-name>.internal:3002
 ```
 
-No shared secret is needed — the CloudSync server fetches the public key from the JWKS endpoint and uses it to verify token signatures. This is how production auth systems (Auth0, Supabase, Firebase) work.
+The issuer is the **base URL** (CloudSync automatically appends `/.well-known/jwks.json`).
+
+**2. Configure CloudSync to accept this issuer:**
+
+In the CloudSync dashboard for this PostgreSQL project:
+- Go to **Configuration** tab → **Edit connection settings**
+- Under **JWT allowed issuers**, enter:
+  ```
+  http://cloudsync-auth-jwks.<your-app-name>.internal:3002
+  ```
+
+CloudSync will:
+1. Receive JWT tokens with `iss: http://cloudsync-auth-jwks.<your-app-name>.internal:3002`
+2. Validate the issuer matches the allowed list
+3. Fetch the public key from `http://cloudsync-auth-jwks.<your-app-name>.internal:3002/.well-known/jwks.json`
+4. Verify the token signature
+
+This is how production auth systems (Auth0, Supabase, Firebase) work — no shared secrets needed.
 
 ---
 
@@ -657,6 +668,47 @@ From your local machine, use `fly proxy`:
 fly proxy 5432:5432 -a <your-app-name>   # Postgres
 fly proxy 3001:3001 -a <your-app-name>   # Auth server (HS256)
 fly proxy 3002:3002 -a <your-app-name>   # Auth server (JWKS)
+```
+
+---
+
+## Reference: CloudSync Configuration
+
+After deployment, use these values to configure CloudSync dashboard:
+
+### Database Connection
+
+```
+postgresql://postgres:<POSTGRES_PASSWORD>@<your-app-name>.internal:5432/postgres
+```
+
+Replace:
+- `<POSTGRES_PASSWORD>`: from `.env` file
+- `<your-app-name>`: your Fly.io app name
+
+### JWT Secret (HS256)
+
+For simple/development setups using shared secrets:
+
+```env
+JWT_SECRET=<your-jwt-secret>
+```
+
+Enter this in CloudSync dashboard → **Configuration** → **JWT secret**
+
+### JWT Issuer (RS256 with JWKS)
+
+For production setups using asymmetric keys:
+
+```
+http://cloudsync-auth-jwks.<your-app-name>.internal:3002
+```
+
+Enter this in CloudSync dashboard → **Configuration** → **JWT allowed issuers**
+
+CloudSync will automatically fetch the public key from:
+```
+http://cloudsync-auth-jwks.<your-app-name>.internal:3002/.well-known/jwks.json
 ```
 
 ---
