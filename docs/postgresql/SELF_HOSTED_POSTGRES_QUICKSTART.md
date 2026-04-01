@@ -64,7 +64,25 @@ CREATE EXTENSION IF NOT EXISTS cloudsync;
 
 ---
 
-## Step 2: Register Your Database in the CloudSync Dashboard
+## Step 2: Verify the Extension
+
+If you are using Docker:
+
+```bash
+docker compose exec db psql -U postgres -d postgres -c "SELECT cloudsync_version();"
+```
+
+If you are using an existing PostgreSQL installation without Docker:
+
+```bash
+psql -U postgres -d postgres -c "SELECT cloudsync_version();"
+```
+
+If the extension is installed correctly, PostgreSQL returns the CloudSync version string.
+
+---
+
+## Step 3: Register Your Database in the CloudSync Dashboard
 
 ### 2.1 Create a Workspace
 
@@ -86,7 +104,7 @@ CREATE EXTENSION IF NOT EXISTS cloudsync;
 
 ---
 
-## Step 3: Set Up Authentication
+## Step 4: Set Up Authentication
 
 ### Quick Test with API Key (Recommended for Testing)
 
@@ -127,7 +145,7 @@ If you need role-based access control (RLS) or production security:
 
 ---
 
-## Step 4: Enable CloudSync on Tables
+## Step 5: Enable CloudSync on Tables
 
 1. In the CloudSync dashboard, go to the **Sync Tables** tab
 2. **Select tables** you want to sync (checkbox each table)
