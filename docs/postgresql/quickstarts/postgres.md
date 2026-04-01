@@ -117,7 +117,7 @@ SELECT cloudsync_network_sync();
 1. Set **Row Level Security** to **Yes, enforce RLS**
 2. Under **Authentication (JWT)**, click **Configure authentication** and choose:
    - **HMAC Secret (HS256):** Enter your JWT secret (or generate one: `openssl rand -base64 32`)
-   - **JWKS Issuer Validation:** Enter the issuer base URL from your token's `iss` claim (e.g. `https://your-auth-domain`). CloudSync fetches the JWKS document automatically
+   - **JWKS Issuer Validation:** Enter the issuer base URL from your token's `iss` claim (e.g. `https://your-auth-domain`). CloudSync automatically fetches the JWKS document from `<issuer-url>/.well-known/jwks.json`
 3. In your client code:
    ```sql
    SELECT cloudsync_network_init('<database-id>');
