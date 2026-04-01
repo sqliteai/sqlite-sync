@@ -2330,6 +2330,155 @@ cleanup:
     return result;
 }
 
+// Test that stale table settings don't crash on reload.
+// Exercises the error cleanup path in table_add_to_context_cb:
+// if a table is dropped without cloudsync_cleanup(), its settings
+// persist as orphans. On re-init the zero-initialized column arrays
+// must prevent databasevm_finalize from being called on garbage pointers.
+bool do_test_stale_table_settings(bool cleanup_databases) {
+    bool result = false;
+    char dbpath[256];
+    time_t timestamp = time(NULL);
+
+    #ifdef __ANDROID__
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-%ld.sqlite", ".", timestamp);
+    #else
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-%ld.sqlite", getenv("HOME"), timestamp);
+    #endif
+
+    // Phase 1: create database, table, and init cloudsync
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(dbpath, &db);
+    if (rc != SQLITE_OK) return false;
+    sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+    sqlite3_cloudsync_init(db, NULL, NULL);
+
+    rc = sqlite3_exec(db, "CREATE TABLE cloud (id TEXT PRIMARY KEY NOT NULL, value TEXT, extra INTEGER);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('cloud');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Phase 2: drop the table WITHOUT calling cloudsync_cleanup
+    // This leaves stale entries in cloudsync_table_settings
+    sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+    sqlite3_close(db);
+    db = NULL;
+
+    // Reopen and drop the table directly (bypassing cloudsync)
+    rc = sqlite3_open(dbpath, &db);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_exec(db, "DROP TABLE IF EXISTS cloud;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    sqlite3_close(db);
+    db = NULL;
+
+    // Phase 3: reopen the database — sqlite3_cloudsync_init will load
+    // stale settings and try to re-create triggers for the dropped table.
+    // Without the fix this would crash (SIGSEGV) or return an error.
+    rc = sqlite3_open(dbpath, &db);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // If we reach here without crashing, the fix works
+    result = true;
+
+cleanup:
+    if (db) {
+        sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+        sqlite3_close(db);
+    }
+    if (cleanup_databases) {
+        file_delete_internal(dbpath);
+        // also clean up WAL and SHM files
+        char walpath[280];
+        snprintf(walpath, sizeof(walpath), "%s-wal", dbpath);
+        file_delete_internal(walpath);
+        snprintf(walpath, sizeof(walpath), "%s-shm", dbpath);
+        file_delete_internal(walpath);
+    }
+    return result;
+}
+
+// Authorizer state for do_test_context_cb_error_cleanup.
+// Denies INSERT on a specific table after allowing a set number of INSERTs.
+static const char *g_deny_insert_table = NULL;
+static int g_deny_insert_remaining = 0;
+
+static int deny_insert_authorizer(void *pUserData, int action, const char *zArg1,
+                                   const char *zArg2, const char *zDbName, const char *zTrigger) {
+    (void)pUserData; (void)zArg2; (void)zDbName; (void)zTrigger;
+    if (action == SQLITE_INSERT && g_deny_insert_table &&
+        zArg1 && strcmp(zArg1, g_deny_insert_table) == 0) {
+        if (g_deny_insert_remaining > 0) {
+            g_deny_insert_remaining--;
+            return SQLITE_OK;
+        }
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+// Test that the error cleanup path in table_add_to_context_cb doesn't crash
+// when databasevm_prepare fails for the merge statement.
+// Before the zeroalloc fix, col_value_stmt[index] contained uninitialized
+// garbage and databasevm_finalize was called on it → SIGSEGV.
+bool do_test_context_cb_error_cleanup(void) {
+    sqlite3 *db = NULL;
+    cloudsync_context *ctx = NULL;
+    bool result = false;
+
+    int rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+    sqlite3_cloudsync_init(db, NULL, NULL);
+
+    // Create table with PK and non-PK columns
+    rc = sqlite3_exec(db,
+        "CREATE TABLE ctx_err (id TEXT PRIMARY KEY NOT NULL, val TEXT, num INTEGER);",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Init cloudsync on the table (creates meta table, triggers, settings)
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('ctx_err');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Create a fresh context — ctx_err is not in its table list,
+    // so table_add_to_context won't short-circuit at table_lookup.
+    ctx = cloudsync_context_create(db);
+    if (!ctx) goto cleanup;
+
+    // Install authorizer that denies INSERT on the base table.
+    // Allow 1 INSERT (the sentinel prepared in table_add_stmts),
+    // then deny the next (the merge UPSERT prepared in the callback).
+    // This causes databasevm_prepare to fail inside table_add_to_context_cb,
+    // triggering the error cleanup path.
+    g_deny_insert_table = "ctx_err";
+    g_deny_insert_remaining = 1;
+    sqlite3_set_authorizer(db, deny_insert_authorizer, NULL);
+
+    // Must return false (callback error) without crashing
+    bool added = table_add_to_context(ctx, table_algo_crdt_cls, "ctx_err");
+
+    // Remove authorizer before any further operations
+    sqlite3_set_authorizer(db, NULL, NULL);
+    g_deny_insert_table = NULL;
+
+    if (added) goto cleanup;  // should have failed
+
+    result = true;
+
+cleanup:
+    sqlite3_set_authorizer(db, NULL, NULL);
+    g_deny_insert_table = NULL;
+    if (ctx) cloudsync_context_free(ctx);
+    if (db) {
+        sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+        sqlite3_close(db);
+    }
+    return result;
+}
+
 // Test cloudsync_terminate function
 bool do_test_terminate(void) {
     sqlite3 *db = NULL;
@@ -11082,6 +11231,8 @@ int main (int argc, const char * argv[]) {
     result += test_report("Delete/Resurrect Order:", do_test_delete_resurrect_ordering(3, print_result, cleanup_databases));
     result += test_report("Large Composite PK Test:", do_test_large_composite_pk(2, print_result, cleanup_databases));
     result += test_report("Schema Hash Mismatch:", do_test_schema_hash_mismatch(2, print_result, cleanup_databases));
+    result += test_report("Stale Table Settings:", do_test_stale_table_settings(cleanup_databases));
+    result += test_report("CB Error Cleanup:", do_test_context_cb_error_cleanup());
 
 finalize:
     if (rc != SQLITE_OK) printf("%s (%d)\n", (db) ? sqlite3_errmsg(db) : "N/A", rc);

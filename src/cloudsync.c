@@ -720,37 +720,35 @@ void table_free (cloudsync_table_context *table) {
     DEBUG_DBFUNCTION("table_free %s", (table) ? (table->name) : "NULL");
     if (!table) return;
     
-    if (table->ncols > 0) {
-        if (table->col_name) {
-            for (int i=0; i<table->ncols; ++i) {
-                cloudsync_memory_free(table->col_name[i]);
-            }
-            cloudsync_memory_free(table->col_name);
+    if (table->col_name) {
+        for (int i=0; i<table->ncols; ++i) {
+            cloudsync_memory_free(table->col_name[i]);
         }
-        if (table->col_merge_stmt) {
-            for (int i=0; i<table->ncols; ++i) {
-                databasevm_finalize(table->col_merge_stmt[i]);
-            }
-            cloudsync_memory_free(table->col_merge_stmt);
+        cloudsync_memory_free(table->col_name);
+    }
+    if (table->col_merge_stmt) {
+        for (int i=0; i<table->ncols; ++i) {
+            databasevm_finalize(table->col_merge_stmt[i]);
         }
-        if (table->col_value_stmt) {
-            for (int i=0; i<table->ncols; ++i) {
-                databasevm_finalize(table->col_value_stmt[i]);
-            }
-            cloudsync_memory_free(table->col_value_stmt);
+        cloudsync_memory_free(table->col_merge_stmt);
+    }
+    if (table->col_value_stmt) {
+        for (int i=0; i<table->ncols; ++i) {
+            databasevm_finalize(table->col_value_stmt[i]);
         }
-        if (table->col_id) {
-            cloudsync_memory_free(table->col_id);
+        cloudsync_memory_free(table->col_value_stmt);
+    }
+    if (table->col_id) {
+        cloudsync_memory_free(table->col_id);
+    }
+    if (table->col_algo) {
+        cloudsync_memory_free(table->col_algo);
+    }
+    if (table->col_delimiter) {
+        for (int i=0; i<table->ncols; ++i) {
+            if (table->col_delimiter[i]) cloudsync_memory_free(table->col_delimiter[i]);
         }
-        if (table->col_algo) {
-            cloudsync_memory_free(table->col_algo);
-        }
-        if (table->col_delimiter) {
-            for (int i=0; i<table->ncols; ++i) {
-                if (table->col_delimiter[i]) cloudsync_memory_free(table->col_delimiter[i]);
-            }
-            cloudsync_memory_free(table->col_delimiter);
-        }
+        cloudsync_memory_free(table->col_delimiter);
     }
 
     if (table->block_value_read_stmt) databasevm_finalize(table->block_value_read_stmt);
