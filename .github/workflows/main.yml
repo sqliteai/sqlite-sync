@@ -168,7 +168,7 @@ jobs:
           codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/CloudSync.xcframework # Then sign the xcframework wrapper
           ditto -c -k --keepParent dist/CloudSync.xcframework dist/CloudSync.xcframework.zip
           xcrun notarytool submit dist/CloudSync.xcframework.zip --apple-id "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
-          rm dist/CloudSync.xcframework.zip
+          rm -rf dist/CloudSync.xcframework
 
       - name: cleanup keychain for codesign
         if: matrix.os == 'macos-15'
@@ -380,7 +380,11 @@ jobs:
                 if [[ "$name" != "cloudsync-apple-xcframework" && "$name" != "cloudsync-android-aar" ]]; then
                   tar -czf "${name}-${VERSION}.tar.gz" -C "$folder" .
                 fi
-                if [[ "$name" != "cloudsync-android-aar" ]]; then
+                if [[ "$name" == "cloudsync-apple-xcframework" ]]; then
+                  # Use the ditto-created zip that preserves macOS symlinks and extract for other steps
+                  cp "$folder/CloudSync.xcframework.zip" "${name}-${VERSION}.zip"
+                  unzip -q "$folder/CloudSync.xcframework.zip" -d "$folder/"
+                elif [[ "$name" != "cloudsync-android-aar" ]]; then
                   (cd "$folder" && zip -rq "../../${name}-${VERSION}.zip" .)
                 else
                   cp "$folder"/*.aar "${name}-${VERSION}.aar"
@@ -530,6 +534,23 @@ jobs:
           cd expo-package
           npm publish --provenance --access public --tag latest
           echo "✓ Published @sqliteai/sqlite-sync-expo@${{ steps.tag.outputs.version }}"
+
+      - name: update Package.swift checksum and version
+        if: steps.tag.outputs.version != ''
+        run: |
+          VERSION=${{ steps.tag.outputs.version }}
+          ZIP="cloudsync-apple-xcframework-${VERSION}.zip"
+          if [ -f "$ZIP" ]; then
+            CHECKSUM=$(swift package compute-checksum "$ZIP")
+            URL="https://github.com/sqliteai/sqlite-sync/releases/download/${VERSION}/${ZIP}"
+            sed -i "s|url: \".*cloudsync-apple-xcframework.*\"|url: \"${URL}\"|" Package.swift
+            sed -i "s|checksum: \".*\"|checksum: \"${CHECKSUM}\"|" Package.swift
+            git config --global user.email "$GITHUB_ACTOR@users.noreply.github.com"
+            git config --global user.name "$GITHUB_ACTOR"
+            git add Package.swift
+            git commit -m "Update Package.swift checksum for ${VERSION} [skip ci]" || true
+            git push origin main || true
+          fi
 
       - uses: softprops/action-gh-release@v2.2.1
         if: steps.tag.outputs.version != ''

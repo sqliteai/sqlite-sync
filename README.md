@@ -58,7 +58,7 @@ Download a pre-built binary from the [Releases](https://github.com/sqliteai/sqli
 | Platform | Install |
 |----------|---------|
 | **SQLite CLI / C** | `.load ./cloudsync` or `SELECT load_extension('./cloudsync');` |
-| **Swift** | [Add this repo as a Swift Package dependency](https://developer.apple.com/documentation/xcode/adding-package-dependencies-to-your-app) |
+| **Swift** | [Add this repo as a Swift Package dependency](https://developer.apple.com/documentation/xcode/adding-package-dependencies-to-your-app), follow [steps 4 and 5](https://github.com/sqliteai/sqlite-extensions-guide/blob/main/platforms/ios.md#4-set-up-sqlite-with-extension-loading), and load extension with `CloudSync.path`  |
 | **Android** | `implementation 'ai.sqlite:sync:1.0.0'` ([Maven Central](https://central.sonatype.com/artifact/ai.sqlite/sync)) |
 | **Flutter** | `flutter pub add sqlite_sync` ([pub.dev](https://pub.dev/packages/sqlite_sync)) |
 | **Expo** | `npm install @sqliteai/sqlite-sync-expo` |
