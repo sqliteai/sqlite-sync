@@ -106,8 +106,6 @@ On the **Client Integration** tab you'll find your **Database ID** and authentic
 
 The fastest way to test CloudSync without per-user access control — no JWT setup needed.
 
-Under **Authentication (Username & Password)**, use your PostgreSQL credentials:
-
 ```sql
 SELECT cloudsync_network_init('<database-id>');
 SELECT cloudsync_network_set_apikey('<username>:<password>');
