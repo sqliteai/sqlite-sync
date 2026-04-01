@@ -363,6 +363,11 @@ int dbutils_settings_table_load_callback (void *xdata, int ncols, char **values,
 
         // Table-level algo setting (col_name == "*")
         if (strcmp(key, "algo") == 0 && col_name && strcmp(col_name, "*") == 0) {
+            // Skip stale settings for tables that no longer exist
+            if (!database_table_exists(data, table_name, cloudsync_schema(data))) {
+                DEBUG_SETTINGS("skipping stale settings for dropped table: %s", table_name);
+                continue;
+            }
             table_algo algo = cloudsync_algo_from_name(value);
             char fbuf[2048];
             int frc = dbutils_table_settings_get_value(data, table_name, "*", "filter", fbuf, sizeof(fbuf));
