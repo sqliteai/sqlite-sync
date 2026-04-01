@@ -2,26 +2,51 @@
 
 This guide helps you enable CloudSync on a **fresh or existing** self-hosted Supabase instance. CloudSync adds offline-first synchronization capabilities to your PostgreSQL database.
 
-## Step 1: Use the Custom PostgreSQL Image with CloudSync
+## Step 1: Use the CloudSync Supabase Image
 
-When deploying or updating your Supabase instance, use our custom PostgreSQL image that includes the CloudSync extension instead of the standard Supabase Postgres image.
+When deploying or updating your Supabase instance, use the published CloudSync Supabase image instead of the standard Supabase Postgres image.
 
 ### For New Deployments
 
-Follow [Supabase's Installing Supabase](https://supabase.com/docs/guides/self-hosting/docker#installing-supabase) guide to set up the initial files and `.env` configuration. Then, instead of using the default Supabase Postgres image, update your `docker-compose.yml`:
+Follow [Supabase's Installing Supabase](https://supabase.com/docs/guides/self-hosting/docker#installing-supabase) guide to set up the initial files and `.env` configuration. Then, before the first `docker compose up -d`, update your `docker-compose.yml` to use the CloudSync-enabled Postgres image:
 
 ```yaml
 db:
-  # PostgreSQL 15
-  image: <cloudsync-image-15>
+  # Supabase on PostgreSQL 15
+  image: sqlitecloud/sqlite-sync-supabase:15.8.1.085
   # instead of: public.ecr.aws/supabase/postgres:15.8.1.085
 
-  # OR PostgreSQL 17
-  image: <cloudsync-image-17>
+  # OR Supabase on PostgreSQL 17
+  image: sqlitecloud/sqlite-sync-supabase:17.6.1.071
   # instead of: public.ecr.aws/supabase/postgres:17.6.1.071
 ```
 
-Then run:
+Use the tag that matches your Supabase Postgres base image exactly. Convenience tags `sqlitecloud/sqlite-sync-supabase:15` and `sqlitecloud/sqlite-sync-supabase:17` are also published, but the exact Supabase tag is the safest choice.
+
+### Add the CloudSync Init Script
+
+Create the init SQL:
+
+```bash
+mkdir -p volumes/db
+cat > volumes/db/cloudsync.sql << 'EOF'
+CREATE EXTENSION IF NOT EXISTS cloudsync;
+EOF
+```
+
+Add a volume mount to the `db` service in `docker-compose.yml`:
+
+```yaml
+services:
+  db:
+    volumes:
+      # ... existing volume mounts ...
+      - ./volumes/db/cloudsync.sql:/docker-entrypoint-initdb.d/init-scripts/100-cloudsync.sql:Z
+```
+
+The `100-` prefix ensures CloudSync loads after Supabase's own init scripts, which are typically numbered `98-99` in the self-hosted Docker Compose setup.
+
+Then start Supabase:
 
 ```bash
 docker compose pull
@@ -30,12 +55,20 @@ docker compose up -d
 
 ### For Existing Deployments
 
-Follow [Supabase's Updating](https://supabase.com/docs/guides/self-hosting/docker#updating) guide. When updating the Postgres image, replace the default image with the CloudSync-enabled image (will be provided):
+Follow [Supabase's Updating](https://supabase.com/docs/guides/self-hosting/docker#updating) guide. When updating the Postgres image, replace the default image with the matching CloudSync image:
 
 ```bash
-# Update docker-compose.yml with the new CloudSync image
+# Update docker-compose.yml to use:
+# sqlitecloud/sqlite-sync-supabase:15.8.1.085
+# or sqlitecloud/sqlite-sync-supabase:17.6.1.071
 docker compose pull
 docker compose down && docker compose up -d
+```
+
+If Postgres has already been initialized and you are adding CloudSync afterward, the init script will not run automatically. Connect to the database and run:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS cloudsync;
 ```
 
 ---
@@ -108,4 +141,3 @@ If you need role-based access control (RLS) or production security:
 4. Click **Deploy Changes**
 
 CloudSync is now active on your selected tables.
-

@@ -4,16 +4,22 @@ This guide helps you enable CloudSync on a **self-hosted PostgreSQL database**. 
 
 ## Step 1: Deploy PostgreSQL with CloudSync
 
-Use the pre-built PostgreSQL Docker image that includes the CloudSync extension. This image is available for:
-- PostgreSQL 15
-- PostgreSQL 17
+You can enable CloudSync in one of two ways:
+- Use the published Docker image if you run PostgreSQL in Docker
+- Install the released extension files into an existing native PostgreSQL installation
+
+### Option A: Docker
+
+Use the published PostgreSQL image that already includes the CloudSync extension:
+- `sqlitecloud/sqlite-sync-postgres:15`
+- `sqlitecloud/sqlite-sync-postgres:17`
 
 Example using Docker Compose:
 
 ```yaml
 services:
   db:
-    image: <cloudsync-postgres-image>
+    image: sqlitecloud/sqlite-sync-postgres:17
     container_name: cloudsync-postgres
     environment:
       POSTGRES_USER: postgres
@@ -37,6 +43,23 @@ CREATE EXTENSION IF NOT EXISTS cloudsync;
 Run:
 ```bash
 docker compose up -d
+```
+
+### Option B: Existing PostgreSQL Without Docker
+
+If you already run PostgreSQL directly on a VM or bare metal, download the release tarball that matches your operating system, CPU architecture, and PostgreSQL major version.
+
+Extract the archive, then copy the three extension files into PostgreSQL's extension directories:
+
+```bash
+cp cloudsync.so "$(pg_config --pkglibdir)/"
+cp cloudsync.control cloudsync--1.0.sql "$(pg_config --sharedir)/extension/"
+```
+
+Then connect to PostgreSQL and enable the extension:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS cloudsync;
 ```
 
 ---
