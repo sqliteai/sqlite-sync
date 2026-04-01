@@ -85,70 +85,45 @@ If the extension is installed correctly, PostgreSQL returns the CloudSync versio
 
 ## Step 3: Register Your Database in the CloudSync Dashboard
 
-### 2.1 Create a Workspace
+In the [CloudSync dashboard](https://dashboard.sqlitecloud.io/), create a new workspace with the **Supabase (Self-hosted)** provider, then add a project with your PostgreSQL connection string:
 
-1. Log in to the CloudSync dashboard
-2. Click **New Workspace**
-3. Choose provider: **Supabase (Self-hosted)**
-4. Enter a workspace name
-5. Click **Create**
-
-### 2.2 Create a CloudSync Project
-
-1. In the workspace, click **New CloudSync Project**
-2. **Project name:** Give it a descriptive name (e.g., `my-app-sync`)
-3. **Connection string:** Enter your PostgreSQL connection:
-   ```
-   postgresql://user:password@host:5432/database
-   ```
-4. Click **Create**
+```
+postgresql://user:password@host:5432/database
+```
 
 ---
 
-## Step 4: Set Up Authentication
+## Step 4: Enable CloudSync on Tables
+
+In the dashboard, go to the **Database Setup** tab, select the tables you want to sync, and click **Deploy Changes**.
+
+---
+
+## Step 5: Set Up Authentication
+
+On the **Client Integration** tab you'll find your **Database ID** and authentication settings.
 
 ### Quick Test with API Key (Recommended for Testing)
 
 The fastest way to test CloudSync without per-user access control — no JWT setup needed.
 
-1. Get PostgreSQL credentials for a user with sufficient permissions on the tables CloudSync will sync
-2. In your client code (SQLite), authenticate with:
-   ```sql
-   SELECT cloudsync_network_init('<database-id>');
-   SELECT cloudsync_network_set_apikey('<username>:<password>');
-   SELECT cloudsync_network_sync();
-   ```
+Under **Authentication (Username & Password)**, use your PostgreSQL credentials:
 
-The API key is simply your PostgreSQL credentials in `username:password` format. No JWT configuration needed.
+```sql
+SELECT cloudsync_network_init('<database-id>');
+SELECT cloudsync_network_set_apikey('<username>:<password>');
+SELECT cloudsync_network_sync();
+```
 
 ### Using JWT Tokens (For RLS and Production)
 
-If you need role-based access control (RLS) or production security:
-
-1. **Choose your JWT authentication method:**
-   - **Default (HS256 - Shared Secret):** Supabase auto-generates `JWT_SECRET` in `.env`
-   - **GoTrue/JWKS (RS256 - Asymmetric):** Use Supabase's GoTrue service with JWKS endpoint
-2. **Configure JWT in the CloudSync dashboard:**
-   - Go to **Configuration** tab → **Edit connection settings**
-   - **For HS256:** Enter your **JWT secret** (from `.env`)
-   - **For RS256/JWKS:** Enter the same issuer base URL used in the token's `iss` claim, for example `https://your-auth-domain`
-   - Do not include `/.well-known/jwks.json` in this field. CloudSync uses the issuer URL and fetches the JWKS document automatically.
-   - Click **Save**
-3. **Generate JWT tokens:**
-   - Use [Supabase's built-in authentication](https://supabase.com/docs/guides/auth/jwts) to generate tokens
-4. **In your client code:**
+1. Set **Row Level Security** to **Yes, enforce RLS**
+2. Under **Authentication (JWT)**, click **Configure authentication** and choose:
+   - **HMAC Secret (HS256):** Enter your `JWT_SECRET` from Supabase's `.env`
+   - **JWKS Issuer Validation:** Enter the issuer base URL from your token's `iss` claim. CloudSync fetches the JWKS document automatically
+3. In your client code:
    ```sql
    SELECT cloudsync_network_init('<database-id>');
    SELECT cloudsync_network_set_token('<jwt-token>');
    SELECT cloudsync_network_sync();
    ```
-
----
-
-## Step 5: Enable CloudSync on Tables
-
-1. In the CloudSync dashboard, go to the **Tables** tab
-2. **Select tables** you want to sync (checkbox each table)
-3. Click **Deploy Changes**
-
-CloudSync is now active on your selected tables.
