@@ -110,7 +110,7 @@ If the extension is installed correctly, PostgreSQL returns the CloudSync versio
 
 The fastest way to test CloudSync without per-user access control — no JWT setup needed.
 
-1. Get your PostgreSQL database credentials (username and password)
+1. Get PostgreSQL credentials for a user with sufficient permissions on the tables CloudSync will sync
 2. In your client code (SQLite), authenticate with:
    ```sql
    SELECT cloudsync_network_init('<database-id>');
@@ -131,7 +131,8 @@ If you need role-based access control (RLS) or production security:
    - Go to your project's **Configuration** tab
    - Click **Edit connection settings**
    - **For HS256 (shared secret):** Enter your JWT secret
-   - **For RS256 (asymmetric):** Enter your JWT allowed issuers URL
+   - **For RS256 (asymmetric):** Enter the same issuer base URL used in the token's `iss` claim, for example `https://your-auth-domain`
+   - Do not include `/.well-known/jwks.json` in this field. CloudSync uses the issuer URL and fetches the JWKS document automatically.
    - Click **Save**
 3. **Get JWT tokens** — choose one:
    - **Testing only:** [jwt.io](https://jwt.io/) — paste your JWT secret, generate a test token

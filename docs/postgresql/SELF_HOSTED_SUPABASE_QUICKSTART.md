@@ -101,7 +101,7 @@ If the extension is installed correctly, PostgreSQL returns the CloudSync versio
    ```
    postgresql://user:password@host:5432/database
    ```
-5. Click **Create**
+4. Click **Create**
 
 ---
 
@@ -111,7 +111,7 @@ If the extension is installed correctly, PostgreSQL returns the CloudSync versio
 
 The fastest way to test CloudSync without per-user access control — no JWT setup needed.
 
-1. Get your PostgreSQL database credentials (username and password)
+1. Get PostgreSQL credentials for a user with sufficient permissions on the tables CloudSync will sync
 2. In your client code (SQLite), authenticate with:
    ```sql
    SELECT cloudsync_network_init('<database-id>');
@@ -131,7 +131,8 @@ If you need role-based access control (RLS) or production security:
 2. **Configure JWT in the CloudSync dashboard:**
    - Go to **Configuration** tab → **Edit connection settings**
    - **For HS256:** Enter your **JWT secret** (from `.env`)
-   - **For RS256/JWKS:** Enter your **JWT allowed issuers** URL
+   - **For RS256/JWKS:** Enter the same issuer base URL used in the token's `iss` claim, for example `https://your-auth-domain`
+   - Do not include `/.well-known/jwks.json` in this field. CloudSync uses the issuer URL and fetches the JWKS document automatically.
    - Click **Save**
 3. **Generate JWT tokens:**
    - Use [Supabase's built-in authentication](https://supabase.com/docs/guides/auth/jwts) to generate tokens
@@ -148,6 +149,6 @@ If you need role-based access control (RLS) or production security:
 
 1. In the CloudSync dashboard, go to the **Tables** tab
 2. **Select tables** you want to sync (checkbox each table)
-4. Click **Deploy Changes**
+3. Click **Deploy Changes**
 
 CloudSync is now active on your selected tables.
