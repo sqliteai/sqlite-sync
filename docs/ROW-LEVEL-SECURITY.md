@@ -44,6 +44,6 @@ CREATE TABLE users (
 );
 ```
 
-For more schema guidelines, see [Database Schema Recommendations](./SCHEMA.md).
+For more schema guidelines, see [Database Schema Recommendations](./schema.md).
 
 For full RLS documentation, see the [SQLite Cloud RLS documentation](https://docs.sqlitecloud.io/docs/rls).

@@ -67,7 +67,7 @@ Additional CRDTs can be implemented if needed, though LWW covers most real-world
 
 ### Observability
 
-* Metrics dashboard available in [grafana-dashboard.json](grafana-dashboard.json)
+* Metrics dashboard available in [grafana-dashboard.json](../internal/grafana-dashboard.json)
 
 
 # Postgres Sync
@@ -97,6 +97,6 @@ The PostgreSQL integration is actively evolving. Current limitations include:
 * **Beta Status**: While extensively tested, the PostgreSQL sync stack should currently be considered **beta software**. Please report any issues; we are committed to resolving them quickly.
 
 # Next
-* [CLIENT](CLIENT.md) installation and setup
-* [SUPABASE](SUPABASE.md) configuration and setup
-* [SPORT-TRACKER APP](SPORT_APP_README_SUPABASE.md) demo web app based on SQLite Sync WASM
+* [CLIENT](client.md) installation and setup
+* [SUPABASE](integrations/supabase.md) configuration and setup
+* [SPORT-TRACKER APP](examples/sport-app-supabase.md) demo web app based on SQLite Sync WASM

@@ -53,7 +53,7 @@ Built on **CRDT** (Conflict-free Replicated Data Types), it guarantees:
 
 ### 1. Install
 
-Download a pre-built binary from the [Releases](https://github.com/sqliteai/sqlite-sync/releases) page, or install a platform package (see [full installation guide](./docs/INSTALLATION.md) for platform-specific code examples):
+Download a pre-built binary from the [Releases](https://github.com/sqliteai/sqlite-sync/releases) page, or install a platform package (see [full installation guide](./docs/installation.md) for platform-specific code examples):
 
 | Platform | Install |
 |----------|---------|
@@ -165,7 +165,7 @@ SELECT cloudsync_init('notes');
 SELECT cloudsync_set_column('notes', 'body', 'algo', 'block');
 ```
 
-Now two agents (or devices) can edit different lines of the same note, and both edits are preserved after sync. See the full guide: **[Block-Level LWW Documentation](./docs/BLOCK-LWW.md)**.
+Now two agents (or devices) can edit different lines of the same note, and both edits are preserved after sync. See the full guide: **[Block-Level LWW Documentation](./docs/block-lww.md)**.
 
 ## Row-Level Security
 
@@ -174,16 +174,16 @@ With SQLite Cloud's RLS, a single shared cloud database serves all users while e
 - One database, multiple tenants, no per-user database provisioning.
 - Each client syncs only authorized rows, minimal bandwidth and storage.
 
-See the full guide: **[Row-Level Security Documentation](./docs/ROW-LEVEL-SECURITY.md)**.
+See the full guide: **[Row-Level Security Documentation](./docs/row-level-security.md)**.
 
 ## Documentation
 
 - **[API Reference](./API.md)**: all functions, parameters, and examples
-- **[Installation Guide](./docs/INSTALLATION.md)**: platform-specific setup (Swift, Android, Expo, React Native, Flutter, WASM)
-- **[Block-Level LWW Guide](./docs/BLOCK-LWW.md)**: line-level text merge for markdown and documents
-- **[Row-Level Security Guide](./docs/ROW-LEVEL-SECURITY.md)**: multi-tenant access control with server-enforced policies
-- **[Database Schema Recommendations](./docs/SCHEMA.md)**: primary keys, constraints, foreign keys, triggers
-- **[Custom Network Layer](./docs/Network.md)**: replace the built-in libcurl networking
+- **[Installation Guide](./docs/installation.md)**: platform-specific setup (Swift, Android, Expo, React Native, Flutter, WASM)
+- **[Block-Level LWW Guide](./docs/block-lww.md)**: line-level text merge for markdown and documents
+- **[Row-Level Security Guide](./docs/row-level-security.md)**: multi-tenant access control with server-enforced policies
+- **[Database Schema Recommendations](./docs/schema.md)**: primary keys, constraints, foreign keys, triggers
+- **[Custom Network Layer](./docs/internal/network.md)**: replace the built-in libcurl networking
 - **[Examples](./examples/)**: complete walkthroughs (todo app, sport tracker, Swift multiplatform)
 
 ## SQLite Cloud Setup

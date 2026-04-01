@@ -57,7 +57,7 @@ When designing your database schema for SQLite Sync, follow these essential requ
 - **Foreign Key Compatibility**: Be aware of potential conflicts during CRDT merge operations and RLS policy interactions.
 - **Trigger Compatibility**: Triggers may cause duplicate operations or be called multiple times due to column-by-column processing.
 
-For comprehensive guidelines, see the [Database Schema Recommendations](docs/SCHEMA.md).
+For comprehensive guidelines, see the [Database Schema Recommendations](docs/schema.md).
 
 The function supports three overloads:
 - `cloudsync_init(table_name)`: Uses the default 'cls' CRDT algorithm.
