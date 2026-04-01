@@ -125,6 +125,39 @@ current_setting('request.jwt.claims')
 
 ---
 
+## Optional: Helper Functions for JWT Claims
+
+CloudSync validates JWTs and passes all claims to PostgreSQL via `request.jwt.claims` — no PostgreSQL extension is required for JWT verification. The validation happens entirely in the CloudSync microservice.
+
+However, writing `(current_setting('request.jwt.claims')::jsonb->>'sub')::uuid` in every RLS policy is verbose. Following the pattern used by Supabase and Neon, you can optionally create a small set of helper functions in a dedicated schema:
+
+```sql
+-- Create a schema for auth helpers (optional, but keeps things clean)
+CREATE SCHEMA IF NOT EXISTS auth;
+
+-- Returns all JWT claims as JSONB
+CREATE OR REPLACE FUNCTION auth.session()
+  RETURNS jsonb AS $$
+    SELECT current_setting('request.jwt.claims', true)::jsonb;
+$$ LANGUAGE SQL STABLE;
+
+-- Returns the user ID (sub claim)
+CREATE OR REPLACE FUNCTION auth.user_id()
+  RETURNS text AS $$
+    SELECT auth.session()->>'sub';
+$$ LANGUAGE SQL STABLE;
+
+-- Returns the user's role claim
+CREATE OR REPLACE FUNCTION auth.role()
+  RETURNS text AS $$
+    SELECT auth.session()->>'role';
+$$ LANGUAGE SQL STABLE;
+```
+
+> **Note:** These are just convenience wrappers — they read from the same `request.jwt.claims` session variable that CloudSync sets.
+
+---
+
 ## Security Rules
 
 ### Rule 1: Use Immutable Claims for RLS
