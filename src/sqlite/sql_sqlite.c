@@ -56,7 +56,7 @@ const char * const SQL_INSERT_SITE_ID_ROWID =
     "INSERT INTO cloudsync_site_id (rowid, site_id) VALUES (?, ?);";
 
 const char * const SQL_CREATE_TABLE_SETTINGS_TABLE =
-    "CREATE TABLE IF NOT EXISTS cloudsync_table_settings (tbl_name TEXT NOT NULL COLLATE NOCASE, col_name TEXT NOT NULL COLLATE NOCASE, key TEXT, value TEXT, PRIMARY KEY(tbl_name,key));";
+    "CREATE TABLE IF NOT EXISTS cloudsync_table_settings (tbl_name TEXT NOT NULL COLLATE NOCASE, col_name TEXT NOT NULL COLLATE NOCASE, key TEXT, value TEXT, PRIMARY KEY(tbl_name,col_name,key));";
 
 const char * const SQL_CREATE_SCHEMA_VERSIONS_TABLE =
     "CREATE TABLE IF NOT EXISTS cloudsync_schema_versions (hash INTEGER PRIMARY KEY, seq INTEGER NOT NULL)";
