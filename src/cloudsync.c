@@ -1079,16 +1079,16 @@ bool table_add_to_context (cloudsync_context *data, table_algo algo, const char 
     
     // a table with only pk(s) is totally legal
     if (ncols > 0) {
-        table->col_name = (char **)cloudsync_memory_alloc((uint64_t)(sizeof(char *) * ncols));
+        table->col_name = (char **)cloudsync_memory_zeroalloc((uint64_t)(sizeof(char *) * ncols));
         if (!table->col_name) goto abort_add_table;
-        
-        table->col_id = (int *)cloudsync_memory_alloc((uint64_t)(sizeof(int) * ncols));
+
+        table->col_id = (int *)cloudsync_memory_zeroalloc((uint64_t)(sizeof(int) * ncols));
         if (!table->col_id) goto abort_add_table;
-        
-        table->col_merge_stmt = (dbvm_t **)cloudsync_memory_alloc((uint64_t)(sizeof(void *) * ncols));
+
+        table->col_merge_stmt = (dbvm_t **)cloudsync_memory_zeroalloc((uint64_t)(sizeof(void *) * ncols));
         if (!table->col_merge_stmt) goto abort_add_table;
-        
-        table->col_value_stmt = (dbvm_t **)cloudsync_memory_alloc((uint64_t)(sizeof(void *) * ncols));
+
+        table->col_value_stmt = (dbvm_t **)cloudsync_memory_zeroalloc((uint64_t)(sizeof(void *) * ncols));
         if (!table->col_value_stmt) goto abort_add_table;
 
         table->col_algo = (col_algo_t *)cloudsync_memory_zeroalloc((uint64_t)(sizeof(col_algo_t) * ncols));
