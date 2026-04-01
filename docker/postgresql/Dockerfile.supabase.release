@@ -1,0 +1,72 @@
+# Supabase PostgreSQL with pre-compiled CloudSync (sqlite-sync) extension
+#
+# Usage:
+#   docker build \
+#     --build-arg SUPABASE_POSTGRES_TAG=15.8.1.085 \
+#     --build-arg CLOUDSYNC_VERSION=1.0.1 \
+#     -f docker/postgresql/Dockerfile.supabase.release \
+#     -t my-cloudsync-supabase-postgres .
+#
+# Or pull the pre-built image from Docker Hub:
+#   docker pull sqlitecloud/sqlite-sync-supabase:15
+#
+
+ARG SUPABASE_POSTGRES_TAG=17.6.1.071
+FROM public.ecr.aws/supabase/postgres:${SUPABASE_POSTGRES_TAG}
+
+ARG CLOUDSYNC_VERSION
+ARG TARGETARCH
+
+ENV CLOUDSYNC_PG_CONFIG=/root/.nix-profile/bin/pg_config
+
+# Download pre-compiled extension and install into Supabase's Nix layout
+RUN case "${TARGETARCH}" in \
+      amd64) ARCH="x86_64" ;; \
+      arm64) ARCH="arm64" ;; \
+      *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    # Derive PG major version from pg_config
+    PG_MAJOR=$(${CLOUDSYNC_PG_CONFIG} --version | sed 's/[^0-9]*//' | cut -d. -f1) && \
+    apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
+    ASSET="cloudsync-postgresql${PG_MAJOR}-linux-${ARCH}-${CLOUDSYNC_VERSION}.tar.gz" && \
+    URL="https://github.com/sqliteai/sqlite-sync/releases/download/${CLOUDSYNC_VERSION}/${ASSET}" && \
+    echo "Downloading ${URL}" && \
+    curl -fSL "${URL}" -o /tmp/cloudsync.tar.gz && \
+    mkdir -p /tmp/cloudsync && \
+    tar -xzf /tmp/cloudsync.tar.gz -C /tmp/cloudsync && \
+    # Resolve Supabase's Nix library path
+    PKGLIBDIR="$(${CLOUDSYNC_PG_CONFIG} --pkglibdir)" && \
+    NIX_PGLIBDIR="$(grep -E '^export NIX_PGLIBDIR' /usr/bin/postgres | sed -E "s/.*'([^']+)'.*/\1/" || true)" && \
+    if [ -n "$NIX_PGLIBDIR" ]; then PKGLIBDIR="$NIX_PGLIBDIR"; fi && \
+    SHAREDIR_PGCONFIG="$(${CLOUDSYNC_PG_CONFIG} --sharedir)" && \
+    SHAREDIR_STD="/usr/share/postgresql" && \
+    install -d "$PKGLIBDIR" "$SHAREDIR_PGCONFIG/extension" && \
+    install -m 755 /tmp/cloudsync/cloudsync.so "$PKGLIBDIR/" && \
+    install -m 644 /tmp/cloudsync/cloudsync--1.0.sql /tmp/cloudsync/cloudsync.control "$SHAREDIR_PGCONFIG/extension/" && \
+    if [ "$SHAREDIR_STD" != "$SHAREDIR_PGCONFIG" ]; then \
+        install -d "$SHAREDIR_STD/extension" && \
+        install -m 644 /tmp/cloudsync/cloudsync--1.0.sql /tmp/cloudsync/cloudsync.control "$SHAREDIR_STD/extension/"; \
+    fi && \
+    rm -rf /tmp/cloudsync /tmp/cloudsync.tar.gz && \
+    apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+# Verify installation
+RUN NIX_PGLIBDIR="$(grep -E '^export NIX_PGLIBDIR' /usr/bin/postgres | sed -E "s/.*'([^']+)'.*/\1/" || true)" && \
+    echo "Verifying CloudSync extension installation..." && \
+    if [ -n "$NIX_PGLIBDIR" ]; then \
+        ls -la "$NIX_PGLIBDIR/cloudsync.so"; \
+    else \
+        ls -la "$(${CLOUDSYNC_PG_CONFIG} --pkglibdir)/cloudsync.so"; \
+    fi && \
+    ls -la "$(${CLOUDSYNC_PG_CONFIG} --sharedir)/extension/cloudsync"* && \
+    if [ -d "/usr/share/postgresql/extension" ]; then \
+        ls -la /usr/share/postgresql/extension/cloudsync*; \
+    fi && \
+    echo "CloudSync extension installed successfully"
+
+EXPOSE 5432
+
+WORKDIR /
+
+LABEL org.sqliteai.cloudsync.description="Supabase PostgreSQL with CloudSync CRDT extension" \
+      org.opencontainers.image.source="https://github.com/sqliteai/sqlite-sync"

@@ -277,7 +277,7 @@ jobs:
 
   postgres-build:
     runs-on: ${{ matrix.os }}
-    name: postgresql-${{ matrix.name }}-${{ matrix.arch }} build
+    name: postgresql${{ matrix.postgres_version }}-${{ matrix.name }}-${{ matrix.arch }} build
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -286,15 +286,35 @@ jobs:
           - os: ubuntu-22.04
             arch: x86_64
             name: linux
+            postgres_version: '17'
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: linux
+            postgres_version: '15'
           - os: ubuntu-22.04-arm
             arch: arm64
             name: linux
+            postgres_version: '17'
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            name: linux
+            postgres_version: '15'
           - os: macos-15
             arch: arm64
             name: macos
+            postgres_version: '17'
+          - os: macos-15
+            arch: arm64
+            name: macos
+            postgres_version: '15'
           - os: macos-15
             arch: x86_64
             name: macos
+            postgres_version: '17'
+          - os: macos-15
+            arch: x86_64
+            name: macos
+            postgres_version: '15'
     steps:
 
       - uses: actions/checkout@v4.2.2
@@ -307,23 +327,23 @@ jobs:
           sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
           sudo apt-get update
-          sudo apt-get install -y postgresql-server-dev-17
+          sudo apt-get install -y postgresql-server-dev-${{ matrix.postgres_version }}
 
       - name: macos install postgresql
         if: matrix.name == 'macos'
-        run: brew install postgresql@17 gettext
+        run: brew install postgresql@${{ matrix.postgres_version }} gettext
 
       - name: build and package postgresql extension (linux)
         if: matrix.name == 'linux'
-        run: make postgres-package
+        run: make postgres-package PG_CONFIG=/usr/lib/postgresql/${{ matrix.postgres_version }}/bin/pg_config
 
       - name: build and package postgresql extension (macos)
         if: matrix.name == 'macos'
-        run: make postgres-package PG_CONFIG=$(brew --prefix postgresql@17)/bin/pg_config PG_EXTRA_CFLAGS="-I$(brew --prefix gettext)/include ${{ matrix.arch == 'x86_64' && '-arch x86_64' || '' }}"
+        run: make postgres-package PG_CONFIG=$(brew --prefix postgresql@${{ matrix.postgres_version }})/bin/pg_config PG_EXTRA_CFLAGS="-I$(brew --prefix gettext)/include ${{ matrix.arch == 'x86_64' && '-arch x86_64' || '' }}"
 
       - uses: actions/upload-artifact@v4.6.2
         with:
-          name: cloudsync-postgresql-${{ matrix.name }}-${{ matrix.arch }}
+          name: cloudsync-postgresql${{ matrix.postgres_version }}-${{ matrix.name }}-${{ matrix.arch }}
           path: dist/postgresql/
           if-no-files-found: error
 
@@ -525,6 +545,8 @@ jobs:
             [**Expo**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo): `npm install @sqliteai/sqlite-sync-expo`
             [**Android**](https://central.sonatype.com/artifact/ai.sqlite/sync): `ai.sqlite:sync:${{ steps.tag.outputs.version }}`
             [**Swift**](https://github.com/sqliteai/sqlite-sync#swift-package): [Installation Guide](https://github.com/sqliteai/sqlite-sync#swift-package)
+            [**Docker (PostgreSQL)**](https://hub.docker.com/r/sqlitecloud/sqlite-sync-postgres): `docker pull sqlitecloud/sqlite-sync-postgres:17` or `:15`
+            [**Docker (Supabase)**](https://hub.docker.com/r/sqlitecloud/sqlite-sync-supabase): `docker pull sqlitecloud/sqlite-sync-supabase:17` or `:15`
 
             ---
 
@@ -534,3 +556,89 @@ jobs:
             cloudsync-*-${{ steps.tag.outputs.version }}.*
             CloudSync-*-${{ steps.tag.outputs.version }}.*
           make_latest: true
+
+  docker-publish:
+    runs-on: ubuntu-22.04
+    name: docker ${{ matrix.image }} pg${{ matrix.pg_major }}
+    needs: [release]
+    if: github.ref == 'refs/heads/main'
+
+    env:
+      DOCKERHUB_ORG: sqlitecloud
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: sqlite-sync-postgres
+            pg_major: '17'
+            dockerfile: docker/postgresql/Dockerfile.release
+          - image: sqlite-sync-postgres
+            pg_major: '15'
+            dockerfile: docker/postgresql/Dockerfile.release
+          - image: sqlite-sync-supabase
+            pg_major: '17'
+            dockerfile: docker/postgresql/Dockerfile.supabase.release
+            supabase_tag: '17.6.1.071'
+          - image: sqlite-sync-supabase
+            pg_major: '15'
+            dockerfile: docker/postgresql/Dockerfile.supabase.release
+            supabase_tag: '15.8.1.085'
+
+    steps:
+
+      - uses: actions/checkout@v4.2.2
+        with:
+          submodules: true
+
+      - name: get cloudsync version
+        id: version
+        run: echo "version=$(make version)" >> $GITHUB_OUTPUT
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: set docker tags and build args (standalone)
+        if: matrix.image == 'sqlite-sync-postgres'
+        id: standalone
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          PG=${{ matrix.pg_major }}
+          IMAGE=${{ env.DOCKERHUB_ORG }}/${{ matrix.image }}
+          {
+            echo "tags=${IMAGE}:${PG},${IMAGE}:${PG}-${VERSION}"
+            echo "build_args<<EOF"
+            echo "POSTGRES_TAG=${PG}"
+            echo "CLOUDSYNC_VERSION=${VERSION}"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: set docker tags and build args (supabase)
+        if: matrix.image == 'sqlite-sync-supabase'
+        id: supabase
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          IMAGE=${{ env.DOCKERHUB_ORG }}/${{ matrix.image }}
+          SUPABASE_TAG=${{ matrix.supabase_tag }}
+          {
+            echo "tags=${IMAGE}:${{ matrix.pg_major }},${IMAGE}:${{ matrix.pg_major }}-${VERSION},${IMAGE}:${SUPABASE_TAG}"
+            echo "build_args<<EOF"
+            echo "SUPABASE_POSTGRES_TAG=${SUPABASE_TAG}"
+            echo "CLOUDSYNC_VERSION=${VERSION}"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ matrix.image == 'sqlite-sync-postgres' && steps.standalone.outputs.tags || steps.supabase.outputs.tags }}
+          build-args: ${{ matrix.image == 'sqlite-sync-postgres' && steps.standalone.outputs.build_args || steps.supabase.outputs.build_args }}

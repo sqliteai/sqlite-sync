@@ -1,0 +1,50 @@
+# PostgreSQL with pre-compiled CloudSync (sqlite-sync) extension
+#
+# Usage:
+#   docker build \
+#     --build-arg POSTGRES_TAG=17 \
+#     --build-arg CLOUDSYNC_VERSION=1.0.1 \
+#     -t sqlite-sync-postgres:17 \
+#     -f docker/postgresql/Dockerfile.release .
+#
+# Or pull the pre-built image from Docker Hub:
+#   docker pull sqlitecloud/sqlite-sync-postgres:17
+#
+
+ARG POSTGRES_TAG=17
+FROM postgres:${POSTGRES_TAG}
+
+ARG CLOUDSYNC_VERSION
+ARG TARGETARCH
+
+# Map Docker platform arch to artifact arch
+RUN case "${TARGETARCH}" in \
+      amd64) ARCH="x86_64" ;; \
+      arm64) ARCH="arm64" ;; \
+      *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
+    ASSET="cloudsync-postgresql${PG_MAJOR}-linux-${ARCH}-${CLOUDSYNC_VERSION}.tar.gz" && \
+    URL="https://github.com/sqliteai/sqlite-sync/releases/download/${CLOUDSYNC_VERSION}/${ASSET}" && \
+    echo "Downloading ${URL}" && \
+    curl -fSL "${URL}" -o /tmp/cloudsync.tar.gz && \
+    mkdir -p /tmp/cloudsync && \
+    tar -xzf /tmp/cloudsync.tar.gz -C /tmp/cloudsync && \
+    install -m 755 /tmp/cloudsync/cloudsync.so "$(pg_config --pkglibdir)/" && \
+    install -m 644 /tmp/cloudsync/cloudsync--1.0.sql "$(pg_config --sharedir)/extension/" && \
+    install -m 644 /tmp/cloudsync/cloudsync.control "$(pg_config --sharedir)/extension/" && \
+    rm -rf /tmp/cloudsync /tmp/cloudsync.tar.gz && \
+    apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+# Verify installation
+RUN ls -la "$(pg_config --pkglibdir)/cloudsync.so" && \
+    ls -la "$(pg_config --sharedir)/extension/cloudsync"* && \
+    echo "CloudSync extension installed successfully"
+
+# Copy initialization script (auto-creates the extension on first start)
+COPY docker/postgresql/init.sql /docker-entrypoint-initdb.d/
+
+EXPOSE 5432
+
+LABEL org.sqliteai.cloudsync.description="PostgreSQL with CloudSync CRDT extension" \
+      org.opencontainers.image.source="https://github.com/sqliteai/sqlite-sync"
