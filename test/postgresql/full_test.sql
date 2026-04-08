@@ -54,6 +54,9 @@
 \ir 44_large_composite_pk.sql
 \ir 45_pg_specific_types.sql
 \ir 46_schema_hash_mismatch.sql
+\ir 47_row_filter_advanced.sql
+\ir 48_row_filter_multi_table.sql
+\ir 49_row_filter_prefill.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

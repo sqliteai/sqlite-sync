@@ -7996,6 +7996,774 @@ finalize:
     return result;
 }
 
+// MARK: - Row Filter: Clear Filter -
+
+bool do_test_row_filter_clear(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[MAX_SIMULATED_CLIENTS] = {NULL};
+    bool result = false;
+    int rc = SQLITE_OK;
+
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    if (nclients >= MAX_SIMULATED_CLIENTS) nclients = MAX_SIMULATED_CLIENTS;
+    if (nclients < 2) nclients = 2;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+    for (int i = 0; i < nclients; ++i) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        rc = sqlite3_exec(db[i], "CREATE TABLE tasks(id TEXT PRIMARY KEY NOT NULL, title TEXT, user_id INTEGER);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('tasks');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_filter('tasks', 'user_id = 1');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // Insert matching and non-matching rows on db[0]
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('a', 'Task A', 1);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('b', 'Task B', 2);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('c', 'Task C', 1);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Test 1: Only matching rows tracked
+    {
+        int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
+        if (meta_count != 2) {
+            printf("do_test_row_filter_clear: expected 2 tracked PKs before clear, got %" PRId64 "\n", meta_count);
+            goto finalize;
+        }
+    }
+
+    // Test 2: Clear filter on db[0]
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_clear_filter('tasks');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Test 3: Insert non-matching row — should now be tracked (no filter)
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('d', 'Task D', 2);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    {
+        int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
+        if (meta_count != 3) {
+            printf("do_test_row_filter_clear: expected 3 tracked PKs after clear+insert, got %" PRId64 "\n", meta_count);
+            goto finalize;
+        }
+    }
+
+    // Test 4: Update previously-untracked row 'b' — should now be tracked
+    rc = sqlite3_exec(db[0], "UPDATE tasks SET title='Task B Updated' WHERE id='b';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    {
+        int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
+        if (meta_count != 4) {
+            printf("do_test_row_filter_clear: expected 4 tracked PKs after update on 'b', got %" PRId64 "\n", meta_count);
+            goto finalize;
+        }
+    }
+
+    // Test 5: Sync to db[1] (which still has filter active)
+    // Payload apply bypasses local triggers, so db[1] should receive all rows
+    if (do_merge_using_payload(db[0], db[1], true, true) == false) goto finalize;
+    {
+        int64_t task_count = test_query_int(db[1], "SELECT COUNT(*) FROM tasks;");
+        if (task_count != 4) {
+            printf("do_test_row_filter_clear: expected 4 rows in db[1] after merge, got %" PRId64 "\n", task_count);
+            goto finalize;
+        }
+    }
+
+    if (print_result) {
+        printf("\n-> tasks (db[0]) after clear:\n");
+        do_query(db[0], "SELECT * FROM tasks ORDER BY id;", NULL);
+        printf("\n-> tasks (db[1]) after merge:\n");
+        do_query(db[1], "SELECT * FROM tasks ORDER BY id;", NULL);
+    }
+
+    result = true;
+
+finalize:
+    for (int i = 0; i < nclients; ++i) {
+        if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK))
+            printf("do_test_row_filter_clear error: %s\n", sqlite3_errmsg(db[i]));
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
+// MARK: - Row Filter: Complex Expressions -
+
+bool do_test_row_filter_complex_expressions(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[MAX_SIMULATED_CLIENTS] = {NULL};
+    bool result = false;
+    int rc = SQLITE_OK;
+
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    if (nclients >= MAX_SIMULATED_CLIENTS) nclients = MAX_SIMULATED_CLIENTS;
+    if (nclients < 2) nclients = 2;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+    for (int i = 0; i < nclients; ++i) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        rc = sqlite3_exec(db[i], "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL, status TEXT, priority INTEGER, category TEXT, user_id INTEGER);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('items');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // --- Phase A: AND + comparison operators ---
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_set_filter('items', 'user_id = 1 AND priority > 3');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    rc = sqlite3_exec(db[0], "INSERT INTO items VALUES('a', 'active', 5, 'work', 1);", NULL, NULL, NULL);  // matches
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO items VALUES('b', 'active', 2, 'work', 1);", NULL, NULL, NULL);  // fails priority
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO items VALUES('c', 'active', 5, 'work', 2);", NULL, NULL, NULL);  // fails user_id
+    if (rc != SQLITE_OK) goto finalize;
+
+    {
+        int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM items_cloudsync;");
+        if (meta_count != 1) {
+            printf("do_test_row_filter_complex: Phase A expected 1 tracked PK, got %" PRId64 "\n", meta_count);
+            goto finalize;
+        }
+    }
+
+    // --- Phase B: String literal with escaped quotes ---
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_clear_filter('items');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_set_filter('items', 'status = ''active'' AND user_id = 1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    {
+        int64_t before = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM items_cloudsync;");
+        rc = sqlite3_exec(db[0], "INSERT INTO items VALUES('d', 'active', 1, 'home', 1);", NULL, NULL, NULL);  // matches
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[0], "INSERT INTO items VALUES('e', 'inactive', 1, 'home', 1);", NULL, NULL, NULL);  // fails status
+        if (rc != SQLITE_OK) goto finalize;
+        int64_t after = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM items_cloudsync;");
+        if (after - before != 1) {
+            printf("do_test_row_filter_complex: Phase B expected 1 new PK, got %" PRId64 "\n", after - before);
+            goto finalize;
+        }
+    }
+
+    // --- Phase C: IS NULL ---
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_clear_filter('items');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_set_filter('items', 'category IS NULL');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    {
+        int64_t before = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM items_cloudsync;");
+        rc = sqlite3_exec(db[0], "INSERT INTO items VALUES('f', 'x', 1, NULL, 1);", NULL, NULL, NULL);  // matches
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[0], "INSERT INTO items VALUES('g', 'x', 1, 'work', 1);", NULL, NULL, NULL);  // fails
+        if (rc != SQLITE_OK) goto finalize;
+        int64_t after = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM items_cloudsync;");
+        if (after - before != 1) {
+            printf("do_test_row_filter_complex: Phase C (IS NULL) expected 1 new PK, got %" PRId64 "\n", after - before);
+            goto finalize;
+        }
+    }
+
+    // --- Phase D: IN expression ---
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_clear_filter('items');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_set_filter('items', 'priority IN (1, 3, 5)');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    {
+        int64_t before = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM items_cloudsync;");
+        rc = sqlite3_exec(db[0], "INSERT INTO items VALUES('h', 'x', 3, 'y', 1);", NULL, NULL, NULL);  // matches
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[0], "INSERT INTO items VALUES('i', 'x', 4, 'y', 1);", NULL, NULL, NULL);  // fails
+        if (rc != SQLITE_OK) goto finalize;
+        int64_t after = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM items_cloudsync;");
+        if (after - before != 1) {
+            printf("do_test_row_filter_complex: Phase D (IN) expected 1 new PK, got %" PRId64 "\n", after - before);
+            goto finalize;
+        }
+    }
+
+    // --- Phase E: Sync roundtrip with AND filter ---
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_set_filter('items', 'user_id = 1 AND priority > 3');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Insert on db[1] matching and non-matching
+    rc = sqlite3_exec(db[1], "INSERT INTO items VALUES('j', 'test', 5, 'cat', 1);", NULL, NULL, NULL);  // matches
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[1], "INSERT INTO items VALUES('k', 'test', 1, 'cat', 1);", NULL, NULL, NULL);  // fails priority
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Sync db[1] -> db[0]
+    if (do_merge_using_payload(db[1], db[0], true, true) == false) goto finalize;
+    {
+        int64_t j_exists = test_query_int(db[0], "SELECT COUNT(*) FROM items WHERE id='j';");
+        if (j_exists != 1) {
+            printf("do_test_row_filter_complex: Phase E expected 'j' in db[0], not found\n");
+            goto finalize;
+        }
+        int64_t k_exists = test_query_int(db[0], "SELECT COUNT(*) FROM items WHERE id='k';");
+        if (k_exists != 0) {
+            printf("do_test_row_filter_complex: Phase E expected 'k' NOT in db[0], but found\n");
+            goto finalize;
+        }
+    }
+
+    if (print_result) {
+        printf("\n-> items (db[0]):\n");
+        do_query(db[0], "SELECT * FROM items ORDER BY id;", NULL);
+        printf("\n-> items (db[1]):\n");
+        do_query(db[1], "SELECT * FROM items ORDER BY id;", NULL);
+    }
+
+    result = true;
+
+finalize:
+    for (int i = 0; i < nclients; ++i) {
+        if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK))
+            printf("do_test_row_filter_complex error: %s\n", sqlite3_errmsg(db[i]));
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
+// MARK: - Row Filter: Row Transition -
+
+bool do_test_row_filter_row_transition(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[MAX_SIMULATED_CLIENTS] = {NULL};
+    bool result = false;
+    int rc = SQLITE_OK;
+
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    if (nclients >= MAX_SIMULATED_CLIENTS) nclients = MAX_SIMULATED_CLIENTS;
+    if (nclients < 2) nclients = 2;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+    for (int i = 0; i < nclients; ++i) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        rc = sqlite3_exec(db[i], "CREATE TABLE tasks(id TEXT PRIMARY KEY NOT NULL, title TEXT, user_id INTEGER);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('tasks');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_filter('tasks', 'user_id = 1');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // --- Phase A: Row exits filter (matching -> non-matching) ---
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('a', 'Task A', 1);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    {
+        int64_t meta_before = test_query_int(db[0], "SELECT COUNT(*) FROM tasks_cloudsync;");
+        // Update row to no longer match filter
+        rc = sqlite3_exec(db[0], "UPDATE tasks SET user_id = 2 WHERE id = 'a';", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        int64_t meta_after = test_query_int(db[0], "SELECT COUNT(*) FROM tasks_cloudsync;");
+        // UPDATE trigger should NOT fire (NEW.user_id=2 fails WHEN clause)
+        if (meta_after != meta_before) {
+            printf("do_test_row_filter_row_transition: Phase A - UPDATE out of filter changed meta (%" PRId64 " -> %" PRId64 ")\n", meta_before, meta_after);
+            goto finalize;
+        }
+    }
+
+    // Sync to db[1]: payload reads current row values, so 'a' arrives with user_id=2
+    // (the INSERT metadata triggers the sync, but the payload carries current column values)
+    if (do_merge_using_payload(db[0], db[1], true, true) == false) goto finalize;
+    {
+        int64_t a_uid = test_query_int(db[1], "SELECT user_id FROM tasks WHERE id='a';");
+        if (a_uid != 2) {
+            printf("do_test_row_filter_row_transition: Phase A - db[1] expected user_id=2 for 'a', got %" PRId64 "\n", a_uid);
+            goto finalize;
+        }
+    }
+
+    // --- Phase B: Row enters filter (non-matching -> matching) ---
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('b', 'Task B', 2);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    {
+        int64_t meta_before = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
+        // Update row to now match filter
+        rc = sqlite3_exec(db[0], "UPDATE tasks SET user_id = 1 WHERE id = 'b';", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        int64_t meta_after = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
+        // UPDATE trigger should fire (NEW.user_id=1 passes WHEN clause)
+        if (meta_after <= meta_before) {
+            printf("do_test_row_filter_row_transition: Phase B - UPDATE into filter did not create metadata (%" PRId64 " -> %" PRId64 ")\n", meta_before, meta_after);
+            goto finalize;
+        }
+    }
+
+    // Sync to db[1]: should now get 'b' with user_id=1
+    if (do_merge_using_payload(db[0], db[1], true, true) == false) goto finalize;
+    {
+        int64_t b_exists = test_query_int(db[1], "SELECT COUNT(*) FROM tasks WHERE id='b' AND user_id=1;");
+        if (b_exists != 1) {
+            printf("do_test_row_filter_row_transition: Phase B - db[1] expected 'b' with user_id=1, not found\n");
+            goto finalize;
+        }
+    }
+
+    // --- Phase C: Bidirectional with transition ---
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('c', 'Task C', 1);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    // Sync 'c' to db[1]
+    if (do_merge_using_payload(db[0], db[1], true, true) == false) goto finalize;
+    {
+        int64_t c_exists = test_query_int(db[1], "SELECT COUNT(*) FROM tasks WHERE id='c';");
+        if (c_exists != 1) {
+            printf("do_test_row_filter_row_transition: Phase C - db[1] should have 'c'\n");
+            goto finalize;
+        }
+    }
+
+    // db[0]: move 'c' out of filter (no metadata generated)
+    rc = sqlite3_exec(db[0], "UPDATE tasks SET user_id = 2 WHERE id = 'c';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // db[1]: update 'c' title (still matching on db[1], metadata generated)
+    rc = sqlite3_exec(db[1], "UPDATE tasks SET title = 'Task C Edited' WHERE id = 'c';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Sync db[1] -> db[0]
+    if (do_merge_using_payload(db[1], db[0], true, true) == false) goto finalize;
+    {
+        // db[0] should receive the title update from db[1]
+        int64_t c_title_match = test_query_int(db[0], "SELECT COUNT(*) FROM tasks WHERE id='c' AND title='Task C Edited';");
+        if (c_title_match != 1) {
+            printf("do_test_row_filter_row_transition: Phase C - db[0] should have updated title for 'c'\n");
+            goto finalize;
+        }
+    }
+
+    if (print_result) {
+        printf("\n-> tasks (db[0]):\n");
+        do_query(db[0], "SELECT * FROM tasks ORDER BY id;", NULL);
+        printf("\n-> tasks (db[1]):\n");
+        do_query(db[1], "SELECT * FROM tasks ORDER BY id;", NULL);
+    }
+
+    result = true;
+
+finalize:
+    for (int i = 0; i < nclients; ++i) {
+        if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK))
+            printf("do_test_row_filter_row_transition error: %s\n", sqlite3_errmsg(db[i]));
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
+// MARK: - Row Filter: Filter Change -
+
+bool do_test_row_filter_change(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[MAX_SIMULATED_CLIENTS] = {NULL};
+    bool result = false;
+    int rc = SQLITE_OK;
+
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    if (nclients >= MAX_SIMULATED_CLIENTS) nclients = MAX_SIMULATED_CLIENTS;
+    if (nclients < 2) nclients = 2;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+    for (int i = 0; i < nclients; ++i) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        rc = sqlite3_exec(db[i], "CREATE TABLE tasks(id TEXT PRIMARY KEY NOT NULL, title TEXT, user_id INTEGER);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('tasks');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // Set initial filter on db[0]
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_set_filter('tasks', 'user_id = 1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Insert rows under initial filter
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('a', 'Task A', 1);", NULL, NULL, NULL);  // matches
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('b', 'Task B', 2);", NULL, NULL, NULL);  // non-matching
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('c', 'Task C', 1);", NULL, NULL, NULL);  // matches
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Test 1: 2 PKs tracked under initial filter
+    {
+        int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
+        if (meta_count != 2) {
+            printf("do_test_row_filter_change: expected 2 PKs under initial filter, got %" PRId64 "\n", meta_count);
+            goto finalize;
+        }
+    }
+
+    // Change filter to user_id = 2
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_set_filter('tasks', 'user_id = 2');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Insert rows under new filter
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('d', 'Task D', 2);", NULL, NULL, NULL);  // matches new
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('e', 'Task E', 1);", NULL, NULL, NULL);  // non-matching under new
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Test 2: Old metadata persists + new row tracked = 3 total distinct PKs
+    {
+        int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
+        if (meta_count != 3) {
+            printf("do_test_row_filter_change: expected 3 PKs after filter change, got %" PRId64 "\n", meta_count);
+            goto finalize;
+        }
+    }
+
+    // Test 3: Update row 'a' (user_id=1) — does NOT match new filter (user_id=2)
+    {
+        int64_t before = test_query_int(db[0], "SELECT COUNT(*) FROM tasks_cloudsync;");
+        rc = sqlite3_exec(db[0], "UPDATE tasks SET title='Task A Updated' WHERE id='a';", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        int64_t after = test_query_int(db[0], "SELECT COUNT(*) FROM tasks_cloudsync;");
+        if (after != before) {
+            printf("do_test_row_filter_change: update on 'a' should not change meta under new filter (%" PRId64 " -> %" PRId64 ")\n", before, after);
+            goto finalize;
+        }
+    }
+
+    // Test 4: Sync to db[1] — db[1] has filter 'user_id = 1'
+    rc = sqlite3_exec(db[1], "SELECT cloudsync_set_filter('tasks', 'user_id = 1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    if (do_merge_using_payload(db[0], db[1], true, true) == false) goto finalize;
+    {
+        // db[1] should receive a, c (from old metadata), d (from new metadata) via payload apply
+        int64_t task_count = test_query_int(db[1], "SELECT COUNT(*) FROM tasks;");
+        if (task_count != 3) {
+            printf("do_test_row_filter_change: expected 3 rows in db[1] after merge, got %" PRId64 "\n", task_count);
+            goto finalize;
+        }
+        // Verify 'a' and 'c' are present (from old filter era metadata)
+        int64_t a_exists = test_query_int(db[1], "SELECT COUNT(*) FROM tasks WHERE id='a';");
+        int64_t c_exists = test_query_int(db[1], "SELECT COUNT(*) FROM tasks WHERE id='c';");
+        int64_t d_exists = test_query_int(db[1], "SELECT COUNT(*) FROM tasks WHERE id='d';");
+        if (a_exists != 1 || c_exists != 1 || d_exists != 1) {
+            printf("do_test_row_filter_change: expected a, c, d in db[1] (got a=%" PRId64 " c=%" PRId64 " d=%" PRId64 ")\n", a_exists, c_exists, d_exists);
+            goto finalize;
+        }
+    }
+
+    if (print_result) {
+        printf("\n-> tasks (db[0]):\n");
+        do_query(db[0], "SELECT * FROM tasks ORDER BY id;", NULL);
+        printf("\n-> tasks_cloudsync (db[0]):\n");
+        do_query(db[0], "SELECT hex(pk), col_name, col_version, db_version FROM tasks_cloudsync ORDER BY pk, col_name;", NULL);
+        printf("\n-> tasks (db[1]):\n");
+        do_query(db[1], "SELECT * FROM tasks ORDER BY id;", NULL);
+    }
+
+    result = true;
+
+finalize:
+    for (int i = 0; i < nclients; ++i) {
+        if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK))
+            printf("do_test_row_filter_change error: %s\n", sqlite3_errmsg(db[i]));
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
+// MARK: - Row Filter: Composite PK + Multi-Table -
+
+bool do_test_row_filter_composite_pk_multi_table(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[MAX_SIMULATED_CLIENTS] = {NULL};
+    bool result = false;
+    int rc = SQLITE_OK;
+
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    if (nclients >= MAX_SIMULATED_CLIENTS) nclients = MAX_SIMULATED_CLIENTS;
+    if (nclients < 2) nclients = 2;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+    for (int i = 0; i < nclients; ++i) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        // Table 1: composite PK
+        rc = sqlite3_exec(db[i], "CREATE TABLE projects(org_id INTEGER NOT NULL, proj_id INTEGER NOT NULL, name TEXT, PRIMARY KEY(org_id, proj_id));", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('projects');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_filter('projects', 'org_id = 1');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+
+        // Table 2: composite PK with string literal in filter
+        rc = sqlite3_exec(db[i], "CREATE TABLE members(org_id INTEGER NOT NULL, user_id INTEGER NOT NULL, role TEXT, PRIMARY KEY(org_id, user_id));", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('members');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_filter('members', 'org_id = 1 AND role = ''admin''');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // --- Test 1: Composite PK insert with filter ---
+    rc = sqlite3_exec(db[0], "INSERT INTO projects VALUES(1, 1, 'Proj A');", NULL, NULL, NULL);  // matches
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO projects VALUES(2, 1, 'Proj B');", NULL, NULL, NULL);  // fails
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO projects VALUES(1, 2, 'Proj C');", NULL, NULL, NULL);  // matches
+    if (rc != SQLITE_OK) goto finalize;
+
+    {
+        int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM projects_cloudsync;");
+        if (meta_count != 2) {
+            printf("do_test_row_filter_composite: expected 2 project PKs, got %" PRId64 "\n", meta_count);
+            goto finalize;
+        }
+    }
+
+    // --- Test 2: Multi-column filter with string literal on second table ---
+    rc = sqlite3_exec(db[0], "INSERT INTO members VALUES(1, 10, 'admin');", NULL, NULL, NULL);   // matches
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO members VALUES(1, 20, 'viewer');", NULL, NULL, NULL);  // fails role
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO members VALUES(2, 10, 'admin');", NULL, NULL, NULL);   // fails org_id
+    if (rc != SQLITE_OK) goto finalize;
+
+    {
+        int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM members_cloudsync;");
+        if (meta_count != 1) {
+            printf("do_test_row_filter_composite: expected 1 member PK, got %" PRId64 "\n", meta_count);
+            goto finalize;
+        }
+    }
+
+    // --- Test 3: Sync roundtrip ---
+    if (do_merge_using_payload(db[0], db[1], true, true) == false) goto finalize;
+
+    {
+        int64_t proj_count = test_query_int(db[1], "SELECT COUNT(*) FROM projects;");
+        if (proj_count != 2) {
+            printf("do_test_row_filter_composite: expected 2 projects in db[1], got %" PRId64 "\n", proj_count);
+            goto finalize;
+        }
+        int64_t member_count = test_query_int(db[1], "SELECT COUNT(*) FROM members;");
+        if (member_count != 1) {
+            printf("do_test_row_filter_composite: expected 1 member in db[1], got %" PRId64 "\n", member_count);
+            goto finalize;
+        }
+        // Verify correct member
+        int64_t admin_exists = test_query_int(db[1], "SELECT COUNT(*) FROM members WHERE org_id=1 AND user_id=10 AND role='admin';");
+        if (admin_exists != 1) {
+            printf("do_test_row_filter_composite: expected admin member (1,10) in db[1]\n");
+            goto finalize;
+        }
+    }
+
+    // --- Test 4: Update and delete on composite PK ---
+    rc = sqlite3_exec(db[0], "UPDATE projects SET name='Proj A Updated' WHERE org_id=1 AND proj_id=1;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "DELETE FROM projects WHERE org_id=1 AND proj_id=2;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Sync again
+    if (do_merge_using_payload(db[0], db[1], true, true) == false) goto finalize;
+
+    {
+        // db[1] should have 1 project (Proj A Updated), Proj C deleted
+        int64_t proj_count = test_query_int(db[1], "SELECT COUNT(*) FROM projects;");
+        if (proj_count != 1) {
+            printf("do_test_row_filter_composite: expected 1 project in db[1] after update+delete, got %" PRId64 "\n", proj_count);
+            goto finalize;
+        }
+        int64_t updated = test_query_int(db[1], "SELECT COUNT(*) FROM projects WHERE org_id=1 AND proj_id=1 AND name='Proj A Updated';");
+        if (updated != 1) {
+            printf("do_test_row_filter_composite: expected updated 'Proj A Updated' in db[1]\n");
+            goto finalize;
+        }
+    }
+
+    if (print_result) {
+        printf("\n-> projects (db[0]):\n");
+        do_query(db[0], "SELECT * FROM projects ORDER BY org_id, proj_id;", NULL);
+        printf("\n-> members (db[0]):\n");
+        do_query(db[0], "SELECT * FROM members ORDER BY org_id, user_id;", NULL);
+        printf("\n-> projects (db[1]):\n");
+        do_query(db[1], "SELECT * FROM projects ORDER BY org_id, proj_id;", NULL);
+        printf("\n-> members (db[1]):\n");
+        do_query(db[1], "SELECT * FROM members ORDER BY org_id, user_id;", NULL);
+    }
+
+    result = true;
+
+finalize:
+    for (int i = 0; i < nclients; ++i) {
+        if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK))
+            printf("do_test_row_filter_composite error: %s\n", sqlite3_errmsg(db[i]));
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
+// MARK: - Row Filter: Pre-existing Data (Prefill) -
+
+bool do_test_row_filter_prefill(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[MAX_SIMULATED_CLIENTS] = {NULL};
+    bool result = false;
+    int rc = SQLITE_OK;
+
+    memset(db, 0, sizeof(sqlite3 *) * MAX_SIMULATED_CLIENTS);
+    if (nclients >= MAX_SIMULATED_CLIENTS) nclients = MAX_SIMULATED_CLIENTS;
+    if (nclients < 2) nclients = 2;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+    for (int i = 0; i < nclients; ++i) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        // Create table
+        rc = sqlite3_exec(db[i], "CREATE TABLE tasks(id TEXT PRIMARY KEY NOT NULL, title TEXT, user_id INTEGER);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // --- Insert pre-existing data into db[0] BEFORE cloudsync_init ---
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('a', 'Task A', 1);", NULL, NULL, NULL);  // matches filter
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('b', 'Task B', 2);", NULL, NULL, NULL);  // non-matching
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('c', 'Task C', 1);", NULL, NULL, NULL);  // matches filter
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('d', 'Task D', 3);", NULL, NULL, NULL);  // non-matching
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('e', 'Task E', 1);", NULL, NULL, NULL);  // matches filter
+    if (rc != SQLITE_OK) goto finalize;
+
+    // --- Now init cloudsync and set filter on both databases ---
+    for (int i = 0; i < nclients; ++i) {
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('tasks');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_filter('tasks', 'user_id = 1');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // --- Test 1: Initial fill should have created metadata for ALL 5 pre-existing rows ---
+    // (filter was not yet set when cloudsync_init ran the refill)
+    {
+        int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
+        if (meta_count != 5) {
+            printf("do_test_row_filter_prefill: expected 5 tracked PKs after init (all pre-existing), got %" PRId64 "\n", meta_count);
+            goto finalize;
+        }
+    }
+
+    // --- Test 2: New insert of matching row → tracked ---
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('f', 'Task F', 1);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    {
+        int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
+        if (meta_count != 6) {
+            printf("do_test_row_filter_prefill: expected 6 PKs after matching insert, got %" PRId64 "\n", meta_count);
+            goto finalize;
+        }
+    }
+
+    // --- Test 3: New insert of non-matching row → NOT tracked ---
+    rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('g', 'Task G', 2);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    {
+        int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
+        if (meta_count != 6) {
+            printf("do_test_row_filter_prefill: expected still 6 PKs after non-matching insert, got %" PRId64 "\n", meta_count);
+            goto finalize;
+        }
+    }
+
+    // --- Test 4: Sync roundtrip — all pre-existing + matching new rows transfer ---
+    if (do_merge_using_payload(db[0], db[1], true, true) == false) goto finalize;
+
+    {
+        // db[1] should have: a, b, c, d, e (all pre-existing via refill metadata) + f (matching new)
+        // g should NOT transfer (non-matching, no metadata)
+        int64_t task_count = test_query_int(db[1], "SELECT COUNT(*) FROM tasks;");
+        if (task_count != 6) {
+            printf("do_test_row_filter_prefill: expected 6 rows in db[1] after merge, got %" PRId64 "\n", task_count);
+            goto finalize;
+        }
+        // Verify 'g' (non-matching, inserted after filter) did NOT transfer
+        int64_t g_exists = test_query_int(db[1], "SELECT COUNT(*) FROM tasks WHERE id='g';");
+        if (g_exists != 0) {
+            printf("do_test_row_filter_prefill: non-matching row 'g' should not have synced\n");
+            goto finalize;
+        }
+        // Verify pre-existing non-matching row 'b' DID transfer (metadata from init refill)
+        int64_t b_exists = test_query_int(db[1], "SELECT COUNT(*) FROM tasks WHERE id='b' AND user_id=2;");
+        if (b_exists != 1) {
+            printf("do_test_row_filter_prefill: pre-existing row 'b' should have synced via refill metadata\n");
+            goto finalize;
+        }
+    }
+
+    if (print_result) {
+        printf("\n-> tasks (db[0]):\n");
+        do_query(db[0], "SELECT * FROM tasks ORDER BY id;", NULL);
+        printf("\n-> tasks_cloudsync (db[0]):\n");
+        do_query(db[0], "SELECT hex(pk), col_name, col_version, db_version FROM tasks_cloudsync ORDER BY pk, col_name;", NULL);
+        printf("\n-> tasks (db[1]):\n");
+        do_query(db[1], "SELECT * FROM tasks ORDER BY id;", NULL);
+    }
+
+    result = true;
+
+finalize:
+    for (int i = 0; i < nclients; ++i) {
+        if (rc != SQLITE_OK && db[i] && (sqlite3_errcode(db[i]) != SQLITE_OK))
+            printf("do_test_row_filter_prefill error: %s\n", sqlite3_errmsg(db[i]));
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
 // Test that BEFORE triggers with RAISE(ABORT) simulate RLS denial:
 // per-PK savepoints isolate failures so allowed rows commit and denied rows roll back.
 bool do_test_rls_trigger_denial (int nclients, bool print_result, bool cleanup_databases, bool only_locals) {
@@ -11186,6 +11954,12 @@ int main (int argc, const char * argv[]) {
 
     // test row-level filter
     result += test_report("Test Row Filter:", do_test_row_filter(2, print_result, cleanup_databases));
+    result += test_report("Test Row Filter Clear:", do_test_row_filter_clear(2, print_result, cleanup_databases));
+    result += test_report("Test Row Filter Complex:", do_test_row_filter_complex_expressions(2, print_result, cleanup_databases));
+    result += test_report("Test Row Filter Transition:", do_test_row_filter_row_transition(2, print_result, cleanup_databases));
+    result += test_report("Test Row Filter Change:", do_test_row_filter_change(2, print_result, cleanup_databases));
+    result += test_report("Test Row Filter CompPK:", do_test_row_filter_composite_pk_multi_table(2, print_result, cleanup_databases));
+    result += test_report("Test Row Filter Prefill:", do_test_row_filter_prefill(2, print_result, cleanup_databases));
 
     // test block-level LWW
     result += test_report("Test Block LWW Insert:", do_test_block_lww_insert(2, print_result, cleanup_databases));
