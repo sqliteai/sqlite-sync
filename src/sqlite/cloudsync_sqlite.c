@@ -1259,6 +1259,14 @@ void dbsync_set_filter (sqlite3_context *context, int argc, sqlite3_value **argv
         return;
     }
 
+    // Clean and refill metatable with the new filter
+    rc = cloudsync_reset_metatable(data, tbl);
+    if (rc != DBRES_OK) {
+        dbsync_set_error(context, "cloudsync_set_filter: error resetting metatable");
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+
     sqlite3_result_int(context, 1);
 }
 
@@ -1285,6 +1293,14 @@ void dbsync_clear_filter (sqlite3_context *context, int argc, sqlite3_value **ar
     int rc = database_create_triggers(data, tbl, algo, NULL);
     if (rc != DBRES_OK) {
         dbsync_set_error(context, "cloudsync_clear_filter: error recreating triggers");
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+
+    // Clean and refill metatable without filter (all rows)
+    rc = cloudsync_reset_metatable(data, tbl);
+    if (rc != DBRES_OK) {
+        dbsync_set_error(context, "cloudsync_clear_filter: error resetting metatable");
         sqlite3_result_error_code(context, rc);
         return;
     }

@@ -2528,6 +2528,18 @@ char *cloudsync_filter_add_row_prefix (const char *filter, const char *prefix, c
     return result;
 }
 
+int cloudsync_reset_metatable (cloudsync_context *data, const char *table_name) {
+    cloudsync_table_context *table = table_lookup(data, table_name);
+    if (!table) return DBRES_ERROR;
+
+    char *sql = cloudsync_memory_mprintf(SQL_DELETE_ALL_FROM_CLOUDSYNC_TABLE, table->meta_ref);
+    int rc = database_exec(data, sql);
+    cloudsync_memory_free(sql);
+    if (rc != DBRES_OK) return rc;
+
+    return cloudsync_refill_metatable(data, table_name);
+}
+
 int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name) {
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) return DBRES_ERROR;

@@ -8038,22 +8038,23 @@ bool do_test_row_filter_clear(int nclients, bool print_result, bool cleanup_data
         }
     }
 
-    // Test 2: Clear filter on db[0]
+    // Test 2: Clear filter on db[0] — resets metatable with all rows (a, b, c)
     rc = sqlite3_exec(db[0], "SELECT cloudsync_clear_filter('tasks');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
 
-    // Test 3: Insert non-matching row — should now be tracked (no filter)
+    // Test 3: Insert non-matching row — should be tracked (no filter)
+    // clear_filter refilled with all 3 existing rows + 'd' = 4
     rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('d', 'Task D', 2);", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
     {
         int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
-        if (meta_count != 3) {
-            printf("do_test_row_filter_clear: expected 3 tracked PKs after clear+insert, got %" PRId64 "\n", meta_count);
+        if (meta_count != 4) {
+            printf("do_test_row_filter_clear: expected 4 tracked PKs after clear+insert, got %" PRId64 "\n", meta_count);
             goto finalize;
         }
     }
 
-    // Test 4: Update previously-untracked row 'b' — should now be tracked
+    // Test 4: Update row 'b' — already tracked by clear_filter refill, meta count unchanged
     rc = sqlite3_exec(db[0], "UPDATE tasks SET title='Task B Updated' WHERE id='b';", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
     {
@@ -8434,11 +8435,11 @@ bool do_test_row_filter_change(int nclients, bool print_result, bool cleanup_dat
     rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES('e', 'Task E', 1);", NULL, NULL, NULL);  // non-matching under new
     if (rc != SQLITE_OK) goto finalize;
 
-    // Test 2: Old metadata persists + new row tracked = 3 total distinct PKs
+    // Test 2: set_filter('user_id = 2') reset metatable — only 'b' (user_id=2) from refill + 'd' from insert = 2
     {
         int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
-        if (meta_count != 3) {
-            printf("do_test_row_filter_change: expected 3 PKs after filter change, got %" PRId64 "\n", meta_count);
+        if (meta_count != 2) {
+            printf("do_test_row_filter_change: expected 2 PKs after filter change, got %" PRId64 "\n", meta_count);
             goto finalize;
         }
     }
@@ -8461,18 +8462,17 @@ bool do_test_row_filter_change(int nclients, bool print_result, bool cleanup_dat
 
     if (do_merge_using_payload(db[0], db[1], true, true) == false) goto finalize;
     {
-        // db[1] should receive a, c (from old metadata), d (from new metadata) via payload apply
+        // db[1] should receive b, d (metadata from new filter era) via payload apply
+        // a, c had their metadata removed by filter change, e was never tracked
         int64_t task_count = test_query_int(db[1], "SELECT COUNT(*) FROM tasks;");
-        if (task_count != 3) {
-            printf("do_test_row_filter_change: expected 3 rows in db[1] after merge, got %" PRId64 "\n", task_count);
+        if (task_count != 2) {
+            printf("do_test_row_filter_change: expected 2 rows in db[1] after merge, got %" PRId64 "\n", task_count);
             goto finalize;
         }
-        // Verify 'a' and 'c' are present (from old filter era metadata)
-        int64_t a_exists = test_query_int(db[1], "SELECT COUNT(*) FROM tasks WHERE id='a';");
-        int64_t c_exists = test_query_int(db[1], "SELECT COUNT(*) FROM tasks WHERE id='c';");
+        int64_t b_exists = test_query_int(db[1], "SELECT COUNT(*) FROM tasks WHERE id='b';");
         int64_t d_exists = test_query_int(db[1], "SELECT COUNT(*) FROM tasks WHERE id='d';");
-        if (a_exists != 1 || c_exists != 1 || d_exists != 1) {
-            printf("do_test_row_filter_change: expected a, c, d in db[1] (got a=%" PRId64 " c=%" PRId64 " d=%" PRId64 ")\n", a_exists, c_exists, d_exists);
+        if (b_exists != 1 || d_exists != 1) {
+            printf("do_test_row_filter_change: expected b, d in db[1] (got b=%" PRId64 " d=%" PRId64 ")\n", b_exists, d_exists);
             goto finalize;
         }
     }
@@ -8682,12 +8682,12 @@ bool do_test_row_filter_prefill(int nclients, bool print_result, bool cleanup_da
         if (rc != SQLITE_OK) goto finalize;
     }
 
-    // --- Test 1: Initial fill should have created metadata for ALL 5 pre-existing rows ---
-    // (filter was not yet set when cloudsync_init ran the refill)
+    // --- Test 1: set_filter resets the metatable to only matching rows ---
+    // cloudsync_init filled all 5, then set_filter cleaned and refilled with filter → 3 matching (a, c, e)
     {
         int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
-        if (meta_count != 5) {
-            printf("do_test_row_filter_prefill: expected 5 tracked PKs after init (all pre-existing), got %" PRId64 "\n", meta_count);
+        if (meta_count != 3) {
+            printf("do_test_row_filter_prefill: expected 3 tracked PKs after set_filter (matching only), got %" PRId64 "\n", meta_count);
             goto finalize;
         }
     }
@@ -8697,8 +8697,8 @@ bool do_test_row_filter_prefill(int nclients, bool print_result, bool cleanup_da
     if (rc != SQLITE_OK) goto finalize;
     {
         int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
-        if (meta_count != 6) {
-            printf("do_test_row_filter_prefill: expected 6 PKs after matching insert, got %" PRId64 "\n", meta_count);
+        if (meta_count != 4) {
+            printf("do_test_row_filter_prefill: expected 4 PKs after matching insert, got %" PRId64 "\n", meta_count);
             goto finalize;
         }
     }
@@ -8708,21 +8708,21 @@ bool do_test_row_filter_prefill(int nclients, bool print_result, bool cleanup_da
     if (rc != SQLITE_OK) goto finalize;
     {
         int64_t meta_count = test_query_int(db[0], "SELECT COUNT(DISTINCT pk) FROM tasks_cloudsync;");
-        if (meta_count != 6) {
-            printf("do_test_row_filter_prefill: expected still 6 PKs after non-matching insert, got %" PRId64 "\n", meta_count);
+        if (meta_count != 4) {
+            printf("do_test_row_filter_prefill: expected still 4 PKs after non-matching insert, got %" PRId64 "\n", meta_count);
             goto finalize;
         }
     }
 
-    // --- Test 4: Sync roundtrip — all pre-existing + matching new rows transfer ---
+    // --- Test 4: Sync roundtrip — only matching rows transfer ---
     if (do_merge_using_payload(db[0], db[1], true, true) == false) goto finalize;
 
     {
-        // db[1] should have: a, b, c, d, e (all pre-existing via refill metadata) + f (matching new)
-        // g should NOT transfer (non-matching, no metadata)
+        // db[1] should have: a, c, e (matching pre-existing) + f (matching new) = 4 rows
+        // b, d (non-matching, metadata removed by set_filter) and g (non-matching post-filter) should NOT transfer
         int64_t task_count = test_query_int(db[1], "SELECT COUNT(*) FROM tasks;");
-        if (task_count != 6) {
-            printf("do_test_row_filter_prefill: expected 6 rows in db[1] after merge, got %" PRId64 "\n", task_count);
+        if (task_count != 4) {
+            printf("do_test_row_filter_prefill: expected 4 rows in db[1] after merge, got %" PRId64 "\n", task_count);
             goto finalize;
         }
         // Verify 'g' (non-matching, inserted after filter) did NOT transfer
@@ -8731,10 +8731,10 @@ bool do_test_row_filter_prefill(int nclients, bool print_result, bool cleanup_da
             printf("do_test_row_filter_prefill: non-matching row 'g' should not have synced\n");
             goto finalize;
         }
-        // Verify pre-existing non-matching row 'b' DID transfer (metadata from init refill)
+        // Verify pre-existing non-matching row 'b' did NOT transfer (metadata removed by set_filter)
         int64_t b_exists = test_query_int(db[1], "SELECT COUNT(*) FROM tasks WHERE id='b' AND user_id=2;");
-        if (b_exists != 1) {
-            printf("do_test_row_filter_prefill: pre-existing row 'b' should have synced via refill metadata\n");
+        if (b_exists != 0) {
+            printf("do_test_row_filter_prefill: pre-existing non-matching row 'b' should not have synced\n");
             goto finalize;
         }
     }

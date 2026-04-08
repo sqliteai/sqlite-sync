@@ -226,6 +226,9 @@ const char * const SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID =
 const char * const SQL_DROP_CLOUDSYNC_TABLE =
     "DROP TABLE IF EXISTS \"%w\";";
 
+const char * const SQL_DELETE_ALL_FROM_CLOUDSYNC_TABLE =
+    "DELETE FROM \"%w\";";
+
 const char * const SQL_CLOUDSYNC_DELETE_COLS_NOT_IN_SCHEMA_OR_PKCOL =
     "DELETE FROM \"%w\" WHERE \"col_name\" NOT IN ("
     "SELECT name FROM pragma_table_info('%q') UNION SELECT '%s'"

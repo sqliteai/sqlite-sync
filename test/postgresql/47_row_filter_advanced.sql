@@ -37,23 +37,24 @@ SELECT (:fail::int + 1) AS fail \gset
 -- Clear filter
 SELECT cloudsync_clear_filter('tasks') AS _cf \gset
 
--- Insert non-matching row — should now be tracked
+-- Insert non-matching row — should now be tracked (no filter)
+-- clear_filter refilled metatable with all 3 existing rows (a, b, c) + insert d = 4
 INSERT INTO tasks VALUES ('d', 'Task D', 2);
 SELECT COUNT(DISTINCT pk) AS meta_pk_count FROM tasks_cloudsync \gset
-SELECT (:meta_pk_count = 3) AS clear_t1b_ok \gset
+SELECT (:meta_pk_count = 4) AS clear_t1b_ok \gset
 \if :clear_t1b_ok
-\echo [PASS] (:testid) clear_filter: non-matching row tracked after clear (3 PKs)
+\echo [PASS] (:testid) clear_filter: non-matching row tracked after clear (4 PKs)
 \else
-\echo [FAIL] (:testid) clear_filter: expected 3 PKs after clear+insert, got :meta_pk_count
+\echo [FAIL] (:testid) clear_filter: expected 4 PKs after clear+insert, got :meta_pk_count
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
--- Update previously-untracked row 'b' — should now be tracked
+-- Update row 'b' — already tracked by clear_filter refill, meta count unchanged
 UPDATE tasks SET title = 'Task B Updated' WHERE id = 'b';
 SELECT COUNT(DISTINCT pk) AS meta_pk_count FROM tasks_cloudsync \gset
 SELECT (:meta_pk_count = 4) AS clear_t1c_ok \gset
 \if :clear_t1c_ok
-\echo [PASS] (:testid) clear_filter: update on 'b' tracked after clear (4 PKs)
+\echo [PASS] (:testid) clear_filter: update on 'b' still 4 PKs
 \else
 \echo [FAIL] (:testid) clear_filter: expected 4 PKs after update on 'b', got :meta_pk_count
 SELECT (:fail::int + 1) AS fail \gset
@@ -156,18 +157,19 @@ SELECT (:meta_count = 2) AS change_t6a_ok \gset
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
--- Change filter
+-- Change filter — resets metatable to only rows matching new filter (user_id = 2)
+-- Only 'b' (user_id=2) matches new filter → 1 PK from refill, then insert d → 2
 SELECT cloudsync_set_filter('fchange', 'user_id = 2') AS _sf2 \gset
 
 INSERT INTO fchange VALUES ('d', 'D', 2);  -- matches new filter
 INSERT INTO fchange VALUES ('e', 'E', 1);  -- non-matching under new filter
 
 SELECT COUNT(DISTINCT pk) AS meta_count FROM fchange_cloudsync \gset
-SELECT (:meta_count = 3) AS change_t6b_ok \gset
+SELECT (:meta_count = 2) AS change_t6b_ok \gset
 \if :change_t6b_ok
-\echo [PASS] (:testid) filter_change: 3 PKs after filter change (old metadata persists)
+\echo [PASS] (:testid) filter_change: 2 PKs after filter change (metatable reset)
 \else
-\echo [FAIL] (:testid) filter_change: expected 3 PKs after filter change, got :meta_count
+\echo [FAIL] (:testid) filter_change: expected 2 PKs after filter change, got :meta_count
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 

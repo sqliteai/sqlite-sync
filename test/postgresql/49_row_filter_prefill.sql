@@ -35,16 +35,16 @@ SELECT cloudsync_init('tasks') AS _init_a \gset
 SELECT cloudsync_set_filter('tasks', 'user_id = 1') AS _sf_a \gset
 
 -- ============================================================
--- Test 1: Init refill should have created metadata for ALL 5 pre-existing rows
--- (filter was not set in settings when cloudsync_init ran the refill)
+-- Test 1: set_filter resets metatable to only matching rows
+-- cloudsync_init filled all 5, then set_filter cleaned and refilled → 3 matching (a, c, e)
 -- ============================================================
 
 SELECT COUNT(DISTINCT pk) AS meta_pk_count FROM tasks_cloudsync \gset
-SELECT (:meta_pk_count = 5) AS prefill_t1_ok \gset
+SELECT (:meta_pk_count = 3) AS prefill_t1_ok \gset
 \if :prefill_t1_ok
-\echo [PASS] (:testid) prefill: all 5 pre-existing rows have metadata after init
+\echo [PASS] (:testid) prefill: 3 matching rows have metadata after set_filter
 \else
-\echo [FAIL] (:testid) prefill: expected 5 tracked PKs after init, got :meta_pk_count
+\echo [FAIL] (:testid) prefill: expected 3 tracked PKs after set_filter, got :meta_pk_count
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -54,11 +54,11 @@ SELECT (:fail::int + 1) AS fail \gset
 
 INSERT INTO tasks VALUES ('f', 'Task F', 1);
 SELECT COUNT(DISTINCT pk) AS meta_pk_count FROM tasks_cloudsync \gset
-SELECT (:meta_pk_count = 6) AS prefill_t2_ok \gset
+SELECT (:meta_pk_count = 4) AS prefill_t2_ok \gset
 \if :prefill_t2_ok
-\echo [PASS] (:testid) prefill: new matching insert tracked (6 PKs)
+\echo [PASS] (:testid) prefill: new matching insert tracked (4 PKs)
 \else
-\echo [FAIL] (:testid) prefill: expected 6 PKs after matching insert, got :meta_pk_count
+\echo [FAIL] (:testid) prefill: expected 4 PKs after matching insert, got :meta_pk_count
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -68,11 +68,11 @@ SELECT (:fail::int + 1) AS fail \gset
 
 INSERT INTO tasks VALUES ('g', 'Task G', 2);
 SELECT COUNT(DISTINCT pk) AS meta_pk_count FROM tasks_cloudsync \gset
-SELECT (:meta_pk_count = 6) AS prefill_t3_ok \gset
+SELECT (:meta_pk_count = 4) AS prefill_t3_ok \gset
 \if :prefill_t3_ok
-\echo [PASS] (:testid) prefill: new non-matching insert not tracked (still 6 PKs)
+\echo [PASS] (:testid) prefill: new non-matching insert not tracked (still 4 PKs)
 \else
-\echo [FAIL] (:testid) prefill: expected still 6 PKs after non-matching insert, got :meta_pk_count
+\echo [FAIL] (:testid) prefill: expected still 4 PKs after non-matching insert, got :meta_pk_count
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -99,13 +99,13 @@ SELECT cloudsync_set_filter('tasks', 'user_id = 1') AS _sf_b \gset
 -- Apply payload
 SELECT cloudsync_payload_apply(decode(:'payload_a_hex', 'hex')) AS _apply \gset
 
--- All pre-existing rows (a-e) + matching new (f) should arrive; non-matching new (g) should not
+-- Only matching rows (a, c, e, f) should arrive; non-matching (b, d, g) should not
 SELECT COUNT(*) AS row_count FROM tasks \gset
-SELECT (:row_count = 6) AS prefill_t4a_ok \gset
+SELECT (:row_count = 4) AS prefill_t4a_ok \gset
 \if :prefill_t4a_ok
-\echo [PASS] (:testid) prefill_sync: 6 rows synced to Database B
+\echo [PASS] (:testid) prefill_sync: 4 matching rows synced to Database B
 \else
-\echo [FAIL] (:testid) prefill_sync: expected 6 rows in Database B, got :row_count
+\echo [FAIL] (:testid) prefill_sync: expected 4 rows in Database B, got :row_count
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -119,13 +119,13 @@ SELECT (:g_count = 0) AS prefill_t4b_ok \gset
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
--- Verify pre-existing non-matching row 'b' DID sync (metadata from init refill)
+-- Verify pre-existing non-matching row 'b' did NOT sync (metadata removed by set_filter)
 SELECT COUNT(*) AS b_count FROM tasks WHERE id = 'b' AND user_id = 2 \gset
-SELECT (:b_count = 1) AS prefill_t4c_ok \gset
+SELECT (:b_count = 0) AS prefill_t4c_ok \gset
 \if :prefill_t4c_ok
-\echo [PASS] (:testid) prefill_sync: pre-existing non-matching row 'b' synced via refill
+\echo [PASS] (:testid) prefill_sync: pre-existing non-matching row 'b' not synced
 \else
-\echo [FAIL] (:testid) prefill_sync: pre-existing row 'b' should have synced via refill metadata
+\echo [FAIL] (:testid) prefill_sync: pre-existing non-matching row 'b' should not have synced
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -152,35 +152,35 @@ INSERT INTO projects VALUES (2, 2, 'Delta', 'active');
 SELECT cloudsync_init('projects') AS _init_proj \gset
 SELECT cloudsync_set_filter('projects', 'org_id = 1') AS _sf_proj \gset
 
--- All 4 pre-existing rows should have metadata
+-- set_filter resets metatable: only 2 matching rows (org_id=1) should have metadata
 SELECT COUNT(DISTINCT pk) AS meta_pk_count FROM projects_cloudsync \gset
-SELECT (:meta_pk_count = 4) AS prefill_t5_ok \gset
+SELECT (:meta_pk_count = 2) AS prefill_t5_ok \gset
 \if :prefill_t5_ok
-\echo [PASS] (:testid) prefill_composite: all 4 pre-existing rows have metadata
+\echo [PASS] (:testid) prefill_composite: 2 matching rows have metadata after set_filter
 \else
-\echo [FAIL] (:testid) prefill_composite: expected 4 tracked PKs, got :meta_pk_count
+\echo [FAIL] (:testid) prefill_composite: expected 2 tracked PKs, got :meta_pk_count
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
 -- New matching insert tracked
 INSERT INTO projects VALUES (1, 3, 'Epsilon', 'active');
 SELECT COUNT(DISTINCT pk) AS meta_pk_count FROM projects_cloudsync \gset
-SELECT (:meta_pk_count = 5) AS prefill_t5b_ok \gset
+SELECT (:meta_pk_count = 3) AS prefill_t5b_ok \gset
 \if :prefill_t5b_ok
-\echo [PASS] (:testid) prefill_composite: new matching row tracked (5 PKs)
+\echo [PASS] (:testid) prefill_composite: new matching row tracked (3 PKs)
 \else
-\echo [FAIL] (:testid) prefill_composite: expected 5 PKs after matching insert, got :meta_pk_count
+\echo [FAIL] (:testid) prefill_composite: expected 3 PKs after matching insert, got :meta_pk_count
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
 -- New non-matching insert NOT tracked
 INSERT INTO projects VALUES (3, 1, 'Zeta', 'active');
 SELECT COUNT(DISTINCT pk) AS meta_pk_count FROM projects_cloudsync \gset
-SELECT (:meta_pk_count = 5) AS prefill_t5c_ok \gset
+SELECT (:meta_pk_count = 3) AS prefill_t5c_ok \gset
 \if :prefill_t5c_ok
-\echo [PASS] (:testid) prefill_composite: new non-matching row not tracked (still 5 PKs)
+\echo [PASS] (:testid) prefill_composite: new non-matching row not tracked (still 3 PKs)
 \else
-\echo [FAIL] (:testid) prefill_composite: expected still 5 PKs, got :meta_pk_count
+\echo [FAIL] (:testid) prefill_composite: expected still 3 PKs, got :meta_pk_count
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 

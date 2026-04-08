@@ -686,6 +686,13 @@ Datum cloudsync_set_filter (PG_FUNCTION_ARGS) {
             ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                             errmsg("cloudsync_set_filter: error recreating triggers")));
         }
+
+        // Clean and refill metatable with the new filter
+        rc = cloudsync_reset_metatable(data, tbl);
+        if (rc != DBRES_OK) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("cloudsync_set_filter: error resetting metatable")));
+        }
     }
     PG_CATCH();
     {
@@ -743,6 +750,13 @@ Datum cloudsync_clear_filter (PG_FUNCTION_ARGS) {
         if (rc != DBRES_OK) {
             ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                             errmsg("cloudsync_clear_filter: error recreating triggers")));
+        }
+
+        // Clean and refill metatable without filter (all rows)
+        rc = cloudsync_reset_metatable(data, tbl);
+        if (rc != DBRES_OK) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("cloudsync_clear_filter: error resetting metatable")));
         }
     }
     PG_CATCH();

@@ -57,6 +57,7 @@ extern const char * const SQL_CLOUDSYNC_SELECT_COL_VERSION_BY_PK_COL;
 extern const char * const SQL_CLOUDSYNC_SELECT_SITE_ID_BY_PK_COL;
 extern const char * const SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID;
 extern const char * const SQL_DROP_CLOUDSYNC_TABLE;
+extern const char * const SQL_DELETE_ALL_FROM_CLOUDSYNC_TABLE;
 extern const char * const SQL_CLOUDSYNC_DELETE_COLS_NOT_IN_SCHEMA_OR_PKCOL;
 extern const char * const SQL_PRAGMA_TABLEINFO_PK_QUALIFIED_COLLIST_FMT;
 extern const char * const SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK;
