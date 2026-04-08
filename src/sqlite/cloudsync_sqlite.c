@@ -858,7 +858,7 @@ void dbsync_terminate (sqlite3_context *context, int argc, sqlite3_value **argv)
 
 // MARK: -
 
-void dbsync_init (sqlite3_context *context, const char *table, const char *algo, bool skip_int_pk_check) {
+void dbsync_init (sqlite3_context *context, const char *table, const char *algo, CLOUDSYNC_INIT_FLAG init_flags) {
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     
     int rc = database_begin_savepoint(data, "cloudsync_init");
@@ -868,7 +868,7 @@ void dbsync_init (sqlite3_context *context, const char *table, const char *algo,
         return;
     }
     
-    rc = cloudsync_init_table(data, table, algo, skip_int_pk_check);
+    rc = cloudsync_init_table(data, table, algo, init_flags);
     if (rc == SQLITE_OK) {
         rc = database_commit_savepoint(data, "cloudsync_init");
         if (rc != SQLITE_OK) {
@@ -896,8 +896,8 @@ void dbsync_init3 (sqlite3_context *context, int argc, sqlite3_value **argv) {
     
     const char *table = (const char *)database_value_text(argv[0]);
     const char *algo = (const char *)database_value_text(argv[1]);
-    bool skip_int_pk_check = (bool)database_value_int(argv[2]);
-    dbsync_init(context, table, algo, skip_int_pk_check);
+    int init_flags = database_value_int(argv[2]);
+    dbsync_init(context, table, algo, init_flags);
 }
 
 void dbsync_init2 (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -905,14 +905,14 @@ void dbsync_init2 (sqlite3_context *context, int argc, sqlite3_value **argv) {
     
     const char *table = (const char *)database_value_text(argv[0]);
     const char *algo = (const char *)database_value_text(argv[1]);
-    dbsync_init(context, table, algo, false);
+    dbsync_init(context, table, algo, CLOUDSYNC_INIT_FLAG_NONE);
 }
 
 void dbsync_init1 (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_init1");
     
     const char *table = (const char *)database_value_text(argv[0]);
-    dbsync_init(context, table, NULL, false);
+    dbsync_init(context, table, NULL, CLOUDSYNC_INIT_FLAG_NONE);
 }
 
 // MARK: -

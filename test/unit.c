@@ -44,7 +44,7 @@ int vtab_colname_is_legal (const char *name);
 int dbutils_binary_comparison (int x, int y);
 sqlite3 *do_create_database (void);
 
-int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, bool skip_int_pk_check);
+int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, CLOUDSYNC_INIT_FLAG init_flags);
 bool database_system_exists (cloudsync_context *data, const char *name, const char *type);
 
 static int stdout_backup = -1; // Backup file descriptor for stdout
@@ -1848,29 +1848,29 @@ bool do_test_dbutils (void) {
     if (b == true) {rc = SQLITE_ERROR; goto finalize;}
     
     // test cloudsync_table_sanity_check
-    rc = cloudsync_table_sanity_check(data, NULL, false);
+    rc = cloudsync_table_sanity_check(data, NULL, CLOUDSYNC_INIT_FLAG_NONE);
     if (rc == DBRES_OK) goto finalize;
-    rc = cloudsync_table_sanity_check(data, "rowid_table", false);
+    rc = cloudsync_table_sanity_check(data, "rowid_table", CLOUDSYNC_INIT_FLAG_NONE);
     if (rc == DBRES_OK) goto finalize;
-    rc = cloudsync_table_sanity_check(data, "foo2", false);
+    rc = cloudsync_table_sanity_check(data, "foo2", CLOUDSYNC_INIT_FLAG_NONE);
     if (rc == DBRES_OK) goto finalize;
-    rc = cloudsync_table_sanity_check(data, build_long_tablename(), false);
+    rc = cloudsync_table_sanity_check(data, build_long_tablename(), CLOUDSYNC_INIT_FLAG_NONE);
     if (rc == DBRES_OK) goto finalize;
-    rc = cloudsync_table_sanity_check(data, "nonnull_prikey_table", false);
+    rc = cloudsync_table_sanity_check(data, "nonnull_prikey_table", CLOUDSYNC_INIT_FLAG_NONE);
     if (rc == DBRES_OK) goto finalize;
-    rc = cloudsync_table_sanity_check(data, "nonnull_nodefault_table", false);
+    rc = cloudsync_table_sanity_check(data, "nonnull_nodefault_table", CLOUDSYNC_INIT_FLAG_NONE);
     if (rc == DBRES_OK) goto finalize;
-    rc = cloudsync_table_sanity_check(data, "nonnull_default_table", false);
+    rc = cloudsync_table_sanity_check(data, "nonnull_default_table", CLOUDSYNC_INIT_FLAG_NONE);
     if (rc != DBRES_OK) goto finalize;
-    rc = cloudsync_table_sanity_check(data, "integer_pk", false);
+    rc = cloudsync_table_sanity_check(data, "integer_pk", CLOUDSYNC_INIT_FLAG_NONE);
     if (rc == DBRES_OK) goto finalize;
-    rc = cloudsync_table_sanity_check(data, "integer_pk", true);
+    rc = cloudsync_table_sanity_check(data, "integer_pk", CLOUDSYNC_INIT_FLAG_SKIP_INT_PK_CHECK);
     if (rc != DBRES_OK) goto finalize;
-    rc = cloudsync_table_sanity_check(data, "int_pk", false);
+    rc = cloudsync_table_sanity_check(data, "int_pk", CLOUDSYNC_INIT_FLAG_NONE);
     if (rc == DBRES_OK) goto finalize;
-    rc = cloudsync_table_sanity_check(data, "int_pk", true);
+    rc = cloudsync_table_sanity_check(data, "int_pk", CLOUDSYNC_INIT_FLAG_SKIP_INT_PK_CHECK);
     if (rc != DBRES_OK) goto finalize;
-    rc = cloudsync_table_sanity_check(data, "quoted table name 🚀", true);
+    rc = cloudsync_table_sanity_check(data, "quoted table name 🚀", CLOUDSYNC_INIT_FLAG_SKIP_INT_PK_CHECK);
     if (rc != DBRES_OK) goto finalize;
     
     // create huge dummy_table table
@@ -1878,7 +1878,7 @@ bool do_test_dbutils (void) {
     if (rc != SQLITE_OK) goto finalize;
     
     // sanity check the huge dummy_table table
-    rc = cloudsync_table_sanity_check(data, "dummy_table", false);
+    rc = cloudsync_table_sanity_check(data, "dummy_table", CLOUDSYNC_INIT_FLAG_NONE);
     if (rc == SQLITE_OK) goto finalize;
     
     // de-augment bar with cloudsync

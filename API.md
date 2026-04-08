@@ -5,10 +5,12 @@ This document provides a reference for the SQLite functions provided by the `sql
 ## Index
 
 - [Configuration Functions](#configuration-functions)
-  - [`cloudsync_init()`](#cloudsync_inittable_name-crdt_algo-force)
+  - [`cloudsync_init()`](#cloudsync_inittable_name-crdt_algo-init_flags)
   - [`cloudsync_enable()`](#cloudsync_enabletable_name)
   - [`cloudsync_disable()`](#cloudsync_disabletable_name)
   - [`cloudsync_is_enabled()`](#cloudsync_is_enabledtable_name)
+  - [`cloudsync_set_filter()`](#cloudsync_set_filtertable_name-filter_expr)
+  - [`cloudsync_clear_filter()`](#cloudsync_clear_filtertable_name)
   - [`cloudsync_cleanup()`](#cloudsync_cleanuptable_name)
   - [`cloudsync_terminate()`](#cloudsync_terminate)
 - [Block-Level LWW Functions](#block-level-lww-functions)
@@ -38,7 +40,7 @@ This document provides a reference for the SQLite functions provided by the `sql
 
 ## Configuration Functions
 
-### `cloudsync_init(table_name, [crdt_algo], [force])`
+### `cloudsync_init(table_name, [crdt_algo], [init_flags])`
 
 **Description:** Initializes a table for `sqlite-sync` synchronization. This function is idempotent and needs to be called only once per table on each site; configurations are stored in the database and automatically loaded with the extension.
 
@@ -62,25 +64,32 @@ For comprehensive guidelines, see the [Database Schema Recommendations](docs/sch
 The function supports three overloads:
 - `cloudsync_init(table_name)`: Uses the default 'cls' CRDT algorithm.
 - `cloudsync_init(table_name, crdt_algo)`: Specifies a CRDT algorithm ('cls', 'dws', 'aws', 'gos').
-- `cloudsync_init(table_name, crdt_algo, force)`: Specifies an algorithm and, if `force` is `true` (or `1`), skips the integer primary key check (use with caution, GUIDs are strongly recommended).
+- `cloudsync_init(table_name, crdt_algo, init_flags)`: Specifies an algorithm and a bitmask of initialization flags to control which schema sanity checks are skipped.
 
 **Parameters:**
 
 - `table_name` (TEXT): The name of the table to initialize.
-- `crdt_algo` (TEXT, optional): The CRDT algorithm to use. Can be "cls", "dws", "aws", "gos". Defaults to "cls".
-- `force` (BOOLEAN, optional): If `true` (or `1`), it skips the check that prevents the use of a single-column INTEGER primary key. Defaults to `false`. It is strongly recommended to use globally unique primary keys instead of integers.
+- `crdt_algo` (TEXT, optional): The CRDT algorithm to use. Can be `"cls"`, `"dws"`, `"aws"`, `"gos"`. Defaults to `"cls"`.
+- `init_flags` (INTEGER, optional): A bitmask of flags that control initialization behavior. Defaults to `0` (no flags). Available flags:
+  - `0` — No flags; all sanity checks are performed (default).
+  - `1` (`CLOUDSYNC_INIT_FLAG_SKIP_INT_PK_CHECK`) — Skip the check that prevents the use of a single-column INTEGER primary key. Use with caution; globally unique primary keys (UUID/ULID) are strongly recommended.
+  - `2` (`CLOUDSYNC_INIT_FLAG_SKIP_NOT_NULL_DEFAULT_CHECK`) — Skip the check that requires all NOT NULL non-PK columns to have a DEFAULT value.
+  - `4` (`CLOUDSYNC_INIT_FLAG_SKIP_NOT_NULL_PRIKEYS_CHECK`) — Skip the check that rejects NULL primary key values.
+  - Flags can be combined with bitwise OR (e.g., `3` skips both the integer PK check and the NOT NULL default check).
 
 **Returns:** None.
 
 **Example:**
 
 ```sql
--- Initialize a single table for synchronization with the Causal-Length Set (CLS) Algorithm (default)
+-- Initialize a table with the default CLS algorithm
 SELECT cloudsync_init('my_table');
 
--- Initialize a single table for synchronization with a different algorithm Delete-Wins Set (DWS)
+-- Initialize a table with the Delete-Wins Set algorithm
 SELECT cloudsync_init('my_table', 'dws');
 
+-- Initialize a table with an integer primary key (skip the integer PK check)
+SELECT cloudsync_init('my_table', 'cls', 1);
 ```
 
 ---
@@ -135,6 +144,56 @@ SELECT cloudsync_disable('my_table');
 
 ```sql
 SELECT cloudsync_is_enabled('my_table');
+```
+
+---
+
+### `cloudsync_set_filter(table_name, filter_expr)`
+
+**Description:** Sets a row-level filter expression on a synchronized table. Only rows that match the filter are tracked by the sync triggers; changes to rows that do not satisfy the expression are ignored and never replicated.
+
+The filter expression is a standard SQL boolean expression written using bare column names (without a table or alias prefix). The extension automatically rewrites it with `NEW.` for INSERT/UPDATE triggers and `OLD.` for DELETE triggers. The expression is evaluated inside the trigger `WHEN` clause.
+
+This function stores the filter in the table's settings and immediately recreates the sync triggers to apply it. The filter persists across database reopens. Use [`cloudsync_clear_filter()`](#cloudsync_clear_filtertable_name) to remove it.
+
+**Parameters:**
+
+- `table_name` (TEXT): The name of the synchronized table.
+- `filter_expr` (TEXT): A SQL boolean expression referencing column names of the table. Only rows for which this expression evaluates to true are tracked for sync.
+
+**Returns:** `1` on success.
+
+**Example:**
+
+```sql
+-- Only sync tasks that are not marked as drafts
+SELECT cloudsync_set_filter('tasks', "is_draft = 0");
+
+-- Only sync rows belonging to a specific tenant
+SELECT cloudsync_set_filter('orders', "tenant_id = 'acme'");
+
+-- Combine conditions
+SELECT cloudsync_set_filter('messages', "deleted = 0 AND type != 'ephemeral'");
+```
+
+---
+
+### `cloudsync_clear_filter(table_name)`
+
+**Description:** Removes the row-level filter previously set with [`cloudsync_set_filter()`](#cloudsync_set_filtertable_name-filter_expr). After clearing, all row changes in the table are tracked and replicated regardless of column values.
+
+This function updates the stored settings and immediately recreates the sync triggers without a filter condition.
+
+**Parameters:**
+
+- `table_name` (TEXT): The name of the synchronized table.
+
+**Returns:** `1` on success.
+
+**Example:**
+
+```sql
+SELECT cloudsync_clear_filter('tasks');
 ```
 
 ---

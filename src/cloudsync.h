@@ -29,6 +29,13 @@ extern "C" {
 
 #define CLOUDSYNC_CHANGES_NCOLS                 9
 
+typedef enum {
+    CLOUDSYNC_INIT_FLAG_NONE                        = 0,
+    CLOUDSYNC_INIT_FLAG_SKIP_INT_PK_CHECK           = 1 << 0, // 1
+    CLOUDSYNC_INIT_FLAG_SKIP_NOT_NULL_DEFAULT_CHECK = 1 << 1, // 2
+    CLOUDSYNC_INIT_FLAG_SKIP_NOT_NULL_PRIKEYS_CHECK = 1 << 2  // 4
+} CLOUDSYNC_INIT_FLAG;
+
 // CRDT Algos
 table_algo cloudsync_algo_from_name (const char *algo_name);
 const char *cloudsync_algo_name (table_algo algo);
@@ -43,7 +50,7 @@ const char *cloudsync_context_init (cloudsync_context *data);
 void cloudsync_context_free (void *ctx);
 
 // CloudSync global
-int cloudsync_init_table (cloudsync_context *data, const char *table_name, const char *algo_name, bool skip_int_pk_check);
+int cloudsync_init_table (cloudsync_context *data, const char *table_name, const char *algo_name, CLOUDSYNC_INIT_FLAG init_flags);
 int cloudsync_cleanup (cloudsync_context *data, const char *table_name);
 int cloudsync_cleanup_all (cloudsync_context *data);
 int cloudsync_terminate (cloudsync_context *data);

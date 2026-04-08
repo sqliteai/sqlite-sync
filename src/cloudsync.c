@@ -2429,7 +2429,7 @@ int cloudsync_commit_alter (cloudsync_context *data, const char *table_name) {
     // init again cloudsync for the table
     table_algo algo_current = dbutils_table_settings_get_algo(data, table_name);
     if (algo_current == table_algo_none) algo_current = dbutils_table_settings_get_algo(data, "*");
-    rc = cloudsync_init_table(data, table_name, cloudsync_algo_name(algo_current), true);
+    rc = cloudsync_init_table(data, table_name, cloudsync_algo_name(algo_current), CLOUDSYNC_INIT_FLAG_SKIP_INT_PK_CHECK);
     if (rc != DBRES_OK) goto rollback_finalize_alter;
 
     return DBRES_OK;
@@ -3290,7 +3290,7 @@ int cloudsync_payload_save (cloudsync_context *data, const char *payload_path, i
 
 // MARK: - Core -
 
-int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, bool skip_int_pk_check) {
+int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, CLOUDSYNC_INIT_FLAG init_flags) {
     DEBUG_DBFUNCTION("cloudsync_table_sanity_check %s", name);
     char buffer[2048];
     
@@ -3329,7 +3329,8 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
         return cloudsync_set_error(data, buffer, DBRES_ERROR);
     }
     #endif
-        
+    
+    bool skip_int_pk_check = (init_flags & CLOUDSYNC_INIT_FLAG_SKIP_INT_PK_CHECK) != 0;
     if (!skip_int_pk_check) {
         if (npri_keys == 1) {
             // the affinity of a column is determined by the declared type of the column,
@@ -3347,23 +3348,29 @@ int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, boo
         
     // if user declared explicit primary key(s) then make sure they are all declared as NOT NULL
     #if CLOUDSYNC_CHECK_NOTNULL_PRIKEYS
-    if (npri_keys > 0) {
-        int npri_keys_notnull = database_count_pk(data, name, true, cloudsync_schema(data));
-        if (npri_keys_notnull < 0) return cloudsync_set_dberror(data);
-        if (npri_keys != npri_keys_notnull) {
-            snprintf(buffer, sizeof(buffer), "All primary keys must be explicitly declared as NOT NULL (table %s)", name);
-            return cloudsync_set_error(data, buffer, DBRES_ERROR);
+    bool skip_notnull_prikeys_check = (init_flags & CLOUDSYNC_INIT_FLAG_SKIP_NOT_NULL_PRIKEYS_CHECK) != 0;
+    if (!skip_notnull_prikeys_check) {
+        if (npri_keys > 0) {
+            int npri_keys_notnull = database_count_pk(data, name, true, cloudsync_schema(data));
+            if (npri_keys_notnull < 0) return cloudsync_set_dberror(data);
+            if (npri_keys != npri_keys_notnull) {
+                snprintf(buffer, sizeof(buffer), "All primary keys must be explicitly declared as NOT NULL (table %s)", name);
+                return cloudsync_set_error(data, buffer, DBRES_ERROR);
+            }
         }
     }
     #endif
     
     // check for columns declared as NOT NULL without a DEFAULT value.
     // Otherwise, col_merge_stmt would fail if changes to other columns are inserted first.
-    int n_notnull_nodefault = database_count_notnull_without_default(data, name, cloudsync_schema(data));
-    if (n_notnull_nodefault < 0) return cloudsync_set_dberror(data);
-    if (n_notnull_nodefault > 0) {
-        snprintf(buffer, sizeof(buffer), "All non-primary key columns declared as NOT NULL must have a DEFAULT value. (table %s)", name);
-        return cloudsync_set_error(data, buffer, DBRES_ERROR);
+    bool skip_notnull_default_check = (init_flags & CLOUDSYNC_INIT_FLAG_SKIP_NOT_NULL_DEFAULT_CHECK) != 0;
+    if (!skip_notnull_default_check) {
+        int n_notnull_nodefault = database_count_notnull_without_default(data, name, cloudsync_schema(data));
+        if (n_notnull_nodefault < 0) return cloudsync_set_dberror(data);
+        if (n_notnull_nodefault > 0) {
+            snprintf(buffer, sizeof(buffer), "All non-primary key columns declared as NOT NULL must have a DEFAULT value. (table %s)", name);
+            return cloudsync_set_error(data, buffer, DBRES_ERROR);
+        }
     }
     
     return DBRES_OK;
@@ -3452,9 +3459,9 @@ int cloudsync_terminate (cloudsync_context *data) {
     return 1;
 }
 
-int cloudsync_init_table (cloudsync_context *data, const char *table_name, const char *algo_name, bool skip_int_pk_check) {
+int cloudsync_init_table (cloudsync_context *data, const char *table_name, const char *algo_name, CLOUDSYNC_INIT_FLAG init_flags) {
     // sanity check table and its primary key(s)
-    int rc = cloudsync_table_sanity_check(data, table_name, skip_int_pk_check);
+    int rc = cloudsync_table_sanity_check(data, table_name, init_flags);
     if (rc != DBRES_OK) return rc;
     
     // init cloudsync_settings

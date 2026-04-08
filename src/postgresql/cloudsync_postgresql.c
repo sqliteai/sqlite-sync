@@ -272,7 +272,7 @@ Datum cloudsync_db_version_next (PG_FUNCTION_ARGS) {
 
 // Internal helper for cloudsync_init - replicates dbsync_init logic from SQLite
 // Returns site_id as bytea on success, raises error on failure
-static bytea *cloudsync_init_internal (cloudsync_context *data, const char *table, const char *algo, bool skip_int_pk_check) {
+static bytea *cloudsync_init_internal (cloudsync_context *data, const char *table, const char *algo, CLOUDSYNC_INIT_FLAG init_flags) {
     bytea *result = NULL;
 
     // Connect SPI for database operations
@@ -290,7 +290,7 @@ static bytea *cloudsync_init_internal (cloudsync_context *data, const char *tabl
         }
 
         // Initialize table for sync
-        rc = cloudsync_init_table(data, table, algo, skip_int_pk_check);
+        rc = cloudsync_init_table(data, table, algo, init_flags);
         ereport(DEBUG1, (errmsg("cloudsync_init_internal cloudsync_init_table %d", rc)));
 
         if (rc == DBRES_OK) {
@@ -305,10 +305,19 @@ static bytea *cloudsync_init_internal (cloudsync_context *data, const char *tabl
                 dbutils_settings_set_key_value(data, "schema", cur_schema);
             }
         } else {
-            // In case of error, rollback transaction
+            // In case of error, rollback sub-transaction and raise.
+            // We intentionally avoid database_rollback_savepoint() here
+            // because it calls database_refresh_snapshot() which pushes a
+            // new active snapshot.  Pushing a snapshot after rollback and
+            // before ereport(ERROR) leaves portal->portalSnapshot non-NULL
+            // when PL/pgSQL's exception handler later calls
+            // EnsurePortalSnapshotExists(), triggering
+            // Assert(portal->portalSnapshot == NULL) on debug builds.
             char err[1024];
             snprintf(err, sizeof(err), "%s", cloudsync_errmsg(data));
-            database_rollback_savepoint(data, "cloudsync_init");
+            if (GetCurrentTransactionNestLevel() > 1) {
+                RollbackAndReleaseCurrentSubTransaction();
+            }
             ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", err)));
         }
 
@@ -332,8 +341,8 @@ static bytea *cloudsync_init_internal (cloudsync_context *data, const char *tabl
     return result;
 }
 
-// cloudsync_init(table_name, [algo], [skip_int_pk_check]) - Initialize table for sync
-// Supports 1-3 arguments with defaults: algo=NULL, skip_int_pk_check=false
+// cloudsync_init(table_name, [algo], [init_flags]) - Initialize table for sync
+// Supports 1-3 arguments with defaults: algo=NULL, init_flags=CLOUDSYNC_INIT_FLAG_NONE
 PG_FUNCTION_INFO_V1(cloudsync_init);
 Datum cloudsync_init (PG_FUNCTION_ARGS) {
     if (PG_ARGISNULL(0)) {
@@ -344,7 +353,7 @@ Datum cloudsync_init (PG_FUNCTION_ARGS) {
 
     // Default values
     const char *algo = NULL;
-    bool skip_int_pk_check = false;
+    int init_flags = CLOUDSYNC_INIT_FLAG_NONE;
 
     // Handle optional arguments
     int nargs = PG_NARGS();
@@ -354,13 +363,13 @@ Datum cloudsync_init (PG_FUNCTION_ARGS) {
     }
 
     if (nargs >= 3 && !PG_ARGISNULL(2)) {
-        skip_int_pk_check = PG_GETARG_BOOL(2);
+        init_flags = PG_GETARG_INT32(2);
     }
 
     cloudsync_context *data = get_cloudsync_context();
 
     // Call internal helper and return site_id as bytea
-    bytea *result = cloudsync_init_internal(data, table, algo, skip_int_pk_check);
+    bytea *result = cloudsync_init_internal(data, table, algo, init_flags);
     PG_RETURN_BYTEA_P(result);
 }
 

@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.9] - 2026-04-08
+
+### Changed
+
+- **cloudsync_init**: Replaced the `force` boolean parameter with an `init_flags` integer bitmask (`CLOUDSYNC_INIT_FLAG`), allowing fine-grained control over which schema sanity checks are skipped. Existing callers passing `0`/`false` or `1`/`true` remain compatible.
+- **API**: Updated `cloudsync_init` SQL signature (PostgreSQL) to accept `integer` instead of `boolean` for the third argument, enabling flag combinations via bitwise OR.
+
+### Added
+
+- `CLOUDSYNC_INIT_FLAG_NONE` (0), `CLOUDSYNC_INIT_FLAG_SKIP_INT_PK_CHECK` (1), `CLOUDSYNC_INIT_FLAG_SKIP_NOT_NULL_DEFAULT_CHECK` (2), `CLOUDSYNC_INIT_FLAG_SKIP_NOT_NULL_PRIKEYS_CHECK` (4) enum values.
+- Documentation for `cloudsync_set_filter` and `cloudsync_clear_filter` in API.md.
+
 ## [1.0.8] - 2026-04-03
 
 ### Changed

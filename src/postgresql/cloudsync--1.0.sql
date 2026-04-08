@@ -55,7 +55,7 @@ RETURNS bytea
 AS 'MODULE_PATHNAME', 'cloudsync_init'
 LANGUAGE C VOLATILE;
 
-CREATE OR REPLACE FUNCTION cloudsync_init(table_name text, algo text, skip_int_pk_check boolean)
+CREATE OR REPLACE FUNCTION cloudsync_init(table_name text, algo text, init_flags integer)
 RETURNS bytea
 AS 'MODULE_PATHNAME', 'cloudsync_init'
 LANGUAGE C VOLATILE;
