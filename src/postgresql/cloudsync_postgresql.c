@@ -305,10 +305,19 @@ static bytea *cloudsync_init_internal (cloudsync_context *data, const char *tabl
                 dbutils_settings_set_key_value(data, "schema", cur_schema);
             }
         } else {
-            // In case of error, rollback transaction
+            // In case of error, rollback sub-transaction and raise.
+            // We intentionally avoid database_rollback_savepoint() here
+            // because it calls database_refresh_snapshot() which pushes a
+            // new active snapshot.  Pushing a snapshot after rollback and
+            // before ereport(ERROR) leaves portal->portalSnapshot non-NULL
+            // when PL/pgSQL's exception handler later calls
+            // EnsurePortalSnapshotExists(), triggering
+            // Assert(portal->portalSnapshot == NULL) on debug builds.
             char err[1024];
             snprintf(err, sizeof(err), "%s", cloudsync_errmsg(data));
-            database_rollback_savepoint(data, "cloudsync_init");
+            if (GetCurrentTransactionNestLevel() > 1) {
+                RollbackAndReleaseCurrentSubTransaction();
+            }
             ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", err)));
         }
 
