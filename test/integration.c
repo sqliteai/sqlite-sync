@@ -437,22 +437,22 @@ int test_offline_error(const char *db_path) {
     char verify_sql[1024];
     snprintf(verify_sql, sizeof(verify_sql),
         "SELECT json_extract('%s', '$.errors[0].status');", errmsg);
-    rc = db_expect_str(db, verify_sql, "500");
+    rc = db_expect_str(db, verify_sql, "503");
     if (rc != SQLITE_OK) { printf("Offline error: unexpected status in: %s\n", errmsg); sqlite3_free(errmsg); goto abort_test; }
 
     snprintf(verify_sql, sizeof(verify_sql),
         "SELECT json_extract('%s', '$.errors[0].code');", errmsg);
-    rc = db_expect_str(db, verify_sql, "internal_server_error");
+    rc = db_expect_str(db, verify_sql, "database_paused");
     if (rc != SQLITE_OK) { printf("Offline error: unexpected code in: %s\n", errmsg); sqlite3_free(errmsg); goto abort_test; }
 
     snprintf(verify_sql, sizeof(verify_sql),
         "SELECT json_extract('%s', '$.errors[0].title');", errmsg);
-    rc = db_expect_str(db, verify_sql, "Internal Server Error");
+    rc = db_expect_str(db, verify_sql, "Database paused");
     if (rc != SQLITE_OK) { printf("Offline error: unexpected title in: %s\n", errmsg); sqlite3_free(errmsg); goto abort_test; }
 
     snprintf(verify_sql, sizeof(verify_sql),
         "SELECT json_extract('%s', '$.errors[0].detail');", errmsg);
-    rc = db_expect_str(db, verify_sql, "failed to resolve token data: failed to resolve db user for api key: db: connect sqlitecloud failed after 3 attempts: Your free node has been paused due to inactivity. To resume usage, please restart your node from your dashboard: https://dashboard.sqlitecloud.io");
+    rc = db_expect_str(db, verify_sql, "database is paused due to inactivity; restart the node from the SQLite Cloud dashboard: ERROR: Your free node has been paused due to inactivity. To resume usage, please restart your node from your dashboard: https://dashboard.sqlitecloud.io (10010 - -1)");
     if (rc != SQLITE_OK) { printf("Offline error: unexpected detail in: %s\n", errmsg); sqlite3_free(errmsg); goto abort_test; }
 
     sqlite3_free(errmsg);
