@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.13] - 2026-04-14
+
+### Fixed
+
+- **Block-level LWW migration**: When `cloudsync_set_column(..., 'algo', 'block')` is called on a table that already has tracked rows, those rows are now immediately migrated into the blocks table. Previously, pre-existing column values were ignored until the next UPDATE, leaving sync state incomplete. The migration uses a two-phase collect-then-write approach to avoid SQLite cursor invalidation and `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING` semantics for idempotency.
+
+### Added
+
+- Unit test `do_test_block_lww_existing_data` (Block LWW Existing Data) verifying block migration on `set_column`, idempotency of repeated `set_column` calls, and correct materialization after update.
+- PostgreSQL test `50_block_lww_existing_data.sql` with equivalent coverage for the PostgreSQL backend.
+
 ## [1.0.12] - 2026-04-11
 
 ### Fixed

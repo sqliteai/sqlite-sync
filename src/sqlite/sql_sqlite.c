@@ -304,3 +304,15 @@ const char * const SQL_BLOCKS_LIST_ALIVE =
     "WHERE b.pk = ?1 AND b.col_name LIKE ?2 "
     "AND m.pk = ?3 AND m.col_name LIKE ?4 AND m.col_version %% 2 = 1 "
     "ORDER BY b.col_name";
+
+const char * const SQL_BLOCKS_INSERT_IGNORE =
+    "INSERT OR IGNORE INTO %s (pk, col_name, col_value) VALUES (?1, ?2, ?3)";
+
+const char * const SQL_META_SCAN_COL_FOR_MIGRATION =
+    "SELECT DISTINCT m.pk FROM %s m "
+    "WHERE m.col_name = ?1 AND m.col_version %% 2 = 1 "
+    "AND NOT EXISTS (SELECT 1 FROM %s b WHERE b.pk = m.pk AND b.col_name LIKE ?2)";
+
+const char * const SQL_META_INSERT_BLOCK_IGNORE =
+    "INSERT OR IGNORE INTO %s (pk, col_name, col_version, db_version, seq, site_id) "
+    "VALUES (?1, ?2, ?3, ?4, ?5, 0)";

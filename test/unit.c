@@ -9104,6 +9104,128 @@ static char *do_select_text(sqlite3 *db, const char *sql) {
     return val;
 }
 
+// Test: enabling block-level LWW on a table that already contains rows migrates
+// existing data into the blocks table so it is not silently ignored.
+// Verifies:
+//  1. Blocks table is populated for pre-existing rows after set_column('algo','block').
+//  2. A subsequent UPDATE correctly diffs against the migrated blocks, not from empty.
+//  3. The migration is idempotent (calling set_column twice does not double the blocks).
+bool do_test_block_lww_existing_data(bool cleanup_databases) {
+    sqlite3 *db = NULL;
+    bool result = false;
+    char dbpath[256];
+    time_t timestamp = time(NULL);
+
+    #ifdef __ANDROID__
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blockexist-%ld.sqlite", ".", timestamp);
+    #else
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blockexist-%ld.sqlite", getenv("HOME"), timestamp);
+    #endif
+
+    int rc = sqlite3_open(dbpath, &db);
+    if (rc != SQLITE_OK) return false;
+    sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+    sqlite3_cloudsync_init(db, NULL, NULL);
+
+    // Create table and init sync BEFORE enabling block-level LWW
+    rc = sqlite3_exec(db, "CREATE TABLE docs (id TEXT PRIMARY KEY NOT NULL, body TEXT);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Insert rows via the sync layer (populates regular column metadata)
+    rc = sqlite3_exec(db, "INSERT INTO docs (id, body) VALUES ('d1', 'line1\nline2\nline3');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_exec(db, "INSERT INTO docs (id, body) VALUES ('d2', 'alpha\nbeta');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Sanity: no blocks table yet
+    int64_t blocks_table_before = do_select_int(db,
+        "SELECT count(*) FROM sqlite_master WHERE name='docs_cloudsync_blocks';");
+    if (blocks_table_before != 0) {
+        printf("block_existing_data: blocks table should not exist before set_column\n");
+        goto cleanup;
+    }
+
+    // NOW enable block-level LWW — this should migrate the existing rows
+    rc = sqlite3_exec(db, "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_existing_data: set_column failed: %s\n", sqlite3_errmsg(db)); goto cleanup; }
+
+    // Verify blocks table was created and is populated
+    int64_t blocks_table_after = do_select_int(db,
+        "SELECT count(*) FROM sqlite_master WHERE name='docs_cloudsync_blocks';");
+    if (blocks_table_after != 1) {
+        printf("block_existing_data: blocks table not created after set_column\n");
+        goto cleanup;
+    }
+
+    // d1 has 3 lines → 3 block entries; d2 has 2 lines → 2 block entries = 5 total
+    int64_t block_count = do_select_int(db, "SELECT count(*) FROM docs_cloudsync_blocks;");
+    if (block_count != 5) {
+        printf("block_existing_data: expected 5 block entries after migration, got %" PRId64 "\n", block_count);
+        goto cleanup;
+    }
+
+    // Metadata must contain the migrated block entries (alive, odd col_version)
+    int64_t meta_block_count = do_select_int(db,
+        "SELECT count(*) FROM docs_cloudsync WHERE col_name LIKE 'body\x1f%' AND col_version % 2 = 1;");
+    if (meta_block_count != 5) {
+        printf("block_existing_data: expected 5 block metadata entries, got %" PRId64 "\n", meta_block_count);
+        goto cleanup;
+    }
+
+    // UPDATE d1: change one line — diff should reuse existing block positions
+    rc = sqlite3_exec(db, "UPDATE docs SET body='line1\nMODIFIED\nline3' WHERE id='d1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_existing_data: UPDATE failed: %s\n", sqlite3_errmsg(db)); goto cleanup; }
+
+    // After the update: total alive blocks is still 5 (d1: 3, d2: 2)
+    int64_t alive_after_update = do_select_int(db,
+        "SELECT count(*) FROM docs_cloudsync_blocks b "
+        "JOIN docs_cloudsync m ON b.pk = m.pk AND b.col_name = m.col_name "
+        "WHERE b.col_name LIKE 'body\x1f%' AND m.col_version % 2 = 1;");
+    if (alive_after_update != 5) {
+        printf("block_existing_data: expected 5 alive blocks after update, got %" PRId64 "\n", alive_after_update);
+        goto cleanup;
+    }
+
+    // Verify materialized value is correct after update
+    char *val = do_select_text(db, "SELECT body FROM docs WHERE id='d1';");
+    if (!val || strcmp(val, "line1\nMODIFIED\nline3") != 0) {
+        printf("block_existing_data: unexpected body after update: '%s'\n", val ? val : "(null)");
+        if (val) sqlite3_free(val);
+        goto cleanup;
+    }
+    sqlite3_free(val);
+
+    // Idempotency: calling set_column again must not duplicate block entries
+    rc = sqlite3_exec(db, "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    int64_t block_count_after_second_call = do_select_int(db, "SELECT count(*) FROM docs_cloudsync_blocks;");
+    if (block_count_after_second_call != block_count) {
+        printf("block_existing_data: idempotency broken — block count changed from %" PRId64 " to %" PRId64 " on second set_column\n",
+               block_count, block_count_after_second_call);
+        goto cleanup;
+    }
+
+    result = true;
+
+cleanup:
+    if (db) {
+        sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+        sqlite3_close(db);
+    }
+    if (cleanup_databases) {
+        file_delete_internal(dbpath);
+        char walpath[280];
+        snprintf(walpath, sizeof(walpath), "%s-wal", dbpath);
+        file_delete_internal(walpath);
+        snprintf(walpath, sizeof(walpath), "%s-shm", dbpath);
+        file_delete_internal(walpath);
+    }
+    return result;
+}
+
 bool do_test_block_lww_insert(int nclients, bool print_result, bool cleanup_databases) {
     // Test: INSERT into a table with a block column properly splits text into blocks
     sqlite3 *db[2] = {NULL, NULL};
@@ -12146,6 +12268,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Large Composite PK Test:", do_test_large_composite_pk(2, print_result, cleanup_databases));
     result += test_report("Schema Hash Mismatch:", do_test_schema_hash_mismatch(2, print_result, cleanup_databases));
     result += test_report("Stale Table Settings:", do_test_stale_table_settings(cleanup_databases));
+    result += test_report("Block LWW Existing Data:", do_test_block_lww_existing_data(cleanup_databases));
     result += test_report("Block Column Reload:", do_test_block_column_reload(cleanup_databases));
     result += test_report("CB Error Cleanup:", do_test_context_cb_error_cleanup());
 

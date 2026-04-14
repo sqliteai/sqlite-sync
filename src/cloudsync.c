@@ -2069,6 +2069,172 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
 
 // MARK: - Block column setup -
 
+// Migrate existing tracked rows to block format when block-level LWW is first enabled on a column.
+// Scans the metadata table for alive rows with the plain col_name entry (not yet block entries),
+// reads each row's current value from the base table, splits it into blocks, and inserts
+// the block entries into both the blocks table and the metadata table.
+// Uses INSERT OR IGNORE semantics so the operation is safe to call multiple times.
+static int block_migrate_existing_rows (cloudsync_context *data, cloudsync_table_context *table, int col_idx) {
+    const char *col_name = table->col_name[col_idx];
+    if (!col_name || !table->meta_ref || !table->blocks_ref) return DBRES_OK;
+
+    const char *delim = table->col_delimiter[col_idx] ? table->col_delimiter[col_idx] : BLOCK_DEFAULT_DELIMITER;
+    int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
+
+    // Phase 1: collect all existing PKs that have an alive regular col_name entry
+    // AND do not yet have any entries in the blocks table for this column.
+    // The NOT IN filter makes this idempotent: rows that were already migrated
+    // (or had their blocks created via INSERT) are skipped on subsequent calls.
+    // We collect PKs before writing so that writes to the metadata table (Phase 2)
+    // do not perturb the read cursor on the same table.
+    char *like_pattern = block_build_colname(col_name, "%");
+    if (!like_pattern) return DBRES_NOMEM;
+
+    char *scan_sql = cloudsync_memory_mprintf(SQL_META_SCAN_COL_FOR_MIGRATION, table->meta_ref, table->blocks_ref);
+    if (!scan_sql) { cloudsync_memory_free(like_pattern); return DBRES_NOMEM; }
+    dbvm_t *scan_vm = NULL;
+    int rc = databasevm_prepare(data, scan_sql, &scan_vm, 0);
+    cloudsync_memory_free(scan_sql);
+    if (rc != DBRES_OK) { cloudsync_memory_free(like_pattern); return rc; }
+
+    rc = databasevm_bind_text(scan_vm, 1, col_name, -1);
+    if (rc != DBRES_OK) { cloudsync_memory_free(like_pattern); databasevm_finalize(scan_vm); return rc; }
+    // Bind like_pattern as ?2 and keep it alive until after all scan steps complete,
+    // because databasevm_bind_text uses SQLITE_STATIC (no copy).
+    rc = databasevm_bind_text(scan_vm, 2, like_pattern, -1);
+    if (rc != DBRES_OK) { cloudsync_memory_free(like_pattern); databasevm_finalize(scan_vm); return rc; }
+
+    // Collect pk blobs into a dynamically-grown array of owned copies
+    void  **pks     = NULL;
+    size_t *pklens  = NULL;
+    int     pk_count = 0;
+    int     pk_cap   = 0;
+
+    while ((rc = databasevm_step(scan_vm)) == DBRES_ROW) {
+        size_t pklen = 0;
+        const void *pk = database_column_blob(scan_vm, 0, &pklen);
+        if (!pk || pklen == 0) continue;
+
+        if (pk_count >= pk_cap) {
+            int new_cap = pk_cap ? pk_cap * 2 : 8;
+            void  **new_pks    = (void  **)cloudsync_memory_realloc(pks,    (uint64_t)(new_cap * sizeof(void *)));
+            size_t *new_pklens = (size_t *)cloudsync_memory_realloc(pklens, (uint64_t)(new_cap * sizeof(size_t)));
+            if (!new_pks || !new_pklens) {
+                cloudsync_memory_free(new_pks ? new_pks : pks);
+                cloudsync_memory_free(new_pklens ? new_pklens : pklens);
+                databasevm_finalize(scan_vm);
+                return DBRES_NOMEM;
+            }
+            pks    = new_pks;
+            pklens = new_pklens;
+            pk_cap = new_cap;
+        }
+
+        pks[pk_count] = cloudsync_memory_alloc((uint64_t)pklen);
+        if (!pks[pk_count]) { rc = DBRES_NOMEM; break; }
+        memcpy(pks[pk_count], pk, pklen);
+        pklens[pk_count] = pklen;
+        pk_count++;
+    }
+
+    databasevm_finalize(scan_vm);
+    cloudsync_memory_free(like_pattern); // safe to free after scan_vm is finalized
+    if (rc != DBRES_DONE && rc != DBRES_OK) {
+        for (int i = 0; i < pk_count; i++) cloudsync_memory_free(pks[i]);
+        cloudsync_memory_free(pks);
+        cloudsync_memory_free(pklens);
+        return rc;
+    }
+
+    if (pk_count == 0) {
+        cloudsync_memory_free(pks);
+        cloudsync_memory_free(pklens);
+        return DBRES_OK;
+    }
+
+    // Phase 2: for each collected PK, read the column value, split into blocks,
+    // and insert into the blocks table + metadata using INSERT OR IGNORE.
+
+    char *meta_sql = cloudsync_memory_mprintf(SQL_META_INSERT_BLOCK_IGNORE, table->meta_ref);
+    if (!meta_sql) { rc = DBRES_NOMEM; goto cleanup_pks; }
+    dbvm_t *meta_vm = NULL;
+    rc = databasevm_prepare(data, meta_sql, &meta_vm, 0);
+    cloudsync_memory_free(meta_sql);
+    if (rc != DBRES_OK) goto cleanup_pks;
+
+    char *blocks_sql = cloudsync_memory_mprintf(SQL_BLOCKS_INSERT_IGNORE, table->blocks_ref);
+    if (!blocks_sql) { databasevm_finalize(meta_vm); rc = DBRES_NOMEM; goto cleanup_pks; }
+    dbvm_t *blocks_vm = NULL;
+    rc = databasevm_prepare(data, blocks_sql, &blocks_vm, 0);
+    cloudsync_memory_free(blocks_sql);
+    if (rc != DBRES_OK) { databasevm_finalize(meta_vm); goto cleanup_pks; }
+
+    dbvm_t *val_vm = (dbvm_t *)table_column_lookup(table, col_name, false, NULL);
+
+    for (int p = 0; p < pk_count; p++) {
+        const void *pk = pks[p];
+        size_t pklen   = pklens[p];
+
+        if (!val_vm) continue;
+
+        // Read current column value from the base table
+        int bind_rc = pk_decode_prikey((char *)pk, pklen, pk_decode_bind_callback, (void *)val_vm);
+        if (bind_rc < 0) { databasevm_reset(val_vm); continue; }
+
+        int step_rc = databasevm_step(val_vm);
+        const char *text = (step_rc == DBRES_ROW) ? database_column_text(val_vm, 0) : NULL;
+        // Make a copy of text before resetting val_vm, as the pointer is only valid until reset
+        char *text_copy = text ? cloudsync_string_dup(text) : NULL;
+        databasevm_reset(val_vm);
+
+        if (!text_copy) continue; // NULL column value: nothing to migrate
+
+        // Split text into blocks and store each one
+        block_list_t *blocks = block_split(text_copy, delim);
+        cloudsync_memory_free(text_copy);
+        if (!blocks) continue;
+
+        char **positions = block_initial_positions(blocks->count);
+        if (positions) {
+            for (int b = 0; b < blocks->count; b++) {
+                char *block_cn = block_build_colname(col_name, positions[b]);
+                if (block_cn) {
+                    // Metadata entry (skip if this block position already exists)
+                    databasevm_bind_blob(meta_vm, 1, pk, (int)pklen);
+                    databasevm_bind_text(meta_vm, 2, block_cn, -1);
+                    databasevm_bind_int(meta_vm, 3, 1);            // col_version = 1 (alive)
+                    databasevm_bind_int(meta_vm, 4, db_version);
+                    databasevm_bind_int(meta_vm, 5, cloudsync_bumpseq(data));
+                    databasevm_step(meta_vm);
+                    databasevm_reset(meta_vm);
+
+                    // Block value (skip if this block position already exists)
+                    databasevm_bind_blob(blocks_vm, 1, pk, (int)pklen);
+                    databasevm_bind_text(blocks_vm, 2, block_cn, -1);
+                    databasevm_bind_text(blocks_vm, 3, blocks->entries[b].content, -1);
+                    databasevm_step(blocks_vm);
+                    databasevm_reset(blocks_vm);
+
+                    cloudsync_memory_free(block_cn);
+                }
+                cloudsync_memory_free(positions[b]);
+            }
+            cloudsync_memory_free(positions);
+        }
+        block_list_free(blocks);
+    }
+
+    databasevm_finalize(meta_vm);
+    databasevm_finalize(blocks_vm);
+    rc = DBRES_OK;
+
+cleanup_pks:
+    for (int i = 0; i < pk_count; i++) cloudsync_memory_free(pks[i]);
+    cloudsync_memory_free(pks);
+    cloudsync_memory_free(pklens);
+    return rc;
+}
+
 int cloudsync_setup_block_column (cloudsync_context *data, const char *table_name, const char *col_name, const char *delimiter, bool persist) {
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) return cloudsync_set_error(data, "cloudsync_setup_block_column: table not found", DBRES_ERROR);
@@ -2148,6 +2314,13 @@ int cloudsync_setup_block_column (cloudsync_context *data, const char *table_nam
             rc = dbutils_table_settings_set_key_value(data, table_name, col_name, "delimiter", delimiter);
             if (rc != DBRES_OK) return rc;
         }
+
+        // Migrate any existing tracked rows: populate the blocks table and metadata with
+        // block entries derived from the current column value, so that subsequent UPDATE
+        // operations can diff against the real existing state instead of treating everything
+        // as new, and so this node participates correctly in LWW conflict resolution.
+        rc = block_migrate_existing_rows(data, table, col_idx);
+        if (rc != DBRES_OK) return rc;
     }
 
     return DBRES_OK;

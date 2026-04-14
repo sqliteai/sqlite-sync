@@ -74,5 +74,8 @@ extern const char * const SQL_BLOCKS_UPSERT;
 extern const char * const SQL_BLOCKS_SELECT;
 extern const char * const SQL_BLOCKS_DELETE;
 extern const char * const SQL_BLOCKS_LIST_ALIVE;
+extern const char * const SQL_BLOCKS_INSERT_IGNORE;
+extern const char * const SQL_META_SCAN_COL_FOR_MIGRATION;
+extern const char * const SQL_META_INSERT_BLOCK_IGNORE;
 
 #endif
