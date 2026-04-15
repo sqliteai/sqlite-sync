@@ -397,9 +397,14 @@ int cloudsync_dbversion_rebuild (cloudsync_context *data) {
     int64_t count = dbutils_table_settings_count_tables(data);
     if (count == 0) return DBRES_OK;
     else if (count == -1) return cloudsync_set_dberror(data);
-    
+
     char *sql = cloudsync_dbversion_build_query(data);
-    if (!sql) return DBRES_NOMEM;
+    // A NULL result here means sqlite_master has no *_cloudsync meta-tables
+    // (for example, the user dropped the base table and its meta-table without
+    // calling cloudsync_cleanup, leaving stale cloudsync_table_settings rows).
+    // Treat this the same as count == 0: no prepared statement, db_version
+    // stays at the minimum and will be rebuilt on the next cloudsync_init.
+    if (!sql) return DBRES_OK;
     DEBUG_SQL("db_version_stmt: %s", sql);
     
     int rc = databasevm_prepare(data, sql, (void **)&data->db_version_stmt, DBFLAG_PERSISTENT);

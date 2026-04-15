@@ -1470,7 +1470,10 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     // load config, if exists
     if (cloudsync_config_exists(data)) {
         if (cloudsync_context_init(data) == NULL) {
-            cloudsync_context_free(data);
+            // Do not free ctx here: it is already owned by the cloudsync_version
+            // function (registered above with cloudsync_context_free as its
+            // destructor). SQLite will release it when the connection is closed.
+            // Freeing it manually would cause a double-free on sqlite3_close.
             if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("An error occurred while trying to initialize context");
             return SQLITE_ERROR;
         }

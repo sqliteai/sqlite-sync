@@ -2401,6 +2401,84 @@ cleanup:
     return result;
 }
 
+// Same as do_test_stale_table_settings, but also drops the <table>_cloudsync
+// meta-table before reopening. With a stale cloudsync_table_settings row and
+// no matching *_cloudsync meta-table in sqlite_master, the dbversion query
+// builder produces an empty (NULL) SQL string, causing sqlite3_cloudsync_init
+// to fail on reopen — previously crashing in some environments.
+bool do_test_stale_table_settings_dropped_meta(bool cleanup_databases) {
+    bool result = false;
+    char dbpath[256];
+    time_t timestamp = time(NULL);
+
+    #ifdef __ANDROID__
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-meta-%ld.sqlite", ".", timestamp);
+    #else
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-meta-%ld.sqlite", getenv("HOME"), timestamp);
+    #endif
+
+    // Phase 1: create database, table, and init cloudsync
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(dbpath, &db);
+    if (rc != SQLITE_OK) return false;
+    sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+    sqlite3_cloudsync_init(db, NULL, NULL);
+
+    rc = sqlite3_exec(db, "CREATE TABLE cloud (id TEXT PRIMARY KEY NOT NULL, value TEXT, extra INTEGER);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('cloud');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Phase 2: drop both the base table AND the meta-table without calling
+    // cloudsync_cleanup. This leaves stale entries in cloudsync_table_settings
+    // with no matching *_cloudsync table in sqlite_master.
+    sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+    sqlite3_close(db);
+    db = NULL;
+
+    rc = sqlite3_open(dbpath, &db);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_exec(db, "DROP TABLE IF EXISTS cloud;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_exec(db, "DROP TABLE IF EXISTS cloud_cloudsync;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    sqlite3_close(db);
+    db = NULL;
+
+    // Phase 3: reopen the database and load the extension — must succeed.
+    rc = sqlite3_open(dbpath, &db);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Sanity check: we can still call cloudsync_version and create a new table.
+    rc = sqlite3_exec(db, "SELECT cloudsync_version();", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(db, "CREATE TABLE cloud2 (id TEXT PRIMARY KEY NOT NULL, v TEXT);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('cloud2');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    result = true;
+
+cleanup:
+    if (db) {
+        sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+        sqlite3_close(db);
+    }
+    if (cleanup_databases) {
+        file_delete_internal(dbpath);
+        char walpath[280];
+        snprintf(walpath, sizeof(walpath), "%s-wal", dbpath);
+        file_delete_internal(walpath);
+        snprintf(walpath, sizeof(walpath), "%s-shm", dbpath);
+        file_delete_internal(walpath);
+    }
+    return result;
+}
+
 // Authorizer state for do_test_context_cb_error_cleanup.
 // Denies INSERT on a specific table after allowing a set number of INSERTs.
 static const char *g_deny_insert_table = NULL;
@@ -12268,6 +12346,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Large Composite PK Test:", do_test_large_composite_pk(2, print_result, cleanup_databases));
     result += test_report("Schema Hash Mismatch:", do_test_schema_hash_mismatch(2, print_result, cleanup_databases));
     result += test_report("Stale Table Settings:", do_test_stale_table_settings(cleanup_databases));
+    result += test_report("Stale Table Settings Dropped Meta:", do_test_stale_table_settings_dropped_meta(cleanup_databases));
     result += test_report("Block LWW Existing Data:", do_test_block_lww_existing_data(cleanup_databases));
     result += test_report("Block Column Reload:", do_test_block_column_reload(cleanup_databases));
     result += test_report("CB Error Cleanup:", do_test_context_cb_error_cleanup());
