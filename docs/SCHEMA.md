@@ -2,6 +2,22 @@
 
 When designing your database schema for SQLite Sync, follow these guidelines to ensure correct CRDT behavior and conflict resolution.
 
+## Schema Consistency Across Devices
+
+All databases participating in the same sync (every client and the cloud database) **must have the same set of synced tables with identical structure**:
+
+- The same tables must be created on every participant.
+- Each table must be initialized with `cloudsync_init()` on every participant.
+- Column names, types, and constraints must match across participants.
+
+sqlite-sync computes a **schema hash** from the synced tables and includes it in every sync payload. The server rejects payloads whose schema hash it does not recognize, failing with an error like:
+
+```
+cloudsync operation failed: Cannot apply the received payload because the schema hash is unknown <hash>
+```
+
+If you need different clients to see different subsets of data (for example, per-tenant or per-workspace isolation), do **not** give each client a different table. Instead, use a single shared schema and scope the data with a column such as `tenant_id` or `workspace_id`, then enforce isolation server-side with [Row-Level Security](./row-level-security.md).
+
 ## Primary Key Requirements
 
 - **Use globally unique identifiers**: Always use TEXT primary keys with UUIDs or ULIDs.

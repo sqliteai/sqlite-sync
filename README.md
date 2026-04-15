@@ -150,6 +150,8 @@ SELECT cloudsync_terminate();
 
 Back on Device A, calling `cloudsync_network_sync()` will pull Device B's changes. The CRDT engine ensures all devices converge to the same data, automatically, with no conflicts.
 
+> **Note:** every device participating in the same sync must create **the same set of tables with the same structure** and initialize each one with `cloudsync_init()`. sqlite-sync derives a schema hash from the synced tables, and the server rejects payloads whose hash it does not recognize. For multi-tenant setups where each client should see only a subset of rows, use a shared schema with a tenant/scope column and enforce isolation with [Row-Level Security](./docs/row-level-security.md) — do not give each client a different table.
+
 ## Block-Level LWW
 
 Standard CRDT sync replaces an entire cell when two devices edit the same column. **Block-Level LWW** splits text into lines and merges them independently, designed for keeping **markdown files and agent memory** in sync.
