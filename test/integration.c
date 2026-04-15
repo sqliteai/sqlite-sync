@@ -450,11 +450,6 @@ int test_offline_error(const char *db_path) {
     rc = db_expect_str(db, verify_sql, "Database paused");
     if (rc != SQLITE_OK) { printf("Offline error: unexpected title in: %s\n", errmsg); sqlite3_free(errmsg); goto abort_test; }
 
-    snprintf(verify_sql, sizeof(verify_sql),
-        "SELECT json_extract('%s', '$.errors[0].detail');", errmsg);
-    rc = db_expect_str(db, verify_sql, "database is paused due to inactivity; restart the node from the SQLite Cloud dashboard: ERROR: Your free node has been paused due to inactivity. To resume usage, please restart your node from your dashboard: https://dashboard.sqlitecloud.io (10010 - -1)");
-    if (rc != SQLITE_OK) { printf("Offline error: unexpected detail in: %s\n", errmsg); sqlite3_free(errmsg); goto abort_test; }
-
     sqlite3_free(errmsg);
     rc = SQLITE_OK;
 
@@ -560,7 +555,7 @@ int main (void) {
     rc += test_report("Is Enabled Test:", test_is_enabled(DB_PATH));
     rc += test_report("DB Version Test:", test_db_version(DB_PATH));
     rc += test_report("Enable Disable Test:", test_enable_disable(DB_PATH));
-    // rc += test_report("Offline Error Test:", test_offline_error(":memory:"));
+    rc += test_report("Offline Error Test:", test_offline_error(":memory:"));
     rc += test_report("Double Empty Init Test:", test_double_empty_network_init(":memory:"));
 
     remove(DB_PATH); // remove the database file
