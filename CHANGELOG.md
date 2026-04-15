@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.14] - 2026-04-15
+
+### Fixed
+
+- **Stale `cloudsync_table_settings` crash**: Reopening a database that had its base table and `<table>_cloudsync` meta-table dropped without calling `cloudsync_cleanup` crashed with a double-free on `sqlite3_close`. Two bugs were involved: (1) `cloudsync_dbversion_rebuild` returned `DBRES_NOMEM` when `cloudsync_dbversion_build_query` yielded a NULL SQL string (stale row in `cloudsync_table_settings` but no matching `*_cloudsync` table in `sqlite_master`), failing extension init; (2) on init failure `dbsync_register_functions` manually freed the context that SQLite already owned via the `cloudsync_version` destructor, causing a double-free when the connection was later closed. `cloudsync_dbversion_rebuild` now treats a NULL build query the same as `count == 0` (no prepared statement, db_version stays at the minimum and is rebuilt on the next `cloudsync_init`), and the manual free in the error path has been removed.
+
+### Added
+
+- Unit test `do_test_stale_table_settings_dropped_meta` (Stale Table Settings Dropped Meta) covering the drop-base-table + drop-meta-table + reopen scenario.
+
 ## [1.0.13] - 2026-04-14
 
 ### Fixed
