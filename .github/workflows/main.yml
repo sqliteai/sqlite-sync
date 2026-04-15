@@ -360,6 +360,8 @@ jobs:
     name: release
     needs: [build, postgres-test, postgres-build]
     if: github.ref == 'refs/heads/main'
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
 
     env:
       GH_TOKEN: ${{ github.token }}
@@ -590,7 +592,7 @@ jobs:
     runs-on: ubuntu-22.04
     name: docker ${{ matrix.image }} pg${{ matrix.pg_major }}
     needs: [release]
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && needs.release.outputs.version != ''
 
     env:
       DOCKERHUB_ORG: sqlitecloud
