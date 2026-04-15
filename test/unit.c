@@ -46,6 +46,7 @@ sqlite3 *do_create_database (void);
 
 int cloudsync_table_sanity_check (cloudsync_context *data, const char *name, CLOUDSYNC_INIT_FLAG init_flags);
 bool database_system_exists (cloudsync_context *data, const char *name, const char *type);
+int cloudsync_dbversion_rebuild (cloudsync_context *data);
 
 static int stdout_backup = -1; // Backup file descriptor for stdout
 static int dev_null_fd = -1;   // File descriptor for /dev/null
@@ -2397,6 +2398,160 @@ cleanup:
         file_delete_internal(walpath);
         snprintf(walpath, sizeof(walpath), "%s-shm", dbpath);
         file_delete_internal(walpath);
+    }
+    return result;
+}
+
+// Same as do_test_stale_table_settings, but also drops the <table>_cloudsync
+// meta-table before reopening. With a stale cloudsync_table_settings row and
+// no matching *_cloudsync meta-table in sqlite_master, the dbversion query
+// builder produces an empty (NULL) SQL string, causing sqlite3_cloudsync_init
+// to fail on reopen — previously crashing in some environments.
+bool do_test_stale_table_settings_dropped_meta(bool cleanup_databases) {
+    bool result = false;
+    char dbpath[256];
+    time_t timestamp = time(NULL);
+
+    #ifdef __ANDROID__
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-meta-%ld.sqlite", ".", timestamp);
+    #else
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-meta-%ld.sqlite", getenv("HOME"), timestamp);
+    #endif
+
+    // Phase 1: create database, table, and init cloudsync
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(dbpath, &db);
+    if (rc != SQLITE_OK) return false;
+    sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+    sqlite3_cloudsync_init(db, NULL, NULL);
+
+    rc = sqlite3_exec(db, "CREATE TABLE cloud (id TEXT PRIMARY KEY NOT NULL, value TEXT, extra INTEGER);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('cloud');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Phase 2: drop both the base table AND the meta-table without calling
+    // cloudsync_cleanup. This leaves stale entries in cloudsync_table_settings
+    // with no matching *_cloudsync table in sqlite_master.
+    sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+    sqlite3_close(db);
+    db = NULL;
+
+    rc = sqlite3_open(dbpath, &db);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_exec(db, "DROP TABLE IF EXISTS cloud;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_exec(db, "DROP TABLE IF EXISTS cloud_cloudsync;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    sqlite3_close(db);
+    db = NULL;
+
+    // Phase 3: reopen the database and load the extension — must succeed.
+    rc = sqlite3_open(dbpath, &db);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Sanity check: we can still call cloudsync_version and create a new table.
+    rc = sqlite3_exec(db, "SELECT cloudsync_version();", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(db, "CREATE TABLE cloud2 (id TEXT PRIMARY KEY NOT NULL, v TEXT);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('cloud2');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    result = true;
+
+cleanup:
+    if (db) {
+        sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+        sqlite3_close(db);
+    }
+    if (cleanup_databases) {
+        file_delete_internal(dbpath);
+        char walpath[280];
+        snprintf(walpath, sizeof(walpath), "%s-wal", dbpath);
+        file_delete_internal(walpath);
+        snprintf(walpath, sizeof(walpath), "%s-shm", dbpath);
+        file_delete_internal(walpath);
+    }
+    return result;
+}
+
+// Authorizer that denies SELECT reads of sqlite_master. Used to force
+// sqlite3_prepare_v2 of SQL_DBVERSION_BUILD_QUERY (which scans sqlite_master)
+// to fail with SQLITE_AUTH, exercising the real error path in
+// cloudsync_dbversion_rebuild introduced after 1.0.14.
+static int deny_sqlite_master_authorizer(void *pUserData, int action, const char *zArg1,
+                                          const char *zArg2, const char *zDbName, const char *zTrigger) {
+    (void)pUserData; (void)zArg2; (void)zDbName; (void)zTrigger;
+    if (action == SQLITE_READ && zArg1 && strcmp(zArg1, "sqlite_master") == 0) {
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+// Verify that cloudsync_dbversion_rebuild surfaces a real failure from
+// database_select_text(SQL_DBVERSION_BUILD_QUERY, ...) instead of silently
+// treating it as "no *_cloudsync meta-tables present" — which would leave
+// db_version_stmt unset and cause writes to fall back to CLOUDSYNC_MIN_DB_VERSION.
+bool do_test_dbversion_rebuild_error(void) {
+    sqlite3 *db = NULL;
+    cloudsync_context *ctx = NULL;
+    bool result = false;
+
+    int rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return false;
+    rc = sqlite3_cloudsync_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Create a real cloudsync table so cloudsync_table_settings has a row
+    // (count_tables > 0 — the early-return-OK path is not taken).
+    rc = sqlite3_exec(db, "CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, v TEXT);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('t');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Create a secondary context on the same db and initialize it. This
+    // context is independent from the one registered by sqlite3_cloudsync_init,
+    // so we can call cloudsync_dbversion_rebuild on it directly without
+    // disturbing the registered functions.
+    ctx = cloudsync_context_create(db);
+    if (!ctx) goto cleanup;
+    if (cloudsync_context_init(ctx) == NULL) goto cleanup;
+
+    // Install an authorizer that denies reads of sqlite_master. New prepares
+    // (including the one SQL_DBVERSION_BUILD_QUERY triggers inside
+    // database_select_text) will fail with SQLITE_AUTH. Already-prepared
+    // statements are unaffected, so the registered cloudsync_* functions
+    // still work for cleanup.
+    sqlite3_set_authorizer(db, deny_sqlite_master_authorizer, NULL);
+
+    // Expect a non-OK result now that the build query cannot be prepared.
+    // Before the review fix this would incorrectly return DBRES_OK and leave
+    // db_version_stmt == NULL, silently masking the failure.
+    int rebuild_rc = cloudsync_dbversion_rebuild(ctx);
+
+    // Remove authorizer before any further work so cleanup can run normally.
+    sqlite3_set_authorizer(db, NULL, NULL);
+
+    if (rebuild_rc == DBRES_OK) goto cleanup;
+
+    // The error must have been recorded on the context via cloudsync_set_dberror.
+    if (cloudsync_errcode(ctx) == DBRES_OK) goto cleanup;
+    const char *msg = cloudsync_errmsg(ctx);
+    if (!msg || msg[0] == 0) goto cleanup;
+
+    result = true;
+
+cleanup:
+    sqlite3_set_authorizer(db, NULL, NULL);
+    if (ctx) cloudsync_context_free(ctx);
+    if (db) {
+        sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+        sqlite3_close(db);
     }
     return result;
 }
@@ -12268,6 +12423,8 @@ int main (int argc, const char * argv[]) {
     result += test_report("Large Composite PK Test:", do_test_large_composite_pk(2, print_result, cleanup_databases));
     result += test_report("Schema Hash Mismatch:", do_test_schema_hash_mismatch(2, print_result, cleanup_databases));
     result += test_report("Stale Table Settings:", do_test_stale_table_settings(cleanup_databases));
+    result += test_report("Stale Table Settings Dropped Meta:", do_test_stale_table_settings_dropped_meta(cleanup_databases));
+    result += test_report("DBVersion Rebuild Error:", do_test_dbversion_rebuild_error());
     result += test_report("Block LWW Existing Data:", do_test_block_lww_existing_data(cleanup_databases));
     result += test_report("Block Column Reload:", do_test_block_column_reload(cleanup_databases));
     result += test_report("CB Error Cleanup:", do_test_context_cb_error_cleanup());

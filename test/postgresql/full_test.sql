@@ -58,6 +58,7 @@
 \ir 48_row_filter_multi_table.sql
 \ir 49_row_filter_prefill.sql
 \ir 50_block_lww_existing_data.sql
+\ir 51_stale_table_settings_dropped_meta.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'
