@@ -363,11 +363,11 @@ void dbvm_reset (dbvm_t *stmt) {
 
 // MARK: - Database Version -
 
-char *cloudsync_dbversion_build_query (cloudsync_context *data) {
+int cloudsync_dbversion_build_query (cloudsync_context *data, char **sql_out) {
     // this function must be manually called each time tables changes
     // because the query plan changes too and it must be re-prepared
     // unfortunately there is no other way
-    
+
     // we need to execute a query like:
     /*
      SELECT max(version) as version FROM (
@@ -380,12 +380,11 @@ char *cloudsync_dbversion_build_query (cloudsync_context *data) {
          SELECT value as version FROM cloudsync_settings WHERE key = 'pre_alter_dbversion'
      )
      */
-    
+
     // the good news is that the query can be computed in SQLite without the need to do any extra computation from the host language
-    
-    char *value = NULL;
-    int rc = database_select_text(data, SQL_DBVERSION_BUILD_QUERY, &value);
-    return (rc == DBRES_OK) ? value : NULL;
+
+    *sql_out = NULL;
+    return database_select_text(data, SQL_DBVERSION_BUILD_QUERY, sql_out);
 }
 
 int cloudsync_dbversion_rebuild (cloudsync_context *data) {
@@ -393,21 +392,26 @@ int cloudsync_dbversion_rebuild (cloudsync_context *data) {
         databasevm_finalize(data->db_version_stmt);
         data->db_version_stmt = NULL;
     }
-    
+
     int64_t count = dbutils_table_settings_count_tables(data);
     if (count == 0) return DBRES_OK;
     else if (count == -1) return cloudsync_set_dberror(data);
 
-    char *sql = cloudsync_dbversion_build_query(data);
-    // A NULL result here means sqlite_master has no *_cloudsync meta-tables
-    // (for example, the user dropped the base table and its meta-table without
-    // calling cloudsync_cleanup, leaving stale cloudsync_table_settings rows).
+    char *sql = NULL;
+    int rc = cloudsync_dbversion_build_query(data, &sql);
+    if (rc != DBRES_OK) return cloudsync_set_dberror(data);
+
+    // A NULL SQL with rc == OK means the generator produced a NULL row:
+    // sqlite_master has no *_cloudsync meta-tables (for example, the user
+    // dropped the base table and its meta-table without calling
+    // cloudsync_cleanup, leaving stale cloudsync_table_settings rows).
     // Treat this the same as count == 0: no prepared statement, db_version
     // stays at the minimum and will be rebuilt on the next cloudsync_init.
+    // Genuine errors from database_select_text are handled above.
     if (!sql) return DBRES_OK;
     DEBUG_SQL("db_version_stmt: %s", sql);
-    
-    int rc = databasevm_prepare(data, sql, (void **)&data->db_version_stmt, DBFLAG_PERSISTENT);
+
+    rc = databasevm_prepare(data, sql, (void **)&data->db_version_stmt, DBFLAG_PERSISTENT);
     DEBUG_STMT("db_version_stmt %p", data->db_version_stmt);
     cloudsync_memory_free(sql);
     return rc;
