@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.15] - 2026-04-16
+
+### Fixed
+
+- **Silent receive failures**: When `cloudsync_payload_apply` failed during the receive phase (for example with an unknown schema hash, invalid checksum, or decompression error), the error was stored only on the internal cloudsync context and never propagated to the SQL caller. Both `cloudsync_network_check_changes()` and `cloudsync_network_sync()` silently returned no result. Apply errors are now surfaced as a `receive.error` field in the JSON response.
+
+### Changed
+
+- **Error handling contract**: endpoint/network errors (server unreachable, auth failure, bad URL) always raise a SQL error. Processing errors (`cloudsync_payload_apply` failures) are returned as structured JSON via `receive.error` or `send.lastFailure`, so callers can inspect and log them without try/catch logic.
+- **`cloudsync_network_send_changes()` output** now includes a `send.lastFailure` object whenever the server reports one (raw pass-through of the server's `lastFailure` — `jobId`, `code`, `message`, `retryable`, `failedAt`, …), regardless of whether the computed `send.status` is `synced`, `syncing`, or `out-of-sync`. The field is omitted when the server does not report a failure.
+- **`cloudsync_network_check_changes()` output** now includes a `receive.error` string when `cloudsync_payload_apply` fails, instead of silently returning NULL. Endpoint/network errors still raise a SQL error.
+- **`cloudsync_network_sync()` output** now mirrors the same `send.lastFailure` field and, if the receive phase has a processing error (`cloudsync_payload_apply` failure), returns structured JSON with a `receive.error` string rather than failing silently. The send result is always preserved so callers can tell that their local changes reached the server even when applying incoming changes failed. Endpoint/network errors during the receive phase still raise a SQL error. The receive retry loop breaks immediately on processing errors (a schema-hash mismatch will not heal across retries).
+
 ## [1.0.14] - 2026-04-15
 
 ### Fixed
