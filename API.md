@@ -519,24 +519,28 @@ If a package of new changes is already available for the local site, the server 
 This function is designed to be called periodically to keep the local database in sync.
 To force an update and wait for changes (with a timeout), use [`cloudsync_network_sync(wait_ms, max_retries)`].
 
-If the network is misconfigured, the remote server is unreachable, or the received payload cannot be applied locally (for example because of an unknown schema hash), the function raises a SQL error. Use [`cloudsync_network_sync()`](#cloudsync_network_syncwait_ms-max_retries) if you want receive errors reported as structured JSON alongside the send result instead of as SQL errors.
+If the network is misconfigured or the remote server is unreachable, the function raises a SQL error. If the received payload cannot be applied locally (for example because of an unknown schema hash), the error is returned as a `receive.error` field in the JSON response.
 
 **Parameters:** None.
 
 **Returns:** A JSON string with the receive result:
 
 ```json
-{"receive": {"rows": N, "tables": ["table1", "table2"]}}
+{"receive": {"rows": N, "tables": ["table1", "table2"], "error": "..."}}
 ```
 
-- `receive.rows`: The number of rows received and applied to the local database.
-- `receive.tables`: An array of table names that received changes. Empty (`[]`) if no changes were applied.
+- `receive.rows`: The number of rows received and applied to the local database. `0` when the receive phase failed.
+- `receive.tables`: An array of table names that received changes. Empty (`[]`) if no changes were applied or the receive phase failed.
+- `receive.error` (optional): Present when `cloudsync_payload_apply` failed. Contains a human-readable error message describing why the received payload could not be applied.
 
 **Example:**
 
 ```sql
 SELECT cloudsync_network_check_changes();
 -- '{"receive":{"rows":3,"tables":["tasks"]}}'
+
+-- With an apply error:
+-- '{"receive":{"rows":0,"tables":[],"error":"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."}}'
 ```
 
 ---
@@ -568,7 +572,7 @@ SELECT cloudsync_network_check_changes();
 - `send.lastFailure` (optional): Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes) — forwarded verbatim from the server whenever a failed apply job is reported, regardless of `status`.
 - `receive.rows`: The number of rows received and applied during the check phase. `0` when the receive phase failed.
 - `receive.tables`: An array of table names that received changes. Empty (`[]`) if no changes were applied or the receive phase failed.
-- `receive.error` (optional): Present when the receive phase failed. Contains a human-readable error message (for example `"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."`). Unlike [`cloudsync_network_check_changes()`](#cloudsync_network_check_changes), `cloudsync_network_sync()` does **not** raise a SQL error when the receive phase fails — it returns the structured JSON so the caller can still see that the send phase completed. The retry loop breaks immediately on a receive error, since failures like schema-hash mismatches do not heal across retries.
+- `receive.error` (optional): Present when `cloudsync_payload_apply` failed (for example `"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."`). The send result is always preserved so the caller can tell that local changes reached the server even when applying incoming changes failed. The retry loop breaks immediately on apply errors, since failures like schema-hash mismatches do not heal across retries. Endpoint/network errors during the receive phase raise a SQL error instead.
 
 **Example:**
 

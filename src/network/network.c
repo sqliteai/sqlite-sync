@@ -415,19 +415,18 @@ int network_set_sqlite_result (sqlite3_context *context, NETWORK_RESULT *result)
     return rc;
 }
 
-// If err_out is non-NULL, any error encountered here is returned via *err_out
-// (malloc'd, caller must cloudsync_memory_free) instead of being raised on the
-// sqlite3_context. This lets composite callers (cloudsync_network_sync) surface
-// receive-side failures as structured JSON rather than SQL errors.
+// If err_out is non-NULL, cloudsync_payload_apply failures are returned via
+// *err_out (malloc'd, caller must cloudsync_memory_free) instead of being raised
+// on the sqlite3_context. This lets composite callers (cloudsync_network_sync)
+// surface apply errors as structured JSON. Endpoint/network errors always raise
+// a SQL error regardless of err_out.
 int network_download_changes (sqlite3_context *context, const char *download_url, int *pnrows, char **err_out) {
     DEBUG_FUNCTION("network_download_changes");
 
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     network_data *netdata = (network_data *)cloudsync_auxdata(data);
     if (!netdata) {
-        const char *msg = "Unable to retrieve network CloudSync context.";
-        if (err_out) *err_out = cloudsync_string_dup(msg);
-        else sqlite3_result_error(context, msg, -1);
+        sqlite3_result_error(context, "Unable to retrieve network CloudSync context.", -1);
         return -1;
     }
 
@@ -444,14 +443,8 @@ int network_download_changes (sqlite3_context *context, const char *download_url
             if (pnrows) *pnrows = 0;
         }
     } else if (result.code == CLOUDSYNC_NETWORK_ERROR) {
-        if (err_out) {
-            const char *msg = (result.buffer && result.buffer[0]) ? result.buffer : "network error during receive";
-            *err_out = cloudsync_string_dup(msg);
-            rc = -1;
-        } else {
-            network_set_sqlite_result(context, &result);
-            rc = -1;
-        }
+        network_set_sqlite_result(context, &result);
+        rc = -1;
         if (pnrows) *pnrows = 0;
     } else {
         // CLOUDSYNC_NETWORK_OK — no data, not an error
@@ -1084,28 +1077,13 @@ void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3
 int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync_result *out, char **err_out) {
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     network_data *netdata = (network_data *)cloudsync_auxdata(data);
-    if (!netdata) {
-        const char *msg = "Unable to retrieve CloudSync network context.";
-        if (err_out) *err_out = cloudsync_string_dup(msg);
-        else sqlite3_result_error(context, msg, -1);
-        return -1;
-    }
+    if (!netdata) {sqlite3_result_error(context, "Unable to retrieve CloudSync network context.", -1); return -1;}
 
     int64_t db_version = dbutils_settings_get_int64_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION);
-    if (db_version<0) {
-        const char *msg = "Unable to retrieve db_version.";
-        if (err_out) *err_out = cloudsync_string_dup(msg);
-        else sqlite3_result_error(context, msg, -1);
-        return -1;
-    }
+    if (db_version<0) {sqlite3_result_error(context, "Unable to retrieve db_version.", -1); return -1;}
 
     int seq = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_SEQ);
-    if (seq<0) {
-        const char *msg = "Unable to retrieve seq.";
-        if (err_out) *err_out = cloudsync_string_dup(msg);
-        else sqlite3_result_error(context, msg, -1);
-        return -1;
-    }
+    if (seq<0) {sqlite3_result_error(context, "Unable to retrieve seq.", -1); return -1;}
 
     // Capture local db_version before download so we can query cloudsync_changes afterwards
     int64_t prev_dbv = cloudsync_dbversion(data);
@@ -1118,28 +1096,18 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
     if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
         char *download_url = json_extract_string(result.buffer, result.blen, "url");
         if (!download_url) {
-            const char *msg = "cloudsync_network_check_changes: missing 'url' in check response.";
-            if (err_out) *err_out = cloudsync_string_dup(msg);
-            else sqlite3_result_error(context, msg, -1);
+            sqlite3_result_error(context, "cloudsync_network_check_changes: missing 'url' in check response.", -1);
             network_result_cleanup(&result);
             return SQLITE_ERROR;
         }
         rc = network_download_changes(context, download_url, pnrows, err_out);
         cloudsync_memory_free(download_url);
+    } else if (result.code == CLOUDSYNC_NETWORK_ERROR) {
+        network_set_sqlite_result(context, &result);
+        rc = -1;
     } else {
-        if (result.code == CLOUDSYNC_NETWORK_ERROR) {
-            if (err_out) {
-                const char *msg = (result.buffer && result.buffer[0]) ? result.buffer : "network error during check";
-                *err_out = cloudsync_string_dup(msg);
-                rc = -1;
-            } else {
-                network_set_sqlite_result(context, &result);
-                rc = -1;
-            }
-        } else {
-            // CLOUDSYNC_NETWORK_OK — no changes ready yet, not an error
-            rc = 0;
-        }
+        // CLOUDSYNC_NETWORK_OK — no changes ready yet, not an error
+        rc = 0;
     }
 
     if (out && pnrows) out->rows_received = *pnrows;
@@ -1243,13 +1211,30 @@ void cloudsync_network_check_changes (sqlite3_context *context, int argc, sqlite
     DEBUG_FUNCTION("cloudsync_network_check_changes");
 
     sync_result sr = {-1, 0, NULL, 0, NULL, NULL};
+    char *receive_err = NULL;
     int nrows = 0;
-    int rc = cloudsync_network_check_internal(context, &nrows, &sr, NULL);
-    if (rc != SQLITE_OK) { if (sr.tables_json) cloudsync_memory_free(sr.tables_json); return; }
+    int rc = cloudsync_network_check_internal(context, &nrows, &sr, &receive_err);
+
+    // Endpoint/network errors already raised a SQL error on the context
+    if (rc != SQLITE_OK && !receive_err) { if (sr.tables_json) cloudsync_memory_free(sr.tables_json); return; }
+
+    // Apply errors → structured JSON with receive.error
+    if (receive_err) {
+        nrows = 0;
+        if (sr.tables_json) { cloudsync_memory_free(sr.tables_json); sr.tables_json = NULL; }
+    }
 
     const char *tables = sr.tables_json ? sr.tables_json : "[]";
-    char *buf = cloudsync_memory_mprintf("{\"receive\":{\"rows\":%d,\"tables\":%s}}", nrows, tables);
+    char *buf;
+    if (receive_err) {
+        char *escaped = json_escape_string(receive_err);
+        buf = cloudsync_memory_mprintf("{\"receive\":{\"rows\":%d,\"tables\":%s,\"error\":\"%s\"}}", nrows, tables, escaped);
+        cloudsync_memory_free(escaped);
+    } else {
+        buf = cloudsync_memory_mprintf("{\"receive\":{\"rows\":%d,\"tables\":%s}}", nrows, tables);
+    }
     sqlite3_result_text(context, buf, -1, cloudsync_memory_free);
+    if (receive_err) cloudsync_memory_free(receive_err);
     if (sr.tables_json) cloudsync_memory_free(sr.tables_json);
 }
 
