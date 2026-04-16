@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.16] - 2026-04-16
+
+### Fixed
+
+- **WASM crash in `cloudsync_set_column` on existing rows**: Calling `cloudsync_set_column(table, col, 'lww', 'block')` on a table with pre-existing rows crashed the WASM build with a `RuntimeError: function signature mismatch` as soon as the block-index migration tried to allocate memory. `block_init_allocator` was casting `cloudsync_memory_alloc` (a `uint64_t size` function) directly to the fractional-indexing allocator's `void *(*)(size_t)` slot. The cast is a no-op on native platforms where `size_t` is 64-bit, but WASM's `call_indirect` enforces strict type checking — the function is registered as `(i64) -> i32` and called as `(i32) -> i32`, triggering an immediate runtime error. A thin `fi_malloc_wrapper` (mirroring the existing `fi_calloc_wrapper`) now bridges the signatures. Native builds are unaffected.
+
 ## [1.0.15] - 2026-04-16
 
 ### Fixed

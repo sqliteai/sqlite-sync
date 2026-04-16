@@ -127,6 +127,12 @@ block_list_t *block_split(const char *text, const char *delimiter) {
 
 // MARK: - Fractional indexing (via fractional-indexing submodule) -
 
+// Wrapper for malloc: fractional_indexing expects size_t (32-bit on WASM) but cloudsync_memory_alloc takes uint64_t.
+// A direct cast passes strict call_indirect type checking in WASM and triggers a RuntimeError.
+static void *fi_malloc_wrapper(size_t size) {
+    return cloudsync_memory_alloc((uint64_t)size);
+}
+
 // Wrapper for calloc: fractional_indexing expects (count, size) but cloudsync_memory_zeroalloc takes a single size.
 static void *fi_calloc_wrapper(size_t count, size_t size) {
     return cloudsync_memory_zeroalloc((uint64_t)(count * size));
@@ -134,7 +140,7 @@ static void *fi_calloc_wrapper(size_t count, size_t size) {
 
 void block_init_allocator(void) {
     fractional_indexing_allocator alloc = {
-        .malloc = (void *(*)(size_t))cloudsync_memory_alloc,
+        .malloc = fi_malloc_wrapper,
         .calloc = fi_calloc_wrapper,
         .free   = cloudsync_memory_free
     };
