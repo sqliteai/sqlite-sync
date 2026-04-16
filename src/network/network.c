@@ -875,6 +875,16 @@ static char *network_get_affected_tables(sqlite3 *db, int64_t since_db_version) 
 }
 
 // MARK: - Sync result
+//
+// Error-handling contract for send/check/sync functions:
+//  - Endpoint/network errors (server unreachable, auth failure, bad URL)
+//    always raise a SQL error via sqlite3_result_error.
+//  - cloudsync_payload_apply failures (unknown schema hash, invalid checksum,
+//    decompression error) are returned as structured JSON via receive.error.
+//  - Server-reported apply job failures are forwarded as send.lastFailure.
+//
+// Callers that receive JSON can trust that the server was reachable.
+// A SQL error means connectivity or configuration is broken.
 
 typedef struct {
     int64_t     server_version;   // lastOptimisticVersion

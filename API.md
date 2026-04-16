@@ -481,6 +481,20 @@ SELECT cloudsync_network_set_apikey('your_api_key');
 
 ---
 
+### Error handling
+
+The sync functions follow a consistent error-handling contract:
+
+| Error type | Behavior |
+|---|---|
+| **Endpoint/network errors** (server unreachable, auth failure, bad URL) | SQL error — the function could not execute. |
+| **Apply errors** (`cloudsync_payload_apply` failures — unknown schema hash, invalid checksum, decompression error) | Structured JSON — a `receive.error` string field is included in the response. |
+| **Server-reported apply job failures** (the server processed the request but its own apply job failed) | Structured JSON — a `send.lastFailure` object is included in the response. |
+
+This means: if you get JSON back, the server was reachable and the network protocol ran. If you get a SQL error, connectivity or configuration is broken.
+
+---
+
 ### `cloudsync_network_send_changes()`
 
 **Description:** Sends all unsent local changes to the remote server.
