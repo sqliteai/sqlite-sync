@@ -443,14 +443,18 @@ int network_download_changes (sqlite3_context *context, const char *download_url
             else sqlite3_result_error(context, msg, -1);
             if (pnrows) *pnrows = 0;
         }
-    } else {
+    } else if (result.code == CLOUDSYNC_NETWORK_ERROR) {
         if (err_out) {
             const char *msg = (result.buffer && result.buffer[0]) ? result.buffer : "network error during receive";
             *err_out = cloudsync_string_dup(msg);
             rc = -1;
         } else {
-            rc = network_set_sqlite_result(context, &result);
+            network_set_sqlite_result(context, &result);
+            rc = -1;
         }
+        if (pnrows) *pnrows = 0;
+    } else {
+        // CLOUDSYNC_NETWORK_OK — no data, not an error
         if (pnrows) *pnrows = 0;
     }
     network_result_cleanup(&result);
@@ -1123,12 +1127,18 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
         rc = network_download_changes(context, download_url, pnrows, err_out);
         cloudsync_memory_free(download_url);
     } else {
-        if (err_out) {
-            const char *msg = (result.buffer && result.buffer[0]) ? result.buffer : "network error during check";
-            *err_out = cloudsync_string_dup(msg);
-            rc = -1;
+        if (result.code == CLOUDSYNC_NETWORK_ERROR) {
+            if (err_out) {
+                const char *msg = (result.buffer && result.buffer[0]) ? result.buffer : "network error during check";
+                *err_out = cloudsync_string_dup(msg);
+                rc = -1;
+            } else {
+                network_set_sqlite_result(context, &result);
+                rc = -1;
+            }
         } else {
-            rc = network_set_sqlite_result(context, &result);
+            // CLOUDSYNC_NETWORK_OK — no changes ready yet, not an error
+            rc = 0;
         }
     }
 
