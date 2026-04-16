@@ -15,6 +15,7 @@
 #define CLOUDSYNC_SITEID_NAME               "cloudsync_site_id"
 #define CLOUDSYNC_TABLE_SETTINGS_NAME       "cloudsync_table_settings"
 #define CLOUDSYNC_SCHEMA_VERSIONS_NAME      "cloudsync_schema_versions"
+#define CLOUDSYNC_MIGRATIONS_NAME           "cloudsync_migrations"
 
 #define CLOUDSYNC_KEY_LIBVERSION            "version"
 #define CLOUDSYNC_KEY_SCHEMAVERSION         "schemaversion"
@@ -29,6 +30,7 @@
 
 // settings
 int dbutils_settings_init (cloudsync_context *data);
+int dbutils_settings_load (cloudsync_context *data);
 int dbutils_settings_cleanup (cloudsync_context *data);
 int dbutils_settings_check_version (cloudsync_context *data, const char *version);
 int dbutils_settings_set_key_value (cloudsync_context *data, const char *key, const char *value);

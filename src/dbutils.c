@@ -12,6 +12,7 @@
 #include "utils.h"
 #include "dbutils.h"
 #include "cloudsync.h"
+#include "migration.h"
 
 #if CLOUDSYNC_UNITTEST
 char *OUT_OF_MEMORY_BUFFER = "OUT_OF_MEMORY_BUFFER";
@@ -462,8 +463,19 @@ int dbutils_settings_init (cloudsync_context *data) {
         int lens[] = {-1, UUID_LEN};
         rc = database_write(data, SQL_INSERT_SITE_ID_ROWID, values, types, lens, 2);
         if (rc != DBRES_OK) return rc;
+
     }
-    
+
+    // NOTE: cloudsync_migrations is NOT created here.
+    // dbutils_settings_init() is invoked on every context open — including
+    // read-only opens and restricted PostgreSQL roles — where issuing a CREATE TABLE
+    // would fail with a write-privilege error.  The ledger is bootstrapped at two
+    // write-guaranteed call sites instead:
+    //   1. cloudsync_init_table() — covers both new databases and upgrades when
+    //      the caller invokes cloudsync_init() or the SQL cloudsync_init() function.
+    //   2. migration_ensure_table() — called by every C migration entry point
+    //      (cloudsync_migration_register / cloudsync_migration_apply_pending).
+
     // check if cloudsync_table_settings table exists
     if (database_internal_table_exists(data, CLOUDSYNC_TABLE_SETTINGS_NAME) == false) {
         DEBUG_SETTINGS("cloudsync_table_settings does not exist (creating a new one)");

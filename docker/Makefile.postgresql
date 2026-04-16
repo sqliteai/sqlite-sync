@@ -39,6 +39,7 @@ endif
 PG_CORE_SRC = \
 	src/cloudsync.c \
 	src/dbutils.c \
+	src/migration.c \
 	src/pk.c \
 	src/utils.c \
 	src/lz4.c \
@@ -49,6 +50,7 @@ PG_CORE_SRC = \
 PG_IMPL_SRC = \
 	src/postgresql/database_postgresql.c \
 	src/postgresql/cloudsync_postgresql.c \
+	src/postgresql/migration_postgresql.c \
 	src/postgresql/pgvalue.c \
 	src/postgresql/sql_postgresql.c
 

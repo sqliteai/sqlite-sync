@@ -52,6 +52,9 @@ void cloudsync_context_free (void *ctx);
 // CloudSync global
 int cloudsync_init_table (cloudsync_context *data, const char *table_name, const char *algo_name, CLOUDSYNC_INIT_FLAG init_flags);
 int cloudsync_cleanup (cloudsync_context *data, const char *table_name);
+int  cloudsync_tables_count (cloudsync_context *data);
+void cloudsync_forget_table (cloudsync_context *data, const char *table_name);
+void cloudsync_reload_tables (cloudsync_context *data);
 int cloudsync_cleanup_all (cloudsync_context *data);
 int cloudsync_terminate (cloudsync_context *data);
 int cloudsync_insync (cloudsync_context *data);
@@ -98,6 +101,7 @@ int    cloudsync_payload_save (cloudsync_context *data, const char *payload_path
 int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name);
 int cloudsync_reset_metatable (cloudsync_context *data, const char *table_name);
 cloudsync_table_context *table_lookup (cloudsync_context *data, const char *table_name);
+const char *table_get_schema (cloudsync_table_context *table);
 void *table_column_lookup (cloudsync_table_context *table, const char *col_name, bool is_merge, int *index);
 bool table_enabled (cloudsync_table_context *table);
 void table_set_enabled (cloudsync_table_context *table, bool value);

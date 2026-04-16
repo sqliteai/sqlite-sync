@@ -36,6 +36,16 @@ const char * const SQL_TABLE_SETTINGS_DELETE_ONE =
 const char * const SQL_TABLE_SETTINGS_COUNT_TABLES =
     "SELECT count(*) FROM cloudsync_table_settings WHERE key='algo';";
 
+const char * const SQL_TABLE_SETTINGS_RENAME_TABLE =
+    "UPDATE cloudsync_table_settings SET tbl_name=$1 WHERE tbl_name=$2;";
+
+const char * const SQL_TABLE_SETTINGS_SELECT_BLOCK_COLS =
+    "SELECT col_name FROM cloudsync_table_settings"
+    " WHERE tbl_name=$1 AND key='algo' AND value='block' AND col_name!='*';";
+
+const char * const SQL_TABLE_SETTINGS_SELECT_ALL_TABLES =
+    "SELECT DISTINCT tbl_name FROM cloudsync_table_settings;";
+
 const char * const SQL_SETTINGS_LOAD_GLOBAL =
     "SELECT key, value FROM cloudsync_settings;";
 
@@ -80,6 +90,49 @@ const char * const SQL_CREATE_TABLE_SETTINGS_TABLE =
 const char * const SQL_CREATE_SCHEMA_VERSIONS_TABLE =
     "CREATE TABLE IF NOT EXISTS cloudsync_schema_versions (hash BIGINT PRIMARY KEY, seq INTEGER NOT NULL)";
 
+// MARK: Migrations
+
+// All migration SQL uses the explicit "public." schema prefix.
+// database_internal_table_exists() calls database_system_exists() with
+// force_public = true, which hard-codes schemaname = 'public' in the pg_tables
+// query.  The ledger must therefore be created in public regardless of the
+// session's search_path.  Without the prefix, a non-default search_path would
+// create the table in the wrong schema while existence checks (force_public = true)
+// still look only in public — so the ledger would always appear missing.
+const char * const SQL_CREATE_MIGRATIONS_TABLE =
+    "CREATE TABLE IF NOT EXISTS public.cloudsync_migrations ("
+    "    version    BIGINT PRIMARY KEY,"
+    "    descriptor BYTEA  NOT NULL,"
+    "    applied_at BIGINT,"
+    "    checksum   BIGINT NOT NULL"
+    ");";
+
+const char * const SQL_MIGRATION_INSERT =
+    "INSERT INTO public.cloudsync_migrations (version, descriptor, checksum, applied_at)"
+    " VALUES ($1, $2, $3, NULL)"
+    " ON CONFLICT (version) DO UPDATE"
+    " SET descriptor = EXCLUDED.descriptor, checksum = EXCLUDED.checksum"
+    " WHERE cloudsync_migrations.applied_at IS NULL;";
+
+const char * const SQL_MIGRATION_SELECT_PENDING =
+    "SELECT version, descriptor, checksum"
+    " FROM public.cloudsync_migrations WHERE applied_at IS NULL ORDER BY version ASC;";
+
+const char * const SQL_MIGRATION_MARK_APPLIED =
+    "UPDATE public.cloudsync_migrations SET applied_at = $1 WHERE version = $2;";
+
+const char * const SQL_MIGRATION_SELECT_ALL =
+    "SELECT version, descriptor, checksum"
+    " FROM public.cloudsync_migrations ORDER BY version ASC;";
+
+const char * const SQL_MIGRATION_SELECT_SINCE =
+    "SELECT version, descriptor, checksum"
+    " FROM public.cloudsync_migrations WHERE version > $1 ORDER BY version ASC;";
+
+// cloudsync_migrations is intentionally omitted: it is the applied-migration
+// ledger and must survive last-table cleanup so that a subsequent re-init knows
+// which versions already ran and does not replay destructive steps (DROP_COLUMN,
+// RENAME_TABLE, etc.) a second time.
 const char * const SQL_SETTINGS_CLEANUP_DROP_ALL =
     "DROP TABLE IF EXISTS cloudsync_settings CASCADE; "
     "DROP TABLE IF EXISTS cloudsync_site_id CASCADE; "

@@ -17,6 +17,12 @@ extern const char * const SQL_TABLE_SETTINGS_DELETE_ALL_FOR_TABLE;
 extern const char * const SQL_TABLE_SETTINGS_REPLACE;
 extern const char * const SQL_TABLE_SETTINGS_DELETE_ONE;
 extern const char * const SQL_TABLE_SETTINGS_COUNT_TABLES;
+// Rename all settings rows from one table name to another (used by RENAME_TABLE migration).
+extern const char * const SQL_TABLE_SETTINGS_RENAME_TABLE;
+// Select all block-LWW column names for a given table (used by RENAME_TABLE migration reload).
+extern const char * const SQL_TABLE_SETTINGS_SELECT_BLOCK_COLS;
+// Select all distinct tracked table names (used by cloudsync_reload_tables).
+extern const char * const SQL_TABLE_SETTINGS_SELECT_ALL_TABLES;
 extern const char * const SQL_SETTINGS_LOAD_GLOBAL;
 extern const char * const SQL_SETTINGS_LOAD_TABLE;
 extern const char * const SQL_CREATE_SETTINGS_TABLE;
@@ -67,6 +73,14 @@ extern const char * const SQL_CLOUDSYNC_INSERT_MISSING_PKS_FROM_BASE_EXCEPT_SYNC
 extern const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL;
 extern const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL_FILTERED;
 extern const char * const SQL_CHANGES_INSERT_ROW;
+
+// MIGRATIONS
+extern const char * const SQL_CREATE_MIGRATIONS_TABLE;
+extern const char * const SQL_MIGRATION_INSERT;
+extern const char * const SQL_MIGRATION_SELECT_PENDING;
+extern const char * const SQL_MIGRATION_MARK_APPLIED;
+extern const char * const SQL_MIGRATION_SELECT_ALL;
+extern const char * const SQL_MIGRATION_SELECT_SINCE;
 
 // BLOCKS (block-level LWW)
 extern const char * const SQL_BLOCKS_CREATE_TABLE;

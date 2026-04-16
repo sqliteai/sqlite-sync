@@ -218,7 +218,7 @@ $(BUILD_TEST)/%.o: %.c
 	$(CC) $(T_CFLAGS) -c $< -o $@
 
 # Run code coverage (--css-file $(CUSTOM_CSS))
-test: $(TARGET) $(TEST_TARGET) unittest e2e
+test: $(TARGET) $(TEST_TARGET) unittest migrationtest e2e
 	set -e; $(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();"
 ifneq ($(COVERAGE),false)
 	mkdir -p $(COV_DIR)
@@ -229,6 +229,10 @@ endif
 # Run only unit tests
 unittest: $(TARGET) $(DIST_DIR)/unit$(EXE)
 	@./$(DIST_DIR)/unit$(EXE)
+
+# Run migration unit tests (SQLite)
+migrationtest: $(DIST_DIR)/migration_tests$(EXE)
+	@./$(DIST_DIR)/migration_tests$(EXE)
 
 # Run end-to-end integration tests
 e2e: $(TARGET) $(DIST_DIR)/integration$(EXE)
@@ -456,6 +460,7 @@ help:
 	@echo "  clean	 				- Remove built files"
 	@echo "  test [COVERAGE=true]	- Test the extension with optional coverage output"
 	@echo "  unittest				- Run only unit tests (test/unit.c)"
+	@echo "  migrationtest			- Run migration unit tests (test/migration_tests.c)"
 	@echo "  help	  				- Display this help message"
 	@echo "  xcframework			- Build the Apple XCFramework"
 	@echo "  aar					- Build the Android AAR package"
@@ -466,4 +471,4 @@ help:
 # Include PostgreSQL extension targets
 include docker/Makefile.postgresql
 
-.PHONY: all clean test unittest e2e extension help version xcframework aar
+.PHONY: all clean test unittest migrationtest e2e extension help version xcframework aar

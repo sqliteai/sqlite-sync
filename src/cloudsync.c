@@ -947,6 +947,10 @@ cloudsync_table_context *table_lookup (cloudsync_context *data, const char *tabl
     return NULL;
 }
 
+const char *table_get_schema (cloudsync_table_context *table) {
+    return table ? table->schema : NULL;
+}
+
 void *table_column_lookup (cloudsync_table_context *table, const char *col_name, bool is_merge, int *index) {
     DEBUG_DBFUNCTION("table_column_lookup %s", col_name);
     
@@ -3617,6 +3621,78 @@ int cloudsync_cleanup (cloudsync_context *data, const char *table_name) {
     return DBRES_OK;
 }
 
+// Return the number of tables currently tracked in the in-memory context.
+// Used by migration helpers that need to decide whether to run the global
+// last-table epilogue after a batch completes.
+int cloudsync_tables_count (cloudsync_context *data) {
+    return (data && data->tables_count > 0) ? data->tables_count : 0;
+}
+
+// Remove a table from the in-memory context only, without touching the database.
+// Used by migration helpers that have already performed all necessary DB-level cleanup
+// (DROP TABLE, trigger drops, settings deletes) and just need the stale in-memory
+// entry gone — without triggering the counter==0 → dbutils_settings_cleanup cascade.
+void cloudsync_forget_table (cloudsync_context *data, const char *table_name) {
+    cloudsync_table_context *table = table_lookup(data, table_name);
+    if (!table) return;
+    table_remove(data, table);
+    table_free(table);
+}
+
+// Callback for cloudsync_reload_tables: drops triggers for every table that
+// the rolled-back DB still has a settings row for.  This handles the case
+// where a migration batch contained DROP_TABLE or RENAME_TABLE followed by a
+// later failing migration: the savepoint rollback restores the original table
+// names and their triggers, but those names are no longer in the in-memory
+// list (they were evicted by cloudsync_forget_table / cloudsync_init_table
+// during the batch).  Without this step, dbutils_settings_load's
+// CREATE TRIGGER would collide with the already-existing restored triggers.
+static int reload_drop_db_triggers_cb(void *xdata, int ncols, char **values, char **names) {
+    (void)ncols; (void)names;
+    cloudsync_context *data = (cloudsync_context *)xdata;
+    if (values[0]) database_delete_triggers(data, values[0]);
+    return 0;
+}
+
+// Rebuild the in-memory table context from the current database state.
+// Used after a savepoint rollback: the DB has been reverted to its pre-batch
+// state but the in-memory list may reflect mutations made by earlier migrations
+// in the failed batch (INIT_SYNC added entries, DROP_TABLE removed entries via
+// cloudsync_forget_table, RENAME_TABLE rewrote entries, commit_alter reloaded
+// schemas).  This function:
+//   1. Drops triggers for tables currently in memory (post-batch names).
+//      After rollback these tables/triggers no longer exist, so the DROPs are
+//      no-ops (IF EXISTS guards them).
+//   2. Drops triggers for every table tracked in the rolled-back DB state.
+//      The rollback may have restored original trigger names that are absent
+//      from the in-memory list; without this step dbutils_settings_load's
+//      CREATE TRIGGER would fail with "trigger already exists".
+//   3. Evicts all in-memory entries without any DB side-effects.
+//   4. Calls dbutils_settings_load to repopulate from the rolled-back DB.
+void cloudsync_reload_tables (cloudsync_context *data) {
+    // Step 1: drop triggers for in-memory (post-batch) names
+    for (int i = 0; i < data->tables_count; i++) {
+        database_delete_triggers(data, data->tables[i]->name);
+    }
+
+    // Step 2: drop triggers for all tables the rolled-back DB knows about.
+    // These are the pre-batch names whose DROP TRIGGER was itself rolled back,
+    // leaving their triggers intact in the DB even though the in-memory list
+    // no longer has entries for them.
+    database_exec_callback(data, SQL_TABLE_SETTINGS_SELECT_ALL_TABLES,
+                           reload_drop_db_triggers_cb, data);
+
+    // Step 3: evict all in-memory entries
+    while (data->tables_count > 0) {
+        cloudsync_table_context *t = data->tables[data->tables_count - 1];
+        table_remove(data, t);
+        table_free(t);
+    }
+
+    // Step 4: repopulate from the rolled-back DB state
+    dbutils_settings_load(data);
+}
+
 int cloudsync_cleanup_all (cloudsync_context *data) {
     return database_cleanup(data);
 }
@@ -3657,7 +3733,7 @@ int cloudsync_init_table (cloudsync_context *data, const char *table_name, const
     if (cloudsync_context_init(data) == NULL) {
         return cloudsync_set_error(data, "Unable to initialize cloudsync context", DBRES_MISUSE);
     }
-    
+
     // sanity check algo name (if exists)
     table_algo algo_new = table_algo_none;
     if (!algo_name) algo_name = CLOUDSYNC_DEFAULT_ALGO;
