@@ -59,7 +59,7 @@ CREATE POLICY "delete_own" ON documents FOR DELETE
     USING (auth.uid() = user_id);
 ```
 
-When you authenticate PostgreSQL requests with JWTs, CloudSync also executes `SET LOCAL ROLE` using the JWT `role` claim. That means the role named in the token must already exist in PostgreSQL and must have the permissions needed to read and write the synced tables.
+When you authenticate PostgreSQL requests with JWTs, CloudSync also executes `SET LOCAL ROLE` using the JWT `role` claim. That means the role named in the token must already exist in PostgreSQL and must have the permissions needed to read and write the synced tables. See [PostgreSQL Role Requirement](./jwt-claims.md#postgresql-role-requirement).
 
 ## Example: Two-User Sync with RLS
 
