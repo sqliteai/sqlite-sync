@@ -62,36 +62,109 @@ For PostgreSQL JWT authentication, the `role` claim must name a real database ro
 That role should:
 
 - already exist in PostgreSQL
-- have the schema, table, and sequence privileges your sync operations need
-- have access to the `cloudsync_changes` view used by PostgreSQL sync operations
+- have the schema, table, and sequence privileges your sync operations need (see [Required Grants](#required-grants))
 - be grantable by the connection-string user
 
 If the JWT contains a `role` that does not exist, or the connection user cannot switch into it, PostgreSQL sync operations will fail even if the JWT itself is otherwise valid.
 
-### Minimum Grants for a JWT Role
+### Creating the Role
 
-In a standard PostgreSQL setup, functions created by `CREATE EXTENSION cloudsync;` are executable by `PUBLIC` unless your cluster has been hardened with explicit `REVOKE EXECUTE` statements. In the normal case, the JWT role needs grants on:
+A typical setup uses a `NOLOGIN` role that your connection user enters via `SET LOCAL ROLE` after JWT verification:
 
-- the schema that contains your synced tables
-- the `cloudsync_changes` view
-- the synced user tables
-- any sequences used by those tables
+```sql
+CREATE ROLE rls_role NOLOGIN;
 
-Example:
+-- Allow the connection-string user (e.g. `postgres`) to switch into it
+GRANT rls_role TO postgres;
+```
+
+### Required Grants
+
+`cloudsync_payload_apply` running as a non-superuser touches several internal CloudSync objects during apply — not just your user table. If any grant is missing on an internal object, the per-PK savepoint silently rolls back the write and the caller sees a non-zero column-change count with no rows landing (see [RLS Troubleshooting](./rls.md#apply-reports-a-count-but-rows-are-missing)).
+
+There are two equivalent ways to configure this: the **recommended default-privileges pattern** (future-proof) or the **explicit minimum grant set** (tighter, for audited deployments).
+
+#### Recommended: default-privileges pattern
+
+Run this **before** `CREATE EXTENSION cloudsync`, as the role that will install the extension (typically `postgres`). Objects created afterwards — including all CloudSync internal tables and future `cloudsync_init` shadows — inherit the grants automatically:
 
 ```sql
 GRANT USAGE ON SCHEMA public TO rls_role;
+GRANT USAGE ON SCHEMA auth   TO rls_role;
 
-GRANT SELECT, INSERT ON cloudsync_changes TO rls_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+    ON TABLES TO rls_role;
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE your_table TO rls_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO rls_role;
 
-GRANT USAGE, SELECT ON SEQUENCE your_table_id_seq TO rls_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT EXECUTE ON FUNCTIONS TO rls_role;
+
+CREATE EXTENSION IF NOT EXISTS cloudsync;
 ```
 
-Administrative functions such as `cloudsync_init`, `cloudsync_enable`, `cloudsync_set*`, `cloudsync_terminate`, `cloudsync_cleanup`, `cloudsync_begin_alter`, and `cloudsync_commit_alter` should be run by the database owner during setup, not by client JWT roles.
+**If the extension is already installed**, `ALTER DEFAULT PRIVILEGES` doesn't apply retroactively — backfill existing objects with a one-time broad grant, then still set defaults for future creations:
 
-If your PostgreSQL setup has revoked the default `PUBLIC` execute privileges on functions, you must also explicitly grant execute permissions on the specific CloudSync functions needed by your sync path.
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES    IN SCHEMA public TO rls_role;
+GRANT USAGE, SELECT                  ON ALL SEQUENCES IN SCHEMA public TO rls_role;
+-- (plus the ALTER DEFAULT PRIVILEGES block above)
+```
+
+#### Explicit minimum grant set
+
+For audited deployments that need an explicit allowlist, the tightest set that allows `cloudsync_payload_apply` to work under a non-superuser:
+
+```sql
+GRANT USAGE ON SCHEMA public TO rls_role;
+GRANT USAGE ON SCHEMA auth   TO rls_role;
+
+-- User table (RLS policies filter rows within these grants)
+GRANT SELECT, INSERT, UPDATE, DELETE ON your_table TO rls_role;
+
+-- Per-table CRDT shadow (created by cloudsync_init)
+GRANT SELECT, INSERT, UPDATE, DELETE ON your_table_cloudsync TO rls_role;
+
+-- CloudSync metadata tables
+GRANT SELECT, INSERT, UPDATE, DELETE ON
+    cloudsync_settings,
+    cloudsync_table_settings,
+    cloudsync_site_id,
+    cloudsync_schema_versions,
+    app_schema_version
+TO rls_role;
+
+-- cloudsync_changes view: SELECT for apply-path readback, INSERT for the
+-- INSTEAD OF trigger that feeds column changes into the flush buffer
+GRANT SELECT, INSERT ON cloudsync_changes TO rls_role;
+
+-- BIGSERIAL-backed sequence on cloudsync_site_id.id (nextval needs USAGE)
+GRANT USAGE ON SEQUENCE cloudsync_site_id_id_seq TO rls_role;
+
+-- Your user table's sequence, if it uses SERIAL / IDENTITY
+-- GRANT USAGE, SELECT ON SEQUENCE your_table_id_seq TO rls_role;
+```
+
+Notes on the minimum set:
+
+- **No `EXECUTE` grants on `cloudsync_*` functions or `auth.uid()` are required**, because PostgreSQL defaults `CREATE FUNCTION` to `EXECUTE TO PUBLIC`. If your cluster has revoked PUBLIC execute, grant `EXECUTE` explicitly on `cloudsync_payload_apply`, `cloudsync_payload_encode`, `cloudsync_changes_select`, `cloudsync_changes_insert_trigger`, `cloudsync_siteid`, `cloudsync_pk_encode`, and `cloudsync_encode_value`.
+- **`app_schema_version` is not `cloudsync_*`-prefixed** — easy to miss in `cloudsync_%`-pattern grants.
+- **Per-table shadows follow the `<table>_cloudsync` convention** — repeat the DML grant for every table passed to `cloudsync_init`.
+- **Administrative functions** such as `cloudsync_init`, `cloudsync_enable`, `cloudsync_set*`, `cloudsync_terminate`, `cloudsync_cleanup`, `cloudsync_begin_alter`, and `cloudsync_commit_alter` should be run by the database owner during setup, not by client JWT roles.
+- The minimum set will need widening if a future CloudSync version adds new internal objects. The default-privileges pattern above is future-proof.
+
+### Service Role (RLS Bypass)
+
+For server-side workers that need to apply payloads without RLS enforcement (admin restores, cross-user sync, maintenance jobs), create a dedicated role with `BYPASSRLS`:
+
+```sql
+CREATE ROLE service_role NOLOGIN BYPASSRLS;
+GRANT service_role TO postgres;
+```
+
+Apply the same grants as for `rls_role`. Use this role only from trusted server code, never from JWT-gated request paths.
 
 ---
 

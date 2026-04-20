@@ -178,6 +178,14 @@ When using Supabase:
 - The `user_id` column in the synced data matches `auth.uid()`
 - RLS policies reference the correct ownership column
 
+### Apply reports a count, but rows are missing
+
+**Symptom**: `cloudsync_payload_apply` returns a non-zero column-change count, but `SELECT` on the target table shows no new rows. No error is raised to the caller.
+
+**Cause**: The calling role is missing a grant on one of CloudSync's internal objects — the per-table shadow (`<table>_cloudsync`), a metadata table (`cloudsync_settings`, `cloudsync_site_id`, `cloudsync_table_settings`, `cloudsync_schema_versions`, `app_schema_version`), the `cloudsync_changes` view, or the `cloudsync_site_id_id_seq` sequence. The per-PK savepoint rolls the write back, but `cloudsync_payload_apply` still returns the number of column changes it processed.
+
+**Solution**: Apply the full grant set from [JWT Claims → Required Grants](./jwt-claims.md#required-grants). To pinpoint which object is missing, re-run the apply as a superuser or raise log verbosity and inspect the server log for `permission denied` entries preceded by the `cloudsync_payload_apply` call.
+
 ### Debugging
 
 ```sql
