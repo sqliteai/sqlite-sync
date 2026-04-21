@@ -1,5 +1,5 @@
 -- CloudSync Extension for PostgreSQL
--- Version 1.0
+-- Version @EXTVERSION@
 
 -- Complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION cloudsync" to load this file. \quit
