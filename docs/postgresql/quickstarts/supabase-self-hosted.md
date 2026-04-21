@@ -100,6 +100,8 @@ DROP EXTENSION IF EXISTS cloudsync CASCADE;
 CREATE EXTENSION cloudsync;
 ```
 
+If you use JWT authentication with PostgreSQL RLS, recheck the database grants for the role named in your JWT `role` claim after upgrading. Recreating the extension also recreates extension-owned objects such as `cloudsync_changes`, so grants on those objects may need to be reapplied. See [PostgreSQL Role Requirement](../reference/jwt-claims.md#postgresql-role-requirement).
+
 ---
 
 ## Step 3: Register Your Database in the CloudSync Dashboard
