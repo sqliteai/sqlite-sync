@@ -17,14 +17,12 @@ EXTENSION = cloudsync
 # (no SQL surface change, no ALTER EXTENSION UPDATE needed); MINOR/MAJOR bumps
 # are the SQL-surface-changing ones that require a per-release upgrade script.
 # cloudsync_version() in the .so still reports the full semver for debugging.
-CLOUDSYNC_VERSION_FULL := $(shell sed -n 's/^\#define CLOUDSYNC_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' src/cloudsync.h)
-ifeq ($(strip $(CLOUDSYNC_VERSION_FULL)),)
-$(error Could not read CLOUDSYNC_VERSION from src/cloudsync.h)
-endif
-EXTVERSION := $(shell echo '$(CLOUDSYNC_VERSION_FULL)' | cut -d. -f1-2)
-ifeq ($(strip $(EXTVERSION)),)
-$(error Could not derive MAJOR.MINOR from CLOUDSYNC_VERSION '$(CLOUDSYNC_VERSION_FULL)')
-endif
+#
+# Recursive (=) rather than immediate (:=) assignment so the shell calls only
+# fire when a PG-related target actually references these variables. Non-PG
+# targets parse this included makefile without invoking sed/cut at all.
+CLOUDSYNC_VERSION_FULL = $(shell sed -n 's/^\#define CLOUDSYNC_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' src/cloudsync.h)
+EXTVERSION             = $(shell echo '$(CLOUDSYNC_VERSION_FULL)' | cut -d. -f1-2)
 
 # Detect OS for platform-specific settings
 ifneq ($(OS),Windows_NT)
@@ -124,7 +122,10 @@ postgres-check-migration:
 postgres-check:
 	@echo "Checking PostgreSQL installation..."
 	@which $(PG_CONFIG) > /dev/null || (echo "Error: pg_config not found. Install postgresql-server-dev." && exit 1)
+	@[ -n "$(CLOUDSYNC_VERSION_FULL)" ] || (echo "Error: could not read CLOUDSYNC_VERSION from src/cloudsync.h" && exit 1)
+	@[ -n "$(EXTVERSION)" ] || (echo "Error: could not derive MAJOR.MINOR EXTVERSION from CLOUDSYNC_VERSION '$(CLOUDSYNC_VERSION_FULL)'" && exit 1)
 	@echo "PostgreSQL version: $$($(PG_CONFIG) --version)"
+	@echo "CloudSync version : $(CLOUDSYNC_VERSION_FULL) (extension version $(EXTVERSION))"
 	@echo "Extension directory: $(PG_PKGLIBDIR)"
 	@echo "Share directory: $(PG_SHAREDIR)"
 	@echo "Include directory: $(PG_INCLUDEDIR)"
@@ -362,7 +363,7 @@ postgres-supabase-build:
 	echo "Using base image: $$supabase_cli_image"; \
 	echo "Pulling fresh base image to avoid layer accumulation..."; \
 	docker pull "$$supabase_cli_image" 2>/dev/null || true; \
-	docker build --build-arg SUPABASE_POSTGRES_TAG="$(SUPABASE_POSTGRES_TAG)" --build-arg CLOUDSYNC_VERSION="$(EXTVERSION)" -f "$$tmp_dockerfile" -t "$$supabase_cli_image" .; \
+	docker build --build-arg SUPABASE_POSTGRES_TAG="$(SUPABASE_POSTGRES_TAG)" --build-arg CLOUDSYNC_VERSION="$(CLOUDSYNC_VERSION_FULL)" -f "$$tmp_dockerfile" -t "$$supabase_cli_image" .; \
 	rm -f "$$tmp_dockerfile"; \
 	echo "Build complete: $$supabase_cli_image"
 
