@@ -53,7 +53,7 @@ Built on **CRDT** (Conflict-free Replicated Data Types), it guarantees:
 
 ### 1. Install
 
-Download a pre-built binary from the [Releases](https://github.com/sqliteai/sqlite-sync/releases) page, or install a platform package (see [full installation guide](./docs/installation.md) for platform-specific code examples):
+Download a pre-built binary from the [Releases](https://github.com/sqliteai/sqlite-sync/releases) page, or install a platform package (see [full installation guide](./docs/INSTALLATION.md) for platform-specific code examples):
 
 | Platform | Install |
 |----------|---------|
