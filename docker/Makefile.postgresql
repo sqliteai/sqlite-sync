@@ -12,11 +12,18 @@ PG_INCLUDEDIR := $(shell $(PG_CONFIG) --includedir-server 2>/dev/null)
 
 # Extension metadata
 EXTENSION = cloudsync
-# Read the extension version from src/cloudsync.h (CLOUDSYNC_VERSION) so the
-# PG extension version stays in sync with the rest of the repo on every release.
-EXTVERSION := $(shell sed -n 's/^\#define CLOUDSYNC_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' src/cloudsync.h)
-ifeq ($(strip $(EXTVERSION)),)
+# Read the binary version (full semver) from src/cloudsync.h, and derive
+# EXTVERSION as just MAJOR.MINOR. Rationale: PATCH bumps are binary-only
+# (no SQL surface change, no ALTER EXTENSION UPDATE needed); MINOR/MAJOR bumps
+# are the SQL-surface-changing ones that require a per-release upgrade script.
+# cloudsync_version() in the .so still reports the full semver for debugging.
+CLOUDSYNC_VERSION_FULL := $(shell sed -n 's/^\#define CLOUDSYNC_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' src/cloudsync.h)
+ifeq ($(strip $(CLOUDSYNC_VERSION_FULL)),)
 $(error Could not read CLOUDSYNC_VERSION from src/cloudsync.h)
+endif
+EXTVERSION := $(shell echo '$(CLOUDSYNC_VERSION_FULL)' | cut -d. -f1-2)
+ifeq ($(strip $(EXTVERSION)),)
+$(error Could not derive MAJOR.MINOR from CLOUDSYNC_VERSION '$(CLOUDSYNC_VERSION_FULL)')
 endif
 
 # Detect OS for platform-specific settings

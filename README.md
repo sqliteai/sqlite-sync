@@ -212,6 +212,12 @@ Part of the **[SQLite AI](https://sqlite.ai)** ecosystem:
 | **[SQLite-JS](https://github.com/sqliteai/sqlite-js)** | Custom SQLite functions in JavaScript |
 | **[Liteparser](https://github.com/sqliteai/liteparser)** | Fully compliant SQLite SQL parser |
 
+## Versioning
+
+This project follows [semver](https://semver.org/). The single source of truth is `CLOUDSYNC_VERSION` in `src/cloudsync.h`; all packaged artifacts (NPM, Maven, pub.dev, Swift, Docker, native tarballs) inherit this version. PATCH releases never alter the exposed API — they ship bug fixes, performance improvements, and internal changes only.
+
+The PostgreSQL extension differs only in how it surfaces the version: its catalog version (`default_version` / `installed_version`) exposes `MAJOR.MINOR` only, so PATCH releases are transparent binary upgrades and only MINOR/MAJOR releases need `ALTER EXTENSION cloudsync UPDATE`. The `cloudsync_version()` SQL function always reports the full semver of the loaded `.so`. See the [PostgreSQL upgrade docs](docs/postgresql/quickstarts/postgres.md#upgrading-a-later-release) for the user-facing procedure.
+
 ## License
 
 This project is licensed under the [Elastic License 2.0](./LICENSE.md). For production or managed service use, [contact SQLite Cloud, Inc](mailto:info@sqlitecloud.io) for a commercial license.
