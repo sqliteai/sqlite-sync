@@ -12485,6 +12485,81 @@ finalize:
     return result;
 }
 
+bool do_test_delete_resurrect_multi_cycle (int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[3] = {NULL, NULL, NULL};
+    bool result = false;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+
+    for (int i = 0; i < 3; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        int rc = sqlite3_exec(db[i], "CREATE TABLE test_tbl (id TEXT PRIMARY KEY, val TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('test_tbl');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // Initial insert and full sync
+    if (sqlite3_exec(db[0], "INSERT INTO test_tbl VALUES ('row1', 'original');", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+    if (!do_merge_using_payload(db[0], db[1], false, true)) goto finalize;
+    if (!do_merge_using_payload(db[0], db[2], false, true)) goto finalize;
+
+    // Cycle 1: A deletes, B resurrects, C receives resurrection before stale delete.
+    if (sqlite3_exec(db[0], "DELETE FROM test_tbl WHERE id = 'row1';", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+    if (!do_merge_using_payload(db[0], db[1], true, true)) goto finalize;
+
+    if (sqlite3_exec(db[1], "INSERT INTO test_tbl VALUES ('row1', 'resurrected_by_b');", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+    if (!do_merge_using_payload(db[1], db[2], true, true)) goto finalize;
+    if (!do_merge_using_payload(db[0], db[2], true, true)) goto finalize;
+    if (!do_merge_using_payload(db[1], db[0], true, true)) goto finalize;
+
+    // Cycle 2: B deletes, A resurrects, C again receives resurrection before stale delete.
+    if (sqlite3_exec(db[1], "DELETE FROM test_tbl WHERE id = 'row1';", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+    if (!do_merge_using_payload(db[1], db[0], true, true)) goto finalize;
+
+    if (sqlite3_exec(db[0], "INSERT INTO test_tbl VALUES ('row1', 'resurrected_by_a_again');", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+    if (!do_merge_using_payload(db[0], db[2], true, true)) goto finalize;
+    if (!do_merge_using_payload(db[1], db[2], true, true)) goto finalize;
+    if (!do_merge_using_payload(db[0], db[1], true, true)) goto finalize;
+
+    const char *query = "SELECT * FROM test_tbl ORDER BY id;";
+    result = do_compare_queries(db[0], query, db[1], query, -1, -1, print_result);
+    if (result) result = do_compare_queries(db[0], query, db[2], query, -1, -1, print_result);
+
+    if (result) {
+        for (int i = 0; i < 3; i++) {
+            int64_t count = do_select_int(db[i], "SELECT COUNT(*) FROM test_tbl WHERE id = 'row1';");
+            int64_t live_sentinel = do_select_int(db[i], "SELECT COUNT(*) FROM test_tbl_cloudsync WHERE col_name = '__[RIP]__' AND col_version % 2 = 1;");
+
+            if (count != 1) {
+                printf("delete_resurrect_multi_cycle: expected row1 to exist on db[%d], count=%" PRId64 "\n", i, count);
+                result = false;
+                break;
+            }
+
+            if (live_sentinel != 1) {
+                printf("delete_resurrect_multi_cycle: expected 1 live sentinel on db[%d], got=%" PRId64 "\n", i, live_sentinel);
+                result = false;
+                break;
+            }
+        }
+    }
+
+finalize:
+    for (int i = 0; i < 3; i++) {
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
 bool do_test_large_composite_pk (int nclients, bool print_result, bool cleanup_databases) {
     sqlite3 *db[2] = {NULL, NULL};
     bool result = false;
@@ -12804,6 +12879,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Payload Idempotency Test:", do_test_payload_idempotency(2, print_result, cleanup_databases));
     result += test_report("CL Tiebreak Test:", do_test_causal_length_tiebreak(3, print_result, cleanup_databases));
     result += test_report("Delete/Resurrect Order:", do_test_delete_resurrect_ordering(3, print_result, cleanup_databases));
+    result += test_report("Delete/Resurrect Multi-Cycle:", do_test_delete_resurrect_multi_cycle(3, print_result, cleanup_databases));
     result += test_report("Large Composite PK Test:", do_test_large_composite_pk(2, print_result, cleanup_databases));
     result += test_report("Schema Hash Mismatch:", do_test_schema_hash_mismatch(2, print_result, cleanup_databases));
     result += test_report("Stale Table Settings:", do_test_stale_table_settings(cleanup_databases));
