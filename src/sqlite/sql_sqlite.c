@@ -187,7 +187,10 @@ const char * const SQL_CLOUDSYNC_UPSERT_RAW_COLVERSION =
     "SELECT ?, ?, ?, ?, ?, 0 "
     "WHERE 1 "
     "ON CONFLICT DO UPDATE SET "
-    "col_version = \"%w\".col_version + 1, db_version = ?, seq = ?, site_id = 0;";
+    "col_version = CASE "
+    "WHEN (col_version %% 2) = (excluded.col_version %% 2) THEN col_version + 2 "
+    "ELSE col_version + 1 END, "
+    "db_version = ?, seq = ?, site_id = 0;";
 
 const char * const SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL =
     "DELETE FROM \"%w\" WHERE pk=? AND col_name!='%s';";
