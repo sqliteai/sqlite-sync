@@ -1,0 +1,13 @@
+# CloudSync PostgreSQL Extension Control File
+#
+# Generated from cloudsync.control.in by docker/Makefile.postgresql.
+# Do not edit the generated file; edit the .in template instead.
+# The version below is read from CLOUDSYNC_VERSION in src/cloudsync.h.
+
+comment = 'CloudSync - CRDT-based multi-master database synchronization'
+default_version = '@EXTVERSION@'
+relocatable = true
+requires = ''
+superuser = false
+module_pathname = '$libdir/cloudsync'
+trusted = true

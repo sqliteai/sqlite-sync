@@ -10,7 +10,7 @@ docker/
 │   ├── Dockerfile       # Custom PostgreSQL image
 │   ├── docker-compose.yml
 │   ├── init.sql        # CloudSync metadata tables
-│   └── cloudsync.control
+│   └── cloudsync.control.in   # template; cloudsync.control is generated at build time
 ```
 
 ## Option 1: Standalone PostgreSQL

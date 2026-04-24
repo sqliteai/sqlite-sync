@@ -239,8 +239,24 @@ jobs:
           path: dist/${{ matrix.name == 'apple-xcframework' && 'CloudSync.*' || 'cloudsync.*'}}
           if-no-files-found: error
 
+  postgres-migration-check:
+    if: ${{ !contains(github.event.head_commit.message, '[auto-update]') }}
+    runs-on: ubuntu-22.04
+    name: postgresql migration script check
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          # Need full history + tags so `git describe` can find the previous
+          # release tag that the check script compares against.
+          fetch-depth: 0
+
+      - name: verify migration script for current CLOUDSYNC_VERSION
+        run: make postgres-check-migration
+
   postgres-test:
     if: ${{ !contains(github.event.head_commit.message, '[auto-update]') }}
+    needs: [postgres-migration-check]
     runs-on: ubuntu-22.04
     name: postgresql ${{ matrix.postgres_tag }} build + test
     timeout-minutes: 10
@@ -284,6 +300,7 @@ jobs:
 
   postgres-build:
     if: ${{ !contains(github.event.head_commit.message, '[auto-update]') }}
+    needs: [postgres-migration-check]
     runs-on: ${{ matrix.os }}
     name: postgresql${{ matrix.postgres_version }}-${{ matrix.name }}-${{ matrix.arch }} build
     timeout-minutes: 15

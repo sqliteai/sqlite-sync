@@ -31,7 +31,7 @@ RUN case "${TARGETARCH}" in \
     mkdir -p /tmp/cloudsync && \
     tar -xzf /tmp/cloudsync.tar.gz -C /tmp/cloudsync && \
     install -m 755 /tmp/cloudsync/cloudsync.so "$(pg_config --pkglibdir)/" && \
-    install -m 644 /tmp/cloudsync/cloudsync--1.0.sql "$(pg_config --sharedir)/extension/" && \
+    install -m 644 /tmp/cloudsync/cloudsync--*.sql "$(pg_config --sharedir)/extension/" && \
     install -m 644 /tmp/cloudsync/cloudsync.control "$(pg_config --sharedir)/extension/" && \
     rm -rf /tmp/cloudsync /tmp/cloudsync.tar.gz && \
     apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*

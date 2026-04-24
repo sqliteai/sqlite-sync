@@ -7,6 +7,11 @@ dist/
 /curl/src
 openssl/
 
+# Generated PostgreSQL extension files (produced from .in templates by
+# docker/Makefile.postgresql; version is derived from src/cloudsync.h)
+/docker/postgresql/cloudsync.control
+/src/postgresql/cloudsync--*.sql
+
 # Test artifacts
 /coverage
 unittest
