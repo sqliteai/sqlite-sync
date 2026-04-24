@@ -395,12 +395,26 @@ int cloudsync_changesvtab_best_index (sqlite3_vtab *vtab, sqlite3_index_info *id
 
 int cloudsync_changesvtab_filter (sqlite3_vtab_cursor *cursor, int idxn, const char *idxs, int argc, sqlite3_value **argv) {
     DEBUG_VTAB("cloudsync_changesvtab_filter");
-    
+
     cloudsync_changes_cursor *c = (cloudsync_changes_cursor *)cursor;
     cloudsync_context *data = c->vtab->data;
     sqlite3 *db = c->vtab->db;
     char *sql = vtab_build_changes_sql(data, idxs);
-    if (sql == NULL) return SQLITE_NOMEM;
+    if (sql == NULL) {
+        // vtab_build_changes_sql returns NULL when no *_cloudsync meta-tables
+        // exist (cloudsync_init was never called, or the last configured table
+        // was cleaned up): the inner GROUP_CONCAT produces a NULL row and the
+        // outer SELECT yields a NULL final string. Distinguish this from a
+        // genuine OOM by checking whether cloudsync is configured, so the user
+        // gets an actionable message instead of "out of memory".
+        if (!cloudsync_config_exists(data) || dbutils_table_settings_count_tables(data) == 0) {
+            return vtab_set_error((sqlite3_vtab *)c->vtab,
+                "cloudsync has no tables configured for sync. Call "
+                "SELECT cloudsync_init('<table_name>') to enable sync on a "
+                "table before querying cloudsync_changes.");
+        }
+        return SQLITE_NOMEM;
+    }
     
     // the xFilter method may be called multiple times on the same sqlite3_vtab_cursor*
     if (c->vm) sqlite3_finalize(c->vm);

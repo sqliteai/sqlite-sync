@@ -2341,6 +2341,16 @@ bool cloudsync_config_exists (cloudsync_context *data) {
     return database_internal_table_exists(data, CLOUDSYNC_SITEID_NAME) == true;
 }
 
+bool cloudsync_context_is_initialized (cloudsync_context *data) {
+    // A fully initialized context has its persistent "is the DB stale" probe
+    // prepared. cloudsync_context_init prepares data_version_stmt (via
+    // cloudsync_add_dbvms) only after the cloudsync_site_id table exists, so
+    // a non-NULL pointer means cloudsync_init has been called at least once
+    // on this connection. Used to produce actionable error messages when
+    // callers hit a function before calling cloudsync_init.
+    return data != NULL && data->data_version_stmt != NULL;
+}
+
 cloudsync_context *cloudsync_context_create (void *db) {
     cloudsync_context *data = (cloudsync_context *)cloudsync_memory_zeroalloc((uint64_t)(sizeof(cloudsync_context)));
     if (!data) return NULL;
@@ -3201,6 +3211,19 @@ static int cloudsync_payload_decode_callback (void *xdata, int index, int type, 
 // #ifndef CLOUDSYNC_OMIT_RLS_VALIDATION
 
 int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int blen, int *pnrows) {
+    // Guard against calling payload_apply before cloudsync_init: without this,
+    // the settings lookups at the top of this function would each emit a
+    // "no such table: cloudsync_settings" debug line, control would fall
+    // through to the meta-table insert, and the function would ultimately
+    // return an error with an empty errmsg — SQLite then surfaces that as
+    // the confusing "Runtime error: not an error".
+    if (!cloudsync_context_is_initialized(data)) {
+        return cloudsync_set_error(data,
+            "cloudsync is not initialized: call SELECT cloudsync_init('<table_name>') "
+            "to enable sync on a table before calling cloudsync_payload_apply().",
+            DBRES_MISUSE);
+    }
+
     // sanity check
     if (blen < (int)sizeof(cloudsync_payload_header)) return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid payload length", DBRES_MISUSE);
     

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.17] - 2026-04-24
+
+### Fixed
+
+- **Confusing errors when `cloudsync_init` was never called**: `cloudsync_changes` (SQLite), `cloudsync_db_version`, `cloudsync_db_version_next`, `cloudsync_set_filter`, `cloudsync_clear_filter`, and `cloudsync_payload_apply` now raise a single actionable message pointing at `SELECT cloudsync_init('<table_name>')` instead of leaking low-level symptoms (`out of memory`, `not an error`, silent `-1`, multi-line "no such table" dumps). The guard runs only on the error branch, so the sync hot path is unaffected.
+
 ## [1.0.16] - 2026-04-16
 
 ### Fixed

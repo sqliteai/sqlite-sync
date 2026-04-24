@@ -218,6 +218,15 @@ Datum cloudsync_db_version (PG_FUNCTION_ARGS) {
     {
         int rc = cloudsync_dbversion_check_uptodate(data);
         if (rc != DBRES_OK) {
+            // When cloudsync_init was never called, data_version_stmt is NULL
+            // and database_errmsg() is empty, producing the unhelpful "Unable
+            // to retrieve db_version ()". Detect the uninitialized state and
+            // return an actionable message instead. The extra check only runs
+            // on the error branch, so it costs nothing on the sync hot path.
+            if (!cloudsync_context_is_initialized(data)) {
+                ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                    errmsg("cloudsync is not initialized: call SELECT cloudsync_init('<table_name>') to enable sync on a table before calling cloudsync_db_version().")));
+            }
             ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to retrieve db_version (%s)", database_errmsg(data))));
         }
 
@@ -256,6 +265,18 @@ Datum cloudsync_db_version_next (PG_FUNCTION_ARGS) {
     PG_TRY();
     {
         next_version = cloudsync_dbversion_next(data, merging_version);
+        if (next_version == -1) {
+            // Previously this path silently returned -1, which is worse than
+            // an error because callers cannot distinguish a bogus version
+            // number from a real one. Emit an actionable message when the
+            // root cause is that cloudsync_init has never been called.
+            if (!cloudsync_context_is_initialized(data)) {
+                ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                    errmsg("cloudsync is not initialized: call SELECT cloudsync_init('<table_name>') to enable sync on a table before calling cloudsync_db_version_next().")));
+            }
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                errmsg("Unable to retrieve next_db_version (%s)", database_errmsg(data))));
+        }
     }
     PG_CATCH();
     {
@@ -670,6 +691,16 @@ Datum cloudsync_set_filter (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
+        // Guard against calling set_filter before the target table has been
+        // set up for sync: without this, we'd drop and fail to recreate
+        // triggers, emitting ten+ noisy "does not exist, skipping" NOTICEs
+        // followed by a generic "error recreating triggers" message that
+        // does not point at the real cause.
+        if (!cloudsync_context_is_initialized(data) || !table_lookup(data, tbl)) {
+            ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                errmsg("cloudsync_set_filter: table '%s' is not configured for sync. Call SELECT cloudsync_init('%s') first.", tbl, tbl)));
+        }
+
         // Store filter in table settings
         dbutils_table_settings_set_key_value(data, tbl, "*", "filter", filter_expr);
 
@@ -735,6 +766,14 @@ Datum cloudsync_clear_filter (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
+        // Guard against calling clear_filter before the target table has
+        // been set up for sync — see cloudsync_set_filter for the same
+        // rationale.
+        if (!cloudsync_context_is_initialized(data) || !table_lookup(data, tbl)) {
+            ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                errmsg("cloudsync_clear_filter: table '%s' is not configured for sync. Call SELECT cloudsync_init('%s') first.", tbl, tbl)));
+        }
+
         // Remove filter from settings
         dbutils_table_settings_set_key_value(data, tbl, "*", "filter", NULL);
 
