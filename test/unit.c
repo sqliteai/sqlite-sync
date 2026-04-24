@@ -9259,6 +9259,390 @@ static char *do_select_text(sqlite3 *db, const char *sql) {
     return val;
 }
 
+// Regression: metadata may store the local site ordinal as 0 internally, but
+// cloudsync_changes must still resolve local changes to the real local site-id
+// blob and preserve remote site-ids on imported rows.
+bool do_test_site_id_resolution(bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    time_t timestamp = time(NULL);
+    int rc;
+    char *site0 = NULL;
+    char *site1 = NULL;
+    char *sql = NULL;
+    bool ok = false;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) goto fail;
+
+        rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, title TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto fail;
+    }
+
+    site0 = do_select_text(db[0], "SELECT hex(cloudsync_siteid());");
+    site1 = do_select_text(db[1], "SELECT hex(cloudsync_siteid());");
+    if (!site0 || !site1) {
+        printf("site_id_resolution: unable to read local site ids\n");
+        goto fail;
+    }
+    if (strcmp(site0, site1) == 0) {
+        printf("site_id_resolution: expected distinct site ids for the two databases\n");
+        goto fail;
+    }
+
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, title) VALUES ('doc1', 'alpha');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("site_id_resolution: local insert failed: %s\n", sqlite3_errmsg(db[0]));
+        goto fail;
+    }
+
+    sql = sqlite3_mprintf(
+        "SELECT count(*) FROM cloudsync_changes "
+        "WHERE tbl='docs' AND pk=cloudsync_pk_encode('doc1') AND col_name='title' AND hex(site_id)='%q';",
+        site0);
+    if (!sql) goto fail;
+    int64_t local_rows = do_select_int(db[0], sql);
+    sqlite3_free(sql);
+    sql = NULL;
+    if (local_rows != 1) {
+        printf("site_id_resolution: expected local title change on db[0] to export with site_id %s, got %" PRId64 "\n", site0, local_rows);
+        goto fail;
+    }
+
+    if (!do_merge_using_payload(db[0], db[1], false, true)) {
+        printf("site_id_resolution: merge 0->1 failed\n");
+        goto fail;
+    }
+
+    sql = sqlite3_mprintf(
+        "SELECT count(*) FROM cloudsync_changes "
+        "WHERE tbl='docs' AND pk=cloudsync_pk_encode('doc1') AND col_name='title' AND hex(site_id)='%q';",
+        site0);
+    if (!sql) goto fail;
+    int64_t imported_rows = do_select_int(db[1], sql);
+    sqlite3_free(sql);
+    sql = NULL;
+    if (imported_rows != 1) {
+        printf("site_id_resolution: expected imported title change on db[1] to preserve sender site_id %s, got %" PRId64 "\n", site0, imported_rows);
+        goto fail;
+    }
+
+    sql = sqlite3_mprintf(
+        "SELECT count(*) FROM cloudsync_changes "
+        "WHERE tbl='docs' AND pk=cloudsync_pk_encode('doc1') AND col_name='title' AND hex(site_id)='%q';",
+        site1);
+    if (!sql) goto fail;
+    int64_t wrong_local_rows = do_select_int(db[1], sql);
+    sqlite3_free(sql);
+    sql = NULL;
+    if (wrong_local_rows != 0) {
+        printf("site_id_resolution: imported row on db[1] was rewritten to local site_id %s\n", site1);
+        goto fail;
+    }
+
+    rc = sqlite3_exec(db[1], "UPDATE docs SET title='beta' WHERE id='doc1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("site_id_resolution: local update on db[1] failed: %s\n", sqlite3_errmsg(db[1]));
+        goto fail;
+    }
+
+    sql = sqlite3_mprintf(
+        "SELECT count(*) FROM cloudsync_changes "
+        "WHERE tbl='docs' AND pk=cloudsync_pk_encode('doc1') AND col_name='title' AND hex(site_id)='%q';",
+        site1);
+    if (!sql) goto fail;
+    int64_t rewritten_local_rows = do_select_int(db[1], sql);
+    sqlite3_free(sql);
+    sql = NULL;
+    if (rewritten_local_rows != 1) {
+        printf("site_id_resolution: expected local update on db[1] to export with local site_id %s, got %" PRId64 "\n", site1, rewritten_local_rows);
+        goto fail;
+    }
+
+    ok = true;
+
+fail:
+    if (sql) sqlite3_free(sql);
+    if (site0) sqlite3_free(site0);
+    if (site1) sqlite3_free(site1);
+    for (int i = 0; i < 2; i++) {
+        if (db[i]) close_db(db[i]);
+    }
+    return ok;
+}
+
+// Regression test for bugs/BUG_block_lww_upsert_tombstone.md.
+// Re-running the raw UPSERT against an already-live block must preserve
+// liveness parity; if the bug is present, the block flips to a tombstone and
+// disappears from materialization.
+bool do_test_block_lww_upsert_tombstone_bug(int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[1] = {NULL};
+    cloudsync_context *ctx = NULL;
+    cloudsync_table_context *table = NULL;
+    time_t timestamp = time(NULL);
+    int rc;
+    char *pk = NULL;
+    int64_t pklen = 0;
+    char *block_colname = NULL;
+
+    db[0] = do_create_database_file(0, timestamp, test_counter++);
+    if (!db[0]) return false;
+
+    rc = sqlite3_exec(db[0], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'AAA\nBBB\nCCC');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("block_upsert_tombstone: INSERT failed: %s\n", sqlite3_errmsg(db[0]));
+        goto fail;
+    }
+
+    int64_t alive_before = do_select_int(db[0],
+        "SELECT count(*) "
+        "FROM docs_cloudsync_blocks b "
+        "JOIN docs_cloudsync m ON b.pk = m.pk AND b.col_name = m.col_name "
+        "WHERE m.col_name LIKE 'body' || x'1f' || '%' AND m.col_version % 2 = 1;");
+    if (alive_before != 3) {
+        printf("block_upsert_tombstone: expected 3 alive blocks before reproducer, got %" PRId64 "\n", alive_before);
+        goto fail;
+    }
+
+    char *target_block = do_select_text(db[0],
+        "SELECT CAST(b.col_value AS TEXT) "
+        "FROM docs_cloudsync_blocks b "
+        "JOIN docs_cloudsync m ON b.pk = m.pk AND b.col_name = m.col_name "
+        "WHERE m.col_name LIKE 'body' || x'1f' || '%' "
+        "ORDER BY b.col_name "
+        "LIMIT 1;");
+    if (!target_block) {
+        printf("block_upsert_tombstone: could not read target block content\n");
+        goto fail;
+    }
+
+    ctx = cloudsync_context_create(db[0]);
+    if (!ctx) goto fail;
+    if (cloudsync_init_table(ctx, "docs", "cls", CLOUDSYNC_INIT_FLAG_NONE) != DBRES_OK) {
+        printf("block_upsert_tombstone: secondary context init failed\n");
+        sqlite3_free(target_block);
+        goto fail;
+    }
+    table = table_lookup(ctx, "docs");
+    if (!table) {
+        printf("block_upsert_tombstone: secondary context could not resolve docs table\n");
+        sqlite3_free(target_block);
+        goto fail;
+    }
+
+    if (database_select_blob(ctx, "SELECT cloudsync_pk_encode('doc1');", &pk, &pklen) != DBRES_OK || !pk) {
+        printf("block_upsert_tombstone: could not encode primary key for helper call\n");
+        sqlite3_free(target_block);
+        goto fail;
+    }
+    if (database_select_text(ctx,
+            "SELECT col_name FROM docs_cloudsync "
+            "WHERE col_name LIKE 'body' || x'1f' || '%' "
+            "ORDER BY col_name LIMIT 1;",
+            &block_colname) != DBRES_OK || !block_colname) {
+        printf("block_upsert_tombstone: could not resolve block col_name for helper call\n");
+        sqlite3_free(target_block);
+        goto fail;
+    }
+
+    rc = local_mark_insert_or_update_meta(table, pk, (size_t)pklen, block_colname,
+                                          cloudsync_dbversion(ctx), cloudsync_bumpseq(ctx));
+    if (rc != SQLITE_OK) {
+        printf("block_upsert_tombstone: helper call failed\n");
+        sqlite3_free(target_block);
+        goto fail;
+    }
+
+    int64_t alive_after = do_select_int(db[0],
+        "SELECT count(*) "
+        "FROM docs_cloudsync_blocks b "
+        "JOIN docs_cloudsync m ON b.pk = m.pk AND b.col_name = m.col_name "
+        "WHERE m.col_name LIKE 'body' || x'1f' || '%' AND m.col_version % 2 = 1;");
+    if (alive_after != 3) {
+        printf("block_upsert_tombstone: bug reproduced, alive blocks changed from 3 to %" PRId64 "\n", alive_after);
+        sqlite3_free(target_block);
+        goto fail;
+    }
+
+    int64_t tombstones = do_select_int(db[0],
+        "SELECT count(*) "
+        "FROM docs_cloudsync "
+        "WHERE col_name LIKE 'body' || x'1f' || '%' AND col_version % 2 = 0;");
+    if (tombstones != 0) {
+        printf("block_upsert_tombstone: bug reproduced, found %" PRId64 " tombstoned block rows\n", tombstones);
+        sqlite3_free(target_block);
+        goto fail;
+    }
+
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_text_materialize('docs', 'body', 'doc1');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("block_upsert_tombstone: materialize failed: %s\n", sqlite3_errmsg(db[0]));
+        sqlite3_free(target_block);
+        goto fail;
+    }
+
+    char *body = do_select_text(db[0], "SELECT body FROM docs WHERE id = 'doc1';");
+    if (!body) {
+        printf("block_upsert_tombstone: materialized body is NULL\n");
+        sqlite3_free(target_block);
+        goto fail;
+    }
+    if (strstr(body, target_block) == NULL) {
+        printf("block_upsert_tombstone: bug reproduced, materialized body lost block [%s] -> [%s]\n", target_block, body);
+        sqlite3_free(target_block);
+        sqlite3_free(body);
+        goto fail;
+    }
+
+    sqlite3_free(target_block);
+    sqlite3_free(body);
+    if (block_colname) cloudsync_memory_free(block_colname);
+    if (pk) cloudsync_memory_free(pk);
+    if (ctx) cloudsync_context_free(ctx);
+    close_db(db[0]);
+    return true;
+
+fail:
+    if (block_colname) cloudsync_memory_free(block_colname);
+    if (pk) cloudsync_memory_free(pk);
+    if (ctx) cloudsync_context_free(ctx);
+    if (db[0]) close_db(db[0]);
+    return false;
+}
+
+// Regression: writing the same block tombstone twice must preserve tombstone
+// parity. Before the parity fix, the second write could resurrect the block
+// metadata by producing col_version = 3.
+bool do_test_block_lww_double_tombstone(bool print_result, bool cleanup_databases) {
+    sqlite3 *db[1] = {NULL};
+    cloudsync_context *ctx = NULL;
+    cloudsync_table_context *table = NULL;
+    time_t timestamp = time(NULL);
+    int rc;
+    char *pk = NULL;
+    int64_t pklen = 0;
+    char *block_colname = NULL;
+    char *sql = NULL;
+    bool ok = false;
+
+    db[0] = do_create_database_file(0, timestamp, test_counter++);
+    if (!db[0]) return false;
+
+    rc = sqlite3_exec(db[0], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto fail;
+
+    rc = sqlite3_exec(db[0], "INSERT INTO docs (id, body) VALUES ('doc1', 'AAA\nBBB\nCCC');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("block_double_tombstone: INSERT failed: %s\n", sqlite3_errmsg(db[0]));
+        goto fail;
+    }
+
+    ctx = cloudsync_context_create(db[0]);
+    if (!ctx) goto fail;
+    if (cloudsync_init_table(ctx, "docs", "cls", CLOUDSYNC_INIT_FLAG_NONE) != DBRES_OK) {
+        printf("block_double_tombstone: secondary context init failed\n");
+        goto fail;
+    }
+    table = table_lookup(ctx, "docs");
+    if (!table) {
+        printf("block_double_tombstone: secondary context could not resolve docs table\n");
+        goto fail;
+    }
+
+    if (database_select_blob(ctx, "SELECT cloudsync_pk_encode('doc1');", &pk, &pklen) != DBRES_OK || !pk) {
+        printf("block_double_tombstone: could not encode primary key\n");
+        goto fail;
+    }
+    if (database_select_text(ctx,
+            "SELECT col_name FROM docs_cloudsync "
+            "WHERE col_name LIKE 'body' || x'1f' || '%' "
+            "ORDER BY col_name LIMIT 1;",
+            &block_colname) != DBRES_OK || !block_colname) {
+        printf("block_double_tombstone: could not resolve block col_name\n");
+        goto fail;
+    }
+
+    rc = local_mark_delete_block_meta(table, pk, (size_t)pklen, block_colname,
+                                      cloudsync_dbversion(ctx), cloudsync_bumpseq(ctx));
+    if (rc != SQLITE_OK) {
+        printf("block_double_tombstone: first tombstone helper call failed\n");
+        goto fail;
+    }
+    rc = block_delete_value_external(ctx, table, pk, (size_t)pklen, block_colname);
+    if (rc != SQLITE_OK) {
+        printf("block_double_tombstone: first block delete failed\n");
+        goto fail;
+    }
+
+    rc = local_mark_delete_block_meta(table, pk, (size_t)pklen, block_colname,
+                                      cloudsync_dbversion(ctx), cloudsync_bumpseq(ctx));
+    if (rc != SQLITE_OK) {
+        printf("block_double_tombstone: second tombstone helper call failed\n");
+        goto fail;
+    }
+    rc = block_delete_value_external(ctx, table, pk, (size_t)pklen, block_colname);
+    if (rc != SQLITE_OK) {
+        printf("block_double_tombstone: second block delete failed\n");
+        goto fail;
+    }
+
+    sql = sqlite3_mprintf("SELECT col_version FROM docs_cloudsync WHERE pk = cloudsync_pk_encode('doc1') AND col_name = '%q';",
+                          block_colname);
+    if (!sql) goto fail;
+    int64_t col_version = do_select_int(db[0], sql);
+    sqlite3_free(sql);
+    sql = NULL;
+    if (col_version != 4) {
+        printf("block_double_tombstone: expected col_version 4 after double tombstone, got %" PRId64 "\n", col_version);
+        goto fail;
+    }
+
+    sql = sqlite3_mprintf("SELECT count(*) FROM docs_cloudsync WHERE pk = cloudsync_pk_encode('doc1') AND col_name = '%q' AND col_version %% 2 = 0;",
+                          block_colname);
+    if (!sql) goto fail;
+    int64_t even_rows = do_select_int(db[0], sql);
+    sqlite3_free(sql);
+    sql = NULL;
+    if (even_rows != 1) {
+        printf("block_double_tombstone: expected 1 even tombstone row after double tombstone, got %" PRId64 "\n", even_rows);
+        goto fail;
+    }
+
+    sql = sqlite3_mprintf("SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('doc1') AND col_name = '%q';",
+                          block_colname);
+    if (!sql) goto fail;
+    int64_t remaining_blocks = do_select_int(db[0], sql);
+    sqlite3_free(sql);
+    sql = NULL;
+    if (remaining_blocks != 0) {
+        printf("block_double_tombstone: expected deleted block value to stay absent, got %" PRId64 " rows\n", remaining_blocks);
+        goto fail;
+    }
+
+    ok = true;
+
+fail:
+    if (sql) sqlite3_free(sql);
+    if (block_colname) cloudsync_memory_free(block_colname);
+    if (pk) cloudsync_memory_free(pk);
+    if (ctx) cloudsync_context_free(ctx);
+    if (db[0]) close_db(db[0]);
+    return ok;
+}
+
 // Test: enabling block-level LWW on a table that already contains rows migrates
 // existing data into the blocks table so it is not silently ignored.
 // Verifies:
@@ -12101,6 +12485,81 @@ finalize:
     return result;
 }
 
+bool do_test_delete_resurrect_multi_cycle (int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[3] = {NULL, NULL, NULL};
+    bool result = false;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+
+    for (int i = 0; i < 3; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        int rc = sqlite3_exec(db[i], "CREATE TABLE test_tbl (id TEXT PRIMARY KEY, val TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('test_tbl');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // Initial insert and full sync
+    if (sqlite3_exec(db[0], "INSERT INTO test_tbl VALUES ('row1', 'original');", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+    if (!do_merge_using_payload(db[0], db[1], false, true)) goto finalize;
+    if (!do_merge_using_payload(db[0], db[2], false, true)) goto finalize;
+
+    // Cycle 1: A deletes, B resurrects, C receives resurrection before stale delete.
+    if (sqlite3_exec(db[0], "DELETE FROM test_tbl WHERE id = 'row1';", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+    if (!do_merge_using_payload(db[0], db[1], true, true)) goto finalize;
+
+    if (sqlite3_exec(db[1], "INSERT INTO test_tbl VALUES ('row1', 'resurrected_by_b');", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+    if (!do_merge_using_payload(db[1], db[2], true, true)) goto finalize;
+    if (!do_merge_using_payload(db[0], db[2], true, true)) goto finalize;
+    if (!do_merge_using_payload(db[1], db[0], true, true)) goto finalize;
+
+    // Cycle 2: B deletes, A resurrects, C again receives resurrection before stale delete.
+    if (sqlite3_exec(db[1], "DELETE FROM test_tbl WHERE id = 'row1';", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+    if (!do_merge_using_payload(db[1], db[0], true, true)) goto finalize;
+
+    if (sqlite3_exec(db[0], "INSERT INTO test_tbl VALUES ('row1', 'resurrected_by_a_again');", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+    if (!do_merge_using_payload(db[0], db[2], true, true)) goto finalize;
+    if (!do_merge_using_payload(db[1], db[2], true, true)) goto finalize;
+    if (!do_merge_using_payload(db[0], db[1], true, true)) goto finalize;
+
+    const char *query = "SELECT * FROM test_tbl ORDER BY id;";
+    result = do_compare_queries(db[0], query, db[1], query, -1, -1, print_result);
+    if (result) result = do_compare_queries(db[0], query, db[2], query, -1, -1, print_result);
+
+    if (result) {
+        for (int i = 0; i < 3; i++) {
+            int64_t count = do_select_int(db[i], "SELECT COUNT(*) FROM test_tbl WHERE id = 'row1';");
+            int64_t live_sentinel = do_select_int(db[i], "SELECT COUNT(*) FROM test_tbl_cloudsync WHERE col_name = '__[RIP]__' AND col_version % 2 = 1;");
+
+            if (count != 1) {
+                printf("delete_resurrect_multi_cycle: expected row1 to exist on db[%d], count=%" PRId64 "\n", i, count);
+                result = false;
+                break;
+            }
+
+            if (live_sentinel != 1) {
+                printf("delete_resurrect_multi_cycle: expected 1 live sentinel on db[%d], got=%" PRId64 "\n", i, live_sentinel);
+                result = false;
+                break;
+            }
+        }
+    }
+
+finalize:
+    for (int i = 0; i < 3; i++) {
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
 bool do_test_large_composite_pk (int nclients, bool print_result, bool cleanup_databases) {
     sqlite3 *db[2] = {NULL, NULL};
     bool result = false;
@@ -12420,13 +12879,17 @@ int main (int argc, const char * argv[]) {
     result += test_report("Payload Idempotency Test:", do_test_payload_idempotency(2, print_result, cleanup_databases));
     result += test_report("CL Tiebreak Test:", do_test_causal_length_tiebreak(3, print_result, cleanup_databases));
     result += test_report("Delete/Resurrect Order:", do_test_delete_resurrect_ordering(3, print_result, cleanup_databases));
+    result += test_report("Delete/Resurrect Multi-Cycle:", do_test_delete_resurrect_multi_cycle(3, print_result, cleanup_databases));
     result += test_report("Large Composite PK Test:", do_test_large_composite_pk(2, print_result, cleanup_databases));
     result += test_report("Schema Hash Mismatch:", do_test_schema_hash_mismatch(2, print_result, cleanup_databases));
     result += test_report("Stale Table Settings:", do_test_stale_table_settings(cleanup_databases));
     result += test_report("Stale Table Settings Dropped Meta:", do_test_stale_table_settings_dropped_meta(cleanup_databases));
     result += test_report("DBVersion Rebuild Error:", do_test_dbversion_rebuild_error());
+    result += test_report("Site ID Resolution:", do_test_site_id_resolution(print_result, cleanup_databases));
     result += test_report("Block LWW Existing Data:", do_test_block_lww_existing_data(cleanup_databases));
     result += test_report("Block Column Reload:", do_test_block_column_reload(cleanup_databases));
+    result += test_report("Block LWW Double Tombstone:", do_test_block_lww_double_tombstone(print_result, cleanup_databases));
+    result += test_report("Block LWW UPSERT Tombstone Bug:", do_test_block_lww_upsert_tombstone_bug(2, print_result, cleanup_databases));
     result += test_report("CB Error Cleanup:", do_test_context_cb_error_cleanup());
 
 finalize:
