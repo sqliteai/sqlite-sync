@@ -2493,6 +2493,76 @@ static int deny_sqlite_master_authorizer(void *pUserData, int action, const char
     return SQLITE_OK;
 }
 
+// Run a SQL statement expected to fail, and verify that its error message
+// contains the stable substring "cloudsync_init" — which every uninitialized
+// guard added by the fix points the caller at. Matching a single stable token
+// rather than full text tolerates future rewordings of the user-facing string.
+static bool expect_uninit_error (sqlite3 *db, const char *sql) {
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        // Prepare-time failures also land in sqlite3_errmsg — accept those.
+        const char *m = sqlite3_errmsg(db);
+        bool ok = (m != NULL && strstr(m, "cloudsync_init") != NULL);
+        if (stmt) sqlite3_finalize(stmt);
+        return ok;
+    }
+    rc = sqlite3_step(stmt);
+    bool failed = (rc != SQLITE_ROW && rc != SQLITE_DONE);
+    const char *msg = sqlite3_errmsg(db);
+    bool has_hint = (msg != NULL && strstr(msg, "cloudsync_init") != NULL);
+    sqlite3_finalize(stmt);
+    return failed && has_hint;
+}
+
+// Regression test for the "uninit error messages" fix. Every function that
+// previously leaked a misleading low-level symptom (out of memory, "not an
+// error", silent -1, multi-line "no such table" dumps) must now point the
+// caller at SELECT cloudsync_init(...). Match on a stable substring rather
+// than full text so the test tolerates future rewordings.
+bool do_test_uninit_error_messages (void) {
+    sqlite3 *db = NULL;
+    bool result = false;
+
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return false;
+    if (sqlite3_cloudsync_init(db, NULL, NULL) != SQLITE_OK) goto cleanup;
+
+    // 96 bytes of zero padding — bigger than cloudsync_payload_header, so the
+    // size sanity check in dbsync_payload_decode passes and control reaches
+    // our guard inside cloudsync_payload_apply.
+    const char *payload_sql =
+        "SELECT cloudsync_payload_apply(zeroblob(96));";
+
+    if (!expect_uninit_error(db, "SELECT * FROM cloudsync_changes;")) goto cleanup;
+    if (!expect_uninit_error(db, "SELECT cloudsync_db_version();")) goto cleanup;
+    if (!expect_uninit_error(db, "SELECT cloudsync_db_version_next();")) goto cleanup;
+    if (!expect_uninit_error(db, "SELECT cloudsync_set_filter('foo','1=1');")) goto cleanup;
+    if (!expect_uninit_error(db, "SELECT cloudsync_clear_filter('foo');")) goto cleanup;
+    if (!expect_uninit_error(db, payload_sql)) goto cleanup;
+
+    // Happy path: after cloudsync_init the same functions no longer fail with
+    // the uninitialized hint. cloudsync_db_version must now return a value.
+    if (sqlite3_exec(db,
+            "CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, v TEXT);"
+            "SELECT cloudsync_init('t');",
+            NULL, NULL, NULL) != SQLITE_OK) goto cleanup;
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT cloudsync_db_version();", -1, &stmt, NULL) != SQLITE_OK) goto cleanup;
+    int step_rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (step_rc != SQLITE_ROW) goto cleanup;
+
+    result = true;
+
+cleanup:
+    if (db) {
+        sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+        sqlite3_close(db);
+    }
+    return result;
+}
+
 // Verify that cloudsync_dbversion_rebuild surfaces a real failure from
 // database_select_text(SQL_DBVERSION_BUILD_QUERY, ...) instead of silently
 // treating it as "no *_cloudsync meta-tables present" — which would leave
@@ -12425,6 +12495,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Stale Table Settings:", do_test_stale_table_settings(cleanup_databases));
     result += test_report("Stale Table Settings Dropped Meta:", do_test_stale_table_settings_dropped_meta(cleanup_databases));
     result += test_report("DBVersion Rebuild Error:", do_test_dbversion_rebuild_error());
+    result += test_report("Uninit Error Messages:", do_test_uninit_error_messages());
     result += test_report("Block LWW Existing Data:", do_test_block_lww_existing_data(cleanup_databases));
     result += test_report("Block Column Reload:", do_test_block_column_reload(cleanup_databases));
     result += test_report("CB Error Cleanup:", do_test_context_cb_error_cleanup());

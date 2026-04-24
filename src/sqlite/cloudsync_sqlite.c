@@ -77,32 +77,51 @@ void dbsync_db_version (sqlite3_context *context, int argc, sqlite3_value **argv
     DEBUG_FUNCTION("cloudsync_db_version");
     UNUSED_PARAMETER(argc);
     UNUSED_PARAMETER(argv);
-    
+
     // retrieve context
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    
+
     int rc = cloudsync_dbversion_check_uptodate(data);
     if (rc != SQLITE_OK) {
-        dbsync_set_error(context, "Unable to retrieve db_version (%s).", database_errmsg(data));
+        // When cloudsync_init was never called, data_version_stmt is NULL and
+        // database_errmsg() falls back to "not an error", producing the
+        // confusing "Unable to retrieve db_version (not an error)". Detect the
+        // uninitialized state and return an actionable message instead. The
+        // extra check only runs on the error branch, so it costs nothing on
+        // the sync hot path (merge operations keep going through the normal
+        // path where rc == SQLITE_OK).
+        if (!cloudsync_context_is_initialized(data)) {
+            dbsync_set_error(context,
+                "cloudsync is not initialized: call SELECT cloudsync_init('<table_name>') "
+                "to enable sync on a table before calling cloudsync_db_version().");
+        } else {
+            dbsync_set_error(context, "Unable to retrieve db_version (%s).", database_errmsg(data));
+        }
         return;
     }
-    
+
     sqlite3_result_int64(context, cloudsync_dbversion(data));
 }
 
 void dbsync_db_version_next (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_db_version_next");
-    
+
     // retrieve context
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    
+
     sqlite3_int64 merging_version = (argc == 1) ? database_value_int(argv[0]) : CLOUDSYNC_VALUE_NOTSET;
     sqlite3_int64 value = cloudsync_dbversion_next(data, merging_version);
     if (value == -1) {
-        dbsync_set_error(context, "Unable to retrieve next_db_version (%s).", database_errmsg(data));
+        if (!cloudsync_context_is_initialized(data)) {
+            dbsync_set_error(context,
+                "cloudsync is not initialized: call SELECT cloudsync_init('<table_name>') "
+                "to enable sync on a table before calling cloudsync_db_version_next().");
+        } else {
+            dbsync_set_error(context, "Unable to retrieve next_db_version (%s).", database_errmsg(data));
+        }
         return;
     }
-    
+
     sqlite3_result_int64(context, value);
 }
 
@@ -1243,6 +1262,17 @@ void dbsync_set_filter (sqlite3_context *context, int argc, sqlite3_value **argv
 
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
 
+    // Guard against calling set_filter before the target table has been set
+    // up for sync: without this, we'd hit "no such table:
+    // cloudsync_table_settings" or "no such table: main.<tbl>" deep inside
+    // the trigger recreation path, which is not actionable.
+    if (!cloudsync_context_is_initialized(data) || !table_lookup(data, tbl)) {
+        dbsync_set_error(context,
+            "cloudsync_set_filter: table '%s' is not configured for sync. "
+            "Call SELECT cloudsync_init('%s') first.", tbl, tbl);
+        return;
+    }
+
     // Store filter in table settings
     dbutils_table_settings_set_key_value(data, tbl, "*", "filter", filter_expr);
 
@@ -1280,6 +1310,15 @@ void dbsync_clear_filter (sqlite3_context *context, int argc, sqlite3_value **ar
     }
 
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+
+    // Guard against calling clear_filter before the target table has been set
+    // up for sync — see dbsync_set_filter for the same rationale.
+    if (!cloudsync_context_is_initialized(data) || !table_lookup(data, tbl)) {
+        dbsync_set_error(context,
+            "cloudsync_clear_filter: table '%s' is not configured for sync. "
+            "Call SELECT cloudsync_init('%s') first.", tbl, tbl);
+        return;
+    }
 
     // Remove filter from table settings (set to NULL/empty)
     dbutils_table_settings_set_key_value(data, tbl, "*", "filter", NULL);
