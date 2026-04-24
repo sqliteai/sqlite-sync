@@ -42,10 +42,10 @@ RUN case "${TARGETARCH}" in \
     SHAREDIR_STD="/usr/share/postgresql" && \
     install -d "$PKGLIBDIR" "$SHAREDIR_PGCONFIG/extension" && \
     install -m 755 /tmp/cloudsync/cloudsync.so "$PKGLIBDIR/" && \
-    install -m 644 /tmp/cloudsync/cloudsync--1.0.sql /tmp/cloudsync/cloudsync.control "$SHAREDIR_PGCONFIG/extension/" && \
+    install -m 644 /tmp/cloudsync/cloudsync--*.sql /tmp/cloudsync/cloudsync.control "$SHAREDIR_PGCONFIG/extension/" && \
     if [ "$SHAREDIR_STD" != "$SHAREDIR_PGCONFIG" ]; then \
         install -d "$SHAREDIR_STD/extension" && \
-        install -m 644 /tmp/cloudsync/cloudsync--1.0.sql /tmp/cloudsync/cloudsync.control "$SHAREDIR_STD/extension/"; \
+        install -m 644 /tmp/cloudsync/cloudsync--*.sql /tmp/cloudsync/cloudsync.control "$SHAREDIR_STD/extension/"; \
     fi && \
     rm -rf /tmp/cloudsync /tmp/cloudsync.tar.gz && \
     apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*

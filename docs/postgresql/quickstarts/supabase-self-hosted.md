@@ -81,6 +81,29 @@ docker compose exec db psql -U supabase_admin -d postgres -c "SELECT cloudsync_v
 
 If the extension is installed correctly, PostgreSQL returns the CloudSync version string.
 
+### Upgrading a later release
+
+CloudSync uses the first two components of its semver as the PostgreSQL extension version (for example, `1.0.17` installs as extension version `1.0`). How you upgrade depends on which component changed:
+
+- **PATCH release** (e.g. `1.0.17 → 1.0.18`): pull the matching `sqlitecloud/sqlite-sync-supabase:<tag>` image and restart the `db` service. No SQL-level upgrade is needed — `installed_version` stays at `1.0` and the new binary takes over on reconnect. `SELECT cloudsync_version();` confirms the new semver.
+- **MINOR or MAJOR release** (e.g. `1.0.x → 1.1.0`): pull the new image and restart as above, then run once per database:
+
+  ```sql
+  ALTER EXTENSION cloudsync UPDATE;
+  ```
+
+  PostgreSQL applies any `cloudsync--<from>--<to>.sql` upgrade scripts shipped with the release and moves `installed_version` to the new value.
+
+You can check the current state at any time:
+
+```sql
+SELECT name, default_version, installed_version
+FROM pg_available_extensions
+WHERE name = 'cloudsync';
+```
+
+If `installed_version` is behind `default_version` after a release, run `ALTER EXTENSION cloudsync UPDATE;` to catch up.
+
 ---
 
 ## Upgrading CloudSync
