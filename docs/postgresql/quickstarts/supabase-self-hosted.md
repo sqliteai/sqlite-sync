@@ -106,27 +106,6 @@ If `installed_version` is behind `default_version` after a release, run `ALTER E
 
 ---
 
-## Upgrading CloudSync
-
-Updating the `sqlitecloud/sqlite-sync-supabase` image does not by itself upgrade the SQL objects already registered in an existing database. PostgreSQL keeps the extension objects that were installed when `CREATE EXTENSION cloudsync;` was first run for that database.
-
-When a release includes PostgreSQL extension upgrade scripts, the preferred upgrade path is:
-
-```sql
-ALTER EXTENSION cloudsync UPDATE;
-```
-
-If no upgrade path is available for the version you are moving from, a drop-and-recreate may be required to refresh the extension SQL objects:
-
-```sql
-DROP EXTENSION IF EXISTS cloudsync CASCADE;
-CREATE EXTENSION cloudsync;
-```
-
-If you use JWT authentication with PostgreSQL RLS, recheck the database grants for the role named in your JWT `role` claim after upgrading. Recreating the extension also recreates extension-owned objects such as `cloudsync_changes`, so grants on those objects may need to be reapplied. See [PostgreSQL Role Requirement](../reference/jwt-claims.md#postgresql-role-requirement).
-
----
-
 ## Step 3: Register Your Database in the CloudSync Dashboard
 
 In the [CloudSync dashboard](https://dashboard.sqlitecloud.io/), create a new workspace with the **Supabase (Self-hosted)** provider, then add a project with your PostgreSQL connection string:
