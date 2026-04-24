@@ -12,7 +12,17 @@ PG_INCLUDEDIR := $(shell $(PG_CONFIG) --includedir-server 2>/dev/null)
 
 # Extension metadata
 EXTENSION = cloudsync
-EXTVERSION = 1.0
+# Read the binary version (full semver) from src/cloudsync.h, and derive
+# EXTVERSION as just MAJOR.MINOR. Rationale: PATCH bumps are binary-only
+# (no SQL surface change, no ALTER EXTENSION UPDATE needed); MINOR/MAJOR bumps
+# are the SQL-surface-changing ones that require a per-release upgrade script.
+# cloudsync_version() in the .so still reports the full semver for debugging.
+#
+# Recursive (=) rather than immediate (:=) assignment so the shell calls only
+# fire when a PG-related target actually references these variables. Non-PG
+# targets parse this included makefile without invoking sed/cut at all.
+CLOUDSYNC_VERSION_FULL = $(shell sed -n 's/^\#define CLOUDSYNC_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' src/cloudsync.h)
+EXTVERSION             = $(shell echo '$(CLOUDSYNC_VERSION_FULL)' | cut -d. -f1-2)
 
 # Detect OS for platform-specific settings
 ifneq ($(OS),Windows_NT)
@@ -82,29 +92,61 @@ endif
 PG_EXTENSION_SQL = src/postgresql/$(EXTENSION)--$(EXTVERSION).sql
 PG_EXTENSION_CONTROL = docker/postgresql/$(EXTENSION).control
 
+# Input templates (tracked). @EXTVERSION@ is substituted at build time.
+PG_EXTENSION_SQL_IN = src/postgresql/$(EXTENSION).sql.in
+PG_EXTENSION_CONTROL_IN = docker/postgresql/$(EXTENSION).control.in
+
+# Upgrade scripts (cloudsync--<from>--<to>.sql) are hand-written per release.
+PG_MIGRATIONS_DIR = src/postgresql/migrations
+PG_MIGRATION_SQLS = $(wildcard $(PG_MIGRATIONS_DIR)/$(EXTENSION)--*--*.sql)
+
 # ============================================================================
 # PostgreSQL Build Targets
 # ============================================================================
 
-.PHONY: postgres-check postgres-build postgres-install postgres-package postgres-clean postgres-test \
+.PHONY: postgres-check postgres-check-migration postgres-generate-files postgres-build postgres-install postgres-package postgres-clean postgres-test \
         postgres-docker-build postgres-docker-build-asan postgres-docker-run postgres-docker-run-asan postgres-docker-stop postgres-docker-rebuild \
         postgres-docker-debug-build postgres-docker-debug-run postgres-docker-debug-rebuild \
         postgres-docker-shell postgres-dev-rebuild postgres-help unittest-pg \
         postgres-supabase-build postgres-supabase-rebuild postgres-supabase-run-smoke-test \
         postgres-docker-run-smoke-test
 
+# Verify that a cloudsync--<prev>--<curr>.sql upgrade script exists for the
+# current CLOUDSYNC_VERSION in src/cloudsync.h. Release-blocking: a missing
+# upgrade script silently breaks ALTER EXTENSION cloudsync UPDATE for every
+# existing deployment. Runs in <1s; safe to call on every PR.
+postgres-check-migration:
+	@scripts/check-postgres-migration.sh
+
 # Check if PostgreSQL is available
 postgres-check:
 	@echo "Checking PostgreSQL installation..."
 	@which $(PG_CONFIG) > /dev/null || (echo "Error: pg_config not found. Install postgresql-server-dev." && exit 1)
+	@[ -n "$(CLOUDSYNC_VERSION_FULL)" ] || (echo "Error: could not read CLOUDSYNC_VERSION from src/cloudsync.h" && exit 1)
+	@[ -n "$(EXTVERSION)" ] || (echo "Error: could not derive MAJOR.MINOR EXTVERSION from CLOUDSYNC_VERSION '$(CLOUDSYNC_VERSION_FULL)'" && exit 1)
 	@echo "PostgreSQL version: $$($(PG_CONFIG) --version)"
+	@echo "CloudSync version : $(CLOUDSYNC_VERSION_FULL) (extension version $(EXTVERSION))"
 	@echo "Extension directory: $(PG_PKGLIBDIR)"
 	@echo "Share directory: $(PG_SHAREDIR)"
 	@echo "Include directory: $(PG_INCLUDEDIR)"
 
+# Render the versioned .sql install script and .control file from their .in
+# templates. This is a phony target (rather than file rules keyed on
+# $(PG_EXTENSION_SQL) / $(PG_EXTENSION_CONTROL)) so that $(EXTVERSION) never
+# appears in a rule's target or prerequisite position — those expansions
+# happen at parse time and would force sed/cut to run on every `make`
+# invocation, including for non-PG goals. Here, the references live inside
+# the recipe body and are only evaluated when this target actually fires.
+# Writes via a .tmp + atomic mv so a failed sed can't leave a half-rendered
+# output file in the extension share dir.
+postgres-generate-files: postgres-check
+	@echo "Rendering extension files at version $(EXTVERSION) (binary $(CLOUDSYNC_VERSION_FULL))"
+	@sed 's/@EXTVERSION@/$(EXTVERSION)/g' $(PG_EXTENSION_SQL_IN)     > $(PG_EXTENSION_SQL).tmp     && mv $(PG_EXTENSION_SQL).tmp     $(PG_EXTENSION_SQL)
+	@sed 's/@EXTVERSION@/$(EXTVERSION)/g' $(PG_EXTENSION_CONTROL_IN) > $(PG_EXTENSION_CONTROL).tmp && mv $(PG_EXTENSION_CONTROL).tmp $(PG_EXTENSION_CONTROL)
+
 # Build PostgreSQL extension
-postgres-build: postgres-check
-	@echo "Building PostgreSQL extension..."
+postgres-build: postgres-generate-files
+	@echo "Building PostgreSQL extension (version $(EXTVERSION))..."
 	@echo "Compiling source files..."
 	@for src in $(PG_ALL_SRC); do \
 		echo "  CC $$src"; \
@@ -125,26 +167,37 @@ postgres-install: postgres-build
 	install -m 644 $(PG_EXTENSION_SQL) $(PG_SHAREDIR)/extension/
 	@echo "Installing control file to $(PG_SHAREDIR)/extension/"
 	install -m 644 $(PG_EXTENSION_CONTROL) $(PG_SHAREDIR)/extension/
+	@if [ -n "$(PG_MIGRATION_SQLS)" ]; then \
+		echo "Installing $(words $(PG_MIGRATION_SQLS)) migration script(s) to $(PG_SHAREDIR)/extension/"; \
+		install -m 644 $(PG_MIGRATION_SQLS) $(PG_SHAREDIR)/extension/; \
+	fi
 	@echo ""
 	@echo "Installation complete!"
 	@echo "To use the extension, run in psql:"
 	@echo "  CREATE EXTENSION $(EXTENSION);"
+	@echo "To upgrade an existing installation, run in psql:"
+	@echo "  ALTER EXTENSION $(EXTENSION) UPDATE;"
 
 # Package extension files for distribution
 PG_DIST_DIR = dist/postgresql
 
 postgres-package: postgres-build
-	@echo "Packaging PostgreSQL extension..."
+	@echo "Packaging PostgreSQL extension (version $(EXTVERSION))..."
 	@mkdir -p $(PG_DIST_DIR)
 	cp $(PG_EXTENSION_LIB) $(PG_DIST_DIR)/
 	cp $(PG_EXTENSION_SQL) $(PG_DIST_DIR)/
 	cp $(PG_EXTENSION_CONTROL) $(PG_DIST_DIR)/
+	@if [ -n "$(PG_MIGRATION_SQLS)" ]; then \
+		echo "Including $(words $(PG_MIGRATION_SQLS)) migration script(s)"; \
+		cp $(PG_MIGRATION_SQLS) $(PG_DIST_DIR)/; \
+	fi
 	@echo "Package ready in $(PG_DIST_DIR)/"
 
 # Clean PostgreSQL build artifacts
 postgres-clean:
 	@echo "Cleaning PostgreSQL build artifacts..."
 	rm -f $(PG_OBJS) $(PG_EXTENSION_LIB)
+	rm -f $(PG_EXTENSION_SQL) $(PG_EXTENSION_CONTROL)
 	@echo "Clean complete"
 
 # Test extension (requires running PostgreSQL)
@@ -314,7 +367,7 @@ postgres-supabase-build:
 	echo "Using base image: $$supabase_cli_image"; \
 	echo "Pulling fresh base image to avoid layer accumulation..."; \
 	docker pull "$$supabase_cli_image" 2>/dev/null || true; \
-	docker build --build-arg SUPABASE_POSTGRES_TAG="$(SUPABASE_POSTGRES_TAG)" -f "$$tmp_dockerfile" -t "$$supabase_cli_image" .; \
+	docker build --build-arg SUPABASE_POSTGRES_TAG="$(SUPABASE_POSTGRES_TAG)" --build-arg CLOUDSYNC_VERSION="$(CLOUDSYNC_VERSION_FULL)" -f "$$tmp_dockerfile" -t "$$supabase_cli_image" .; \
 	rm -f "$$tmp_dockerfile"; \
 	echo "Build complete: $$supabase_cli_image"
 
@@ -361,6 +414,8 @@ postgres-help:
 	@echo ""
 	@echo "Build & Install:"
 	@echo "  postgres-check          - Verify PostgreSQL installation"
+	@echo "  postgres-check-migration - Verify a migration script exists for the current version"
+	@echo "  postgres-generate-files  - Render cloudsync.control and cloudsync--<ext>.sql from templates"
 	@echo "  postgres-build          - Build extension (.so file)"
 	@echo "  postgres-install        - Install extension to PostgreSQL"
 	@echo "  postgres-clean          - Clean build artifacts"

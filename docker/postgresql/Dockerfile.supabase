@@ -30,12 +30,20 @@ RUN if [ ! -x "$CLOUDSYNC_PG_CONFIG" ]; then \
 # Collect build artifacts (avoid installing into the Nix store)
 RUN mkdir -p /tmp/cloudsync-artifacts/lib /tmp/cloudsync-artifacts/extension && \
     cp /tmp/cloudsync/cloudsync.so /tmp/cloudsync-artifacts/lib/ && \
-    cp /tmp/cloudsync/src/postgresql/cloudsync--1.0.sql /tmp/cloudsync-artifacts/extension/ && \
-    cp /tmp/cloudsync/docker/postgresql/cloudsync.control /tmp/cloudsync-artifacts/extension/
+    cp /tmp/cloudsync/src/postgresql/cloudsync--*.sql /tmp/cloudsync-artifacts/extension/ && \
+    cp /tmp/cloudsync/docker/postgresql/cloudsync.control /tmp/cloudsync-artifacts/extension/ && \
+    # Include per-release upgrade scripts so ALTER EXTENSION ... UPDATE works
+    if ls /tmp/cloudsync/src/postgresql/migrations/cloudsync--*--*.sql 1>/dev/null 2>&1; then \
+        cp /tmp/cloudsync/src/postgresql/migrations/cloudsync--*--*.sql /tmp/cloudsync-artifacts/extension/; \
+    fi
 
 # Runtime image based on Supabase Postgres
 ARG SUPABASE_POSTGRES_TAG=17.6.1.071
 FROM public.ecr.aws/supabase/postgres:${SUPABASE_POSTGRES_TAG}
+
+# Extension version (derived from src/cloudsync.h by the Makefile and passed in
+# as a build arg); used only for the image label.
+ARG CLOUDSYNC_VERSION=unknown
 
 # Match builder pg_config path
 ENV CLOUDSYNC_PG_CONFIG=/root/.nix-profile/bin/pg_config
@@ -85,5 +93,5 @@ EXPOSE 5432
 WORKDIR /
 
 # Add label with extension version
-LABEL org.sqliteai.cloudsync.version="1.0" \
+LABEL org.sqliteai.cloudsync.version="${CLOUDSYNC_VERSION}" \
       org.sqliteai.cloudsync.description="PostgreSQL with CloudSync CRDT extension"

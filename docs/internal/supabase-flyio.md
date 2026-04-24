@@ -86,10 +86,10 @@ The `make postgres-supabase-build` command does the following:
 1. **Pulls the official Supabase Postgres base image** (e.g., `public.ecr.aws/supabase/postgres:15.8.1.085`) — this is Supabase's standard PostgreSQL image that ships with ~30 extensions pre-installed (PostGIS, pgvector, etc.)
 2. **Runs a multi-stage Docker build** using `docker/postgresql/Dockerfile.supabase`:
    - **Stage 1 (builder)**: Installs C build tools (`gcc`, `make`), copies the CloudSync source code (`src/`, `modules/`), and compiles `cloudsync.so` against Supabase's `pg_config`
-   - **Stage 2 (runtime)**: Starts from a clean Supabase Postgres image and copies in just three files:
+   - **Stage 2 (runtime)**: Starts from a clean Supabase Postgres image and copies in just three kinds of file:
      - `cloudsync.so` — the compiled extension binary
-     - `cloudsync.control` — tells PostgreSQL the extension's name and version
-     - `cloudsync--1.0.sql` — the SQL that defines all CloudSync functions
+     - `cloudsync.control` — tells PostgreSQL the extension's name and default version (generated at build time from `cloudsync.control.in`, with the version read from `src/cloudsync.h`)
+     - `cloudsync--<version>.sql` — the SQL that defines all CloudSync functions for the current release (e.g. `cloudsync--1.0.16.sql`), plus any `cloudsync--<from>--<to>.sql` upgrade scripts shipped under `src/postgresql/migrations/`
 3. **Tags the result** with the same name as the base image, so it's a drop-in replacement
 
 To find the correct tag, clone the Supabase repo and check:
@@ -118,7 +118,8 @@ Verify CloudSync is installed inside the image:
 ```bash
 docker run --rm <your-dockerhub-username>/supabase-postgres-cloudsync:15.8.1.085 \
   find / -name "cloudsync*" -type f 2>/dev/null
-# Should list cloudsync.so, cloudsync.control, and cloudsync--1.0.sql
+# Should list cloudsync.so, cloudsync.control, and cloudsync--<version>.sql
+# (plus any cloudsync--<from>--<to>.sql upgrade scripts)
 # in /nix/store/...-postgresql-and-plugins-15.8/ paths
 ```
 
