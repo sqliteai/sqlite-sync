@@ -217,9 +217,6 @@ const char * const SQL_CLOUDSYNC_TOMBSTONE_PK_EXCEPT_COL =
 const char * const SQL_CLOUDSYNC_SELECT_COL_VERSION_BY_PK_COL =
     "SELECT col_version FROM \"%w\" WHERE pk=? AND col_name=?;";
 
-const char * const SQL_CLOUDSYNC_SELECT_SITE_ID_BY_PK_COL =
-    "SELECT site_id FROM \"%w\" WHERE pk=? AND col_name=?;";
-
 const char * const SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID =
     "SELECT name, cid FROM pragma_table_info('%q') WHERE pk=0 ORDER BY cid;";
 

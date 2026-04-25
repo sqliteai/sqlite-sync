@@ -143,7 +143,6 @@ struct cloudsync_context {
     uint8_t     site_id[UUID_LEN];
     int         insync;
     int         debug;
-    bool        merge_equal_values;
     void        *aux_data;
     
     // stmts and context values
@@ -218,7 +217,6 @@ struct cloudsync_table_context {
     dbvm_t      *meta_merge_delete_drop;
     dbvm_t      *meta_zero_clock_stmt;
     dbvm_t      *meta_col_version_stmt;
-    dbvm_t      *meta_site_id_stmt;
     
     dbvm_t      *real_col_values_stmt;          // retrieve all column values based on pk
     dbvm_t      *real_merge_delete_stmt;
@@ -782,7 +780,6 @@ void table_free (cloudsync_table_context *table) {
     if (table->meta_merge_delete_drop) databasevm_finalize(table->meta_merge_delete_drop);
     if (table->meta_zero_clock_stmt) databasevm_finalize(table->meta_zero_clock_stmt);
     if (table->meta_col_version_stmt) databasevm_finalize(table->meta_col_version_stmt);
-    if (table->meta_site_id_stmt) databasevm_finalize(table->meta_site_id_stmt);
     
     if (table->real_col_values_stmt) databasevm_finalize(table->real_col_values_stmt);
     if (table->real_merge_delete_stmt) databasevm_finalize(table->real_merge_delete_stmt);
@@ -898,15 +895,6 @@ int table_add_stmts (cloudsync_table_context *table, int ncols) {
     DEBUG_SQL("meta_col_version_stmt: %s", sql);
     
     rc = databasevm_prepare(data, sql, (void **)&table->meta_col_version_stmt, DBFLAG_PERSISTENT);
-    cloudsync_memory_free(sql);
-    if (rc != DBRES_OK) goto cleanup;
-    
-    // site_id
-    sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_SELECT_SITE_ID_BY_PK_COL, table->meta_ref);
-    if (!sql) {rc = DBRES_NOMEM; goto cleanup;}
-    DEBUG_SQL("meta_site_id_stmt: %s", sql);
-    
-    rc = databasevm_prepare(data, sql, (void **)&table->meta_site_id_stmt, DBFLAG_PERSISTENT);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) goto cleanup;
     
@@ -1689,37 +1677,8 @@ int merge_did_cid_win (cloudsync_context *data, cloudsync_table_context *table, 
     // reset after compare, otherwise local value would be deallocated
     dbvm_reset(vm);
     vm = NULL;
-    
-    bool compare_site_id = (ret == 0 && data->merge_equal_values == true);
-    if (!compare_site_id) {
-        *didwin_flag = (ret > 0);
-        goto cleanup;
-    }
-    
-    // values are the same and merge_equal_values is true
-    vm = table->meta_site_id_stmt;
-    rc = databasevm_bind_blob(vm, 1, (const void *)pk, pklen);
-    if (rc != DBRES_OK) goto cleanup;
-    
-    rc = databasevm_bind_text(vm, 2, col_name, -1);
-    if (rc != DBRES_OK) goto cleanup;
-    
-    rc = databasevm_step(vm);
-    if (rc == DBRES_ROW) {
-        const void *local_site_id = database_column_blob(vm, 0, NULL);
-        if (!local_site_id) {
-            dbvm_reset(vm);
-            return cloudsync_set_error(data, "NULL site_id in cloudsync table, table is probably corrupted", DBRES_ERROR);
-        }
-        ret = memcmp(site_id, local_site_id, site_len);
-        *didwin_flag = (ret > 0);
-        dbvm_reset(vm);
-        return DBRES_OK;
-    }
-    
-    // handle error condition here
-    dbvm_reset(vm);
-    return cloudsync_set_error(data, "Unable to find site_id for previous change, cloudsync table is probably corrupted", DBRES_ERROR);
+    *didwin_flag = (ret > 0);
+    goto cleanup;
     
 cleanup:
     if (rc != DBRES_OK) cloudsync_set_dberror(data);

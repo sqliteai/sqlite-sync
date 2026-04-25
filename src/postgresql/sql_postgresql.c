@@ -334,9 +334,6 @@ const char * const SQL_CLOUDSYNC_TOMBSTONE_PK_EXCEPT_COL =
 const char * const SQL_CLOUDSYNC_SELECT_COL_VERSION_BY_PK_COL =
     "SELECT col_version FROM %s WHERE pk = $1 AND col_name = $2;";
 
-const char * const SQL_CLOUDSYNC_SELECT_SITE_ID_BY_PK_COL =
-    "SELECT site_id FROM %s WHERE pk = $1 AND col_name = $2;";
-
 const char * const SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID =
     "SELECT c.column_name, c.ordinal_position "
     "FROM information_schema.columns c "
