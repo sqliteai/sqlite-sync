@@ -490,6 +490,7 @@ The sync functions follow a consistent error-handling contract:
 | **Endpoint/network errors** (server unreachable, auth failure, bad URL) | SQL error — the function could not execute. |
 | **Apply errors** (`cloudsync_payload_apply` failures — unknown schema hash, invalid checksum, decompression error) | Structured JSON — a `receive.error` string field is included in the response. |
 | **Server-reported apply job failures** (the server processed the request but its own apply job failed) | Structured JSON — a `send.lastFailure` object is included in the response. |
+| **Server-reported check job failures** (the server failed to encode a changeset for the client) | Structured JSON — a `receive.lastFailure` object is included in the response. |
 
 This means: if you get JSON back, the server was reachable and the network protocol ran. If you get a SQL error, connectivity or configuration is broken.
 
@@ -510,7 +511,7 @@ This means: if you get JSON back, the server was reachable and the network proto
 - `send.status`: The current sync state — `"synced"` (all changes confirmed), `"syncing"` (changes sent but not yet confirmed), `"out-of-sync"` (local changes pending or gaps detected), or `"error"`.
 - `send.localVersion`: The latest local database version.
 - `send.serverVersion`: The latest version confirmed by the server.
-- `send.lastFailure` (optional): Present only when the server reports a failed apply job. The object is forwarded verbatim from the server and typically includes `jobId`, `code`, `message`, `retryable`, and `failedAt`. It is emitted regardless of `status` so callers can detect server-side failures during `"syncing"` or even after the state has nominally recovered.
+- `send.lastFailure` (optional): Present only when the server reports a failed apply job. Forwarded verbatim from the server's `failures.apply` and typically includes `jobId`, `code`, `stage`, `message`, `retryable`, and `failedAt`. It is emitted regardless of `status` so callers can detect server-side failures during `"syncing"` or even after the state has nominally recovered. This function is **send/apply-scoped**: server-reported check-job failures (`failures.check`) are not surfaced here — see [`cloudsync_network_check_changes()`](#cloudsync_network_check_changes) and [`cloudsync_network_sync()`](#cloudsync_network_sync).
 
 **Example:**
 
@@ -519,7 +520,7 @@ SELECT cloudsync_network_send_changes();
 -- '{"send":{"status":"synced","localVersion":5,"serverVersion":5}}'
 
 -- With a server-reported failure (e.g. unknown schema hash on the server side):
--- '{"send":{"status":"out-of-sync","localVersion":1,"serverVersion":0,"lastFailure":{"jobId":44961,"code":"internal_error","message":"cloudsync operation failed: Cannot apply the received payload because the schema hash is unknown 4288148391734624266.","retryable":true,"failedAt":"2026-04-15T22:21:09.018606Z"}}}'
+-- '{"send":{"status":"out-of-sync","localVersion":1,"serverVersion":0,"lastFailure":{"jobId":44961,"code":"internal_error","stage":"apply_payload","message":"cloudsync operation failed: Cannot apply the received payload because the schema hash is unknown 4288148391734624266.","retryable":true,"failedAt":"2026-04-15T22:21:09.018606Z"}}}'
 ```
 
 ---
@@ -533,19 +534,20 @@ If a package of new changes is already available for the local site, the server 
 This function is designed to be called periodically to keep the local database in sync.
 To force an update and wait for changes (with a timeout), use [`cloudsync_network_sync(wait_ms, max_retries)`].
 
-If the network is misconfigured or the remote server is unreachable, the function raises a SQL error. If the received payload cannot be applied locally (for example because of an unknown schema hash), the error is returned as a `receive.error` field in the JSON response.
+If the network is misconfigured or the remote server is unreachable, the function raises a SQL error. If the received payload cannot be applied locally (for example because of an unknown schema hash), the error is returned as a `receive.error` field in the JSON response. If the server reports an unresolved failed check job (e.g. an `encode_changes` failure), that failure is forwarded as a `receive.lastFailure` object.
 
 **Parameters:** None.
 
 **Returns:** A JSON string with the receive result:
 
 ```json
-{"receive": {"rows": N, "tables": ["table1", "table2"], "error": "..."}}
+{"receive": {"rows": N, "tables": ["table1", "table2"], "error": "...", "lastFailure": {...}}}
 ```
 
 - `receive.rows`: The number of rows received and applied to the local database. `0` when the receive phase failed.
 - `receive.tables`: An array of table names that received changes. Empty (`[]`) if no changes were applied or the receive phase failed.
-- `receive.error` (optional): Present when `cloudsync_payload_apply` failed. Contains a human-readable error message describing why the received payload could not be applied.
+- `receive.error` (optional, string): Present when client-side `cloudsync_payload_apply` failed. Contains a human-readable error message describing why the received payload could not be applied.
+- `receive.lastFailure` (optional, object): Present only when the server reports a failed check job. Forwarded verbatim from the server's `failures.check` and typically includes `jobId`, `dbVersion`, `seq`, `code`, `stage`, `message`, `retryable`, and `failedAt`. Distinct from `receive.error`: `receive.error` describes a client-side apply failure (string), while `receive.lastFailure` describes a server-side check-job failure (object). Both can coexist in the same response. This function is **check-scoped**: server-reported apply-job failures (`failures.apply`) are not surfaced here — see [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes) and [`cloudsync_network_sync()`](#cloudsync_network_sync).
 
 **Example:**
 
@@ -553,8 +555,11 @@ If the network is misconfigured or the remote server is unreachable, the functio
 SELECT cloudsync_network_check_changes();
 -- '{"receive":{"rows":3,"tables":["tasks"]}}'
 
--- With an apply error:
+-- With a client-side apply error:
 -- '{"receive":{"rows":0,"tables":[],"error":"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."}}'
+
+-- With a server-reported check-job failure:
+-- '{"receive":{"rows":0,"tables":[],"lastFailure":{"jobId":456,"dbVersion":15,"seq":1,"code":"tenant_unreachable","stage":"encode_changes","message":"tenant check failed","retryable":true,"failedAt":"2026-04-24T10:22:00Z"}}}'
 ```
 
 ---
@@ -576,17 +581,18 @@ SELECT cloudsync_network_check_changes();
 ```json
 {
   "send": {"status": "synced|syncing|out-of-sync|error", "localVersion": N, "serverVersion": N, "lastFailure": {...}},
-  "receive": {"rows": N, "tables": ["table1", "table2"], "error": "..."}
+  "receive": {"rows": N, "tables": ["table1", "table2"], "error": "...", "lastFailure": {...}}
 }
 ```
 
 - `send.status`: The current sync state — `"synced"`, `"syncing"`, `"out-of-sync"`, or `"error"`.
 - `send.localVersion`: The latest local database version.
 - `send.serverVersion`: The latest version confirmed by the server.
-- `send.lastFailure` (optional): Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes) — forwarded verbatim from the server whenever a failed apply job is reported, regardless of `status`.
+- `send.lastFailure` (optional): Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes) — forwarded verbatim from the server's `failures.apply` whenever a failed apply job is reported, regardless of `status`.
 - `receive.rows`: The number of rows received and applied during the check phase. `0` when the receive phase failed.
 - `receive.tables`: An array of table names that received changes. Empty (`[]`) if no changes were applied or the receive phase failed.
-- `receive.error` (optional): Present when `cloudsync_payload_apply` failed (for example `"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."`). The send result is always preserved so the caller can tell that local changes reached the server even when applying incoming changes failed. The retry loop breaks immediately on apply errors, since failures like schema-hash mismatches do not heal across retries. Endpoint/network errors during the receive phase raise a SQL error instead.
+- `receive.error` (optional, string): Present when client-side `cloudsync_payload_apply` failed (for example `"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."`). The send result is always preserved so the caller can tell that local changes reached the server even when applying incoming changes failed. The retry loop breaks immediately on apply errors, since failures like schema-hash mismatches do not heal across retries. Endpoint/network errors during the receive phase raise a SQL error instead.
+- `receive.lastFailure` (optional, object): Same semantics as in [`cloudsync_network_check_changes()`](#cloudsync_network_check_changes) — forwarded verbatim from the server's `failures.check` whenever a failed check job is reported. Distinct from `receive.error`. `cloudsync_network_sync()` reports both `send.lastFailure` and `receive.lastFailure` when present.
 
 **Example:**
 

@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.18] - 2026-04-27
+
+### Changed
+
+- **`cloudsync_network_send_changes()` and `cloudsync_network_sync()`**: `send.lastFailure` is now sourced from the server's per-stage `failures.apply` object. The wire-format SQL field (`send.lastFailure`) is unchanged in shape — it is still forwarded verbatim from the server.
+- **`cloudsync_network_check_changes()`**: now correctly handles the `/check` endpoint's status snapshot response (returned when no artifact is yet available). Previously this path errored with `missing 'url' in check response`; the function now treats it as "no rows yet, not an error" and surfaces any server-reported check failure via the new `receive.lastFailure` field.
+
+### Added
+
+- **`receive.lastFailure`** JSON field on `cloudsync_network_check_changes()` and `cloudsync_network_sync()`. Forwarded verbatim from the server's `failures.check` (e.g. `encode_changes` job failures), and emitted alongside but distinct from `receive.error` (which remains a string for client-side `cloudsync_payload_apply` failures). Per-function scoping is strict: `cloudsync_network_send_changes()` is send/apply-scoped (only `send.lastFailure`); `cloudsync_network_check_changes()` is check-scoped (only `receive.lastFailure`); `cloudsync_network_sync()` reports both.
+
 ## [1.0.17] - 2026-04-24
 
 ### Fixed
