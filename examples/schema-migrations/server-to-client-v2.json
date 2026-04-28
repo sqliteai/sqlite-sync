@@ -1,0 +1,47 @@
+{
+  "type": "cloudsync.schema.migration",
+  "formatVersion": 2,
+  "migrationId": "0197097d-3f7e-7f00-8a3f-91dfaa8f0f3a",
+  "schemaEpoch": 2,
+  "requiredCapabilities": ["schema:write", "schema:destructive"],
+  "ops": [
+    {
+      "op": "addColumn",
+      "table": "notes",
+      "column": {
+        "name": "summary",
+        "type": "text",
+        "nullable": false,
+        "default": {"type": "text", "value": ""}
+      }
+    },
+    {
+      "op": "renameColumn",
+      "table": "notes",
+      "from": "title",
+      "to": "heading"
+    },
+    {
+      "op": "rawSql",
+      "sql": "CREATE INDEX notes_heading_idx ON notes(heading)"
+    },
+    {
+      "op": "rawSql",
+      "sql": {
+        "sqlite": [
+          "CREATE INDEX notes_body_sqlite_idx ON notes(body)"
+        ]
+      },
+      "skipMissingDialect": true
+    },
+    {
+      "op": "rawSql",
+      "sql": {
+        "postgresql": [
+          "CREATE INDEX notes_body_pg_idx ON \"notes\" (\"body\")"
+        ]
+      },
+      "skipMissingDialect": true
+    }
+  ]
+}

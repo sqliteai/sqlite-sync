@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdlib.h>
 
 #include "network.h"
@@ -56,6 +57,9 @@ struct network_data {
     char        *upload_endpoint;
     char        *apply_endpoint;
     char        *status_endpoint;
+    char        *schema_check_endpoint;
+    char        *schema_upload_endpoint;
+    char        *schema_download_endpoint;
 };
 
 typedef struct {
@@ -71,6 +75,11 @@ typedef struct {
     size_t      size;
     size_t      read_pos;
 } network_read_data;
+
+static int cloudsync_network_migration_check_internal(sqlite3_context *context, char **result_json, char **err_out);
+static bool network_migration_apply_error(const char *message);
+static void network_result_to_sqlite_error(sqlite3_context *context, NETWORK_RESULT res, const char *default_error_message);
+network_data *cloudsync_network_data(sqlite3_context *context);
 
 // MARK: -
 
@@ -100,6 +109,9 @@ bool network_data_set_endpoints (network_data *data, char *auth, char *check, ch
     if (data->upload_endpoint) cloudsync_memory_free(data->upload_endpoint);
     if (data->apply_endpoint) cloudsync_memory_free(data->apply_endpoint);
     if (data->status_endpoint) cloudsync_memory_free(data->status_endpoint);
+    if (data->schema_check_endpoint) cloudsync_memory_free(data->schema_check_endpoint);
+    if (data->schema_upload_endpoint) cloudsync_memory_free(data->schema_upload_endpoint);
+    if (data->schema_download_endpoint) cloudsync_memory_free(data->schema_download_endpoint);
 
     // clear pointers
     data->authentication = NULL;
@@ -107,6 +119,9 @@ bool network_data_set_endpoints (network_data *data, char *auth, char *check, ch
     data->upload_endpoint = NULL;
     data->apply_endpoint = NULL;
     data->status_endpoint = NULL;
+    data->schema_check_endpoint = NULL;
+    data->schema_upload_endpoint = NULL;
+    data->schema_download_endpoint = NULL;
 
     // make a copy of the new endpoints
     char *auth_copy = NULL;
@@ -157,6 +172,9 @@ void network_data_free (network_data *data) {
     if (data->upload_endpoint) cloudsync_memory_free(data->upload_endpoint);
     if (data->apply_endpoint) cloudsync_memory_free(data->apply_endpoint);
     if (data->status_endpoint) cloudsync_memory_free(data->status_endpoint);
+    if (data->schema_check_endpoint) cloudsync_memory_free(data->schema_check_endpoint);
+    if (data->schema_upload_endpoint) cloudsync_memory_free(data->schema_upload_endpoint);
+    if (data->schema_download_endpoint) cloudsync_memory_free(data->schema_download_endpoint);
     cloudsync_memory_free(data);
 }
 
@@ -438,9 +456,34 @@ int network_download_changes (sqlite3_context *context, const char *download_url
         if (rc != DBRES_OK) {
             const char *msg = cloudsync_errmsg(data);
             if (!msg || !msg[0]) msg = "cloudsync_payload_apply failed";
-            if (err_out) *err_out = cloudsync_string_dup(msg);
-            else sqlite3_result_error(context, msg, -1);
-            if (pnrows) *pnrows = 0;
+            if (network_migration_apply_error(msg)) {
+                char *migration_err = NULL;
+                char *migration_result = NULL;
+                int mrc = cloudsync_network_migration_check_internal(context, &migration_result, &migration_err);
+                if (migration_result) cloudsync_memory_free(migration_result);
+                if (mrc == SQLITE_OK && !migration_err) {
+                    if (pnrows) *pnrows = 0;
+                    rc = cloudsync_payload_apply(data, result.buffer, (int)result.blen, pnrows);
+                    msg = rc == DBRES_OK ? NULL : cloudsync_errmsg(data);
+                } else {
+                    if (migration_err) {
+                        if (err_out) *err_out = migration_err;
+                        else {
+                            sqlite3_result_error(context, migration_err, -1);
+                            cloudsync_memory_free(migration_err);
+                        }
+                    }
+                    rc = SQLITE_ERROR;
+                    if (pnrows) *pnrows = 0;
+                    goto cleanup_download;
+                }
+            }
+            if (rc != DBRES_OK) {
+                if (!msg || !msg[0]) msg = "cloudsync_payload_apply failed";
+                if (err_out) *err_out = cloudsync_string_dup(msg);
+                else sqlite3_result_error(context, msg, -1);
+                if (pnrows) *pnrows = 0;
+            }
         }
     } else if (result.code == CLOUDSYNC_NETWORK_ERROR) {
         network_set_sqlite_result(context, &result);
@@ -450,6 +493,7 @@ int network_download_changes (sqlite3_context *context, const char *download_url
         // CLOUDSYNC_NETWORK_OK — no data, not an error
         if (pnrows) *pnrows = 0;
     }
+cleanup_download:
     network_result_cleanup(&result);
 
     return rc;
@@ -468,7 +512,95 @@ char *network_authentication_token (const char *key, const char *value) {
 
 // MARK: - JSON helpers (jsmn) -
 
-#define JSMN_MAX_TOKENS 64
+#define JSMN_INITIAL_TOKENS 512
+
+static bool json_is_whitespace(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+static bool json_has_single_root(const char *json, size_t json_len, const jsmntok_t *tokens, int ntokens) {
+    if (!json || !tokens || ntokens < 1 || tokens[0].start < 0 || tokens[0].end < tokens[0].start) return false;
+
+    size_t cursor = 0;
+    while (cursor < json_len && json_is_whitespace(json[cursor])) cursor++;
+    if (cursor != (size_t)tokens[0].start) return false;
+
+    cursor = (size_t)tokens[0].end;
+    while (cursor < json_len && json_is_whitespace(json[cursor])) cursor++;
+    return cursor == json_len;
+}
+
+static int json_parse_root_object(const char *json, size_t json_len, jsmntok_t *tokens, unsigned int max_tokens) {
+    if (!json || json_len == 0 || !tokens || max_tokens == 0) return JSMN_ERROR_INVAL;
+
+    jsmn_parser parser;
+    jsmn_init(&parser);
+    int ntokens = jsmn_parse(&parser, json, json_len, tokens, max_tokens);
+    if (ntokens < 0) return ntokens;
+    if (ntokens < 1 || tokens[0].type != JSMN_OBJECT || !json_has_single_root(json, json_len, tokens, ntokens)) {
+        return JSMN_ERROR_INVAL;
+    }
+    return ntokens;
+}
+
+static jsmntok_t *json_parse_root_object_alloc(const char *json, size_t json_len, int *ntokens_out) {
+    if (ntokens_out) *ntokens_out = 0;
+    if (!json || json_len == 0 || !ntokens_out) return NULL;
+
+    size_t max_tokens = json_len + 1;
+    if (max_tokens < JSMN_INITIAL_TOKENS) max_tokens = JSMN_INITIAL_TOKENS;
+    if (max_tokens > (size_t)INT_MAX) max_tokens = (size_t)INT_MAX;
+
+    size_t cap = JSMN_INITIAL_TOKENS;
+    if (cap > max_tokens) cap = max_tokens;
+    while (cap > 0 && cap <= max_tokens) {
+        if (cap > SIZE_MAX / sizeof(jsmntok_t)) return NULL;
+        jsmntok_t *tokens = cloudsync_memory_alloc(cap * sizeof(jsmntok_t));
+        if (!tokens) return NULL;
+
+        int ntokens = json_parse_root_object(json, json_len, tokens, (unsigned int)cap);
+        if (ntokens == JSMN_ERROR_NOMEM) {
+            cloudsync_memory_free(tokens);
+            if (cap == max_tokens) break;
+            size_t next = cap * 2;
+            if (next <= cap || next > max_tokens) next = max_tokens;
+            cap = next;
+            continue;
+        }
+        if (ntokens < 1) {
+            cloudsync_memory_free(tokens);
+            return NULL;
+        }
+
+        *ntokens_out = ntokens;
+        return tokens;
+    }
+
+    return NULL;
+}
+
+static bool json_is_valid_root_object(const char *json, size_t json_len) {
+    int ntokens = 0;
+    jsmntok_t *tokens = json_parse_root_object_alloc(json, json_len, &ntokens);
+    bool valid = tokens != NULL && ntokens >= 1;
+    if (tokens) cloudsync_memory_free(tokens);
+    return valid;
+}
+
+static int network_json_error(sqlite3_context *context, const char *source, char **err_out) {
+    char buffer[192];
+    snprintf(buffer, sizeof(buffer), "%s returned invalid JSON.", source ? source : "CloudSync network endpoint");
+    if (err_out) *err_out = cloudsync_string_dup(buffer);
+    else sqlite3_result_error(context, buffer, -1);
+    return SQLITE_ERROR;
+}
+
+static bool network_validate_json_response(sqlite3_context *context, NETWORK_RESULT *res, const char *source, char **err_out) {
+    if (!res || res->code != CLOUDSYNC_NETWORK_BUFFER || !res->buffer || res->blen == 0) return true;
+    if (json_is_valid_root_object(res->buffer, res->blen)) return true;
+    network_json_error(context, source, err_out);
+    return false;
+}
 
 static bool jsmn_token_eq(const char *json, const jsmntok_t *tok, const char *s) {
     return (tok->type == JSMN_STRING &&
@@ -522,55 +654,98 @@ static char *json_unescape_string(const char *src, int len) {
 static char *json_extract_string(const char *json, size_t json_len, const char *key) {
     if (!json || json_len == 0 || !key) return NULL;
 
-    jsmn_parser parser;
-    jsmntok_t tokens[JSMN_MAX_TOKENS];
-    jsmn_init(&parser);
-    int ntokens = jsmn_parse(&parser, json, json_len, tokens, JSMN_MAX_TOKENS);
+    int ntokens = 0;
+    jsmntok_t *tokens = json_parse_root_object_alloc(json, json_len, &ntokens);
     if (ntokens < 1) return NULL;
 
     int i = jsmn_find_key(json, tokens, ntokens, key);
-    if (i < 0 || i + 1 >= ntokens) return NULL;
+    if (i < 0 || i + 1 >= ntokens) {
+        cloudsync_memory_free(tokens);
+        return NULL;
+    }
 
     jsmntok_t *val = &tokens[i + 1];
-    if (val->type != JSMN_STRING) return NULL;
+    if (val->type != JSMN_STRING) {
+        cloudsync_memory_free(tokens);
+        return NULL;
+    }
 
-    return json_unescape_string(json + val->start, val->end - val->start);
+    char *result = json_unescape_string(json + val->start, val->end - val->start);
+    cloudsync_memory_free(tokens);
+    return result;
+}
+
+static char *network_migration_upload_error_message(NETWORK_RESULT *res) {
+    if (!res || res->code != CLOUDSYNC_NETWORK_BUFFER || !res->buffer || res->blen == 0) return NULL;
+
+    char *status = json_extract_string(res->buffer, res->blen, "status");
+    char *error = json_extract_string(res->buffer, res->blen, "error");
+    bool rejected = false;
+    bool accepted = status && (strcmp(status, "uploaded") == 0 || strcmp(status, "accepted") == 0 ||
+                               strcmp(status, "applied") == 0 || strcmp(status, "ok") == 0 ||
+                               strcmp(status, "success") == 0);
+    if (error && error[0]) rejected = true;
+    if (!status || !status[0]) rejected = true;
+    else if (!accepted) rejected = true;
+
+    char *message = NULL;
+    if (rejected) {
+        if (error && error[0]) message = cloudsync_string_dup(error);
+        else if (status && status[0]) message = cloudsync_memory_mprintf("CloudSync schema migration upload failed with status '%s'.", status);
+        else message = cloudsync_string_dup("CloudSync schema migration upload response did not include an accepted status.");
+    }
+
+    if (status) cloudsync_memory_free(status);
+    if (error) cloudsync_memory_free(error);
+    return message;
 }
 
 static int64_t json_extract_int(const char *json, size_t json_len, const char *key, int64_t default_value) {
     if (!json || json_len == 0 || !key) return default_value;
 
-    jsmn_parser parser;
-    jsmntok_t tokens[JSMN_MAX_TOKENS];
-    jsmn_init(&parser);
-    int ntokens = jsmn_parse(&parser, json, json_len, tokens, JSMN_MAX_TOKENS);
-    if (ntokens < 1 || tokens[0].type != JSMN_OBJECT) return default_value;
+    int ntokens = 0;
+    jsmntok_t *tokens = json_parse_root_object_alloc(json, json_len, &ntokens);
+    if (ntokens < 1) return default_value;
 
     int i = jsmn_find_key(json, tokens, ntokens, key);
-    if (i < 0 || i + 1 >= ntokens) return default_value;
+    if (i < 0 || i + 1 >= ntokens) {
+        cloudsync_memory_free(tokens);
+        return default_value;
+    }
 
     jsmntok_t *val = &tokens[i + 1];
-    if (val->type != JSMN_PRIMITIVE) return default_value;
+    if (val->type != JSMN_PRIMITIVE) {
+        cloudsync_memory_free(tokens);
+        return default_value;
+    }
 
-    return strtoll(json + val->start, NULL, 10);
+    int64_t result = strtoll(json + val->start, NULL, 10);
+    cloudsync_memory_free(tokens);
+    return result;
 }
 
 static int json_extract_array_size(const char *json, size_t json_len, const char *key) {
     if (!json || json_len == 0 || !key) return -1;
 
-    jsmn_parser parser;
-    jsmntok_t tokens[JSMN_MAX_TOKENS];
-    jsmn_init(&parser);
-    int ntokens = jsmn_parse(&parser, json, json_len, tokens, JSMN_MAX_TOKENS);
-    if (ntokens < 1 || tokens[0].type != JSMN_OBJECT) return -1;
+    int ntokens = 0;
+    jsmntok_t *tokens = json_parse_root_object_alloc(json, json_len, &ntokens);
+    if (ntokens < 1) return -1;
 
     int i = jsmn_find_key(json, tokens, ntokens, key);
-    if (i < 0 || i + 1 >= ntokens) return -1;
+    if (i < 0 || i + 1 >= ntokens) {
+        cloudsync_memory_free(tokens);
+        return -1;
+    }
 
     jsmntok_t *val = &tokens[i + 1];
-    if (val->type != JSMN_ARRAY) return -1;
+    if (val->type != JSMN_ARRAY) {
+        cloudsync_memory_free(tokens);
+        return -1;
+    }
 
-    return val->size;
+    int result = val->size;
+    cloudsync_memory_free(tokens);
+    return result;
 }
 
 // Escape a string for safe embedding as a JSON string value (without surrounding quotes).
@@ -613,26 +788,262 @@ static char *json_escape_string(const char *src) {
 static char *json_extract_object_raw(const char *json, size_t json_len, const char *key) {
     if (!json || json_len == 0 || !key) return NULL;
 
-    jsmn_parser parser;
-    jsmntok_t tokens[JSMN_MAX_TOKENS];
-    jsmn_init(&parser);
-    int ntokens = jsmn_parse(&parser, json, json_len, tokens, JSMN_MAX_TOKENS);
+    int ntokens = 0;
+    jsmntok_t *tokens = json_parse_root_object_alloc(json, json_len, &ntokens);
     if (ntokens < 1) return NULL;
 
     int i = jsmn_find_key(json, tokens, ntokens, key);
-    if (i < 0 || i + 1 >= ntokens) return NULL;
+    if (i < 0 || i + 1 >= ntokens) {
+        cloudsync_memory_free(tokens);
+        return NULL;
+    }
 
     jsmntok_t *val = &tokens[i + 1];
-    if (val->type != JSMN_OBJECT) return NULL;
+    if (val->type != JSMN_OBJECT) {
+        cloudsync_memory_free(tokens);
+        return NULL;
+    }
 
     int len = val->end - val->start;
-    if (len <= 0) return NULL;
+    if (len <= 0) {
+        cloudsync_memory_free(tokens);
+        return NULL;
+    }
 
     char *out = cloudsync_memory_zeroalloc(len + 1);
-    if (!out) return NULL;
+    if (!out) {
+        cloudsync_memory_free(tokens);
+        return NULL;
+    }
     memcpy(out, json + val->start, len);
     out[len] = '\0';
+    cloudsync_memory_free(tokens);
     return out;
+}
+
+static bool network_migration_apply_error(const char *message) {
+    if (!message) return false;
+    return strstr(message, "schema hash") != NULL ||
+           strstr(message, "cloudsync is not initialized") != NULL;
+}
+
+static int64_t network_migration_current_epoch(cloudsync_context *data) {
+    if (!database_internal_table_exists(data, "cloudsync_migrations")) return 0;
+    int64_t epoch = 0;
+    int rc = database_select_int(data, "SELECT COALESCE(MAX(schema_epoch), 0) FROM cloudsync_migrations;", &epoch);
+    return rc == DBRES_OK ? epoch : 0;
+}
+
+static char *network_migration_state_json(cloudsync_context *data) {
+    uint64_t schema_hash = database_schema_hash(data);
+    int64_t schema_epoch = network_migration_current_epoch(data);
+    bool has_tables = cloudsync_config_exists(data) && dbutils_table_settings_count_tables(data) > 0;
+    return cloudsync_memory_mprintf(
+        "{\"schemaHash\":\"%" PRIu64 "\",\"schemaEpoch\":%lld,\"hasTables\":%s}",
+        schema_hash, (long long)schema_epoch, has_tables ? "true" : "false");
+}
+
+static int network_apply_migration_payload(sqlite3_context *context, const char *payload, size_t payload_len, char **result_json, char **err_out) {
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    char *apply_result = NULL;
+    int rc = cloudsync_migration_apply(data, payload, (int)payload_len, &apply_result);
+    if (rc != DBRES_OK) {
+        const char *msg = cloudsync_errmsg(data);
+        if (!msg || !msg[0]) msg = "cloudsync_migration_apply failed";
+        if (err_out) *err_out = cloudsync_string_dup(msg);
+        else sqlite3_result_error(context, msg, -1);
+        if (apply_result) cloudsync_memory_free(apply_result);
+        return SQLITE_ERROR;
+    }
+
+    if (result_json) *result_json = apply_result;
+    else if (apply_result) cloudsync_memory_free(apply_result);
+    return SQLITE_OK;
+}
+
+static int network_apply_migration_response(sqlite3_context *context, NETWORK_RESULT *res, bool allow_url, char **result_json, char **err_out) {
+    if (!res) {
+        const char *msg = "CloudSync schema migration endpoint failed.";
+        if (err_out) *err_out = cloudsync_string_dup(msg);
+        else sqlite3_result_error(context, msg, -1);
+        return SQLITE_ERROR;
+    }
+
+    if (res->code == CLOUDSYNC_NETWORK_OK || (res->code == CLOUDSYNC_NETWORK_BUFFER && (!res->buffer || res->blen == 0))) {
+        if (result_json) *result_json = cloudsync_string_dup("{\"status\":\"none\"}");
+        return SQLITE_OK;
+    }
+
+    if (res->code != CLOUDSYNC_NETWORK_BUFFER) {
+        if (err_out) {
+            *err_out = cloudsync_string_dup(res->buffer ? res->buffer : "CloudSync schema migration endpoint failed.");
+        } else {
+            network_result_to_sqlite_error(context, *res, "CloudSync schema migration endpoint failed.");
+        }
+        return SQLITE_ERROR;
+    }
+
+    if (!network_validate_json_response(context, res, "CloudSync schema migration endpoint", err_out)) {
+        return SQLITE_ERROR;
+    }
+
+    network_data *netdata = NULL;
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    if (data) netdata = (network_data *)cloudsync_auxdata(data);
+
+    char *migration = json_extract_object_raw(res->buffer, res->blen, "migration");
+    if (!migration) migration = json_extract_object_raw(res->buffer, res->blen, "payload");
+    if (migration) {
+        int rc = network_apply_migration_payload(context, migration, strlen(migration), result_json, err_out);
+        cloudsync_memory_free(migration);
+        return rc;
+    }
+
+    if (allow_url && netdata) {
+        char *url = json_extract_string(res->buffer, res->blen, "url");
+        if (url) {
+            NETWORK_RESULT download = network_receive_buffer(netdata, url, NULL, true, false, NULL, NULL);
+            cloudsync_memory_free(url);
+            int rc = network_apply_migration_response(context, &download, false, result_json, err_out);
+            network_result_cleanup(&download);
+            return rc;
+        }
+    }
+
+    if (json_extract_array_size(res->buffer, res->blen, "ops") >= 0) {
+        return network_apply_migration_payload(context, res->buffer, res->blen, result_json, err_out);
+    }
+
+    if (result_json) *result_json = cloudsync_string_dup("{\"status\":\"none\"}");
+    return SQLITE_OK;
+}
+
+static int cloudsync_network_migration_check_internal(sqlite3_context *context, char **result_json, char **err_out) {
+    if (result_json) *result_json = NULL;
+    if (err_out) *err_out = NULL;
+
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    network_data *netdata = (network_data *)cloudsync_auxdata(data);
+    if (!netdata || !netdata->schema_check_endpoint) {
+        sqlite3_result_error(context, "Unable to retrieve CloudSync schema migration endpoint.", -1);
+        return SQLITE_ERROR;
+    }
+
+    char *state = network_migration_state_json(data);
+    if (!state) {
+        sqlite3_result_error_code(context, SQLITE_NOMEM);
+        return SQLITE_NOMEM;
+    }
+
+    NETWORK_RESULT res = network_receive_buffer(netdata, netdata->schema_check_endpoint, netdata->authentication, true, true, state, CLOUDSYNC_HEADER_SQLITECLOUD);
+    cloudsync_memory_free(state);
+
+    int rc = network_apply_migration_response(context, &res, true, result_json, err_out);
+    network_result_cleanup(&res);
+    return rc;
+}
+
+static int cloudsync_network_migration_download_internal(sqlite3_context *context, char **result_json, char **err_out) {
+    if (result_json) *result_json = NULL;
+    if (err_out) *err_out = NULL;
+
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    network_data *netdata = (network_data *)cloudsync_auxdata(data);
+    if (!netdata || !netdata->schema_download_endpoint) {
+        sqlite3_result_error(context, "Unable to retrieve CloudSync schema migration download endpoint.", -1);
+        return SQLITE_ERROR;
+    }
+
+    NETWORK_RESULT res = network_receive_buffer(netdata, netdata->schema_download_endpoint, netdata->authentication, true, false, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
+    int rc = network_apply_migration_response(context, &res, true, result_json, err_out);
+    network_result_cleanup(&res);
+    return rc;
+}
+
+void cloudsync_network_migration_check(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    char *result = NULL;
+    int rc = cloudsync_network_migration_check_internal(context, &result, NULL);
+    if (rc == SQLITE_OK) {
+        if (result) sqlite3_result_text(context, result, -1, cloudsync_memory_free);
+        else sqlite3_result_text(context, "{\"status\":\"none\"}", -1, SQLITE_TRANSIENT);
+    }
+}
+
+void cloudsync_network_migration_download(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    char *result = NULL;
+    int rc = cloudsync_network_migration_download_internal(context, &result, NULL);
+    if (rc == SQLITE_OK) {
+        if (result) sqlite3_result_text(context, result, -1, cloudsync_memory_free);
+        else sqlite3_result_text(context, "{\"status\":\"none\"}", -1, SQLITE_TRANSIENT);
+    }
+}
+
+void cloudsync_network_migration_upload(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    network_data *netdata = cloudsync_network_data(context);
+    if (!netdata || !netdata->schema_upload_endpoint) {
+        sqlite3_result_error(context, "Unable to retrieve CloudSync schema migration upload endpoint.", -1);
+        return;
+    }
+
+    bool from_pending = false;
+    char *pending_id = NULL;
+    char *pending_payload = NULL;
+    const char *payload = NULL;
+
+    if (argc == 0) {
+        pending_id = cloudsync_pending_migration_next_id(data);
+        if (!pending_id) {
+            sqlite3_result_error(context, "No pending schema migration to upload.", -1);
+            return;
+        }
+        pending_payload = cloudsync_pending_migration_payload(data, pending_id);
+        if (!pending_payload) {
+            sqlite3_result_error(context, "Unable to load pending schema migration payload.", -1);
+            cloudsync_memory_free(pending_id);
+            return;
+        }
+        payload = pending_payload;
+        from_pending = true;
+    } else {
+        payload = (const char *)sqlite3_value_text(argv[0]);
+    }
+
+    if (!payload || payload[0] == '\0') {
+        sqlite3_result_error(context, "cloudsync_network_migration_upload expects a JSON text payload.", -1);
+        if (pending_id) cloudsync_memory_free(pending_id);
+        if (pending_payload) cloudsync_memory_free(pending_payload);
+        return;
+    }
+    if (!json_is_valid_root_object(payload, strlen(payload))) {
+        sqlite3_result_error(context, "cloudsync_network_migration_upload expects a valid JSON object payload.", -1);
+        if (pending_id) cloudsync_memory_free(pending_id);
+        if (pending_payload) cloudsync_memory_free(pending_payload);
+        return;
+    }
+
+    NETWORK_RESULT res = network_receive_buffer(netdata, netdata->schema_upload_endpoint, netdata->authentication, true, true, (char *)payload, CLOUDSYNC_HEADER_SQLITECLOUD);
+    if (network_validate_json_response(context, &res, "CloudSync schema migration upload endpoint", NULL)) {
+        int rc = DBRES_OK;
+        char *upload_error = network_migration_upload_error_message(&res);
+        if (res.code == CLOUDSYNC_NETWORK_ERROR) {
+            network_set_sqlite_result(context, &res);
+        } else if (upload_error) {
+            sqlite3_result_error(context, upload_error, -1);
+        } else {
+            if (from_pending) rc = cloudsync_pending_migration_mark_uploaded(data, pending_id);
+            if (rc == DBRES_OK) {
+                network_set_sqlite_result(context, &res);
+            } else {
+                sqlite3_result_error(context, cloudsync_errmsg(data), -1);
+                sqlite3_result_error_code(context, rc);
+            }
+        }
+        if (upload_error) cloudsync_memory_free(upload_error);
+    }
+    network_result_cleanup(&res);
+    if (pending_id) cloudsync_memory_free(pending_id);
+    if (pending_payload) cloudsync_memory_free(pending_payload);
 }
 
 int network_extract_query_param (const char *query, const char *key, char *output, size_t output_size) {
@@ -719,6 +1130,24 @@ static bool network_compute_endpoints_with_address (sqlite3_context *context, ne
     snprintf(status_endpoint, requested, "%s/%s/%s/%s/%s",
              address, CLOUDSYNC_ENDPOINT_PREFIX, managedDatabaseId, data->site_id, CLOUDSYNC_ENDPOINT_STATUS);
 
+    char *schema_check_endpoint = cloudsync_memory_mprintf("%s/%s/%s/%s/%s/%s",
+        address, CLOUDSYNC_ENDPOINT_PREFIX, managedDatabaseId, data->site_id, CLOUDSYNC_ENDPOINT_SCHEMA, CLOUDSYNC_ENDPOINT_SCHEMA_CHECK);
+    char *schema_upload_endpoint = cloudsync_memory_mprintf("%s/%s/%s/%s/%s/%s",
+        address, CLOUDSYNC_ENDPOINT_PREFIX, managedDatabaseId, data->site_id, CLOUDSYNC_ENDPOINT_SCHEMA, CLOUDSYNC_ENDPOINT_SCHEMA_UPLOAD);
+    char *schema_download_endpoint = cloudsync_memory_mprintf("%s/%s/%s/%s/%s/%s",
+        address, CLOUDSYNC_ENDPOINT_PREFIX, managedDatabaseId, data->site_id, CLOUDSYNC_ENDPOINT_SCHEMA, CLOUDSYNC_ENDPOINT_SCHEMA_DOWNLOAD);
+    if (!schema_check_endpoint || !schema_upload_endpoint || !schema_download_endpoint) {
+        if (schema_check_endpoint) cloudsync_memory_free(schema_check_endpoint);
+        if (schema_upload_endpoint) cloudsync_memory_free(schema_upload_endpoint);
+        if (schema_download_endpoint) cloudsync_memory_free(schema_download_endpoint);
+        cloudsync_memory_free(check_endpoint);
+        cloudsync_memory_free(upload_endpoint);
+        cloudsync_memory_free(apply_endpoint);
+        cloudsync_memory_free(status_endpoint);
+        sqlite3_result_error_code(context, SQLITE_NOMEM);
+        return false;
+    }
+
     if (data->check_endpoint) cloudsync_memory_free(data->check_endpoint);
     data->check_endpoint = check_endpoint;
 
@@ -731,10 +1160,19 @@ static bool network_compute_endpoints_with_address (sqlite3_context *context, ne
     if (data->status_endpoint) cloudsync_memory_free(data->status_endpoint);
     data->status_endpoint = status_endpoint;
 
+    if (data->schema_check_endpoint) cloudsync_memory_free(data->schema_check_endpoint);
+    data->schema_check_endpoint = schema_check_endpoint;
+
+    if (data->schema_upload_endpoint) cloudsync_memory_free(data->schema_upload_endpoint);
+    data->schema_upload_endpoint = schema_upload_endpoint;
+
+    if (data->schema_download_endpoint) cloudsync_memory_free(data->schema_download_endpoint);
+    data->schema_download_endpoint = schema_download_endpoint;
+
     return true;
 }
 
-void network_result_to_sqlite_error (sqlite3_context *context, NETWORK_RESULT res, const char *default_error_message) {
+static void network_result_to_sqlite_error (sqlite3_context *context, NETWORK_RESULT res, const char *default_error_message) {
     sqlite3_result_error(context, ((res.code == CLOUDSYNC_NETWORK_ERROR) && (res.buffer)) ? res.buffer : default_error_message, -1);
     sqlite3_result_error_code(context, SQLITE_ERROR);
 }
@@ -931,6 +1369,10 @@ void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, s
     int64_t last_optimistic_version = -1;
 
     if (res.code == CLOUDSYNC_NETWORK_BUFFER && res.buffer) {
+        if (!network_validate_json_response(context, &res, "CloudSync status endpoint", NULL)) {
+            network_result_cleanup(&res);
+            return;
+        }
         last_optimistic_version = json_extract_int(res.buffer, res.blen, "lastOptimisticVersion", -1);
     } else if (res.code != CLOUDSYNC_NETWORK_OK) {
         network_result_to_sqlite_error(context, res, "unable to retrieve current status from remote host.");
@@ -950,6 +1392,35 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     
     network_data *netdata = (network_data *)cloudsync_auxdata(data);
     if (!netdata) {sqlite3_result_error(context, "Unable to retrieve CloudSync network context.", -1); return SQLITE_ERROR;}
+
+    bool has_sync_tables = cloudsync_config_exists(data) && dbutils_table_settings_count_tables(data) > 0;
+    if (!has_sync_tables) {
+        char *migration_result = NULL;
+        char *migration_err = NULL;
+        int mrc = cloudsync_network_migration_check_internal(context, &migration_result, &migration_err);
+        if (migration_result) cloudsync_memory_free(migration_result);
+        if (migration_err) {
+            sqlite3_result_error(context, migration_err, -1);
+            cloudsync_memory_free(migration_err);
+            return SQLITE_ERROR;
+        }
+        if (mrc != SQLITE_OK) return mrc;
+
+        has_sync_tables = cloudsync_config_exists(data) && dbutils_table_settings_count_tables(data) > 0;
+        if (!has_sync_tables) {
+            if (out) {
+                out->server_version = 0;
+                out->local_version = 0;
+                out->status = network_compute_status(0, 0, 0, 0);
+            }
+            return SQLITE_OK;
+        }
+    }
+
+    if (cloudsync_pending_migration_count(data) > 0) {
+        sqlite3_result_error(context, "A pending schema migration must be uploaded before sending row changes.", -1);
+        return SQLITE_ERROR;
+    }
     
     // retrieve payload
     char *blob = NULL;
@@ -964,6 +1435,19 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     
     // Case 1: empty local db — no payload and no server state, skip network entirely
     if ((blob == NULL || blob_size == 0) && db_version == 0) {
+        bool has_sync_tables = cloudsync_config_exists(data) && dbutils_table_settings_count_tables(data) > 0;
+        if (!has_sync_tables) {
+            char *migration_result = NULL;
+            char *migration_err = NULL;
+            int mrc = cloudsync_network_migration_check_internal(context, &migration_result, &migration_err);
+            if (migration_result) cloudsync_memory_free(migration_result);
+            if (migration_err) {
+                sqlite3_result_error(context, migration_err, -1);
+                cloudsync_memory_free(migration_err);
+                return SQLITE_ERROR;
+            }
+            if (mrc != SQLITE_OK) return mrc;
+        }
         if (out) {
             out->server_version = 0;
             out->local_version = 0;
@@ -979,6 +1463,11 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
         if (res.code != CLOUDSYNC_NETWORK_BUFFER) {
             cloudsync_memory_free(blob);
             network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to receive upload URL");
+            network_result_cleanup(&res);
+            return SQLITE_ERROR;
+        }
+        if (!network_validate_json_response(context, &res, "CloudSync upload endpoint", NULL)) {
+            cloudsync_memory_free(blob);
             network_result_cleanup(&res);
             return SQLITE_ERROR;
         }
@@ -1023,6 +1512,10 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     char *last_failure_json = NULL;
 
     if (res.code == CLOUDSYNC_NETWORK_BUFFER && res.buffer) {
+        if (!network_validate_json_response(context, &res, "CloudSync apply/status endpoint", NULL)) {
+            network_result_cleanup(&res);
+            return SQLITE_ERROR;
+        }
         last_optimistic_version = json_extract_int(res.buffer, res.blen, "lastOptimisticVersion", -1);
         last_confirmed_version = json_extract_int(res.buffer, res.blen, "lastConfirmedVersion", -1);
         gaps_size = json_extract_array_size(res.buffer, res.blen, "gaps");
@@ -1104,6 +1597,10 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
     NETWORK_RESULT result = network_receive_buffer(netdata, netdata->check_endpoint, netdata->authentication, true, true, json_payload, CLOUDSYNC_HEADER_SQLITECLOUD);
     int rc = SQLITE_OK;
     if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
+        if (!network_validate_json_response(context, &result, "CloudSync check endpoint", err_out)) {
+            network_result_cleanup(&result);
+            return SQLITE_ERROR;
+        }
         char *download_url = json_extract_string(result.buffer, result.blen, "url");
         if (!download_url) {
             sqlite3_result_error(context, "cloudsync_network_check_changes: missing 'url' in check response.", -1);
@@ -1136,6 +1633,18 @@ void cloudsync_network_sync (sqlite3_context *context, int wait_ms, int max_retr
     sync_result sr = {-1, 0, NULL, 0, NULL, NULL};
     int rc = cloudsync_network_send_changes_internal(context, 0, NULL, &sr);
     if (rc != SQLITE_OK) { if (sr.last_failure_json) cloudsync_memory_free(sr.last_failure_json); return; }
+
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    if (!cloudsync_config_exists(data) || dbutils_table_settings_count_tables(data) == 0) {
+        char *buf = cloudsync_memory_mprintf(
+            "{\"send\":{\"status\":\"%s\",\"localVersion\":%lld,\"serverVersion\":%lld},"
+            "\"receive\":{\"rows\":0,\"tables\":[]}}",
+            sr.status ? sr.status : "error",
+            (long long)sr.local_version, (long long)sr.server_version);
+        sqlite3_result_text(context, buf, -1, cloudsync_memory_free);
+        if (sr.last_failure_json) cloudsync_memory_free(sr.last_failure_json);
+        return;
+    }
 
     int ntries = 0;
     int nrows = 0;
@@ -1356,7 +1865,9 @@ void cloudsync_network_status (sqlite3_context *context, int argc, sqlite3_value
     }
 
     NETWORK_RESULT res = network_receive_buffer(netdata, netdata->status_endpoint, netdata->authentication, true, false, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
-    network_set_sqlite_result(context, &res);
+    if (network_validate_json_response(context, &res, "CloudSync status endpoint", NULL)) {
+        network_set_sqlite_result(context, &res);
+    }
     network_result_cleanup(&res);
 }
 
@@ -1403,6 +1914,17 @@ int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
     if (rc != SQLITE_OK) return rc;
 
     rc = sqlite3_create_function(db, "cloudsync_network_status", 0, DEFAULT_FLAGS, ctx, cloudsync_network_status, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_create_function(db, "cloudsync_network_migration_check", 0, DEFAULT_FLAGS, ctx, cloudsync_network_migration_check, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_create_function(db, "cloudsync_network_migration_upload", 1, DEFAULT_FLAGS, ctx, cloudsync_network_migration_upload, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = sqlite3_create_function(db, "cloudsync_network_migration_upload", 0, DEFAULT_FLAGS, ctx, cloudsync_network_migration_upload, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_create_function(db, "cloudsync_network_migration_download", 0, DEFAULT_FLAGS, ctx, cloudsync_network_migration_download, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
 cleanup:

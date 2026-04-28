@@ -210,10 +210,14 @@ $(TEST_TARGET): $(TEST_OBJ)
 	$(CC) $(filter-out $(patsubst $(DIST_DIR)/%$(EXE),$(BUILD_TEST)/%.o, $(filter-out $@,$(TEST_TARGET))), $(TEST_OBJ)) -o $@ $(T_LDFLAGS)
 
 # Object files
+$(BUILD_RELEASE)/fractional_indexing.o: $(FI_DIR)/fractional_indexing.c
+	$(CC) $(CFLAGS) -Wno-sign-compare -O3 -fPIC -c $< -o $@
 $(BUILD_RELEASE)/%.o: %.c
 	$(CC) $(CFLAGS) -O3 -fPIC -c $< -o $@
 $(BUILD_TEST)/sqlite3.o: $(SQLITE_DIR)/sqlite3.c
 	$(CC) $(CFLAGS) -DSQLITE_DQS=0 -DSQLITE_CORE -c $< -o $@
+$(BUILD_TEST)/fractional_indexing.o: $(FI_DIR)/fractional_indexing.c
+	$(CC) $(T_CFLAGS) -Wno-sign-compare -c $< -o $@
 $(BUILD_TEST)/%.o: %.c
 	$(CC) $(T_CFLAGS) -c $< -o $@
 
@@ -236,6 +240,15 @@ e2e: $(TARGET) $(DIST_DIR)/integration$(EXE)
 		export $$(grep -v '^#' .env | xargs); \
 	fi; \
 	./$(DIST_DIR)/integration$(EXE)
+
+cross-dialect-migration-test: $(TARGET)
+	PG_DOCKER_DB_HOST="$(PG_DOCKER_DB_HOST)" \
+	PG_DOCKER_DB_PORT="$(PG_DOCKER_DB_PORT)" \
+	PG_DOCKER_DB_NAME="$(PG_DOCKER_DB_NAME)" \
+	PG_DOCKER_DB_USER="$(PG_DOCKER_DB_USER)" \
+	PG_DOCKER_DB_PASSWORD="$(PG_DOCKER_DB_PASSWORD)" \
+	SQLITE3="$(SQLITE3)" \
+	./test/schema_migration_cross_dialect.sh
 
 OPENSSL_TARBALL = $(OPENSSL_DIR)/$(OPENSSL_VERSION).tar.gz
 
@@ -456,6 +469,7 @@ help:
 	@echo "  clean	 				- Remove built files"
 	@echo "  test [COVERAGE=true]	- Test the extension with optional coverage output"
 	@echo "  unittest				- Run only unit tests (test/unit.c)"
+	@echo "  cross-dialect-migration-test - Test schema migrations between SQLite and PostgreSQL"
 	@echo "  help	  				- Display this help message"
 	@echo "  xcframework			- Build the Apple XCFramework"
 	@echo "  aar					- Build the Android AAR package"
@@ -466,4 +480,4 @@ help:
 # Include PostgreSQL extension targets
 include docker/Makefile.postgresql
 
-.PHONY: all clean test unittest e2e extension help version xcframework aar
+.PHONY: all clean test unittest e2e cross-dialect-migration-test extension help version xcframework aar

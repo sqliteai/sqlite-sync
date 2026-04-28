@@ -22,8 +22,24 @@ This document provides a reference for the SQLite functions provided by the `sql
   - [`cloudsync_db_version()`](#cloudsync_db_version)
   - [`cloudsync_uuid()`](#cloudsync_uuid)
 - [Schema Alteration Functions](#schema-alteration-functions)
-  - [`cloudsync_begin_alter()`](#cloudsync_begin_altertable_name)
-  - [`cloudsync_commit_alter()`](#cloudsync_commit_altertable_name)
+  - [`cloudsync_alter_create_table()`](#cloudsync_alter_create_tabletable_name)
+  - [`cloudsync_alter_add_column()`](#cloudsync_alter_add_columntable_name-column_name-logical_type-nullable-default_value)
+  - [`cloudsync_alter_add_column_sqlite()`](#cloudsync_alter_add_column_sqlitetable_name-column_name-type_sql-nullable-default_sql)
+  - [`cloudsync_alter_add_column_postgresql()`](#cloudsync_alter_add_column_postgresqltable_name-column_name-type_sql-nullable-default_sql)
+  - [`cloudsync_alter_sql()`](#cloudsync_alter_sqlsql)
+  - [`cloudsync_alter_sqlite()`](#cloudsync_alter_sqlitesql)
+  - [`cloudsync_alter_postgresql()`](#cloudsync_alter_postgresqlsql)
+  - [`cloudsync_alter_add_primary_key()`](#cloudsync_alter_add_primary_keytable_name-column_name)
+  - [`cloudsync_alter_augment_table()`](#cloudsync_alter_augment_tabletable_name-algo-init_flags)
+  - [`cloudsync_alter_set_block_lww()`](#cloudsync_alter_set_block_lwwtable_name-column_name-delimiter)
+  - [`cloudsync_alter_set_column()`](#cloudsync_alter_set_columntable_name-column_name-key-value)
+  - [`cloudsync_alter_set_filter()`](#cloudsync_alter_set_filtertable_name-filter_expr)
+  - [`cloudsync_alter_drop_column()`](#cloudsync_alter_drop_columntable_name-column_name)
+  - [`cloudsync_alter_rename_column()`](#cloudsync_alter_rename_columntable_name-from_name-to_name)
+  - [`cloudsync_alter_preview()`](#cloudsync_alter_preview)
+  - [`cloudsync_alter_apply()`](#cloudsync_alter_apply)
+  - [`cloudsync_alter_clear()`](#cloudsync_alter_cleartable_name)
+  - [`cloudsync_migration_apply()`](#cloudsync_migration_applypayload)
 - [Network Functions](#network-functions)
   - [`cloudsync_network_init()`](#cloudsync_network_initmanageddatabaseid)
   - [`cloudsync_network_cleanup()`](#cloudsync_network_cleanup)
@@ -32,6 +48,9 @@ This document provides a reference for the SQLite functions provided by the `sql
   - [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes)
   - [`cloudsync_network_check_changes()`](#cloudsync_network_check_changes)
   - [`cloudsync_network_sync()`](#cloudsync_network_syncwait_ms-max_retries)
+  - [`cloudsync_network_migration_check()`](#cloudsync_network_migration_check)
+  - [`cloudsync_network_migration_download()`](#cloudsync_network_migration_download)
+  - [`cloudsync_network_migration_upload()`](#cloudsync_network_migration_uploadpayload)
   - [`cloudsync_network_reset_sync_version()`](#cloudsync_network_reset_sync_version)
   - [`cloudsync_network_has_unsent_changes()`](#cloudsync_network_has_unsent_changes)
   - [`cloudsync_network_logout()`](#cloudsync_network_logout)
@@ -365,46 +384,390 @@ INSERT INTO products (id, name) VALUES (cloudsync_uuid(), 'New Product');
 
 ## Schema Alteration Functions
 
-### `cloudsync_begin_alter(table_name)`
+Schema migrations should be created with the declarative `cloudsync_alter_*`
+functions. Operations are queued in memory for the current connection until
+`cloudsync_alter_apply()` applies them locally and stores a generated
+payload in `cloudsync_pending_migration` for upload.
 
-**Description:** Prepares a synchronized table for schema changes. This function must be called before altering the table. Failure to use `cloudsync_begin_alter` and `cloudsync_commit_alter` can lead to synchronization errors and data divergence.
+The older public SQL functions `cloudsync_begin_alter()` and
+`cloudsync_commit_alter()` are no longer exposed. The extension still uses
+internal C primitives with those names while replaying migrations on augmented
+tables.
+
+### `cloudsync_alter_create_table(table_name)`
+
+**Description:** Queues creation of a table inside a schema migration. Add the
+table columns with `cloudsync_alter_add_column()` and mark at least one primary
+key column with `cloudsync_alter_add_primary_key()` before applying.
 
 **Parameters:**
 
-- `table_name` (TEXT): The name of the table that will be altered.
+- `table_name` (TEXT): The table to create.
 
 **Returns:** None.
 
 **Example:**
 
 ```sql
-SELECT cloudsync_init('my_table');
--- ... later
-SELECT cloudsync_begin_alter('my_table');
-ALTER TABLE my_table ADD COLUMN new_column TEXT;
-SELECT cloudsync_commit_alter('my_table');
+SELECT cloudsync_alter_create_table('notes');
+SELECT cloudsync_alter_add_column('notes', 'id', 'text', false);
+SELECT cloudsync_alter_add_primary_key('notes', 'id');
 ```
 
 ---
 
-### `cloudsync_commit_alter(table_name)`
+### `cloudsync_alter_add_column(table_name, column_name, logical_type, nullable, [default_value])`
 
-**Description:** Finalizes schema changes for a synchronized table. This function must be called after altering the table's schema, completing the process initiated by `cloudsync_begin_alter` and ensuring CRDT data consistency.
+**Description:** Queues a portable column definition. `default_value` is
+optional. A `NOT NULL` non-primary-key column must have a default value.
 
 **Parameters:**
 
-- `table_name` (TEXT): The name of the table that was altered.
+- `table_name` (TEXT): The table to alter.
+- `column_name` (TEXT): The column to add.
+- `logical_type` (TEXT): Portable type such as `text`, `integer`, `real`, `numeric`, `blob`, `boolean`, `json`, `timestamp`, or `uuid`.
+- `nullable` (BOOLEAN/INTEGER): Whether the column may contain NULL values.
+- `default_value` (optional): Plain default value. Serialization is inferred from `logical_type`.
 
 **Returns:** None.
 
 **Example:**
 
 ```sql
-SELECT cloudsync_init('my_table');
--- ... later
-SELECT cloudsync_begin_alter('my_type');
-ALTER TABLE my_table ADD COLUMN new_column TEXT;
-SELECT cloudsync_commit_alter('my_table');
+SELECT cloudsync_alter_add_column('notes', 'title', 'text', false, '');
+SELECT cloudsync_alter_add_column('notes', 'metadata', 'json', true);
+```
+
+---
+
+### `cloudsync_alter_add_column_sqlite(table_name, column_name, type_sql, nullable, [default_sql])`
+
+**Description:** Adds or replaces the SQLite-specific SQL rendering for a
+previously queued `cloudsync_alter_add_column()` operation.
+
+**Parameters:**
+
+- `table_name` (TEXT): The table being altered.
+- `column_name` (TEXT): The column with the override.
+- `type_sql` (TEXT): SQLite type SQL fragment.
+- `nullable` (BOOLEAN/INTEGER): Whether the column may contain NULL values.
+- `default_sql` (TEXT, optional): SQLite default SQL expression, not a plain value.
+
+**Returns:** None.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_add_column('notes', 'metadata', 'json', false, '{}');
+SELECT cloudsync_alter_add_column_sqlite('notes', 'metadata', 'TEXT', false, '''{}''');
+```
+
+---
+
+### `cloudsync_alter_add_column_postgresql(table_name, column_name, type_sql, nullable, [default_sql])`
+
+**Description:** Adds or replaces the PostgreSQL-specific SQL rendering for a
+previously queued `cloudsync_alter_add_column()` operation.
+
+**Parameters:**
+
+- `table_name` (TEXT): The table being altered.
+- `column_name` (TEXT): The column with the override.
+- `type_sql` (TEXT): PostgreSQL type SQL fragment.
+- `nullable` (BOOLEAN/INTEGER): Whether the column may contain NULL values.
+- `default_sql` (TEXT, optional): PostgreSQL default SQL expression, not a plain value.
+
+**Returns:** None.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_add_column('notes', 'metadata', 'json', false, '{}');
+SELECT cloudsync_alter_add_column_postgresql('notes', 'metadata', 'JSONB', false, '''{}''::jsonb');
+```
+
+---
+
+### `cloudsync_alter_sql(sql)`
+
+**Description:** Queues raw SQL inside the current schema migration. This is an
+advanced escape hatch for schema work that cannot be represented by the
+portable alter APIs. The SQL runs in order with the other queued operations and
+inside the same migration savepoint. Transaction-control statements such as
+`BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, and `RELEASE` are rejected. Because
+the extension cannot infer the impact of arbitrary SQL, generated raw SQL
+migrations use `formatVersion: 2` and require destructive-schema authorization.
+
+**Parameters:**
+
+- `sql` (TEXT): SQL statement to run on every database engine.
+
+**Returns:** None.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_sql('CREATE INDEX notes_updated_at_idx ON notes(updated_at)');
+```
+
+---
+
+### `cloudsync_alter_sqlite(sql)`
+
+**Description:** Queues raw SQL that should run only when the migration is
+applied to SQLite. PostgreSQL skips this operation.
+
+**Parameters:**
+
+- `sql` (TEXT): SQLite SQL statement.
+
+**Returns:** None.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_sqlite('CREATE INDEX notes_body_sqlite_idx ON notes(body)');
+```
+
+---
+
+### `cloudsync_alter_postgresql(sql)`
+
+**Description:** Queues raw SQL that should run only when the migration is
+applied to PostgreSQL. SQLite skips this operation.
+
+**Parameters:**
+
+- `sql` (TEXT): PostgreSQL SQL statement.
+
+**Returns:** None.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_postgresql('CREATE INDEX notes_body_pg_idx ON notes(body)');
+```
+
+---
+
+### `cloudsync_alter_add_primary_key(table_name, column_name)`
+
+**Description:** Marks a queued column as part of the primary key for a queued
+`cloudsync_alter_create_table()` operation.
+
+**Parameters:**
+
+- `table_name` (TEXT): The table being created.
+- `column_name` (TEXT): The primary-key column.
+
+**Returns:** None.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_add_primary_key('notes', 'id');
+```
+
+---
+
+### `cloudsync_alter_augment_table(table_name, [algo], [init_flags])`
+
+**Description:** Queues CloudSync augmentation for the table. This is the
+migration equivalent of `cloudsync_init()`.
+
+**Parameters:**
+
+- `table_name` (TEXT): The table to augment.
+- `algo` (TEXT, optional): CRDT algorithm. Defaults to `cls`.
+- `init_flags` (INTEGER, optional): Same bitmask used by `cloudsync_init()`.
+
+**Returns:** None.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_augment_table('notes', 'CLS', 1);
+```
+
+---
+
+### `cloudsync_alter_set_block_lww(table_name, column_name, [delimiter])`
+
+**Description:** Queues block-level LWW for a text column.
+
+**Parameters:**
+
+- `table_name` (TEXT): The synchronized table.
+- `column_name` (TEXT): The text column to configure.
+- `delimiter` (TEXT, optional): Block delimiter. For line-level blocks use `char(10)`.
+
+**Returns:** None.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_set_block_lww('notes', 'body', char(10));
+```
+
+---
+
+### `cloudsync_alter_set_column(table_name, column_name, key, value)`
+
+**Description:** Queues a CloudSync column setting.
+
+**Parameters:**
+
+- `table_name` (TEXT): The synchronized table.
+- `column_name` (TEXT): The target column.
+- `key` (TEXT): Setting key.
+- `value` (TEXT): Setting value, or NULL.
+
+**Returns:** None.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_set_column('notes', 'body', 'delimiter', char(10));
+```
+
+---
+
+### `cloudsync_alter_set_filter(table_name, filter_expr)`
+
+**Description:** Queues a portable row filter. Use
+`cloudsync_alter_set_filter_sqlite()` or
+`cloudsync_alter_set_filter_postgresql()` when the expression must differ by
+database.
+
+**Parameters:**
+
+- `table_name` (TEXT): The synchronized table.
+- `filter_expr` (TEXT): SQL predicate for rows that should be tracked.
+
+**Returns:** None.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_set_filter('notes', 'archived = 0');
+SELECT cloudsync_alter_set_filter_postgresql('notes', 'archived IS FALSE');
+```
+
+---
+
+### `cloudsync_alter_drop_column(table_name, column_name)`
+
+**Description:** Queues a V2 destructive column drop. Backend uploads must
+require `schema:destructive` authorization.
+
+**Parameters:**
+
+- `table_name` (TEXT): The table to alter.
+- `column_name` (TEXT): The column to drop.
+
+**Returns:** None.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_drop_column('notes', 'legacy_body');
+```
+
+---
+
+### `cloudsync_alter_rename_column(table_name, from_name, to_name)`
+
+**Description:** Queues a V2 column rename and updates CloudSync metadata for
+the renamed column.
+
+**Parameters:**
+
+- `table_name` (TEXT): The table to alter.
+- `from_name` (TEXT): Existing column name.
+- `to_name` (TEXT): New column name.
+
+**Returns:** None.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_rename_column('notes', 'text', 'body');
+```
+
+---
+
+### `cloudsync_alter_preview()`
+
+**Description:** Returns the generated schema migration JSON without applying it.
+
+**Parameters:** None.
+
+**Returns:** A JSON payload as TEXT.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_preview();
+```
+
+---
+
+### `cloudsync_alter_apply()`
+
+**Description:** Builds the queued migration, applies it locally, stores the
+generated payload in `cloudsync_pending_migration`, and clears the queued
+operations for the current connection.
+
+**Parameters:** None.
+
+**Returns:** A JSON status object with the generated `migrationId`.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_apply();
+-- '{"status":"applied","migrationId":"...","pendingUpload":true}'
+```
+
+---
+
+### `cloudsync_alter_clear([table_name])`
+
+**Description:** Discards queued in-memory schema alteration operations. With no
+argument, clears all queued operations for the current connection, including
+global raw SQL operations.
+
+**Parameters:**
+
+- `table_name` (TEXT, optional): Table-specific queue to clear.
+
+**Returns:** None.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_clear('notes');
+SELECT cloudsync_alter_clear();
+```
+
+---
+
+### `cloudsync_migration_apply(payload)`
+
+**Description:** Applies an explicit schema migration JSON payload. This is
+mainly for custom backends, server-downloaded migrations, and tests; application
+code should normally use the declarative `cloudsync_alter_*` functions.
+
+**Parameters:**
+
+- `payload` (TEXT): Migration JSON.
+
+**Returns:** A JSON status object.
+
+**Example:**
+
+```sql
+SELECT cloudsync_migration_apply(CAST(readfile('client-to-server-v1.json') AS TEXT));
 ```
 
 ---
@@ -600,6 +963,72 @@ SELECT cloudsync_network_sync(500, 3);
 
 -- Receive phase failed but send phase completed — the error is surfaced in JSON, not as a SQL error:
 -- '{"send":{"status":"synced","localVersion":5,"serverVersion":5},"receive":{"rows":0,"tables":[],"error":"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."}}'
+```
+
+---
+
+### `cloudsync_network_migration_check()`
+
+**Description:** Checks the schema migration endpoint and applies any returned
+migration before normal row payloads are processed. Responses may contain an
+inline `migration`/`payload` object, a migration payload directly, a `url` to
+download, or no migration.
+
+**Parameters:** None.
+
+**Returns:** A JSON status object such as `{"status":"applied"}` or
+`{"status":"none"}`.
+
+**Example:**
+
+```sql
+SELECT cloudsync_network_migration_check();
+```
+
+---
+
+### `cloudsync_network_migration_download()`
+
+**Description:** Downloads and applies the next migration from the schema
+download endpoint.
+
+**Parameters:** None.
+
+**Returns:** A JSON status object such as `{"status":"applied"}` or
+`{"status":"none"}`.
+
+**Example:**
+
+```sql
+SELECT cloudsync_network_migration_download();
+```
+
+---
+
+### `cloudsync_network_migration_upload([payload])`
+
+**Description:** Uploads a schema migration to the backend. With no arguments it
+uploads the next row from `cloudsync_pending_migration`, which is the normal
+flow after `cloudsync_alter_apply()`. With one argument it uploads the
+explicit JSON payload.
+
+Uploading requires a schema-capable API key on the backend. V2/destructive
+migrations should require a stronger destructive-schema permission.
+
+**Parameters:**
+
+- `payload` (TEXT, optional): Explicit migration JSON. Omit it to upload the next pending generated migration.
+
+**Returns:** The backend JSON response.
+
+**Example:**
+
+```sql
+SELECT cloudsync_alter_apply();
+SELECT cloudsync_network_migration_upload();
+
+-- Custom backend/test flow:
+SELECT cloudsync_network_migration_upload(CAST(readfile('client-to-server-v1.json') AS TEXT));
 ```
 
 ---

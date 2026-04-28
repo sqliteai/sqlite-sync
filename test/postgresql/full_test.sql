@@ -59,6 +59,7 @@
 \ir 49_row_filter_prefill.sql
 \ir 50_block_lww_existing_data.sql
 \ir 51_stale_table_settings_dropped_meta.sql
+\ir 52_schema_migrations.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

@@ -72,7 +72,7 @@ int cloudsync_uuid_v7 (uint8_t value[UUID_LEN]) {
     
     // get current timestamp in ms
     struct timespec ts;
-    #ifdef __ANDROID__
+    #if defined(__ANDROID__) || defined(__APPLE__)
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return -1;
     #else
     if (timespec_get(&ts, TIME_UTC) == 0) return -1;

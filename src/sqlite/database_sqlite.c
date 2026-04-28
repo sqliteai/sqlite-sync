@@ -672,7 +672,7 @@ int database_cleanup (cloudsync_context *data) {
     }
     
     for (int i = ncols; i < nrows+ncols; i+=ncols) {
-        int rc2 = cloudsync_cleanup(data, result[i]);
+        int rc2 = cloudsync_cleanup(data, result[i], false);
         if (rc2 != SQLITE_OK) {rc = rc2; goto exit_cleanup;}
     }
     
@@ -1383,5 +1383,4 @@ void dbmem_free (void *ptr) {
 uint64_t dbmem_size (void *ptr) {
     return (uint64_t)sqlite3_msize(ptr);
 }
-
 

@@ -1,5 +1,5 @@
 -- Alter Table Sync Test
--- Tests cloudsync_begin_alter and cloudsync_commit_alter functions.
+-- Tests declarative cloudsync_alter_* schema migration functions.
 -- Verifies that schema changes (add column) are handled correctly
 -- and data syncs after alteration.
 
@@ -106,7 +106,7 @@ SELECT (:fail::int + 1) AS fail \gset
 \endif
 
 -- ============================================================================
--- ALTER TABLE on Database A (begin_alter + ALTER + commit_alter on SAME connection)
+-- ALTER TABLE on Database A through declarative migration API
 -- ============================================================================
 
 \echo [INFO] (:testid) === ALTER TABLE on Database A ===
@@ -115,21 +115,19 @@ SELECT (:fail::int + 1) AS fail \gset
 \ir helper_psql_conn_setup.sql
 SELECT cloudsync_init('products', 'CLS', 0) AS _reinit \gset
 
-SELECT cloudsync_begin_alter('products') AS begin_alter_a \gset
-\if :begin_alter_a
-\echo [PASS] (:testid) cloudsync_begin_alter succeeded on Database A
+SELECT cloudsync_alter_add_column('products', 'description', 'text', false, '') AS alter_add_a \gset
+\if :alter_add_a
+\echo [PASS] (:testid) cloudsync_alter_add_column queued on Database A
 \else
-\echo [FAIL] (:testid) cloudsync_begin_alter failed on Database A
+\echo [FAIL] (:testid) cloudsync_alter_add_column failed on Database A
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
-ALTER TABLE products ADD COLUMN description TEXT NOT NULL DEFAULT '';
-
-SELECT cloudsync_commit_alter('products') AS commit_alter_a \gset
-\if :commit_alter_a
-\echo [PASS] (:testid) cloudsync_commit_alter succeeded on Database A
+SELECT cloudsync_alter_apply() IS NOT NULL AS alter_apply_a \gset
+\if :alter_apply_a
+\echo [PASS] (:testid) cloudsync_alter_apply succeeded on Database A
 \else
-\echo [FAIL] (:testid) cloudsync_commit_alter failed on Database A
+\echo [FAIL] (:testid) cloudsync_alter_apply failed on Database A
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -157,7 +155,7 @@ SELECT (:fail::int + 1) AS fail \gset
 \endif
 
 -- ============================================================================
--- ALTER TABLE on Database B (begin_alter + ALTER + commit_alter on SAME connection)
+-- ALTER TABLE on Database B through declarative migration API
 -- Apply A's payload, insert/update, encode B's payload
 -- ============================================================================
 
@@ -167,21 +165,19 @@ SELECT (:fail::int + 1) AS fail \gset
 \ir helper_psql_conn_setup.sql
 SELECT cloudsync_init('products', 'CLS', 0) AS _reinit \gset
 
-SELECT cloudsync_begin_alter('products') AS begin_alter_b \gset
-\if :begin_alter_b
-\echo [PASS] (:testid) cloudsync_begin_alter succeeded on Database B
+SELECT cloudsync_alter_add_column('products', 'description', 'text', false, '') AS alter_add_b \gset
+\if :alter_add_b
+\echo [PASS] (:testid) cloudsync_alter_add_column queued on Database B
 \else
-\echo [FAIL] (:testid) cloudsync_begin_alter failed on Database B
+\echo [FAIL] (:testid) cloudsync_alter_add_column failed on Database B
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
-ALTER TABLE products ADD COLUMN description TEXT NOT NULL DEFAULT '';
-
-SELECT cloudsync_commit_alter('products') AS commit_alter_b \gset
-\if :commit_alter_b
-\echo [PASS] (:testid) cloudsync_commit_alter succeeded on Database B
+SELECT cloudsync_alter_apply() IS NOT NULL AS alter_apply_b \gset
+\if :alter_apply_b
+\echo [PASS] (:testid) cloudsync_alter_apply succeeded on Database B
 \else
-\echo [FAIL] (:testid) cloudsync_commit_alter failed on Database B
+\echo [FAIL] (:testid) cloudsync_alter_apply failed on Database B
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 

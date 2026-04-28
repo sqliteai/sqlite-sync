@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define CLOUDSYNC_VERSION                       "1.0.17"
+#define CLOUDSYNC_VERSION                       "1.1.0"
 #define CLOUDSYNC_MAX_TABLENAME_LEN             512
 
 #define CLOUDSYNC_VALUE_NOTSET                  -1
@@ -51,7 +51,7 @@ void cloudsync_context_free (void *ctx);
 
 // CloudSync global
 int cloudsync_init_table (cloudsync_context *data, const char *table_name, const char *algo_name, CLOUDSYNC_INIT_FLAG init_flags);
-int cloudsync_cleanup (cloudsync_context *data, const char *table_name);
+int cloudsync_cleanup (cloudsync_context *data, const char *table_name, bool preserve_global_state);
 int cloudsync_cleanup_all (cloudsync_context *data);
 int cloudsync_terminate (cloudsync_context *data);
 int cloudsync_insync (cloudsync_context *data);
@@ -67,9 +67,32 @@ bool cloudsync_config_exists (cloudsync_context *data);
 bool cloudsync_context_is_initialized (cloudsync_context *data);
 dbvm_t *cloudsync_colvalue_stmt (cloudsync_context *data, const char *tbl_name, bool *persistent);
 
-// CloudSync alter table
+// CloudSync alter table internals used by migration replay
 int cloudsync_begin_alter (cloudsync_context *data, const char *table_name);
 int cloudsync_commit_alter (cloudsync_context *data, const char *table_name);
+
+// CloudSync declarative schema alter API
+int cloudsync_alter_create_table(cloudsync_context *data, const char *table);
+int cloudsync_alter_add_column(cloudsync_context *data, const char *table, const char *column, const char *type, bool nullable, bool has_default, const char *default_value);
+int cloudsync_alter_add_column_dialect(cloudsync_context *data, const char *table, const char *column, const char *dialect, const char *type_sql, bool nullable, bool has_default_sql, const char *default_sql);
+int cloudsync_alter_add_primary_key(cloudsync_context *data, const char *table, const char *column);
+int cloudsync_alter_augment_table(cloudsync_context *data, const char *table, const char *algorithm, int64_t init_flags);
+int cloudsync_alter_set_block_lww(cloudsync_context *data, const char *table, const char *column, const char *delimiter);
+int cloudsync_alter_set_column(cloudsync_context *data, const char *table, const char *column, const char *key, const char *value);
+int cloudsync_alter_set_filter(cloudsync_context *data, const char *table, const char *filter);
+int cloudsync_alter_set_filter_dialect(cloudsync_context *data, const char *table, const char *dialect, const char *filter);
+int cloudsync_alter_drop_column(cloudsync_context *data, const char *table, const char *column);
+int cloudsync_alter_rename_column(cloudsync_context *data, const char *table, const char *from, const char *to);
+int cloudsync_alter_sql(cloudsync_context *data, const char *sql);
+int cloudsync_alter_sql_dialect(cloudsync_context *data, const char *dialect, const char *sql);
+int cloudsync_alter_clear(cloudsync_context *data, const char *table);
+void cloudsync_alter_clear_context(cloudsync_context *data);
+char *cloudsync_alter_preview(cloudsync_context *data);
+int cloudsync_alter_apply(cloudsync_context *data, char **result_json);
+int cloudsync_pending_migration_count(cloudsync_context *data);
+char *cloudsync_pending_migration_next_id(cloudsync_context *data);
+char *cloudsync_pending_migration_payload(cloudsync_context *data, const char *migration_id);
+int cloudsync_pending_migration_mark_uploaded(cloudsync_context *data, const char *migration_id);
 
 // CloudSync getter/setter
 void *cloudsync_db (cloudsync_context *data);
@@ -94,6 +117,9 @@ char  *cloudsync_payload_blob (cloudsync_payload_context *payload, int64_t *blob
 size_t cloudsync_payload_context_size (size_t *header_size);
 int    cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int64_t *new_db_version);
 int    cloudsync_payload_save (cloudsync_context *data, const char *payload_path, int *blob_size); // available only on Desktop OS (no WASM, no mobile)
+
+// Schema migrations
+int    cloudsync_migration_apply (cloudsync_context *data, const char *payload, int payload_len, char **result_json);
 
 // CloudSync table context
 int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name);

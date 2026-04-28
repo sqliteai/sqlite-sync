@@ -52,6 +52,7 @@ PG_CORE_SRC = \
 	src/pk.c \
 	src/utils.c \
 	src/lz4.c \
+	src/migration.c \
 	src/block.c \
 	modules/fractional-indexing/fractional_indexing.c
 

@@ -464,7 +464,7 @@ Datum pg_cloudsync_cleanup (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
-        rc = cloudsync_cleanup(data, table);
+        rc = cloudsync_cleanup(data, table, false);
     }
     PG_CATCH();
     {
@@ -818,117 +818,6 @@ Datum cloudsync_clear_filter (PG_FUNCTION_ARGS) {
     PG_RETURN_BOOL(true);
 }
 
-// MARK: - Schema Alteration -
-
-// cloudsync_begin_alter - Begin schema alteration
-PG_FUNCTION_INFO_V1(pg_cloudsync_begin_alter);
-Datum pg_cloudsync_begin_alter (PG_FUNCTION_ARGS) {
-    if (PG_ARGISNULL(0)) {
-        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name cannot be NULL")));
-    }
-
-    const char *table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    cloudsync_context *data = get_cloudsync_context();
-    int rc = DBRES_OK;
-
-    if (SPI_connect() != SPI_OK_CONNECT) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed")));
-    }
-
-    PG_TRY();
-    {
-        database_begin_savepoint(data, "cloudsync_alter");
-        rc = cloudsync_begin_alter(data, table_name);
-        if (rc != DBRES_OK) {
-            database_rollback_savepoint(data, "cloudsync_alter");
-        }
-    }
-    PG_CATCH();
-    {
-        SPI_finish();
-        PG_RE_THROW();
-    }
-    PG_END_TRY();
-
-    SPI_finish();
-    if (rc != DBRES_OK) {
-        ereport(ERROR,
-                (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("%s", cloudsync_errmsg(data))));
-    }
-    PG_RETURN_BOOL(true);
-}
-
-// cloudsync_commit_alter - Commit schema alteration
-//
-// This wrapper manages SPI in two phases to avoid the PostgreSQL warning
-// "subtransaction left non-empty SPI stack". The subtransaction was opened
-// by a prior cloudsync_begin_alter call, so SPI_connect() here creates a
-// connection at the subtransaction level. We must disconnect SPI before
-// cloudsync_commit_alter releases that subtransaction, then reconnect
-// for post-commit work (cloudsync_update_schema_hash).
-// Prepared statements survive SPI_finish via SPI_keepplan/TopMemoryContext.
-PG_FUNCTION_INFO_V1(pg_cloudsync_commit_alter);
-Datum pg_cloudsync_commit_alter (PG_FUNCTION_ARGS) {
-    if (PG_ARGISNULL(0)) {
-        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name cannot be NULL")));
-    }
-
-    const char *table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    cloudsync_context *data = get_cloudsync_context();
-    int rc = DBRES_OK;
-
-    // Phase 1: SPI work before savepoint release
-    if (SPI_connect() != SPI_OK_CONNECT) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed")));
-    }
-
-    PG_TRY();
-    {
-        rc = cloudsync_commit_alter(data, table_name);
-    }
-    PG_CATCH();
-    {
-        SPI_finish();
-        PG_RE_THROW();
-    }
-    PG_END_TRY();
-
-    // Disconnect SPI before savepoint boundary
-    SPI_finish();
-
-    if (rc != DBRES_OK) {
-        // Rollback savepoint (SPI disconnected, no warning)
-        database_rollback_savepoint(data, "cloudsync_alter");
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
-    }
-
-    // Release savepoint (SPI disconnected, no warning)
-    rc = database_commit_savepoint(data, "cloudsync_alter");
-    if (rc != DBRES_OK) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to release cloudsync_alter savepoint: %s", database_errmsg(data))));
-    }
-
-    // Phase 2: reconnect SPI for post-commit work
-    if (SPI_connect() != SPI_OK_CONNECT) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed after savepoint release")));
-    }
-
-    PG_TRY();
-    {
-        cloudsync_update_schema_hash(data);
-    }
-    PG_CATCH();
-    {
-        SPI_finish();
-        PG_RE_THROW();
-    }
-    PG_END_TRY();
-
-    SPI_finish();
-    PG_RETURN_BOOL(true);
-}
-
 // MARK: - Payload Functions -
 
 // Aggregate function: cloudsync_payload_encode transition function
@@ -1053,6 +942,431 @@ Datum cloudsync_payload_decode (PG_FUNCTION_ARGS) {
 PG_FUNCTION_INFO_V1(pg_cloudsync_payload_apply);
 Datum pg_cloudsync_payload_apply (PG_FUNCTION_ARGS) {
     return cloudsync_payload_decode(fcinfo);
+}
+
+// Schema migration apply
+PG_FUNCTION_INFO_V1(pg_cloudsync_migration_apply);
+Datum pg_cloudsync_migration_apply (PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0)) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("migration payload cannot be NULL")));
+    }
+
+    char *payload = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    char *result_json = NULL;
+    bool spi_connected = false;
+
+    int spi_rc = SPI_connect();
+    if (spi_rc != SPI_OK_CONNECT) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
+    }
+    spi_connected = true;
+
+    PG_TRY();
+    {
+        rc = cloudsync_migration_apply(data, payload, (int)strlen(payload), &result_json);
+    }
+    PG_CATCH();
+    {
+        if (result_json) cloudsync_memory_free(result_json);
+        if (spi_connected) SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    if (spi_connected) SPI_finish();
+    if (rc != DBRES_OK) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+    }
+
+    text *result = cstring_to_text(result_json ? result_json : "{\"status\":\"applied\"}");
+    if (result_json) cloudsync_memory_free(result_json);
+    PG_RETURN_TEXT_P(result);
+}
+
+static void pg_cloudsync_raise_error(cloudsync_context *data) {
+    const char *msg = cloudsync_errmsg(data);
+    ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", msg && msg[0] ? msg : "CloudSync operation failed")));
+}
+
+static void pg_cloudsync_spi_connect_or_error(void) {
+    int spi_rc = SPI_connect();
+    if (spi_rc != SPI_OK_CONNECT) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("SPI_connect failed: %d", spi_rc)));
+    }
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_create_table);
+Datum pg_cloudsync_alter_create_table(PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0)) ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name cannot be NULL")));
+    cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    pg_cloudsync_spi_connect_or_error();
+    PG_TRY();
+    {
+        rc = cloudsync_alter_create_table(data, text_to_cstring(PG_GETARG_TEXT_PP(0)));
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SPI_finish();
+    if (rc != DBRES_OK) pg_cloudsync_raise_error(data);
+    PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_add_column);
+Datum pg_cloudsync_alter_add_column(PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) || PG_ARGISNULL(3)) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("cloudsync_alter_add_column requires table, column, type, and nullable")));
+    }
+    const char *default_value = NULL;
+    bool has_default = PG_NARGS() >= 5;
+    if (has_default) {
+        if (!PG_ARGISNULL(4)) default_value = text_to_cstring(PG_GETARG_TEXT_PP(4));
+    }
+    cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    pg_cloudsync_spi_connect_or_error();
+    PG_TRY();
+    {
+        rc = cloudsync_alter_add_column(data,
+            text_to_cstring(PG_GETARG_TEXT_PP(0)),
+            text_to_cstring(PG_GETARG_TEXT_PP(1)),
+            text_to_cstring(PG_GETARG_TEXT_PP(2)),
+            PG_GETARG_BOOL(3),
+            has_default,
+            default_value);
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SPI_finish();
+    if (rc != DBRES_OK) pg_cloudsync_raise_error(data);
+    PG_RETURN_BOOL(true);
+}
+
+static Datum pg_cloudsync_alter_add_column_dialect(PG_FUNCTION_ARGS, const char *dialect) {
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) || PG_ARGISNULL(3)) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("dialect add_column requires table, column, type SQL, and nullable")));
+    }
+    bool has_default = PG_NARGS() >= 5;
+    const char *default_sql = (has_default && !PG_ARGISNULL(4)) ? text_to_cstring(PG_GETARG_TEXT_PP(4)) : NULL;
+    cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    pg_cloudsync_spi_connect_or_error();
+    PG_TRY();
+    {
+        rc = cloudsync_alter_add_column_dialect(data,
+            text_to_cstring(PG_GETARG_TEXT_PP(0)),
+            text_to_cstring(PG_GETARG_TEXT_PP(1)),
+            dialect,
+            text_to_cstring(PG_GETARG_TEXT_PP(2)),
+            PG_GETARG_BOOL(3),
+            has_default,
+            default_sql);
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SPI_finish();
+    if (rc != DBRES_OK) pg_cloudsync_raise_error(data);
+    PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_add_column_sqlite);
+Datum pg_cloudsync_alter_add_column_sqlite(PG_FUNCTION_ARGS) {
+    return pg_cloudsync_alter_add_column_dialect(fcinfo, "sqlite");
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_add_column_postgresql);
+Datum pg_cloudsync_alter_add_column_postgresql(PG_FUNCTION_ARGS) {
+    return pg_cloudsync_alter_add_column_dialect(fcinfo, "postgresql");
+}
+
+static Datum pg_cloudsync_alter_sql_dialect(PG_FUNCTION_ARGS, const char *dialect) {
+    if (PG_ARGISNULL(0)) ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("sql cannot be NULL")));
+    cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    pg_cloudsync_spi_connect_or_error();
+    PG_TRY();
+    {
+        const char *sql = text_to_cstring(PG_GETARG_TEXT_PP(0));
+        rc = dialect ? cloudsync_alter_sql_dialect(data, dialect, sql) : cloudsync_alter_sql(data, sql);
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SPI_finish();
+    if (rc != DBRES_OK) pg_cloudsync_raise_error(data);
+    PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_sql);
+Datum pg_cloudsync_alter_sql(PG_FUNCTION_ARGS) {
+    return pg_cloudsync_alter_sql_dialect(fcinfo, NULL);
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_sqlite);
+Datum pg_cloudsync_alter_sqlite(PG_FUNCTION_ARGS) {
+    return pg_cloudsync_alter_sql_dialect(fcinfo, "sqlite");
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_postgresql);
+Datum pg_cloudsync_alter_postgresql(PG_FUNCTION_ARGS) {
+    return pg_cloudsync_alter_sql_dialect(fcinfo, "postgresql");
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_add_primary_key);
+Datum pg_cloudsync_alter_add_primary_key(PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1)) ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name and column_name cannot be NULL")));
+    cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    pg_cloudsync_spi_connect_or_error();
+    PG_TRY();
+    {
+        rc = cloudsync_alter_add_primary_key(data, text_to_cstring(PG_GETARG_TEXT_PP(0)), text_to_cstring(PG_GETARG_TEXT_PP(1)));
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SPI_finish();
+    if (rc != DBRES_OK) pg_cloudsync_raise_error(data);
+    PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_augment_table);
+Datum pg_cloudsync_alter_augment_table(PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0)) ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name cannot be NULL")));
+    const char *algo = (PG_NARGS() >= 2 && !PG_ARGISNULL(1)) ? text_to_cstring(PG_GETARG_TEXT_PP(1)) : CLOUDSYNC_DEFAULT_ALGO;
+    int32 init_flags = (PG_NARGS() >= 3 && !PG_ARGISNULL(2)) ? PG_GETARG_INT32(2) : CLOUDSYNC_INIT_FLAG_NONE;
+    cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    pg_cloudsync_spi_connect_or_error();
+    PG_TRY();
+    {
+        rc = cloudsync_alter_augment_table(data, text_to_cstring(PG_GETARG_TEXT_PP(0)), algo, init_flags);
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SPI_finish();
+    if (rc != DBRES_OK) pg_cloudsync_raise_error(data);
+    PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_set_block_lww);
+Datum pg_cloudsync_alter_set_block_lww(PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1)) ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name and column_name cannot be NULL")));
+    const char *delimiter = (PG_NARGS() >= 3 && !PG_ARGISNULL(2)) ? text_to_cstring(PG_GETARG_TEXT_PP(2)) : NULL;
+    cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    pg_cloudsync_spi_connect_or_error();
+    PG_TRY();
+    {
+        rc = cloudsync_alter_set_block_lww(data, text_to_cstring(PG_GETARG_TEXT_PP(0)), text_to_cstring(PG_GETARG_TEXT_PP(1)), delimiter);
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SPI_finish();
+    if (rc != DBRES_OK) pg_cloudsync_raise_error(data);
+    PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_set_column);
+Datum pg_cloudsync_alter_set_column(PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2)) ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name, column_name, and key cannot be NULL")));
+    const char *value = PG_ARGISNULL(3) ? NULL : text_to_cstring(PG_GETARG_TEXT_PP(3));
+    cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    pg_cloudsync_spi_connect_or_error();
+    PG_TRY();
+    {
+        rc = cloudsync_alter_set_column(data, text_to_cstring(PG_GETARG_TEXT_PP(0)), text_to_cstring(PG_GETARG_TEXT_PP(1)), text_to_cstring(PG_GETARG_TEXT_PP(2)), value);
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SPI_finish();
+    if (rc != DBRES_OK) pg_cloudsync_raise_error(data);
+    PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_set_filter);
+Datum pg_cloudsync_alter_set_filter(PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1)) ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name and filter cannot be NULL")));
+    cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    pg_cloudsync_spi_connect_or_error();
+    PG_TRY();
+    {
+        rc = cloudsync_alter_set_filter(data, text_to_cstring(PG_GETARG_TEXT_PP(0)), text_to_cstring(PG_GETARG_TEXT_PP(1)));
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SPI_finish();
+    if (rc != DBRES_OK) pg_cloudsync_raise_error(data);
+    PG_RETURN_BOOL(true);
+}
+
+static Datum pg_cloudsync_alter_set_filter_dialect(PG_FUNCTION_ARGS, const char *dialect) {
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1)) ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name and filter cannot be NULL")));
+    cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    pg_cloudsync_spi_connect_or_error();
+    PG_TRY();
+    {
+        rc = cloudsync_alter_set_filter_dialect(data, text_to_cstring(PG_GETARG_TEXT_PP(0)), dialect, text_to_cstring(PG_GETARG_TEXT_PP(1)));
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SPI_finish();
+    if (rc != DBRES_OK) pg_cloudsync_raise_error(data);
+    PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_set_filter_sqlite);
+Datum pg_cloudsync_alter_set_filter_sqlite(PG_FUNCTION_ARGS) {
+    return pg_cloudsync_alter_set_filter_dialect(fcinfo, "sqlite");
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_set_filter_postgresql);
+Datum pg_cloudsync_alter_set_filter_postgresql(PG_FUNCTION_ARGS) {
+    return pg_cloudsync_alter_set_filter_dialect(fcinfo, "postgresql");
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_drop_column);
+Datum pg_cloudsync_alter_drop_column(PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1)) ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name and column_name cannot be NULL")));
+    cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    pg_cloudsync_spi_connect_or_error();
+    PG_TRY();
+    {
+        rc = cloudsync_alter_drop_column(data, text_to_cstring(PG_GETARG_TEXT_PP(0)), text_to_cstring(PG_GETARG_TEXT_PP(1)));
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SPI_finish();
+    if (rc != DBRES_OK) pg_cloudsync_raise_error(data);
+    PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_rename_column);
+Datum pg_cloudsync_alter_rename_column(PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2)) ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("table_name, from, and to cannot be NULL")));
+    cloudsync_context *data = get_cloudsync_context();
+    int rc = DBRES_OK;
+    pg_cloudsync_spi_connect_or_error();
+    PG_TRY();
+    {
+        rc = cloudsync_alter_rename_column(data, text_to_cstring(PG_GETARG_TEXT_PP(0)), text_to_cstring(PG_GETARG_TEXT_PP(1)), text_to_cstring(PG_GETARG_TEXT_PP(2)));
+    }
+    PG_CATCH();
+    {
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SPI_finish();
+    if (rc != DBRES_OK) pg_cloudsync_raise_error(data);
+    PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_clear);
+Datum pg_cloudsync_alter_clear(PG_FUNCTION_ARGS) {
+    const char *table = (PG_NARGS() == 0 || PG_ARGISNULL(0)) ? NULL : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    cloudsync_context *data = get_cloudsync_context();
+    int rc = cloudsync_alter_clear(data, table);
+    if (rc != DBRES_OK) pg_cloudsync_raise_error(data);
+    PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_preview);
+Datum pg_cloudsync_alter_preview(PG_FUNCTION_ARGS) {
+    cloudsync_context *data = get_cloudsync_context();
+    char *payload = NULL;
+    pg_cloudsync_spi_connect_or_error();
+    PG_TRY();
+    {
+        payload = cloudsync_alter_preview(data);
+    }
+    PG_CATCH();
+    {
+        if (payload) cloudsync_memory_free(payload);
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SPI_finish();
+    if (!payload) pg_cloudsync_raise_error(data);
+    text *result = cstring_to_text(payload);
+    cloudsync_memory_free(payload);
+    PG_RETURN_TEXT_P(result);
+}
+
+PG_FUNCTION_INFO_V1(pg_cloudsync_alter_apply);
+Datum pg_cloudsync_alter_apply(PG_FUNCTION_ARGS) {
+    cloudsync_context *data = get_cloudsync_context();
+    char *result_json = NULL;
+    int rc = DBRES_OK;
+    pg_cloudsync_spi_connect_or_error();
+    PG_TRY();
+    {
+        rc = cloudsync_alter_apply(data, &result_json);
+    }
+    PG_CATCH();
+    {
+        if (result_json) cloudsync_memory_free(result_json);
+        SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SPI_finish();
+    if (rc != DBRES_OK) {
+        if (result_json) cloudsync_memory_free(result_json);
+        pg_cloudsync_raise_error(data);
+    }
+    text *result = cstring_to_text(result_json ? result_json : "{\"status\":\"applied\"}");
+    if (result_json) cloudsync_memory_free(result_json);
+    PG_RETURN_TEXT_P(result);
 }
 
 // MARK: - Private/Internal Functions -

@@ -2973,7 +2973,12 @@ int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_
     PG_TRY();
     {
         RollbackAndReleaseCurrentSubTransaction();
-        database_refresh_snapshot();
+        /*
+         * Do not refresh the active snapshot after a rollback. Several callers
+         * raise a PostgreSQL ERROR immediately after rolling back; pushing a new
+         * snapshot at that point can leave portal->portalSnapshot non-NULL when
+         * PL/pgSQL exception handling resumes.
+         */
     }
     PG_CATCH();
     {
@@ -3072,5 +3077,4 @@ uint64_t dbmem_size (void *ptr) {
     // Return 0 as a safe default
     return 0;
 }
-
 

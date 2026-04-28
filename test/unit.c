@@ -1079,6 +1079,51 @@ abort_create_tables:
     return false;
 }
 
+static void test_json_append_string(sqlite3_str *json, const char *value) {
+    sqlite3_str_appendchar(json, 1, '"');
+    if (value) {
+        for (const unsigned char *p = (const unsigned char *)value; *p; ++p) {
+            switch (*p) {
+                case '"': sqlite3_str_appendall(json, "\\\""); break;
+                case '\\': sqlite3_str_appendall(json, "\\\\"); break;
+                case '\b': sqlite3_str_appendall(json, "\\b"); break;
+                case '\f': sqlite3_str_appendall(json, "\\f"); break;
+                case '\n': sqlite3_str_appendall(json, "\\n"); break;
+                case '\r': sqlite3_str_appendall(json, "\\r"); break;
+                case '\t': sqlite3_str_appendall(json, "\\t"); break;
+                default:
+                    if (*p < 0x20) sqlite3_str_appendf(json, "\\u%04x", *p);
+                    else sqlite3_str_appendchar(json, 1, (char)*p);
+                    break;
+            }
+        }
+    }
+    sqlite3_str_appendchar(json, 1, '"');
+}
+
+static bool do_rebuild_table_migration(sqlite3 *db, const char *migration_id, const char *table, const char **ddl, int ddl_count) {
+    sqlite3_str *json = sqlite3_str_new(NULL);
+    sqlite3_str_appendall(json, "{\"type\":\"cloudsync.schema.migration\",\"formatVersion\":2,\"migrationId\":");
+    test_json_append_string(json, migration_id);
+    sqlite3_str_appendall(json, ",\"requiredCapabilities\":[\"schema:write\",\"schema:destructive\"],\"ops\":[{\"op\":\"rebuildTableSync\",\"table\":");
+    test_json_append_string(json, table);
+    sqlite3_str_appendall(json, ",\"algorithm\":\"cls\",\"initFlags\":1,\"ddl\":[{\"op\":\"rawSql\",\"sql\":[");
+    for (int i = 0; i < ddl_count; ++i) {
+        if (i > 0) sqlite3_str_appendchar(json, 1, ',');
+        test_json_append_string(json, ddl[i]);
+    }
+    sqlite3_str_appendall(json, "]}]}]}");
+    char *payload = sqlite3_str_finish(json);
+    if (!payload) return false;
+
+    char *sql = sqlite3_mprintf("SELECT cloudsync_migration_apply('%q');", payload);
+    sqlite3_free(payload);
+    if (!sql) return false;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    sqlite3_free(sql);
+    return rc == SQLITE_OK;
+}
+
 bool do_alter_tables (int table_mask, sqlite3 *db, int alter_version) {
     // declare tables
     if (table_mask & TEST_PRIKEYS) {
@@ -1086,37 +1131,45 @@ bool do_alter_tables (int table_mask, sqlite3 *db, int alter_version) {
         char *sql = NULL;
         switch (alter_version) {
             case 1:
-                sql = sqlite3_mprintf("SELECT cloudsync_begin_alter('%q'); "
-                                     "ALTER TABLE \"%w\" ADD new_column_1 TEXT; "
-                                     "ALTER TABLE \"%w\" ADD new_column_2 TEXT DEFAULT 'default value'; "
-                                     "ALTER TABLE \"%w\" DROP note; "
-                                     "SELECT cloudsync_commit_alter('%q') ", 
-                                     CUSTOMERS_TABLE, CUSTOMERS_TABLE, CUSTOMERS_TABLE, CUSTOMERS_TABLE, CUSTOMERS_TABLE);
+                sql = sqlite3_mprintf("SELECT cloudsync_alter_add_column('%q', 'new_column_1', 'text', 1); "
+                                     "SELECT cloudsync_alter_add_column('%q', 'new_column_2', 'text', 1, 'default value'); "
+                                     "SELECT cloudsync_alter_drop_column('%q', 'note'); "
+                                     "SELECT cloudsync_alter_apply();",
+                                     CUSTOMERS_TABLE, CUSTOMERS_TABLE, CUSTOMERS_TABLE);
                 break;
             case 2:
-                sql = sqlite3_mprintf("SELECT cloudsync_begin_alter('%q'); "
-                                     "ALTER TABLE \"%w\" RENAME TO do_alter_tables_temp_customers; "
-                                     "CREATE TABLE \"%w\" (first_name TEXT NOT NULL, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\" TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT 'note',  note4 DATETIME DEFAULT(datetime('subsec')), stamp TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(first_name, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\")); "
-                                     "INSERT INTO \"%w\" (\"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\",\"note\",'a new note',\"stamp\" FROM do_alter_tables_temp_customers; "
-                                     "DROP TABLE do_alter_tables_temp_customers; "
-                                     "SELECT cloudsync_commit_alter('%q') ", 
-                                     CUSTOMERS_TABLE, CUSTOMERS_TABLE, CUSTOMERS_TABLE, CUSTOMERS_TABLE, CUSTOMERS_TABLE);
+            {
+                char *ddl0 = sqlite3_mprintf("ALTER TABLE \"%w\" RENAME TO do_alter_tables_temp_customers;", CUSTOMERS_TABLE);
+                char *ddl1 = sqlite3_mprintf("CREATE TABLE \"%w\" (first_name TEXT NOT NULL, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\" TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT 'note',  note4 DATETIME DEFAULT(datetime('subsec')), stamp TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(first_name, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\"));", CUSTOMERS_TABLE);
+                char *ddl2 = sqlite3_mprintf("INSERT INTO \"%w\" (\"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\",\"note\",'a new note',\"stamp\" FROM do_alter_tables_temp_customers;", CUSTOMERS_TABLE);
+                const char *ddl[] = {ddl0, ddl1, ddl2, "DROP TABLE do_alter_tables_temp_customers;"};
+                bool ok = ddl0 && ddl1 && ddl2 && do_rebuild_table_migration(db, "test-rebuild-customers-v2", CUSTOMERS_TABLE, ddl, 4);
+                if (ddl0) sqlite3_free(ddl0);
+                if (ddl1) sqlite3_free(ddl1);
+                if (ddl2) sqlite3_free(ddl2);
+                if (!ok) goto abort_alter_tables;
+                sql = NULL;
                 break;
+            }
             case 3:
-                sql = sqlite3_mprintf("SELECT cloudsync_begin_alter('%q'); "
-                                     "ALTER TABLE \"%w\" RENAME TO do_alter_tables_temp_customers; "
-                                     "CREATE TABLE \"%w\" (name TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT 'note',  note4 DATETIME DEFAULT(datetime('subsec')), stamp TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(name)); "
-                                     "INSERT INTO \"%w\" (\"name\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\" ||  \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\" ,\"note\",'a new note',\"stamp\" FROM do_alter_tables_temp_customers; "
-                                     "DROP TABLE do_alter_tables_temp_customers; "
-                                     "SELECT cloudsync_commit_alter('%q') ", 
-                                     CUSTOMERS_TABLE, CUSTOMERS_TABLE, CUSTOMERS_TABLE, CUSTOMERS_TABLE, CUSTOMERS_TABLE);
+            {
+                char *ddl0 = sqlite3_mprintf("ALTER TABLE \"%w\" RENAME TO do_alter_tables_temp_customers;", CUSTOMERS_TABLE);
+                char *ddl1 = sqlite3_mprintf("CREATE TABLE \"%w\" (name TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT 'note',  note4 DATETIME DEFAULT(datetime('subsec')), stamp TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(name));", CUSTOMERS_TABLE);
+                char *ddl2 = sqlite3_mprintf("INSERT INTO \"%w\" (\"name\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\" || \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\" ,\"note\",'a new note',\"stamp\" FROM do_alter_tables_temp_customers;", CUSTOMERS_TABLE);
+                const char *ddl[] = {ddl0, ddl1, ddl2, "DROP TABLE do_alter_tables_temp_customers;"};
+                bool ok = ddl0 && ddl1 && ddl2 && do_rebuild_table_migration(db, "test-rebuild-customers-v3", CUSTOMERS_TABLE, ddl, 4);
+                if (ddl0) sqlite3_free(ddl0);
+                if (ddl1) sqlite3_free(ddl1);
+                if (ddl2) sqlite3_free(ddl2);
+                if (!ok) goto abort_alter_tables;
+                sql = NULL;
                 break;
+            }
             case 4: // only add columns, not drop
-                sql = sqlite3_mprintf("SELECT cloudsync_begin_alter('%q'); "
-                                     "ALTER TABLE \"%w\" ADD new_column_1 TEXT; "
-                                     "ALTER TABLE \"%w\" ADD new_column_2 TEXT DEFAULT 'default value'; "
-                                     "SELECT cloudsync_commit_alter('%q') ", 
-                                     CUSTOMERS_TABLE, CUSTOMERS_TABLE, CUSTOMERS_TABLE, CUSTOMERS_TABLE);
+                sql = sqlite3_mprintf("SELECT cloudsync_alter_add_column('%q', 'new_column_1', 'text', 1); "
+                                     "SELECT cloudsync_alter_add_column('%q', 'new_column_2', 'text', 1, 'default value'); "
+                                     "SELECT cloudsync_alter_apply();",
+                                     CUSTOMERS_TABLE, CUSTOMERS_TABLE);
                 break;
             default:
                 sql = NULL;
@@ -1133,37 +1186,46 @@ bool do_alter_tables (int table_mask, sqlite3 *db, int alter_version) {
         const char *sql;
         switch (alter_version) {
             case 1:
-                sql = "SELECT cloudsync_begin_alter('" CUSTOMERS_NOCOLS_TABLE "'); "
-                      "ALTER TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" ADD new_column_1 TEXT; "
-                      "ALTER TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" ADD new_column_2 TEXT DEFAULT 'default value'; "
-                      "SELECT cloudsync_commit_alter('" CUSTOMERS_NOCOLS_TABLE "'); ";
+                sql = "SELECT cloudsync_alter_add_column('" CUSTOMERS_NOCOLS_TABLE "', 'new_column_1', 'text', 1); "
+                      "SELECT cloudsync_alter_add_column('" CUSTOMERS_NOCOLS_TABLE "', 'new_column_2', 'text', 1, 'default value'); "
+                      "SELECT cloudsync_alter_apply(); ";
                 break;
             case 2:
-                sql = "SELECT cloudsync_begin_alter('" CUSTOMERS_NOCOLS_TABLE "'); "
-                      "ALTER TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" RENAME TO do_alter_tables_temp_customers_nocols; "
-                      "CREATE TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" (first_name TEXT NOT NULL, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME " 2\" TEXT NOT NULL, PRIMARY KEY(first_name, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME " 2\")); "
-                      "INSERT INTO \"" CUSTOMERS_NOCOLS_TABLE "\" (\"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME " 2\") SELECT \"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\" FROM do_alter_tables_temp_customers_nocols; "
-                      "DROP TABLE do_alter_tables_temp_customers_nocols; "
-                      "SELECT cloudsync_commit_alter('" CUSTOMERS_NOCOLS_TABLE "'); "
-                      "SELECT cloudsync_begin_alter('" CUSTOMERS_NOCOLS_TABLE "'); "
-                      "ALTER TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" RENAME TO do_alter_tables_temp_customers_nocols; "
-                      "CREATE TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" (first_name TEXT NOT NULL, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\" TEXT NOT NULL, PRIMARY KEY(first_name, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\")); "
-                      "INSERT INTO \"" CUSTOMERS_NOCOLS_TABLE "\" (\"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\") SELECT \"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME " 2\" FROM do_alter_tables_temp_customers_nocols; "
-                      "DROP TABLE do_alter_tables_temp_customers_nocols; "
-                      "SELECT cloudsync_commit_alter('" CUSTOMERS_NOCOLS_TABLE "');" ;
+            {
+                const char *ddl1[] = {
+                    "ALTER TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" RENAME TO do_alter_tables_temp_customers_nocols;",
+                    "CREATE TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" (first_name TEXT NOT NULL, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME " 2\" TEXT NOT NULL, PRIMARY KEY(first_name, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME " 2\"));",
+                    "INSERT INTO \"" CUSTOMERS_NOCOLS_TABLE "\" (\"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME " 2\") SELECT \"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\" FROM do_alter_tables_temp_customers_nocols;",
+                    "DROP TABLE do_alter_tables_temp_customers_nocols;"
+                };
+                const char *ddl2[] = {
+                    "ALTER TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" RENAME TO do_alter_tables_temp_customers_nocols;",
+                    "CREATE TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" (first_name TEXT NOT NULL, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\" TEXT NOT NULL, PRIMARY KEY(first_name, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\"));",
+                    "INSERT INTO \"" CUSTOMERS_NOCOLS_TABLE "\" (\"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\") SELECT \"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME " 2\" FROM do_alter_tables_temp_customers_nocols;",
+                    "DROP TABLE do_alter_tables_temp_customers_nocols;"
+                };
+                if (!do_rebuild_table_migration(db, "test-rebuild-customers-nocols-v2a", CUSTOMERS_NOCOLS_TABLE, ddl1, 4)) goto abort_alter_tables;
+                if (!do_rebuild_table_migration(db, "test-rebuild-customers-nocols-v2b", CUSTOMERS_NOCOLS_TABLE, ddl2, 4)) goto abort_alter_tables;
+                sql = NULL;
                 break;
+            }
             case 3:
-                sql = "SELECT cloudsync_begin_alter('" CUSTOMERS_NOCOLS_TABLE "'); "
-                      "ALTER TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" RENAME TO do_alter_tables_temp_customers_nocols; "
-                      "CREATE TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" (name TEXT NOT NULL PRIMARY KEY); "
-                      "INSERT INTO \"" CUSTOMERS_NOCOLS_TABLE "\" (\"name\") SELECT \"first_name\" || \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\" FROM do_alter_tables_temp_customers_nocols; "
-                      "DROP TABLE do_alter_tables_temp_customers_nocols; "
-                      "SELECT cloudsync_commit_alter('" CUSTOMERS_NOCOLS_TABLE "'); ";
+            {
+                const char *ddl[] = {
+                    "ALTER TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" RENAME TO do_alter_tables_temp_customers_nocols;",
+                    "CREATE TABLE \"" CUSTOMERS_NOCOLS_TABLE "\" (name TEXT NOT NULL PRIMARY KEY);",
+                    "INSERT INTO \"" CUSTOMERS_NOCOLS_TABLE "\" (\"name\") SELECT \"first_name\" || \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\" FROM do_alter_tables_temp_customers_nocols;",
+                    "DROP TABLE do_alter_tables_temp_customers_nocols;"
+                };
+                if (!do_rebuild_table_migration(db, "test-rebuild-customers-nocols-v3", CUSTOMERS_NOCOLS_TABLE, ddl, 4)) goto abort_alter_tables;
+                sql = NULL;
                 break;
+            }
             default:
+                sql = NULL;
                 break;
         }
-        if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) goto abort_alter_tables;
+        if (sql && sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) goto abort_alter_tables;
     }
     
     if (table_mask & TEST_NOPRIKEYS) {
@@ -1171,35 +1233,39 @@ bool do_alter_tables (int table_mask, sqlite3 *db, int alter_version) {
         const char *sql;
         switch (alter_version) {
             case 1:
-                sql = "SELECT cloudsync_begin_alter('customers_noprikey'); "
-                      "ALTER TABLE customers_noprikey ADD new_column_1 TEXT, new_column_2 TEXT DEFAULT CURRENT_TIMESTAMP; "
-                      "SELECT cloudsync_commit_alter('customers_noprikey') ";
+                sql = "SELECT cloudsync_alter_add_column('customers_noprikey', 'new_column_1', 'text', 1); "
+                      "SELECT cloudsync_alter_add_column('customers_noprikey', 'new_column_2', 'text', 1, CURRENT_TIMESTAMP); "
+                      "SELECT cloudsync_alter_apply(); ";
                 break;
             case 2:
-                sql = "SELECT cloudsync_begin_alter('customers_noprikey'); "
-                      "ALTER TABLE \"customers_noprikey\" RENAME TO do_alter_tables_temp_customers_noprikey; "
-                      "CREATE TABLE \"customers_noprikey\" (first_name TEXT NOT NULL, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\" TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT 'note', stamp TEXT DEFAULT CURRENT_TIMESTAMP); "
-                      "INSERT INTO \"customers_noprikey\" (\"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\",\"note\",'a new note',\"stamp\" FROM do_alter_tables_temp_customers_noprikey; "
-                      "DROP TABLE do_alter_tables_temp_customers_noprikey; "
-                      "SELECT cloudsync_commit_alter('customers_noprikey') "
-                        "SELECT cloudsync_begin_alter('customers_noprikey'); "
-                        "ALTER TABLE \"customers_noprikey\" RENAME TO do_alter_tables_temp_customers_noprikey; "
-                        "CREATE TABLE customers_noprikey (first_name TEXT NOT NULL, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\" TEXT NOT NULL, PRIMARY KEY(first_name, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\")); "
-                        "INSERT INTO \"customers_noprikey\" (\"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\") SELECT \"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME " 2\" FROM do_alter_tables_temp_customers_noprikey; "
-                        "DROP TABLE do_alter_tables_temp_customers_noprikey; "
-                        "SELECT cloudsync_commit_alter('customers_noprikey');" ;
+            {
+                const char *ddl[] = {
+                    "ALTER TABLE \"customers_noprikey\" RENAME TO do_alter_tables_temp_customers_noprikey;",
+                    "CREATE TABLE \"customers_noprikey\" (first_name TEXT NOT NULL, \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\" TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT 'note', stamp TEXT DEFAULT CURRENT_TIMESTAMP);",
+                    "INSERT INTO \"customers_noprikey\" (\"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\",NULL,'a new note',CURRENT_TIMESTAMP FROM do_alter_tables_temp_customers_noprikey;",
+                    "DROP TABLE do_alter_tables_temp_customers_noprikey;"
+                };
+                if (!do_rebuild_table_migration(db, "test-rebuild-customers-noprikey-v2", "customers_noprikey", ddl, 4)) goto abort_alter_tables;
+                sql = NULL;
                 break;
+            }
             case 3:
-                sql = "SELECT cloudsync_begin_alter('customers_noprikey'); "
-                      "ALTER TABLE \"customers_noprikey\" RENAME TO do_alter_tables_temp_customers_noprikey; "
-                      "CREATE TABLE \"customers_noprikey\" (name TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT 'note', stamp TEXT DEFAULT CURRENT_TIMESTAMP); "
-                      "INSERT INTO \"customers_noprikey\" (\"first_name\" || \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\",\"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\",\"note\",'a new note',\"stamp\" FROM do_alter_tables_temp_customers_noprikey; "
-                      "DROP TABLE do_alter_tables_temp_customers_noprikey; "
-                      "SELECT cloudsync_commit_alter('customers_noprikey') ";
+            {
+                const char *ddl[] = {
+                    "ALTER TABLE \"customers_noprikey\" RENAME TO do_alter_tables_temp_customers_noprikey;",
+                    "CREATE TABLE \"customers_noprikey\" (name TEXT NOT NULL, note TEXT, note3 TEXT DEFAULT 'note', stamp TEXT DEFAULT CURRENT_TIMESTAMP);",
+                    "INSERT INTO \"customers_noprikey\" (\"name\",\"note\", \"note3\", \"stamp\") SELECT \"first_name\" || \"" CUSTOMERS_TABLE_COLUMN_LASTNAME "\",NULL,'a new note',CURRENT_TIMESTAMP FROM do_alter_tables_temp_customers_noprikey;",
+                    "DROP TABLE do_alter_tables_temp_customers_noprikey;"
+                };
+                if (!do_rebuild_table_migration(db, "test-rebuild-customers-noprikey-v3", "customers_noprikey", ddl, 4)) goto abort_alter_tables;
+                sql = NULL;
+                break;
+            }
             default:
+                sql = NULL;
                 break;
         }
-        if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) goto abort_alter_tables;
+        if (sql && sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) goto abort_alter_tables;
     }
     
     return true;
@@ -2005,13 +2071,41 @@ bool do_test_error_cases (sqlite3 *db) {
     int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_ERROR) return false;
     
-    // test error
-    sql = "SELECT cloudsync_begin_alter('foo2');";
+    // test empty declarative migration
+    sql = "SELECT cloudsync_alter_apply();";
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_MISUSE) return false;
     
-    // test error
-    sql = "SELECT cloudsync_commit_alter('foo2');";
+    // test NOT NULL add-column without default
+    sql = "SELECT cloudsync_alter_add_column('foo2', 'required_value', 'text', 0);"
+          "SELECT cloudsync_alter_apply();";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_MISUSE) return false;
+    sqlite3_exec(db, "SELECT cloudsync_alter_clear('foo2');", NULL, NULL, NULL);
+
+    // test NOT NULL add-column with explicit SQL NULL default
+    sql = "SELECT cloudsync_alter_add_column('foo2', 'required_null', 'text', 0, NULL);"
+          "SELECT cloudsync_alter_apply();";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_MISUSE) return false;
+    sqlite3_exec(db, "SELECT cloudsync_alter_clear('foo2');", NULL, NULL, NULL);
+
+    // test current-dialect override with explicit SQL NULL default
+    sql = "SELECT cloudsync_alter_add_column('foo2', 'required_null_override', 'text', 0, 'fallback');"
+          "SELECT cloudsync_alter_add_column_sqlite('foo2', 'required_null_override', 'TEXT', 0, NULL);"
+          "SELECT cloudsync_alter_apply();";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_MISUSE) return false;
+    sqlite3_exec(db, "SELECT cloudsync_alter_clear('foo2');", NULL, NULL, NULL);
+
+    // test raw SQL guardrails
+    sql = "SELECT cloudsync_alter_sql('BEGIN');";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_MISUSE) return false;
+    sql = "SELECT cloudsync_alter_sql('END');";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_MISUSE) return false;
+    sql = "SELECT cloudsync_alter_sql('ABORT');";
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_MISUSE) return false;
 
@@ -12313,6 +12407,929 @@ finalize:
     return result;
 }
 
+bool do_test_migration_v1_create_augment_block (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    const char *payload =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"mig-sqlite-v1-create\","
+        "\"ops\":["
+        "{\"op\":\"createTable\",\"table\":\"notes\",\"columns\":["
+        "{\"name\":\"id\",\"type\":\"text\",\"primaryKey\":true,\"nullable\":false},"
+        "{\"name\":\"body\",\"type\":\"text\",\"nullable\":false,\"default\":{\"type\":\"text\",\"value\":\"\"}}"
+        "]},"
+        "{\"op\":\"augmentTable\",\"table\":\"notes\",\"algorithm\":\"CLS\",\"initFlags\":0},"
+        "{\"op\":\"setBlockLww\",\"table\":\"notes\",\"column\":\"body\",\"delimiter\":\"\\n\"}"
+        "]"
+        "}');";
+
+    int rc = sqlite3_exec(db, payload, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("migration_v1_create: apply failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    rc = sqlite3_exec(db, "INSERT INTO notes (id, body) VALUES ('n1', 'a\nb\nc');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("migration_v1_create: insert failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    int64_t settings = do_select_int(db, "SELECT count(*) FROM cloudsync_table_settings WHERE tbl_name='notes' AND key='algo';");
+    int64_t blocks = do_select_int(db, "SELECT count(*) FROM notes_cloudsync_blocks WHERE pk = cloudsync_pk_encode('n1');");
+    int64_t migrations = do_select_int(db, "SELECT count(*) FROM cloudsync_migrations WHERE migration_id='mig-sqlite-v1-create';");
+    int64_t pk_notnull = do_select_int(db, "SELECT count(*) FROM pragma_table_info('notes') WHERE name='id' AND pk > 0 AND \"notnull\" = 1;");
+    result = (settings == 2 && blocks == 3 && migrations == 1 && pk_notnull == 1);
+    if (!result) {
+        printf("migration_v1_create: unexpected settings=%lld blocks=%lld migrations=%lld pk_notnull=%lld\n",
+               (long long)settings, (long long)blocks, (long long)migrations, (long long)pk_notnull);
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_v1_add_column_idempotent (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '');"
+        "SELECT cloudsync_init('tasks');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    const char *payload =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"mig-sqlite-v1-add-column\","
+        "\"ops\":[{\"op\":\"addColumn\",\"table\":\"tasks\",\"column\":{"
+        "\"name\":\"description\",\"type\":\"text\",\"nullable\":false,"
+        "\"default\":{\"type\":\"text\",\"value\":\"\"}}}]"
+        "}');";
+
+    rc = sqlite3_exec(db, payload, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("migration_v1_add: apply failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+    rc = sqlite3_exec(db, payload, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("migration_v1_add: idempotent apply failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    int64_t col_exists = do_select_int(db, "SELECT count(*) FROM pragma_table_info('tasks') WHERE name='description';");
+    int64_t migrations = do_select_int(db, "SELECT count(*) FROM cloudsync_migrations WHERE migration_id='mig-sqlite-v1-add-column';");
+    rc = sqlite3_exec(db, "INSERT INTO tasks (id, title, description) VALUES ('t1', 'title', 'desc');", NULL, NULL, NULL);
+    result = (col_exists == 1 && migrations == 1 && rc == SQLITE_OK);
+    if (!result) {
+        printf("migration_v1_add: col=%lld migrations=%lld rc=%d err=%s\n",
+               (long long)col_exists, (long long)migrations, rc, sqlite3_errmsg(db));
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_v1_rollback_on_failure (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '');"
+        "SELECT cloudsync_init('tasks');"
+        "INSERT INTO tasks (id, title) VALUES ('t1', 'title');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    const char *payload =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"mig-sqlite-v1-fail\","
+        "\"ops\":[{\"op\":\"addColumn\",\"table\":\"tasks\",\"column\":{"
+        "\"name\":\"must_fail\",\"type\":\"text\",\"nullable\":false}}]"
+        "}');";
+
+    rc = sqlite3_exec(db, payload, NULL, NULL, NULL);
+    if (rc == SQLITE_OK) {
+        printf("migration_v1_fail: migration unexpectedly succeeded\n");
+        goto cleanup;
+    }
+
+    int64_t col_exists = do_select_int(db, "SELECT count(*) FROM pragma_table_info('tasks') WHERE name='must_fail';");
+    int64_t migrations = do_select_int(db, "SELECT count(*) FROM cloudsync_migrations WHERE migration_id='mig-sqlite-v1-fail';");
+    result = (col_exists == 0 && migrations == 0);
+    if (!result) {
+        printf("migration_v1_fail: rollback failed col=%lld migrations=%lld\n",
+               (long long)col_exists, (long long)migrations);
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_v2_rename_column (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT NOT NULL DEFAULT '');"
+        "SELECT cloudsync_init('docs');"
+        "INSERT INTO docs (id, body) VALUES ('d1', 'line1\nline2');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    const char *payload =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":2,"
+        "\"migrationId\":\"mig-sqlite-v2-rename\","
+        "\"requiredCapabilities\":[\"schema:destructive\"],"
+        "\"ops\":[{\"op\":\"renameColumn\",\"table\":\"docs\",\"from\":\"body\",\"to\":\"content\"}]"
+        "}');";
+
+    rc = sqlite3_exec(db, payload, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("migration_v2_rename: apply failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    int64_t col_exists = do_select_int(db, "SELECT count(*) FROM pragma_table_info('docs') WHERE name='content';");
+    int64_t old_meta = do_select_int(db, "SELECT count(*) FROM docs_cloudsync WHERE col_name='body';");
+    int64_t new_meta = do_select_int(db, "SELECT count(*) FROM docs_cloudsync WHERE col_name='content';");
+    rc = sqlite3_exec(db, "UPDATE docs SET content='changed' WHERE id='d1';", NULL, NULL, NULL);
+    result = (col_exists == 1 && old_meta == 0 && new_meta > 0 && rc == SQLITE_OK);
+    if (!result) {
+        printf("migration_v2_rename: col=%lld old_meta=%lld new_meta=%lld rc=%d err=%s\n",
+               (long long)col_exists, (long long)old_meta, (long long)new_meta, rc, sqlite3_errmsg(db));
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_v2_rebuild_drop_column (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    char *site_before = NULL;
+    char *site_after = NULL;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE docs (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', legacy TEXT NOT NULL DEFAULT '');"
+        "SELECT cloudsync_init('docs');"
+        "INSERT INTO docs (id, title, legacy) VALUES ('d1', 'title', 'legacy');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    site_before = do_select_text(db, "SELECT hex(site_id) FROM cloudsync_site_id WHERE rowid=0;");
+
+    const char *payload =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":2,"
+        "\"migrationId\":\"mig-sqlite-v2-rebuild\","
+        "\"requiredCapabilities\":[\"schema:destructive\"],"
+        "\"ops\":[{\"op\":\"rebuildTableSync\",\"table\":\"docs\",\"algorithm\":\"CLS\",\"initFlags\":0,"
+        "\"ddl\":[{\"op\":\"rawSql\",\"sql\":{\"sqlite\":[\"ALTER TABLE docs DROP COLUMN legacy\"]}}]}]"
+        "}');";
+
+    rc = sqlite3_exec(db, payload, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("migration_v2_rebuild: apply failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    int64_t legacy_exists = do_select_int(db, "SELECT count(*) FROM pragma_table_info('docs') WHERE name='legacy';");
+    int64_t meta_exists = do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='docs_cloudsync';");
+    site_after = do_select_text(db, "SELECT hex(site_id) FROM cloudsync_site_id WHERE rowid=0;");
+    rc = sqlite3_exec(db, "INSERT INTO docs (id, title) VALUES ('d2', 'new');", NULL, NULL, NULL);
+    int64_t row_count = do_select_int(db, "SELECT count(*) FROM docs;");
+    bool site_preserved = site_before && site_after && strcmp(site_before, site_after) == 0;
+    result = (legacy_exists == 0 && meta_exists == 1 && row_count == 2 && rc == SQLITE_OK && site_preserved);
+    if (!result) {
+        printf("migration_v2_rebuild: legacy=%lld meta=%lld rows=%lld site_preserved=%d rc=%d err=%s\n",
+               (long long)legacy_exists, (long long)meta_exists, (long long)row_count, site_preserved, rc, sqlite3_errmsg(db));
+    }
+cleanup:
+    if (site_before) sqlite3_free(site_before);
+    if (site_after) sqlite3_free(site_after);
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_v2_rebuild_rejects_malformed_ddl (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE docs (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', legacy TEXT NOT NULL DEFAULT '');"
+        "SELECT cloudsync_init('docs');"
+        "INSERT INTO docs (id, title, legacy) VALUES ('d1', 'title', 'legacy');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    const char *payload =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":2,"
+        "\"migrationId\":\"mig-sqlite-v2-rebuild-bad-ddl\","
+        "\"requiredCapabilities\":[\"schema:destructive\"],"
+        "\"ops\":[{\"op\":\"rebuildTableSync\",\"table\":\"docs\",\"algorithm\":\"CLS\",\"initFlags\":0,"
+        "\"ddl\":{\"op\":\"rawSql\",\"sql\":{\"sqlite\":[\"ALTER TABLE docs DROP COLUMN legacy\"]}}}]"
+        "}');";
+
+    rc = sqlite3_exec(db, payload, NULL, NULL, NULL);
+    if (rc == SQLITE_OK) {
+        printf("migration_v2_rebuild_bad_ddl: migration unexpectedly succeeded\n");
+        goto cleanup;
+    }
+
+    int64_t legacy_exists = do_select_int(db, "SELECT count(*) FROM pragma_table_info('docs') WHERE name='legacy';");
+    int64_t meta_exists = do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='docs_cloudsync';");
+    int64_t migrations = do_select_int(db, "SELECT count(*) FROM cloudsync_migrations WHERE migration_id='mig-sqlite-v2-rebuild-bad-ddl';");
+    result = (legacy_exists == 1 && meta_exists == 1 && migrations == 0);
+    if (!result) {
+        printf("migration_v2_rebuild_bad_ddl: legacy=%lld meta=%lld migrations=%lld\n",
+               (long long)legacy_exists, (long long)meta_exists, (long long)migrations);
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_v2_rebuild_rejects_malformed_block_lww (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT NOT NULL DEFAULT '');"
+        "SELECT cloudsync_init('docs');"
+        "INSERT INTO docs (id, body) VALUES ('d1', 'line1\nline2');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    const char *payload =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":2,"
+        "\"migrationId\":\"mig-sqlite-v2-rebuild-bad-block\","
+        "\"requiredCapabilities\":[\"schema:destructive\"],"
+        "\"ops\":[{\"op\":\"rebuildTableSync\",\"table\":\"docs\",\"algorithm\":\"CLS\",\"initFlags\":0,"
+        "\"blockLww\":{\"column\":\"body\",\"delimiter\":\"\\n\"}}]"
+        "}');";
+
+    rc = sqlite3_exec(db, payload, NULL, NULL, NULL);
+    if (rc == SQLITE_OK) {
+        printf("migration_v2_rebuild_bad_block: migration unexpectedly succeeded\n");
+        goto cleanup;
+    }
+
+    int64_t meta_exists = do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='docs_cloudsync';");
+    int64_t migrations = do_select_int(db, "SELECT count(*) FROM cloudsync_migrations WHERE migration_id='mig-sqlite-v2-rebuild-bad-block';");
+    int64_t row_count = do_select_int(db, "SELECT count(*) FROM docs WHERE id='d1' AND body='line1\nline2';");
+    result = (meta_exists == 1 && migrations == 0 && row_count == 1);
+    if (!result) {
+        printf("migration_v2_rebuild_bad_block: meta=%lld migrations=%lld rows=%lld\n",
+               (long long)meta_exists, (long long)migrations, (long long)row_count);
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_rejects_trailing_json (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    const char *payload =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"mig-sqlite-invalid-json\","
+        "\"ops\":[{\"op\":\"createTable\",\"table\":\"invalid_json_notes\",\"columns\":["
+        "{\"name\":\"id\",\"type\":\"text\",\"primaryKey\":true,\"nullable\":false}"
+        "]}]"
+        "} true');";
+
+    int rc = sqlite3_exec(db, payload, NULL, NULL, NULL);
+    if (rc == SQLITE_OK) {
+        printf("migration_invalid_json: migration unexpectedly succeeded\n");
+        goto cleanup;
+    }
+
+    int64_t table_exists = do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='invalid_json_notes';");
+    int64_t migrations_exists = do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='cloudsync_migrations';");
+    result = (table_exists == 0 && migrations_exists == 0);
+    if (!result) {
+        printf("migration_invalid_json: table_exists=%lld migrations_exists=%lld\n",
+               (long long)table_exists, (long long)migrations_exists);
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_v2_rebuild_valid_block_lww (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT NOT NULL DEFAULT '');"
+        "SELECT cloudsync_init('docs');"
+        "INSERT INTO docs (id, body) VALUES ('d1', 'one\ntwo');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    const char *payload =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":2,"
+        "\"migrationId\":\"mig-sqlite-v2-rebuild-good-block\","
+        "\"requiredCapabilities\":[\"schema:destructive\"],"
+        "\"ops\":[{\"op\":\"rebuildTableSync\",\"table\":\"docs\",\"algorithm\":\"CLS\",\"initFlags\":0,"
+        "\"blockLww\":[{\"column\":\"body\",\"delimiter\":\"\\n\"}]}]"
+        "}');";
+
+    rc = sqlite3_exec(db, payload, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("migration_v2_rebuild_good_block: apply failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    rc = sqlite3_exec(db, "UPDATE docs SET body='one\ntwo\nthree' WHERE id='d1';", NULL, NULL, NULL);
+    int64_t blocks = do_select_int(db, "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('d1');");
+    int64_t settings = do_select_int(db, "SELECT count(*) FROM cloudsync_table_settings WHERE tbl_name='docs' AND col_name='body' AND key='algo' AND value='block';");
+    int64_t migrations = do_select_int(db, "SELECT count(*) FROM cloudsync_migrations WHERE migration_id='mig-sqlite-v2-rebuild-good-block';");
+    result = (rc == SQLITE_OK && blocks == 3 && settings == 1 && migrations == 1);
+    if (!result) {
+        printf("migration_v2_rebuild_good_block: rc=%d blocks=%lld settings=%lld migrations=%lld err=%s\n",
+               rc, (long long)blocks, (long long)settings, (long long)migrations, sqlite3_errmsg(db));
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_v2_rename_block_column (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT NOT NULL DEFAULT '');"
+        "SELECT cloudsync_init('docs');"
+        "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');"
+        "INSERT INTO docs (id, body) VALUES ('d1', 'a\nb');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    const char *payload =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":2,"
+        "\"migrationId\":\"mig-sqlite-v2-rename-block\","
+        "\"requiredCapabilities\":[\"schema:destructive\"],"
+        "\"ops\":[{\"op\":\"renameColumn\",\"table\":\"docs\",\"from\":\"body\",\"to\":\"content\"}]"
+        "}');";
+
+    rc = sqlite3_exec(db, payload, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("migration_v2_rename_block: apply failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    int64_t content_col = do_select_int(db, "SELECT count(*) FROM pragma_table_info('docs') WHERE name='content';");
+    int64_t old_meta = do_select_int(db, "SELECT count(*) FROM docs_cloudsync WHERE col_name='body' OR col_name LIKE 'body' || x'1f' || '%';");
+    int64_t new_meta = do_select_int(db, "SELECT count(*) FROM docs_cloudsync WHERE col_name='content' OR col_name LIKE 'content' || x'1f' || '%';");
+    int64_t old_blocks = do_select_int(db, "SELECT count(*) FROM docs_cloudsync_blocks WHERE col_name='body' OR col_name LIKE 'body' || x'1f' || '%';");
+    int64_t new_blocks = do_select_int(db, "SELECT count(*) FROM docs_cloudsync_blocks WHERE col_name='content' OR col_name LIKE 'content' || x'1f' || '%';");
+    int64_t setting = do_select_int(db, "SELECT count(*) FROM cloudsync_table_settings WHERE tbl_name='docs' AND col_name='content' AND key='algo' AND value='block';");
+    rc = sqlite3_exec(db, "UPDATE docs SET content='a\nb\nc' WHERE id='d1';", NULL, NULL, NULL);
+    result = (rc == SQLITE_OK && content_col == 1 && old_meta == 0 && new_meta > 0 && old_blocks == 0 && new_blocks > 0 && setting == 1);
+    if (!result) {
+        printf("migration_v2_rename_block: rc=%d col=%lld old_meta=%lld new_meta=%lld old_blocks=%lld new_blocks=%lld setting=%lld err=%s\n",
+               rc, (long long)content_col, (long long)old_meta, (long long)new_meta,
+               (long long)old_blocks, (long long)new_blocks, (long long)setting, sqlite3_errmsg(db));
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_v2_drop_column_direct (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE docs (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', legacy TEXT NOT NULL DEFAULT '');"
+        "SELECT cloudsync_init('docs');"
+        "INSERT INTO docs (id, title, legacy) VALUES ('d1', 'title', 'legacy');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    const char *payload =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":2,"
+        "\"migrationId\":\"mig-sqlite-v2-drop-column\","
+        "\"requiredCapabilities\":[\"schema:destructive\"],"
+        "\"ops\":[{\"op\":\"dropColumn\",\"table\":\"docs\",\"column\":\"legacy\"}]"
+        "}');";
+
+    rc = sqlite3_exec(db, payload, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("migration_v2_drop_column: apply failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    int64_t legacy_exists = do_select_int(db, "SELECT count(*) FROM pragma_table_info('docs') WHERE name='legacy';");
+    int64_t legacy_meta = do_select_int(db, "SELECT count(*) FROM docs_cloudsync WHERE col_name='legacy';");
+    rc = sqlite3_exec(db, "INSERT INTO docs (id, title) VALUES ('d2', 'new');", NULL, NULL, NULL);
+    int64_t row_count = do_select_int(db, "SELECT count(*) FROM docs;");
+    result = (legacy_exists == 0 && legacy_meta == 0 && rc == SQLITE_OK && row_count == 2);
+    if (!result) {
+        printf("migration_v2_drop_column: legacy=%lld meta=%lld rows=%lld rc=%d err=%s\n",
+               (long long)legacy_exists, (long long)legacy_meta, (long long)row_count, rc, sqlite3_errmsg(db));
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_v2_drop_block_column_cleans_metadata (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE docs (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '');"
+        "SELECT cloudsync_init('docs');"
+        "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');"
+        "INSERT INTO docs (id, title, body) VALUES ('d1', 'title', 'a\nb');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    int64_t blocks_before = do_select_int(db, "SELECT count(*) FROM docs_cloudsync_blocks WHERE col_name LIKE 'body' || char(31) || '%';");
+    int64_t settings_before = do_select_int(db, "SELECT count(*) FROM cloudsync_table_settings WHERE tbl_name='docs' AND col_name='body';");
+    if (blocks_before == 0 || settings_before == 0) goto cleanup;
+
+    const char *payload =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":2,"
+        "\"migrationId\":\"mig-sqlite-v2-drop-block-column\","
+        "\"requiredCapabilities\":[\"schema:destructive\"],"
+        "\"ops\":[{\"op\":\"dropColumn\",\"table\":\"docs\",\"column\":\"body\"}]"
+        "}');";
+
+    rc = sqlite3_exec(db, payload, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("migration_v2_drop_block_column: apply failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    int64_t body_exists = do_select_int(db, "SELECT count(*) FROM pragma_table_info('docs') WHERE name='body';");
+    int64_t body_meta = do_select_int(db, "SELECT count(*) FROM docs_cloudsync WHERE col_name='body' OR col_name LIKE 'body' || char(31) || '%';");
+    int64_t body_blocks = do_select_int(db, "SELECT count(*) FROM docs_cloudsync_blocks WHERE col_name LIKE 'body' || char(31) || '%';");
+    int64_t body_settings = do_select_int(db, "SELECT count(*) FROM cloudsync_table_settings WHERE tbl_name='docs' AND col_name='body';");
+    rc = sqlite3_exec(db, "UPDATE docs SET title='changed' WHERE id='d1';", NULL, NULL, NULL);
+    result = (body_exists == 0 && body_meta == 0 && body_blocks == 0 && body_settings == 0 && rc == SQLITE_OK);
+    if (!result) {
+        printf("migration_v2_drop_block_column: exists=%lld meta=%lld blocks=%lld settings=%lld rc=%d err=%s\n",
+               (long long)body_exists, (long long)body_meta, (long long)body_blocks,
+               (long long)body_settings, rc, sqlite3_errmsg(db));
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_v1_set_filter_and_set_column (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, owner TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '');"
+        "SELECT cloudsync_init('tasks');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    const char *payload =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"mig-sqlite-v1-filter-column\","
+        "\"ops\":["
+        "{\"op\":\"setColumn\",\"table\":\"tasks\",\"column\":\"title\",\"key\":\"label\",\"value\":\"sync-title\"},"
+        "{\"op\":\"setFilter\",\"table\":\"tasks\",\"filter\":\"owner = ''alice''\"}"
+        "]"
+        "}');";
+
+    rc = sqlite3_exec(db, payload, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("migration_v1_filter_column: apply failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    rc = sqlite3_exec(db,
+        "INSERT INTO tasks (id, owner, title) VALUES ('t1', 'alice', 'visible');"
+        "INSERT INTO tasks (id, owner, title) VALUES ('t2', 'bob', 'hidden');",
+        NULL, NULL, NULL);
+    int64_t custom_setting = do_select_int(db, "SELECT count(*) FROM cloudsync_table_settings WHERE tbl_name='tasks' AND col_name='title' AND key='label' AND value='sync-title';");
+    int64_t filter_setting = do_select_int(db, "SELECT count(*) FROM cloudsync_table_settings WHERE tbl_name='tasks' AND col_name='*' AND key='filter' AND value='owner = ''alice''';");
+    int64_t alice_meta = do_select_int(db, "SELECT count(*) FROM tasks_cloudsync WHERE pk = cloudsync_pk_encode('t1');");
+    int64_t bob_meta = do_select_int(db, "SELECT count(*) FROM tasks_cloudsync WHERE pk = cloudsync_pk_encode('t2');");
+    result = (rc == SQLITE_OK && custom_setting == 1 && filter_setting == 1 && alice_meta > 0 && bob_meta == 0);
+    if (!result) {
+        printf("migration_v1_filter_column: rc=%d custom=%lld filter=%lld alice=%lld bob=%lld err=%s\n",
+               rc, (long long)custom_setting, (long long)filter_setting,
+               (long long)alice_meta, (long long)bob_meta, sqlite3_errmsg(db));
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_hash_guards (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '');"
+        "SELECT cloudsync_init('tasks');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    const char *bad_base =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"mig-sqlite-bad-base\","
+        "\"baseSchemaHash\":\"1\","
+        "\"ops\":[{\"op\":\"addColumn\",\"table\":\"tasks\",\"column\":{\"name\":\"base_fail\",\"type\":\"text\",\"nullable\":true}}]"
+        "}');";
+    rc = sqlite3_exec(db, bad_base, NULL, NULL, NULL);
+    bool base_rejected = (rc != SQLITE_OK);
+
+    const char *bad_target =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"mig-sqlite-bad-target\","
+        "\"targetSchemaHash\":\"1\","
+        "\"ops\":[{\"op\":\"addColumn\",\"table\":\"tasks\",\"column\":{\"name\":\"target_fail\",\"type\":\"text\",\"nullable\":true}}]"
+        "}');";
+    rc = sqlite3_exec(db, bad_target, NULL, NULL, NULL);
+    bool target_rejected = (rc != SQLITE_OK);
+
+    int64_t base_col = do_select_int(db, "SELECT count(*) FROM pragma_table_info('tasks') WHERE name='base_fail';");
+    int64_t target_col = do_select_int(db, "SELECT count(*) FROM pragma_table_info('tasks') WHERE name='target_fail';");
+    int64_t records = do_select_int(db, "SELECT count(*) FROM cloudsync_migrations WHERE migration_id IN ('mig-sqlite-bad-base', 'mig-sqlite-bad-target');");
+    result = (base_rejected && target_rejected && base_col == 0 && target_col == 0 && records == 0);
+    if (!result) {
+        printf("migration_hash_guards: base_rejected=%d target_rejected=%d base_col=%lld target_col=%lld records=%lld\n",
+               base_rejected, target_rejected, (long long)base_col, (long long)target_col, (long long)records);
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_raw_sql_dialect_validation (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    const char *success =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"mig-sqlite-raw-success\","
+        "\"ops\":[{\"op\":\"rawSql\",\"sql\":{\"sqlite\":[\"CREATE TABLE raw_ok (id TEXT PRIMARY KEY NOT NULL)\"]}}]"
+        "}');";
+    int rc = sqlite3_exec(db, success, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("migration_raw_sql: success branch failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    const char *missing_dialect =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"mig-sqlite-raw-missing\","
+        "\"ops\":[{\"op\":\"rawSql\",\"sql\":{\"postgresql\":[\"CREATE TABLE raw_missing (id TEXT PRIMARY KEY NOT NULL)\"]}}]"
+        "}');";
+    rc = sqlite3_exec(db, missing_dialect, NULL, NULL, NULL);
+    bool missing_rejected = (rc != SQLITE_OK);
+
+    const char *bad_item =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"mig-sqlite-raw-bad-item\","
+        "\"ops\":[{\"op\":\"rawSql\",\"sql\":{\"sqlite\":[123]}}]"
+        "}');";
+    rc = sqlite3_exec(db, bad_item, NULL, NULL, NULL);
+    bool item_rejected = (rc != SQLITE_OK);
+
+    const char *tx_control =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"mig-sqlite-raw-tx\","
+        "\"ops\":[{\"op\":\"rawSql\",\"sql\":{\"sqlite\":[\"COMMIT\"]}}]"
+        "}');";
+    rc = sqlite3_exec(db, tx_control, NULL, NULL, NULL);
+    bool tx_rejected = (rc != SQLITE_OK);
+
+    int64_t raw_ok = do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='raw_ok';");
+    int64_t raw_missing = do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='raw_missing';");
+    int64_t bad_records = do_select_int(db, "SELECT count(*) FROM cloudsync_migrations WHERE migration_id IN ('mig-sqlite-raw-missing', 'mig-sqlite-raw-bad-item', 'mig-sqlite-raw-tx');");
+    result = (raw_ok == 1 && missing_rejected && item_rejected && tx_rejected && raw_missing == 0 && bad_records == 0);
+    if (!result) {
+        printf("migration_raw_sql: raw_ok=%lld missing_rejected=%d item_rejected=%d tx_rejected=%d raw_missing=%lld bad_records=%lld\n",
+               (long long)raw_ok, missing_rejected, item_rejected, tx_rejected, (long long)raw_missing, (long long)bad_records);
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_rejects_non_boolean_column_flags (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    const char *bad_primary_key =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"mig-sqlite-bad-bool-pk\","
+        "\"ops\":[{\"op\":\"createTable\",\"table\":\"bad_bool_pk_notes\",\"columns\":["
+        "{\"name\":\"id\",\"type\":\"text\",\"primaryKey\":\"true\",\"nullable\":false}"
+        "]}]"
+        "}');";
+    int rc = sqlite3_exec(db, bad_primary_key, NULL, NULL, NULL);
+    bool pk_rejected = (rc != SQLITE_OK);
+
+    rc = sqlite3_exec(db,
+        "CREATE TABLE bad_bool_add_notes (id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL DEFAULT '');"
+        "SELECT cloudsync_init('bad_bool_add_notes');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    const char *bad_nullable =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"mig-sqlite-bad-bool-nullable\","
+        "\"ops\":[{\"op\":\"addColumn\",\"table\":\"bad_bool_add_notes\",\"column\":{"
+        "\"name\":\"summary\",\"type\":\"text\",\"nullable\":\"false\",\"default\":{\"type\":\"text\",\"value\":\"\"}}}]"
+        "}');";
+    rc = sqlite3_exec(db, bad_nullable, NULL, NULL, NULL);
+    bool nullable_rejected = (rc != SQLITE_OK);
+
+    int64_t pk_table_exists = do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='bad_bool_pk_notes';");
+    int64_t add_col_exists = do_select_int(db, "SELECT count(*) FROM pragma_table_info('bad_bool_add_notes') WHERE name='summary';");
+    int64_t bad_records = do_select_int(db, "SELECT count(*) FROM cloudsync_migrations WHERE migration_id IN ('mig-sqlite-bad-bool-pk', 'mig-sqlite-bad-bool-nullable');");
+    result = (pk_rejected && nullable_rejected && pk_table_exists == 0 && add_col_exists == 0 && bad_records == 0);
+    if (!result) {
+        printf("migration_bad_bool: pk_rejected=%d nullable_rejected=%d pk_table=%lld add_col=%lld records=%lld\n",
+               pk_rejected, nullable_rejected, (long long)pk_table_exists,
+               (long long)add_col_exists, (long long)bad_records);
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_create_table_rejects_existing_table (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db, "CREATE TABLE notes (id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL DEFAULT '');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    const char *payload =
+        "SELECT cloudsync_migration_apply('{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"mig-sqlite-existing-create\","
+        "\"ops\":[{\"op\":\"createTable\",\"table\":\"notes\",\"columns\":["
+        "{\"name\":\"id\",\"type\":\"text\",\"primaryKey\":true,\"nullable\":false},"
+        "{\"name\":\"body\",\"type\":\"text\",\"nullable\":true}"
+        "]}]"
+        "}');";
+    rc = sqlite3_exec(db, payload, NULL, NULL, NULL);
+    bool rejected = (rc != SQLITE_OK);
+    int64_t body_col = do_select_int(db, "SELECT count(*) FROM pragma_table_info('notes') WHERE name='body';");
+    int64_t migrations_table = do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='cloudsync_migrations';");
+    int64_t migration_record = migrations_table == 1 ? do_select_int(db, "SELECT count(*) FROM cloudsync_migrations WHERE migration_id='mig-sqlite-existing-create';") : 0;
+
+    result = (rejected && body_col == 0 && migration_record == 0);
+    if (!result) {
+        printf("migration_create_existing: rejected=%d body_col=%lld record=%lld err=%s\n",
+               rejected, (long long)body_col, (long long)migration_record, sqlite3_errmsg(db));
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
+bool do_test_migration_large_dynamic_json_parse (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    char *payload = NULL;
+    char *sql = NULL;
+    if (!db) return false;
+
+    sqlite3_str *json = sqlite3_str_new(NULL);
+    if (!json) goto cleanup;
+    sqlite3_str_appendall(json,
+        "{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"0197097c-8b35-7c11-8ed4-4e59ddfdb928\","
+        "\"ops\":[{\"op\":\"createTable\",\"table\":\"wide_dynamic_notes\",\"columns\":["
+        "{\"name\":\"id\",\"type\":\"text\",\"primaryKey\":true,\"nullable\":false}");
+    for (int i = 0; i < 700; ++i) {
+        sqlite3_str_appendf(json, ",{\"name\":\"extra_%03d\",\"type\":\"text\",\"nullable\":true}", i);
+    }
+    sqlite3_str_appendall(json, "]}]}");
+    payload = sqlite3_str_finish(json);
+    if (!payload) goto cleanup;
+
+    sql = sqlite3_mprintf("SELECT cloudsync_migration_apply('%q');", payload);
+    if (!sql) goto cleanup;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("migration_large_dynamic_json: apply failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    int64_t col_count = do_select_int(db, "SELECT count(*) FROM pragma_table_info('wide_dynamic_notes');");
+    int64_t migration_record = do_select_int(db, "SELECT count(*) FROM cloudsync_migrations WHERE migration_id='0197097c-8b35-7c11-8ed4-4e59ddfdb928';");
+    result = (col_count == 701 && migration_record == 1);
+    if (!result) {
+        printf("migration_large_dynamic_json: col_count=%lld migration_record=%lld\n",
+               (long long)col_count, (long long)migration_record);
+    }
+
+cleanup:
+    if (sql) sqlite3_free(sql);
+    if (payload) sqlite3_free(payload);
+    close_db(db);
+    return result;
+}
+
+bool do_test_declarative_alter_apply_atomic_pending_save (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE cloudsync_pending_migration (x TEXT);"
+        "SELECT cloudsync_alter_create_table('atomic_notes');"
+        "SELECT cloudsync_alter_add_column('atomic_notes', 'id', 'text', 0);"
+        "SELECT cloudsync_alter_add_primary_key('atomic_notes', 'id');"
+        "SELECT cloudsync_alter_apply();",
+        NULL, NULL, NULL);
+    bool rejected = (rc != SQLITE_OK);
+    int64_t table_exists = do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='atomic_notes';");
+    int64_t pending_shape = do_select_int(db, "SELECT count(*) FROM pragma_table_info('cloudsync_pending_migration') WHERE name='x';");
+    int64_t migrations_table = do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='cloudsync_migrations';");
+    int64_t migration_records = migrations_table == 1 ? do_select_int(db, "SELECT count(*) FROM cloudsync_migrations;") : 0;
+
+    result = (rejected && table_exists == 0 && pending_shape == 1 && migration_records == 0);
+    if (!result) {
+        printf("declarative_alter_atomic: rejected=%d table=%lld pending_shape=%lld records=%lld err=%s\n",
+               rejected, (long long)table_exists, (long long)pending_shape,
+               (long long)migration_records, sqlite3_errmsg(db));
+    }
+
+    close_db(db);
+    return result;
+}
+
+bool do_test_declarative_alter_builder (void) {
+    sqlite3 *db = do_create_database();
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "SELECT cloudsync_alter_create_table('drafts');"
+        "SELECT cloudsync_alter_add_column('drafts', 'id', 'text', 0);"
+        "SELECT cloudsync_alter_add_primary_key('drafts', 'id');"
+        "SELECT cloudsync_alter_add_column('drafts', 'body', 'text', 0, '');"
+        "SELECT cloudsync_alter_add_column('drafts', 'rank', 'integer', 0, 0);"
+        "SELECT cloudsync_alter_augment_table('drafts');"
+        "SELECT cloudsync_alter_set_block_lww('drafts', 'body', '\n');"
+        "SELECT cloudsync_alter_sql('CREATE INDEX drafts_rank_idx ON drafts(rank)');"
+        "SELECT cloudsync_alter_sqlite('CREATE INDEX drafts_body_sqlite_idx ON drafts(body)');"
+        "SELECT cloudsync_alter_postgresql('CREATE INDEX drafts_body_pg_idx ON drafts(body)');"
+        "SELECT cloudsync_alter_apply();",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("declarative_alter: create/apply failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    rc = sqlite3_exec(db, "INSERT INTO drafts (id, body, rank) VALUES ('d1', 'a\nb', 5);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    int64_t table_exists = do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='drafts';");
+    int64_t pk_notnull = do_select_int(db, "SELECT count(*) FROM pragma_table_info('drafts') WHERE name='id' AND pk > 0 AND \"notnull\" = 1;");
+    int64_t block_setting = do_select_int(db, "SELECT count(*) FROM cloudsync_table_settings WHERE tbl_name='drafts' AND col_name='body' AND key='algo' AND value='block';");
+    int64_t block_rows = do_select_int(db, "SELECT count(*) FROM drafts_cloudsync_blocks WHERE pk = cloudsync_pk_encode('d1');");
+    int64_t common_index = do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='drafts_rank_idx';");
+    int64_t sqlite_index = do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='drafts_body_sqlite_idx';");
+    int64_t pg_index = do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='drafts_body_pg_idx';");
+    int64_t pending_after_create = do_select_int(db, "SELECT count(*) FROM cloudsync_pending_migration WHERE uploaded_at IS NULL;");
+    if (table_exists != 1 || pk_notnull != 1 || block_setting != 1 || block_rows != 2 || common_index != 1 || sqlite_index != 1 || pg_index != 0 || pending_after_create != 1) {
+        printf("declarative_alter: create checks failed table=%lld pk=%lld block_setting=%lld block_rows=%lld common_index=%lld sqlite_index=%lld pg_index=%lld pending=%lld\n",
+               (long long)table_exists, (long long)pk_notnull, (long long)block_setting, (long long)block_rows,
+               (long long)common_index, (long long)sqlite_index, (long long)pg_index, (long long)pending_after_create);
+        goto cleanup;
+    }
+
+    rc = sqlite3_exec(db,
+        "SELECT cloudsync_alter_add_column('drafts', 'tag', 'text', 1);"
+        "SELECT cloudsync_alter_add_column_sqlite('drafts', 'tag', 'TEXT COLLATE NOCASE', 1, '''misc''');"
+        "SELECT cloudsync_alter_add_column_postgresql('drafts', 'tag', 'TEXT', 1, '''misc''');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("declarative_alter: dialect queue failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    int64_t preview_has_dialects = do_select_int(db, "SELECT instr(cloudsync_alter_preview(), '\"dialects\"') > 0;");
+    rc = sqlite3_exec(db, "SELECT cloudsync_alter_apply();", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("declarative_alter: dialect apply failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    int64_t tag_exists = do_select_int(db, "SELECT count(*) FROM pragma_table_info('drafts') WHERE name='tag';");
+    rc = sqlite3_exec(db,
+        "SELECT cloudsync_alter_set_filter_sqlite('drafts', 'rank >= 0');"
+        "SELECT cloudsync_alter_set_filter_postgresql('drafts', 'rank >= 0');"
+        "SELECT cloudsync_alter_apply();",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("declarative_alter: filter apply failed: %s\n", sqlite3_errmsg(db));
+        goto cleanup;
+    }
+
+    int64_t filter_saved = do_select_int(db, "SELECT count(*) FROM cloudsync_table_settings WHERE tbl_name='drafts' AND col_name='*' AND key='filter' AND value='rank >= 0';");
+    int64_t pending_total = do_select_int(db, "SELECT count(*) FROM cloudsync_pending_migration WHERE uploaded_at IS NULL;");
+
+    result = (preview_has_dialects == 1 && tag_exists == 1 && filter_saved == 1 && pending_total == 3);
+    if (!result) {
+        printf("declarative_alter: final checks failed preview=%lld tag=%lld filter=%lld pending=%lld\n",
+               (long long)preview_has_dialects, (long long)tag_exists, (long long)filter_saved, (long long)pending_total);
+    }
+
+cleanup:
+    close_db(db);
+    return result;
+}
+
 int test_report(const char *description, bool result){
     printf("%-30s %s\n", description, (result) ? "OK" : "FAILED");
     return result ? 0 : 1;
@@ -12492,6 +13509,26 @@ int main (int argc, const char * argv[]) {
     result += test_report("Delete/Resurrect Order:", do_test_delete_resurrect_ordering(3, print_result, cleanup_databases));
     result += test_report("Large Composite PK Test:", do_test_large_composite_pk(2, print_result, cleanup_databases));
     result += test_report("Schema Hash Mismatch:", do_test_schema_hash_mismatch(2, print_result, cleanup_databases));
+    result += test_report("Migration V1 Create:", do_test_migration_v1_create_augment_block());
+    result += test_report("Migration V1 Add Column:", do_test_migration_v1_add_column_idempotent());
+    result += test_report("Migration V1 Rollback:", do_test_migration_v1_rollback_on_failure());
+    result += test_report("Migration V2 Rename Col:", do_test_migration_v2_rename_column());
+    result += test_report("Migration V2 Rebuild:", do_test_migration_v2_rebuild_drop_column());
+    result += test_report("Migration V2 Bad DDL:", do_test_migration_v2_rebuild_rejects_malformed_ddl());
+    result += test_report("Migration V2 Bad Block:", do_test_migration_v2_rebuild_rejects_malformed_block_lww());
+    result += test_report("Migration Bad JSON:", do_test_migration_rejects_trailing_json());
+    result += test_report("Migration V2 Block Rebuild:", do_test_migration_v2_rebuild_valid_block_lww());
+    result += test_report("Migration V2 Rename Block:", do_test_migration_v2_rename_block_column());
+    result += test_report("Migration V2 Drop Column:", do_test_migration_v2_drop_column_direct());
+    result += test_report("Migration V2 Drop Block Column:", do_test_migration_v2_drop_block_column_cleans_metadata());
+    result += test_report("Migration V1 Filter/Column:", do_test_migration_v1_set_filter_and_set_column());
+    result += test_report("Migration Hash Guards:", do_test_migration_hash_guards());
+    result += test_report("Migration Raw SQL:", do_test_migration_raw_sql_dialect_validation());
+    result += test_report("Migration Bad Bool Flags:", do_test_migration_rejects_non_boolean_column_flags());
+    result += test_report("Migration Existing Table:", do_test_migration_create_table_rejects_existing_table());
+    result += test_report("Migration Large JSON:", do_test_migration_large_dynamic_json_parse());
+    result += test_report("Declarative Alter API:", do_test_declarative_alter_builder());
+    result += test_report("Declarative Alter Atomic:", do_test_declarative_alter_apply_atomic_pending_save());
     result += test_report("Stale Table Settings:", do_test_stale_table_settings(cleanup_databases));
     result += test_report("Stale Table Settings Dropped Meta:", do_test_stale_table_settings_dropped_meta(cleanup_databases));
     result += test_report("DBVersion Rebuild Error:", do_test_dbversion_rebuild_error());

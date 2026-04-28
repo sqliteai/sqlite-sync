@@ -14,6 +14,14 @@
 #include "utils.h"
 #include "sqlite3.h"
 
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
+
 // Define the number of simulated peers, when it's 0 it skips the peer test.
 #if defined(__linux__) && !defined(__ANDROID__)
 #define PEERS           0
@@ -498,6 +506,511 @@ int version(void){
 ABORT_TEST
 }
 
+#ifndef _WIN32
+typedef enum {
+    MOCK_INVALID_STATUS,
+    MOCK_INVALID_CHECK,
+    MOCK_INVALID_UPLOAD,
+    MOCK_INVALID_APPLY,
+    MOCK_INVALID_SCHEMA_CHECK,
+    MOCK_INVALID_SCHEMA_DOWNLOAD,
+    MOCK_INVALID_SCHEMA_UPLOAD,
+    MOCK_SCHEMA_UPLOAD_AUTH_ERROR,
+    MOCK_SCHEMA_CHECK_HTTP_EMPTY_ERROR,
+    MOCK_SCHEMA_UPLOAD_MISSING_STATUS,
+    MOCK_FIRST_SCHEMA_SYNC
+} mock_network_scenario;
+
+typedef struct {
+    int listen_fd;
+    int port;
+    volatile int stop;
+    pthread_t thread;
+    mock_network_scenario scenario;
+    const unsigned char *payload;
+    int payload_len;
+    const char *migration_json;
+} mock_network_server;
+
+static int mock_send_all(int fd, const void *buffer, size_t len) {
+    const char *ptr = (const char *)buffer;
+    while (len > 0) {
+        ssize_t sent = send(fd, ptr, len, 0);
+        if (sent <= 0) return SQLITE_ERROR;
+        ptr += sent;
+        len -= (size_t)sent;
+    }
+    return SQLITE_OK;
+}
+
+static void mock_send_response(int fd, const char *content_type, const void *body, size_t body_len) {
+    char header[512];
+    snprintf(header, sizeof(header),
+             "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nContent-Type: %s\r\nConnection: close\r\n\r\n",
+             body_len, content_type ? content_type : "application/json");
+    mock_send_all(fd, header, strlen(header));
+    if (body && body_len > 0) mock_send_all(fd, body, body_len);
+}
+
+static void mock_send_status_response(int fd, const char *status, const char *content_type, const void *body, size_t body_len) {
+    char header[512];
+    snprintf(header, sizeof(header),
+             "HTTP/1.1 %s\r\nContent-Length: %zu\r\nContent-Type: %s\r\nConnection: close\r\n\r\n",
+             status, body_len, content_type ? content_type : "application/json");
+    mock_send_all(fd, header, strlen(header));
+    if (body && body_len > 0) mock_send_all(fd, body, body_len);
+}
+
+static void mock_send_text(int fd, const char *body) {
+    mock_send_response(fd, "application/json", body, strlen(body));
+}
+
+static void mock_absorb_request_body(int fd, const char *request, int received) {
+    const char *content_length = strstr(request, "Content-Length:");
+    if (!content_length) content_length = strstr(request, "content-length:");
+    const char *body = strstr(request, "\r\n\r\n");
+    if (!content_length || !body) return;
+    long expected = strtol(content_length + strlen("Content-Length:"), NULL, 10);
+    long have = received - (long)((body + 4) - request);
+    char scratch[1024];
+    while (have < expected) {
+        ssize_t n = recv(fd, scratch, sizeof(scratch), 0);
+        if (n <= 0) break;
+        have += (long)n;
+    }
+}
+
+static void mock_handle_client(mock_network_server *server, int fd) {
+    char request[8192];
+    int received = 0;
+    while (received < (int)sizeof(request) - 1) {
+        ssize_t n = recv(fd, request + received, sizeof(request) - 1 - (size_t)received, 0);
+        if (n <= 0) return;
+        received += (int)n;
+        request[received] = '\0';
+        if (strstr(request, "\r\n\r\n")) break;
+    }
+
+    char method[16] = {0};
+    char path[1024] = {0};
+    sscanf(request, "%15s %1023s", method, path);
+    mock_absorb_request_body(fd, request, received);
+
+    if (server->stop) {
+        mock_send_text(fd, "{}");
+        return;
+    }
+
+    if (strstr(path, "/schema/check")) {
+        if (server->scenario == MOCK_INVALID_SCHEMA_CHECK) {
+            mock_send_text(fd, "not-json");
+        } else if (server->scenario == MOCK_SCHEMA_CHECK_HTTP_EMPTY_ERROR) {
+            mock_send_status_response(fd, "503 Service Unavailable", "application/json", NULL, 0);
+        } else if (server->scenario == MOCK_FIRST_SCHEMA_SYNC) {
+            char *body = sqlite3_mprintf("{\"migration\":%s}", server->migration_json);
+            mock_send_text(fd, body ? body : "{}");
+            sqlite3_free(body);
+        } else {
+            mock_send_text(fd, "{\"status\":\"none\"}");
+        }
+    } else if (strstr(path, "/schema/download")) {
+        if (server->scenario == MOCK_INVALID_SCHEMA_DOWNLOAD) mock_send_text(fd, "not-json");
+        else mock_send_text(fd, "{\"status\":\"none\"}");
+    } else if (strstr(path, "/schema/upload")) {
+        if (server->scenario == MOCK_INVALID_SCHEMA_UPLOAD) mock_send_text(fd, "not-json");
+        else if (server->scenario == MOCK_SCHEMA_UPLOAD_AUTH_ERROR) {
+            const char *body = "{\"error\":\"missing schema api key\"}";
+            mock_send_status_response(fd, "403 Forbidden", "application/json", body, strlen(body));
+        } else if (server->scenario == MOCK_SCHEMA_UPLOAD_MISSING_STATUS) {
+            mock_send_text(fd, "{}");
+        }
+        else mock_send_text(fd, "{\"status\":\"uploaded\"}");
+    } else if (strstr(path, "/blob-upload")) {
+        mock_send_text(fd, "");
+    } else if (strstr(path, "/download")) {
+        mock_send_response(fd, "application/octet-stream", server->payload, server->payload_len);
+    } else if (strstr(path, "/status")) {
+        if (server->scenario == MOCK_INVALID_STATUS) mock_send_text(fd, "not-json");
+        else mock_send_text(fd, "{\"lastOptimisticVersion\":0,\"lastConfirmedVersion\":0,\"gaps\":[]}");
+    } else if (strstr(path, "/upload")) {
+        if (server->scenario == MOCK_INVALID_UPLOAD) {
+            mock_send_text(fd, "not-json");
+        } else {
+            char body[256];
+            snprintf(body, sizeof(body), "{\"url\":\"http://127.0.0.1:%d/blob-upload\"}", server->port);
+            mock_send_text(fd, body);
+        }
+    } else if (strstr(path, "/apply")) {
+        if (server->scenario == MOCK_INVALID_APPLY) mock_send_text(fd, "not-json");
+        else mock_send_text(fd, "{\"lastOptimisticVersion\":1,\"lastConfirmedVersion\":1,\"gaps\":[]}");
+    } else if (strstr(path, "/check")) {
+        if (server->scenario == MOCK_INVALID_CHECK) {
+            mock_send_text(fd, "not-json");
+        } else if (server->scenario == MOCK_FIRST_SCHEMA_SYNC) {
+            char body[256];
+            snprintf(body, sizeof(body), "{\"url\":\"http://127.0.0.1:%d/download\"}", server->port);
+            mock_send_text(fd, body);
+        } else {
+            mock_send_text(fd, "{\"lastOptimisticVersion\":0,\"lastConfirmedVersion\":0,\"gaps\":[]}");
+        }
+    } else {
+        mock_send_text(fd, "{}");
+    }
+}
+
+static void *mock_network_worker(void *arg) {
+    mock_network_server *server = (mock_network_server *)arg;
+    while (!server->stop) {
+        int fd = accept(server->listen_fd, NULL, NULL);
+        if (fd < 0) continue;
+        mock_handle_client(server, fd);
+        close(fd);
+    }
+    return NULL;
+}
+
+static int mock_network_start(mock_network_server *server, mock_network_scenario scenario) {
+    memset(server, 0, sizeof(*server));
+    server->scenario = scenario;
+    server->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server->listen_fd < 0) return SQLITE_ERROR;
+
+    int reuse = 1;
+    setsockopt(server->listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (bind(server->listen_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) return SQLITE_ERROR;
+    if (listen(server->listen_fd, 16) != 0) return SQLITE_ERROR;
+
+    socklen_t len = sizeof(addr);
+    if (getsockname(server->listen_fd, (struct sockaddr *)&addr, &len) != 0) return SQLITE_ERROR;
+    server->port = ntohs(addr.sin_port);
+    if (pthread_create(&server->thread, NULL, mock_network_worker, server) != 0) return SQLITE_ERROR;
+    return SQLITE_OK;
+}
+
+static void mock_network_stop(mock_network_server *server) {
+    if (!server || server->listen_fd <= 0) return;
+    server->stop = 1;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd >= 0) {
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons((uint16_t)server->port);
+        connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+        close(fd);
+    }
+    pthread_join(server->thread, NULL);
+    close(server->listen_fd);
+    server->listen_fd = -1;
+}
+
+static int mock_network_init_db(sqlite3 *db, mock_network_server *server) {
+    char sql[256];
+    snprintf(sql, sizeof(sql), "SELECT cloudsync_network_init_custom('http://127.0.0.1:%d', 'mockdb');", server->port);
+    return db_exec(db, sql);
+}
+
+static int expect_sql_error_contains(sqlite3 *db, const char *sql, const char *expected) {
+    char *errmsg = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &errmsg);
+    if (rc == SQLITE_OK) {
+        printf("Error: expected SQL failure while executing %s\n", sql);
+        return SQLITE_ERROR;
+    }
+    if (expected && (!errmsg || !strstr(errmsg, expected))) {
+        printf("Error: expected message containing \"%s\", got \"%s\"\n", expected, errmsg ? errmsg : "NULL");
+        sqlite3_free(errmsg);
+        return SQLITE_ERROR;
+    }
+    sqlite3_free(errmsg);
+    return SQLITE_OK;
+}
+
+static int mock_prepare_synced_row(sqlite3 *db) {
+    int rc = db_exec(db,
+        "CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY NOT NULL, body TEXT NOT NULL DEFAULT '');"
+        "SELECT cloudsync_init('notes');"
+        "INSERT INTO notes (id, body) VALUES ('n1', 'hello');");
+    return rc;
+}
+
+static int mock_prepare_large_synced_row(sqlite3 *db) {
+    sqlite3_str *str = sqlite3_str_new(NULL);
+    if (!str) return SQLITE_NOMEM;
+
+    sqlite3_str_appendall(str, "CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY NOT NULL, body TEXT NOT NULL DEFAULT ''");
+    for (int i = 0; i < 90; ++i) {
+        sqlite3_str_appendf(str, ", extra_%02d TEXT", i);
+    }
+    sqlite3_str_appendall(str,
+        ");"
+        "SELECT cloudsync_init('notes');"
+        "INSERT INTO notes (id, body) VALUES ('n1', 'hello');");
+
+    char *sql = sqlite3_str_finish(str);
+    if (!sql) return SQLITE_NOMEM;
+    int rc = db_exec(db, sql);
+    sqlite3_free(sql);
+    return rc;
+}
+
+static int select_payload_blob(sqlite3 *db, unsigned char **payload, int *payload_len) {
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes;";
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) { sqlite3_finalize(stmt); return SQLITE_ERROR; }
+    int len = sqlite3_column_bytes(stmt, 0);
+    const void *blob = sqlite3_column_blob(stmt, 0);
+    if (!blob || len <= 0) { sqlite3_finalize(stmt); return SQLITE_ERROR; }
+    unsigned char *copy = sqlite3_malloc(len);
+    if (!copy) { sqlite3_finalize(stmt); return SQLITE_NOMEM; }
+    memcpy(copy, blob, (size_t)len);
+    *payload = copy;
+    *payload_len = len;
+    sqlite3_finalize(stmt);
+    return SQLITE_OK;
+}
+
+static char *mock_build_large_first_schema_migration(void) {
+    sqlite3_str *str = sqlite3_str_new(NULL);
+    if (!str) return NULL;
+
+    sqlite3_str_appendall(str,
+        "{"
+        "\"type\":\"cloudsync.schema.migration\","
+        "\"formatVersion\":1,"
+        "\"migrationId\":\"mock-first-schema-sync-large\","
+        "\"ops\":["
+        "{\"op\":\"createTable\",\"table\":\"notes\",\"columns\":["
+        "{\"name\":\"id\",\"type\":\"text\",\"primaryKey\":true,\"nullable\":false},"
+        "{\"name\":\"body\",\"type\":\"text\",\"nullable\":false,\"default\":{\"type\":\"text\",\"value\":\"\"}}");
+    for (int i = 0; i < 90; ++i) {
+        sqlite3_str_appendf(str, ",{\"name\":\"extra_%02d\",\"type\":\"text\",\"nullable\":true}", i);
+    }
+    sqlite3_str_appendall(str,
+        "]},"
+        "{\"op\":\"augmentTable\",\"table\":\"notes\",\"algorithm\":\"CLS\",\"initFlags\":0}"
+        "]"
+        "}");
+
+    return sqlite3_str_finish(str);
+}
+
+static int test_mock_network_json_validation_one(mock_network_scenario scenario, const char *sql, bool expect_error_json) {
+    mock_network_server server;
+    int rc = mock_network_start(&server, scenario);
+    if (rc != SQLITE_OK) return rc;
+
+    sqlite3 *db = NULL;
+    rc = open_load_ext(":memory:", &db);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = mock_network_init_db(db, &server);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    if (scenario == MOCK_INVALID_UPLOAD || scenario == MOCK_INVALID_APPLY || scenario == MOCK_INVALID_CHECK) {
+        rc = mock_prepare_synced_row(db);
+        if (rc != SQLITE_OK) goto cleanup;
+    }
+
+    if (expect_error_json) rc = db_expect_int(db, sql, 1);
+    else rc = expect_sql_error_contains(db, sql, "invalid JSON");
+
+cleanup:
+    if (db) {
+        db_exec(db, "SELECT cloudsync_terminate();");
+        sqlite3_close(db);
+    }
+    mock_network_stop(&server);
+    return rc;
+}
+
+static int test_mock_network_json_validation(void) {
+    int rc = SQLITE_OK;
+    rc += test_mock_network_json_validation_one(MOCK_INVALID_STATUS, "SELECT cloudsync_network_status();", false);
+    rc += test_mock_network_json_validation_one(MOCK_INVALID_CHECK, "SELECT cloudsync_network_check_changes() LIKE '%invalid JSON%';", true);
+    rc += test_mock_network_json_validation_one(MOCK_INVALID_UPLOAD, "SELECT cloudsync_network_send_changes();", false);
+    rc += test_mock_network_json_validation_one(MOCK_INVALID_APPLY, "SELECT cloudsync_network_send_changes();", false);
+    rc += test_mock_network_json_validation_one(MOCK_INVALID_SCHEMA_CHECK, "SELECT cloudsync_network_migration_check();", false);
+    rc += test_mock_network_json_validation_one(MOCK_INVALID_SCHEMA_DOWNLOAD, "SELECT cloudsync_network_migration_download();", false);
+    rc += test_mock_network_json_validation_one(MOCK_INVALID_SCHEMA_UPLOAD, "SELECT cloudsync_network_migration_upload('{\"ops\":[]}');", false);
+    return rc == SQLITE_OK ? SQLITE_OK : SQLITE_ERROR;
+}
+
+static int test_mock_schema_check_empty_error(void) {
+    mock_network_server server;
+    int rc = mock_network_start(&server, MOCK_SCHEMA_CHECK_HTTP_EMPTY_ERROR);
+    if (rc != SQLITE_OK) return rc;
+
+    sqlite3 *db = NULL;
+    rc = open_load_ext(":memory:", &db);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = mock_network_init_db(db, &server);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = expect_sql_error_contains(db, "SELECT cloudsync_network_migration_check();", "CloudSync schema migration endpoint failed");
+
+cleanup:
+    if (db) {
+        db_exec(db, "SELECT cloudsync_terminate();");
+        sqlite3_close(db);
+    }
+    mock_network_stop(&server);
+    return rc;
+}
+
+static int test_mock_migration_upload_error_keeps_pending(void) {
+    mock_network_server server;
+    int rc = mock_network_start(&server, MOCK_SCHEMA_UPLOAD_AUTH_ERROR);
+    if (rc != SQLITE_OK) return rc;
+
+    sqlite3 *db = NULL;
+    rc = open_load_ext(":memory:", &db);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = mock_network_init_db(db, &server);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = db_exec(db,
+        "SELECT cloudsync_alter_create_table('upload_notes');"
+        "SELECT cloudsync_alter_add_column('upload_notes', 'id', 'text', 0);"
+        "SELECT cloudsync_alter_add_primary_key('upload_notes', 'id');"
+        "SELECT cloudsync_alter_augment_table('upload_notes');"
+        "SELECT cloudsync_alter_apply();");
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = db_expect_int(db, "SELECT count(*) FROM cloudsync_pending_migration WHERE uploaded_at IS NULL;", 1);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = expect_sql_error_contains(db, "SELECT cloudsync_network_migration_upload();", NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = db_expect_int(db, "SELECT count(*) FROM cloudsync_pending_migration WHERE uploaded_at IS NULL;", 1);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = db_exec(db, "INSERT INTO upload_notes (id) VALUES ('u1');");
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = expect_sql_error_contains(db, "SELECT cloudsync_network_send_changes();", "pending schema migration");
+
+cleanup:
+    if (db) {
+        db_exec(db, "SELECT cloudsync_terminate();");
+        sqlite3_close(db);
+    }
+    mock_network_stop(&server);
+    return rc;
+}
+
+static int test_mock_migration_upload_missing_status_keeps_pending(void) {
+    mock_network_server server;
+    int rc = mock_network_start(&server, MOCK_SCHEMA_UPLOAD_MISSING_STATUS);
+    if (rc != SQLITE_OK) return rc;
+
+    sqlite3 *db = NULL;
+    rc = open_load_ext(":memory:", &db);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = mock_network_init_db(db, &server);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = db_exec(db,
+        "SELECT cloudsync_alter_create_table('upload_missing_status_notes');"
+        "SELECT cloudsync_alter_add_column('upload_missing_status_notes', 'id', 'text', 0);"
+        "SELECT cloudsync_alter_add_primary_key('upload_missing_status_notes', 'id');"
+        "SELECT cloudsync_alter_augment_table('upload_missing_status_notes');"
+        "SELECT cloudsync_alter_apply();");
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = db_expect_int(db, "SELECT count(*) FROM cloudsync_pending_migration WHERE uploaded_at IS NULL;", 1);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = expect_sql_error_contains(db, "SELECT cloudsync_network_migration_upload();", "accepted status");
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = db_expect_int(db, "SELECT count(*) FROM cloudsync_pending_migration WHERE uploaded_at IS NULL;", 1);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = db_exec(db, "INSERT INTO upload_missing_status_notes (id) VALUES ('u1');");
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = expect_sql_error_contains(db, "SELECT cloudsync_network_send_changes();", "pending schema migration");
+
+cleanup:
+    if (db) {
+        db_exec(db, "SELECT cloudsync_terminate();");
+        sqlite3_close(db);
+    }
+    mock_network_stop(&server);
+    return rc;
+}
+
+static int test_mock_first_schema_sync(void) {
+    sqlite3 *source = NULL;
+    sqlite3 *target = NULL;
+    unsigned char *payload = NULL;
+    int payload_len = 0;
+    char *migration_json = NULL;
+    mock_network_server server;
+    int rc = open_load_ext(":memory:", &source);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = mock_prepare_large_synced_row(source);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = select_payload_blob(source, &payload, &payload_len);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = mock_network_start(&server, MOCK_FIRST_SCHEMA_SYNC);
+    if (rc != SQLITE_OK) goto cleanup;
+    server.payload = payload;
+    server.payload_len = payload_len;
+    migration_json = mock_build_large_first_schema_migration();
+    if (!migration_json || strlen(migration_json) < 4096) { rc = SQLITE_ERROR; goto cleanup_server; }
+    server.migration_json = migration_json;
+
+    rc = open_load_ext(":memory:", &target);
+    if (rc != SQLITE_OK) goto cleanup_server;
+    rc = mock_network_init_db(target, &server);
+    if (rc != SQLITE_OK) goto cleanup_server;
+    rc = db_exec(target, "SELECT cloudsync_network_sync(10, 1);");
+    if (rc != SQLITE_OK) goto cleanup_server;
+    rc = db_expect_int(target, "SELECT count(*) FROM notes WHERE id='n1' AND body='hello';", 1);
+    if (rc != SQLITE_OK) goto cleanup_server;
+    rc = db_expect_int(target, "SELECT count(*) FROM cloudsync_migrations WHERE migration_id='mock-first-schema-sync-large';", 1);
+
+cleanup_server:
+    mock_network_stop(&server);
+cleanup:
+    if (source) { db_exec(source, "SELECT cloudsync_terminate();"); sqlite3_close(source); }
+    if (target) { db_exec(target, "SELECT cloudsync_terminate();"); sqlite3_close(target); }
+    if (payload) sqlite3_free(payload);
+    if (migration_json) sqlite3_free(migration_json);
+    return rc;
+}
+#else
+static int test_mock_network_json_validation(void) {
+    printf("Skipping local mock network JSON test on Windows.\n");
+    return SQLITE_OK;
+}
+
+static int test_mock_schema_check_empty_error(void) {
+    printf("Skipping local mock schema empty error test on Windows.\n");
+    return SQLITE_OK;
+}
+
+static int test_mock_migration_upload_error_keeps_pending(void) {
+    printf("Skipping local mock migration upload auth test on Windows.\n");
+    return SQLITE_OK;
+}
+
+static int test_mock_migration_upload_missing_status_keeps_pending(void) {
+    printf("Skipping local mock migration upload ack test on Windows.\n");
+    return SQLITE_OK;
+}
+
+static int test_mock_first_schema_sync(void) {
+    printf("Skipping local mock first schema sync test on Windows.\n");
+    return SQLITE_OK;
+}
+#endif
+
 // MARK: -
 
 int test_report(const char *description, int rc){
@@ -546,6 +1059,21 @@ int main (void) {
     printf("===========================================\n");
     test_report("Version Test:", rc);
 
+    rc += test_report("Mock Network JSON Test:", test_mock_network_json_validation());
+    rc += test_report("Mock Schema Empty Error:", test_mock_schema_check_empty_error());
+    rc += test_report("Mock Migration Upload Auth:", test_mock_migration_upload_error_keeps_pending());
+    rc += test_report("Mock Migration Upload Ack:", test_mock_migration_upload_missing_status_keeps_pending());
+    rc += test_report("Mock First Schema Sync Test:", test_mock_first_schema_sync());
+    rc += test_report("Double Empty Init Test:", test_double_empty_network_init(":memory:"));
+
+    if (!getenv("INTEGRATION_TEST_DATABASE_ID")) {
+        printf("Skipping remote integration tests: INTEGRATION_TEST_DATABASE_ID not set.\n");
+        remove(DB_PATH);
+        cloudsync_memory_finalize();
+        printf("\n");
+        return rc;
+    }
+
     sqlite3 *db = NULL;
     rc += open_load_ext(DB_PATH, &db);
     rc += db_init(db);
@@ -556,7 +1084,6 @@ int main (void) {
     rc += test_report("DB Version Test:", test_db_version(DB_PATH));
     rc += test_report("Enable Disable Test:", test_enable_disable(DB_PATH));
     rc += test_report("Offline Error Test:", test_offline_error(":memory:"));
-    rc += test_report("Double Empty Init Test:", test_double_empty_network_init(":memory:"));
 
     remove(DB_PATH); // remove the database file
 

@@ -12,6 +12,7 @@
 #include "../block.h"
 #include "../database.h"
 #include "../dbutils.h"
+#include "../utils.h"
 
 #ifndef CLOUDSYNC_OMIT_NETWORK
 #include "../network/network.h"
@@ -825,7 +826,7 @@ void dbsync_cleanup (sqlite3_context *context, int argc, sqlite3_value **argv) {
     const char *table = (const char *)database_value_text(argv[0]);
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     
-    int rc = cloudsync_cleanup(data, table);
+    int rc = cloudsync_cleanup(data, table, false);
     if (rc != DBRES_OK) {
         sqlite3_result_error(context, cloudsync_errmsg(data), -1);
         sqlite3_result_error_code(context, rc);
@@ -932,56 +933,6 @@ void dbsync_init1 (sqlite3_context *context, int argc, sqlite3_value **argv) {
     
     const char *table = (const char *)database_value_text(argv[0]);
     dbsync_init(context, table, NULL, CLOUDSYNC_INIT_FLAG_NONE);
-}
-
-// MARK: -
-
-void dbsync_begin_alter (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    DEBUG_FUNCTION("dbsync_begin_alter");
-
-    const char *table_name = (const char *)database_value_text(argv[0]);
-    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-
-    int rc = database_begin_savepoint(data, "cloudsync_alter");
-    if (rc != DBRES_OK) {
-        sqlite3_result_error(context, "Unable to create cloudsync_alter savepoint", -1);
-        sqlite3_result_error_code(context, rc);
-        return;
-    }
-
-    rc = cloudsync_begin_alter(data, table_name);
-    if (rc != DBRES_OK) {
-        database_rollback_savepoint(data, "cloudsync_alter");
-        sqlite3_result_error(context, cloudsync_errmsg(data), -1);
-        sqlite3_result_error_code(context, rc);
-    }
-}
-
-void dbsync_commit_alter (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    DEBUG_FUNCTION("cloudsync_commit_alter");
-    
-    //retrieve table argument
-    const char *table_name = (const char *)database_value_text(argv[0]);
-    
-    // retrieve context
-    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    
-    int rc = cloudsync_commit_alter(data, table_name);
-    if (rc != DBRES_OK) {
-        database_rollback_savepoint(data, "cloudsync_alter");
-        sqlite3_result_error(context, cloudsync_errmsg(data), -1);
-        sqlite3_result_error_code(context, rc);
-        return;
-    }
-
-    rc = database_commit_savepoint(data, "cloudsync_alter");
-    if (rc != DBRES_OK) {
-        sqlite3_result_error(context, database_errmsg(data), -1);
-        sqlite3_result_error_code(context, rc);
-        return;
-    }
-
-    cloudsync_update_schema_hash(data);
 }
 
 // MARK: - Payload -
@@ -1144,6 +1095,266 @@ void dbsync_payload_load (sqlite3_context *context, int argc, sqlite3_value **ar
     sqlite3_result_int(context, nrows);
 }
 #endif
+
+// MARK: - Schema Migrations -
+
+void dbsync_migration_apply (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_migration_apply");
+
+    if (database_value_type(argv[0]) != SQLITE_TEXT) {
+        sqlite3_result_error(context, "cloudsync_migration_apply expects a JSON text payload.", -1);
+        sqlite3_result_error_code(context, SQLITE_MISUSE);
+        return;
+    }
+
+    const char *payload = (const char *)database_value_text(argv[0]);
+    int payload_len = database_value_bytes(argv[0]);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+
+    char *result = NULL;
+    int rc = cloudsync_migration_apply(data, payload, payload_len, &result);
+    if (rc != SQLITE_OK) {
+        sqlite3_result_error(context, cloudsync_errmsg(data), -1);
+        sqlite3_result_error_code(context, rc);
+        if (result) cloudsync_memory_free(result);
+        return;
+    }
+
+    if (result) sqlite3_result_text(context, result, -1, cloudsync_memory_free);
+    else sqlite3_result_int(context, 1);
+}
+
+static void dbsync_result_from_rc(sqlite3_context *context, cloudsync_context *data, int rc) {
+    if (rc != SQLITE_OK) {
+        sqlite3_result_error(context, cloudsync_errmsg(data), -1);
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+    sqlite3_result_int(context, 1);
+}
+
+static char *dbsync_default_value_text(sqlite3_value *value, bool *oom) {
+    int type = sqlite3_value_type(value);
+    switch (type) {
+        case SQLITE_NULL:
+            return NULL;
+        case SQLITE_INTEGER:
+            return cloudsync_memory_mprintf("%lld", (long long)sqlite3_value_int64(value));
+        case SQLITE_FLOAT: {
+            char buffer[64];
+            snprintf(buffer, sizeof(buffer), "%.17g", sqlite3_value_double(value));
+            return cloudsync_string_dup(buffer);
+        }
+        case SQLITE_BLOB: {
+            const unsigned char *blob = sqlite3_value_blob(value);
+            int len = sqlite3_value_bytes(value);
+            char *hex = cloudsync_memory_alloc((uint64_t)len * 2 + 1);
+            if (!hex) {
+                if (oom) *oom = true;
+                return NULL;
+            }
+            static const char digits[] = "0123456789abcdef";
+            for (int i = 0; i < len; ++i) {
+                hex[i * 2] = digits[(blob[i] >> 4) & 0x0f];
+                hex[i * 2 + 1] = digits[blob[i] & 0x0f];
+            }
+            hex[len * 2] = '\0';
+            return hex;
+        }
+        default:
+            return cloudsync_string_dup((const char *)sqlite3_value_text(value));
+    }
+}
+
+void dbsync_alter_create_table(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAMETER(argc);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    int rc = cloudsync_alter_create_table(data, (const char *)database_value_text(argv[0]));
+    dbsync_result_from_rc(context, data, rc);
+}
+
+void dbsync_alter_add_column(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    char *default_value = NULL;
+    bool oom = false;
+    bool has_default = argc >= 5;
+    if (has_default) {
+        default_value = dbsync_default_value_text(argv[4], &oom);
+        if (oom || (!default_value && sqlite3_value_type(argv[4]) != SQLITE_NULL)) {
+            sqlite3_result_error_nomem(context);
+            return;
+        }
+    }
+    int rc = cloudsync_alter_add_column(data,
+        (const char *)database_value_text(argv[0]),
+        (const char *)database_value_text(argv[1]),
+        (const char *)database_value_text(argv[2]),
+        database_value_int(argv[3]) != 0,
+        has_default,
+        default_value);
+    if (default_value) cloudsync_memory_free(default_value);
+    dbsync_result_from_rc(context, data, rc);
+}
+
+static void dbsync_alter_add_column_dialect(sqlite3_context *context, int argc, sqlite3_value **argv, const char *dialect) {
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    int rc = cloudsync_alter_add_column_dialect(data,
+        (const char *)database_value_text(argv[0]),
+        (const char *)database_value_text(argv[1]),
+        dialect,
+        (const char *)database_value_text(argv[2]),
+        database_value_int(argv[3]) != 0,
+        argc >= 5,
+        argc >= 5 ? (const char *)database_value_text(argv[4]) : NULL);
+    dbsync_result_from_rc(context, data, rc);
+}
+
+void dbsync_alter_add_column_sqlite(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    dbsync_alter_add_column_dialect(context, argc, argv, "sqlite");
+}
+
+void dbsync_alter_add_column_postgresql(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    dbsync_alter_add_column_dialect(context, argc, argv, "postgresql");
+}
+
+static void dbsync_alter_sql_dialect(sqlite3_context *context, sqlite3_value **argv, const char *dialect) {
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    int rc = dialect
+        ? cloudsync_alter_sql_dialect(data, dialect, (const char *)database_value_text(argv[0]))
+        : cloudsync_alter_sql(data, (const char *)database_value_text(argv[0]));
+    dbsync_result_from_rc(context, data, rc);
+}
+
+void dbsync_alter_sql(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAMETER(argc);
+    dbsync_alter_sql_dialect(context, argv, NULL);
+}
+
+void dbsync_alter_sqlite(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAMETER(argc);
+    dbsync_alter_sql_dialect(context, argv, "sqlite");
+}
+
+void dbsync_alter_postgresql(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAMETER(argc);
+    dbsync_alter_sql_dialect(context, argv, "postgresql");
+}
+
+void dbsync_alter_add_primary_key(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAMETER(argc);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    int rc = cloudsync_alter_add_primary_key(data, (const char *)database_value_text(argv[0]), (const char *)database_value_text(argv[1]));
+    dbsync_result_from_rc(context, data, rc);
+}
+
+void dbsync_alter_augment_table(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    const char *algorithm = (argc >= 2 && sqlite3_value_type(argv[1]) != SQLITE_NULL) ? (const char *)database_value_text(argv[1]) : CLOUDSYNC_DEFAULT_ALGO;
+    int init_flags = argc >= 3 ? database_value_int(argv[2]) : CLOUDSYNC_INIT_FLAG_NONE;
+    int rc = cloudsync_alter_augment_table(data,
+        (const char *)database_value_text(argv[0]),
+        algorithm,
+        init_flags);
+    dbsync_result_from_rc(context, data, rc);
+}
+
+void dbsync_alter_set_block_lww(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    const char *delimiter = (argc >= 3 && sqlite3_value_type(argv[2]) != SQLITE_NULL) ? (const char *)database_value_text(argv[2]) : NULL;
+    int rc = cloudsync_alter_set_block_lww(data, (const char *)database_value_text(argv[0]), (const char *)database_value_text(argv[1]), delimiter);
+    dbsync_result_from_rc(context, data, rc);
+}
+
+void dbsync_alter_set_column(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAMETER(argc);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    const char *value = sqlite3_value_type(argv[3]) == SQLITE_NULL ? NULL : (const char *)database_value_text(argv[3]);
+    int rc = cloudsync_alter_set_column(data,
+        (const char *)database_value_text(argv[0]),
+        (const char *)database_value_text(argv[1]),
+        (const char *)database_value_text(argv[2]),
+        value);
+    dbsync_result_from_rc(context, data, rc);
+}
+
+void dbsync_alter_set_filter(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAMETER(argc);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    int rc = cloudsync_alter_set_filter(data, (const char *)database_value_text(argv[0]), (const char *)database_value_text(argv[1]));
+    dbsync_result_from_rc(context, data, rc);
+}
+
+static void dbsync_alter_set_filter_dialect(sqlite3_context *context, sqlite3_value **argv, const char *dialect) {
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    int rc = cloudsync_alter_set_filter_dialect(data,
+        (const char *)database_value_text(argv[0]),
+        dialect,
+        (const char *)database_value_text(argv[1]));
+    dbsync_result_from_rc(context, data, rc);
+}
+
+void dbsync_alter_set_filter_sqlite(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAMETER(argc);
+    dbsync_alter_set_filter_dialect(context, argv, "sqlite");
+}
+
+void dbsync_alter_set_filter_postgresql(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAMETER(argc);
+    dbsync_alter_set_filter_dialect(context, argv, "postgresql");
+}
+
+void dbsync_alter_drop_column(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAMETER(argc);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    int rc = cloudsync_alter_drop_column(data, (const char *)database_value_text(argv[0]), (const char *)database_value_text(argv[1]));
+    dbsync_result_from_rc(context, data, rc);
+}
+
+void dbsync_alter_rename_column(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAMETER(argc);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    int rc = cloudsync_alter_rename_column(data,
+        (const char *)database_value_text(argv[0]),
+        (const char *)database_value_text(argv[1]),
+        (const char *)database_value_text(argv[2]));
+    dbsync_result_from_rc(context, data, rc);
+}
+
+void dbsync_alter_clear(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    const char *table = argc == 0 || sqlite3_value_type(argv[0]) == SQLITE_NULL ? NULL : (const char *)database_value_text(argv[0]);
+    int rc = cloudsync_alter_clear(data, table);
+    dbsync_result_from_rc(context, data, rc);
+}
+
+void dbsync_alter_preview(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAMETER(argc);
+    UNUSED_PARAMETER(argv);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    char *payload = cloudsync_alter_preview(data);
+    if (!payload) {
+        sqlite3_result_error(context, cloudsync_errmsg(data), -1);
+        sqlite3_result_error_code(context, cloudsync_errcode(data));
+        return;
+    }
+    sqlite3_result_text(context, payload, -1, cloudsync_memory_free);
+}
+
+void dbsync_alter_apply(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAMETER(argc);
+    UNUSED_PARAMETER(argv);
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    char *result = NULL;
+    int rc = cloudsync_alter_apply(data, &result);
+    if (rc != SQLITE_OK) {
+        sqlite3_result_error(context, cloudsync_errmsg(data), -1);
+        sqlite3_result_error_code(context, rc);
+        if (result) cloudsync_memory_free(result);
+        return;
+    }
+    if (result) sqlite3_result_text(context, result, -1, cloudsync_memory_free);
+    else sqlite3_result_int(context, 1);
+}
 
 // MARK: - Register -
 
@@ -1434,12 +1645,6 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     rc = dbsync_register_function(db, "cloudsync_db_version_next", dbsync_db_version_next, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_begin_alter", dbsync_begin_alter, 1, pzErrMsg, ctx, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
-    rc = dbsync_register_function(db, "cloudsync_commit_alter", dbsync_commit_alter, 1, pzErrMsg, ctx, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
     rc = dbsync_register_function(db, "cloudsync_uuid", dbsync_uuid, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
@@ -1451,6 +1656,71 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     rc = dbsync_register_function(db, "cloudsync_payload_decode", dbsync_payload_decode, -1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     rc = dbsync_register_function(db, "cloudsync_payload_apply", dbsync_payload_decode, -1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    // SCHEMA MIGRATIONS
+    rc = dbsync_register_function(db, "cloudsync_migration_apply", dbsync_migration_apply, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbsync_register_function(db, "cloudsync_alter_create_table", dbsync_alter_create_table, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbsync_register_function(db, "cloudsync_alter_add_column", dbsync_alter_add_column, 4, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_add_column", dbsync_alter_add_column, 5, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbsync_register_function(db, "cloudsync_alter_add_column_sqlite", dbsync_alter_add_column_sqlite, 4, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_add_column_sqlite", dbsync_alter_add_column_sqlite, 5, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_add_column_postgresql", dbsync_alter_add_column_postgresql, 4, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_add_column_postgresql", dbsync_alter_add_column_postgresql, 5, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbsync_register_function(db, "cloudsync_alter_sql", dbsync_alter_sql, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_sqlite", dbsync_alter_sqlite, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_postgresql", dbsync_alter_postgresql, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbsync_register_function(db, "cloudsync_alter_add_primary_key", dbsync_alter_add_primary_key, 2, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbsync_register_function(db, "cloudsync_alter_augment_table", dbsync_alter_augment_table, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_augment_table", dbsync_alter_augment_table, 2, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_augment_table", dbsync_alter_augment_table, 3, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbsync_register_function(db, "cloudsync_alter_set_block_lww", dbsync_alter_set_block_lww, 2, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_set_block_lww", dbsync_alter_set_block_lww, 3, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbsync_register_function(db, "cloudsync_alter_set_column", dbsync_alter_set_column, 4, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_set_filter", dbsync_alter_set_filter, 2, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_set_filter_sqlite", dbsync_alter_set_filter_sqlite, 2, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_set_filter_postgresql", dbsync_alter_set_filter_postgresql, 2, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbsync_register_function(db, "cloudsync_alter_drop_column", dbsync_alter_drop_column, 2, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_rename_column", dbsync_alter_rename_column, 3, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_clear", dbsync_alter_clear, 0, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_clear", dbsync_alter_clear, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_preview", dbsync_alter_preview, 0, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_alter_apply", dbsync_alter_apply, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
     #ifdef CLOUDSYNC_DESKTOP_OS

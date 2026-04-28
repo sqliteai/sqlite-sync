@@ -1,0 +1,31 @@
+{
+  "type": "cloudsync.schema.migration",
+  "formatVersion": 1,
+  "migrationId": "0197097c-8b35-7c11-8ed4-4e59ddfdb928",
+  "schemaEpoch": 1,
+  "requiredCapabilities": ["schema:write"],
+  "ops": [
+    {
+      "op": "createTable",
+      "table": "notes",
+      "columns": [
+        {"name": "id", "type": "text", "primaryKey": true, "nullable": false},
+        {"name": "title", "type": "text", "nullable": false, "default": {"type": "text", "value": ""}},
+        {"name": "body", "type": "text", "nullable": false, "default": {"type": "text", "value": ""}},
+        {"name": "updated_at", "type": "timestamp", "nullable": false, "default": {"type": "timestamp", "value": "1970-01-01T00:00:00Z"}}
+      ]
+    },
+    {
+      "op": "augmentTable",
+      "table": "notes",
+      "algorithm": "CLS",
+      "initFlags": 1
+    },
+    {
+      "op": "setBlockLww",
+      "table": "notes",
+      "column": "body",
+      "delimiter": "\n"
+    }
+  ]
+}

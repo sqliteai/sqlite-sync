@@ -323,7 +323,7 @@ DBVM_VALUE dbvm_execute (dbvm_t *stmt, cloudsync_context *data) {
         } else {
             result = DBVM_VALUE_UNCHANGED;
         }
-        
+
     } else if (stmt == data->db_version_stmt) {
         data->db_version = (rc == DBRES_DONE) ? CLOUDSYNC_MIN_DB_VERSION : database_column_int(stmt, 0);
     }
@@ -688,7 +688,7 @@ char *table_build_value_sql (cloudsync_table_context *table, const char *colname
         return sql;
     }
     #endif
-        
+
     // SELECT age FROM customers WHERE first_name=? AND last_name=?;
     return sql_build_select_cols_by_pk(table->context, table->name, colname, table->schema);
 }
@@ -2387,6 +2387,7 @@ void cloudsync_context_free (void *ctx) {
 
     // free all table contexts and prepared statements
     cloudsync_terminate(data);
+    cloudsync_alter_clear_context(data);
 
     cloudsync_memory_free(data->tables);
     cloudsync_memory_free(data);
@@ -3624,17 +3625,17 @@ int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context
     return DBRES_OK;
 }
 
-int cloudsync_cleanup (cloudsync_context *data, const char *table_name) {
+int cloudsync_cleanup (cloudsync_context *data, const char *table_name, bool preserve_global_state) {
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) return DBRES_OK;
-    
-    // TODO: check what happen if cloudsync_cleanup_internal failes (not eveything dropped) and the table is still in memory?
-    
+
     int rc = cloudsync_cleanup_internal(data, table);
     if (rc != DBRES_OK) return rc;
     
     int counter = table_remove(data, table);
     table_free(table);
+
+    if (preserve_global_state) return DBRES_OK;
     
     if (counter == 0) {
         // cleanup database on last table

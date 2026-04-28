@@ -14,6 +14,10 @@
 #define CLOUDSYNC_ENDPOINT_CHECK            "check"
 #define CLOUDSYNC_ENDPOINT_APPLY            "apply"
 #define CLOUDSYNC_ENDPOINT_STATUS           "status"
+#define CLOUDSYNC_ENDPOINT_SCHEMA           "schema"
+#define CLOUDSYNC_ENDPOINT_SCHEMA_CHECK     "check"
+#define CLOUDSYNC_ENDPOINT_SCHEMA_UPLOAD    "upload"
+#define CLOUDSYNC_ENDPOINT_SCHEMA_DOWNLOAD  "download"
 #define CLOUDSYNC_HEADER_SQLITECLOUD        "Accept: sqlc/plain"
 #define CLOUDSYNC_HEADER_ORG                "X-CloudSync-Org"
 

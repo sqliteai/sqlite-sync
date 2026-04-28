@@ -10,6 +10,7 @@ services:
       POSTGRES_DB: cloudsync_test
     ports:
       - "5432:5432"
+    command: ["postgres", "-c", "listen_addresses=*"]
     ulimits:
       core: -1
     cap_add:

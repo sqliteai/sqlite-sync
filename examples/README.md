@@ -12,6 +12,12 @@ This directory contains comprehensive examples demonstrating SQLite Sync in vari
 - Offline scenarios and network synchronization
 - Perfect for understanding core sync mechanics
 
+### [schema-migrations/](./schema-migrations/)
+**Schema Migrations**
+- Client-to-server and server-to-client migration examples
+- Demonstrates the `cloudsync_alter_*` API, generated pending migrations, table creation, `cloudsync_init`, block-level LWW, dialect overrides, raw SQL escape hatches, and V2 rebuild payloads
+- Shows how schema-capable API keys fit into migration upload/download
+
 ### [sport-tracker-app/](./sport-tracker-app/)
 **Advanced Web App - Production Patterns**
 - React/TypeScript web application with Vite
