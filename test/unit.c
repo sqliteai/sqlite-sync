@@ -13218,6 +13218,205 @@ cleanup:
     return result;
 }
 
+static bool do_apply_migration_json(sqlite3 *db, const char *payload) {
+    if (!db || !payload) return false;
+    char *sql = sqlite3_mprintf("SELECT cloudsync_migration_apply('%q');", payload);
+    if (!sql) return false;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("apply_migration_json: %s\n", sqlite3_errmsg(db));
+    }
+    sqlite3_free(sql);
+    return rc == SQLITE_OK;
+}
+
+static unsigned char *do_select_payload_blob(sqlite3 *db, bool only_local, int *payload_len) {
+    sqlite3_stmt *stmt = NULL;
+    unsigned char *copy = NULL;
+    if (payload_len) *payload_len = 0;
+    const char *sql = only_local
+        ? "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes WHERE site_id=cloudsync_siteid();"
+        : "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes;";
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW || sqlite3_column_type(stmt, 0) == SQLITE_NULL) goto cleanup;
+
+    int len = sqlite3_column_bytes(stmt, 0);
+    const unsigned char *blob = sqlite3_column_blob(stmt, 0);
+    if (!blob || len <= 0) goto cleanup;
+    copy = sqlite3_malloc(len);
+    if (!copy) goto cleanup;
+    memcpy(copy, blob, len);
+    if (payload_len) *payload_len = len;
+
+cleanup:
+    if (stmt) sqlite3_finalize(stmt);
+    return copy;
+}
+
+static bool do_apply_payload_blob(sqlite3 *db, const unsigned char *payload, int payload_len, bool print_error_msg) {
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+    int rc = sqlite3_prepare_v2(db, "SELECT cloudsync_payload_decode(?);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_bind_blob(stmt, 1, payload, payload_len, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_step(stmt);
+    result = (rc == SQLITE_ROW);
+
+cleanup:
+    if (!result && print_error_msg) printf("apply_payload_blob: %s\n", sqlite3_errmsg(db));
+    if (stmt) sqlite3_finalize(stmt);
+    return result;
+}
+
+bool do_test_declarative_alter_dialect_nullable_is_portable (void) {
+    sqlite3 *db = do_create_database();
+    char *preview = NULL;
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "SELECT cloudsync_alter_add_column('dialect_notes', 'tag', 'text', 0, '');"
+        "SELECT cloudsync_alter_add_column_sqlite('dialect_notes', 'tag', 'TEXT', 1);",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    preview = do_select_text(db, "SELECT cloudsync_alter_preview();");
+    result = preview && strstr(preview, "\"nullable\":false") != NULL && strstr(preview, "\"nullable\":true") == NULL;
+    if (!result) {
+        printf("alter_dialect_nullable: unexpected preview=%s\n", preview ? preview : "NULL");
+    }
+
+cleanup:
+    if (preview) sqlite3_free(preview);
+    close_db(db);
+    return result;
+}
+
+bool do_test_declarative_alter_dialect_replacement_clears_default (void) {
+    sqlite3 *db = do_create_database();
+    char *preview = NULL;
+    bool result = false;
+    if (!db) return false;
+
+    int rc = sqlite3_exec(db,
+        "SELECT cloudsync_alter_add_column('dialect_notes', 'tag', 'text', 1);"
+        "SELECT cloudsync_alter_add_column_sqlite('dialect_notes', 'tag', 'TEXT', 1, '''stale''');"
+        "SELECT cloudsync_alter_add_column_sqlite('dialect_notes', 'tag', 'TEXT COLLATE NOCASE', 1);",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    preview = do_select_text(db, "SELECT cloudsync_alter_preview();");
+    result = preview &&
+             strstr(preview, "\"typeSql\":\"TEXT COLLATE NOCASE\"") != NULL &&
+             strstr(preview, "defaultSql") == NULL &&
+             strstr(preview, "stale") == NULL;
+    if (!result) {
+        printf("alter_dialect_replace: unexpected preview=%s\n", preview ? preview : "NULL");
+    }
+
+cleanup:
+    if (preview) sqlite3_free(preview);
+    close_db(db);
+    return result;
+}
+
+bool do_test_generated_migration_json_roundtrip_two_devices (void) {
+    sqlite3 *db[2] = {NULL, NULL};
+    char *payload = NULL;
+    bool result = false;
+
+    db[0] = do_create_database();
+    db[1] = do_create_database();
+    if (!db[0] || !db[1]) goto cleanup;
+
+    int rc = sqlite3_exec(db[0],
+        "SELECT cloudsync_alter_create_table('roundtrip_notes');"
+        "SELECT cloudsync_alter_add_column('roundtrip_notes', 'id', 'text', 0);"
+        "SELECT cloudsync_alter_add_primary_key('roundtrip_notes', 'id');"
+        "SELECT cloudsync_alter_add_column('roundtrip_notes', 'body', 'text', 0, '');"
+        "SELECT cloudsync_alter_add_column('roundtrip_notes', 'rank', 'integer', 0, 0);"
+        "SELECT cloudsync_alter_augment_table('roundtrip_notes');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    payload = do_select_text(db[0], "SELECT cloudsync_alter_preview();");
+    if (!payload) goto cleanup;
+
+    rc = sqlite3_exec(db[0], "SELECT cloudsync_alter_apply();", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    if (!do_apply_migration_json(db[1], payload)) goto cleanup;
+
+    rc = sqlite3_exec(db[0], "INSERT INTO roundtrip_notes (id, body, rank) VALUES ('n1', 'hello', 7);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    if (!do_merge_using_payload(db[0], db[1], true, true)) goto cleanup;
+
+    int64_t cols0 = do_select_int(db[0], "SELECT count(*) FROM pragma_table_info('roundtrip_notes') WHERE name IN ('id', 'body', 'rank');");
+    int64_t cols1 = do_select_int(db[1], "SELECT count(*) FROM pragma_table_info('roundtrip_notes') WHERE name IN ('id', 'body', 'rank');");
+    int64_t row1 = do_select_int(db[1], "SELECT count(*) FROM roundtrip_notes WHERE id='n1' AND body='hello' AND rank=7;");
+    int64_t meta1 = do_select_int(db[1], "SELECT count(*) FROM roundtrip_notes_cloudsync WHERE pk=cloudsync_pk_encode('n1');");
+    result = (cols0 == 3 && cols1 == 3 && row1 == 1 && meta1 > 0);
+    if (!result) {
+        printf("migration_roundtrip_two_devices: cols0=%lld cols1=%lld row1=%lld meta1=%lld\n",
+               (long long)cols0, (long long)cols1, (long long)row1, (long long)meta1);
+    }
+
+cleanup:
+    if (payload) sqlite3_free(payload);
+    for (int i = 0; i < 2; ++i) if (db[i]) close_db(db[i]);
+    return result;
+}
+
+bool do_test_row_payload_retry_after_migration_json (void) {
+    sqlite3 *db[2] = {NULL, NULL};
+    char *migration_payload = NULL;
+    unsigned char *row_payload = NULL;
+    int row_payload_len = 0;
+    bool result = false;
+
+    db[0] = do_create_database();
+    db[1] = do_create_database();
+    if (!db[0] || !db[1]) goto cleanup;
+
+    for (int i = 0; i < 2; ++i) {
+        int rc = sqlite3_exec(db[i],
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL DEFAULT '');"
+            "SELECT cloudsync_init('tasks');",
+            NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto cleanup;
+    }
+
+    int rc = sqlite3_exec(db[0],
+        "SELECT cloudsync_alter_add_column('tasks', 'description', 'text', 0, '');"
+        "SELECT cloudsync_alter_apply();"
+        "INSERT INTO tasks (id, title, description) VALUES ('t1', 'title', 'desc');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    migration_payload = do_select_text(db[0], "SELECT payload FROM cloudsync_pending_migration WHERE uploaded_at IS NULL ORDER BY created_at, migration_id LIMIT 1;");
+    row_payload = do_select_payload_blob(db[0], true, &row_payload_len);
+    if (!migration_payload || !row_payload) goto cleanup;
+
+    bool rejected_before_migration = !do_apply_payload_blob(db[1], row_payload, row_payload_len, false);
+    if (!do_apply_migration_json(db[1], migration_payload)) goto cleanup;
+    bool applied_after_migration = do_apply_payload_blob(db[1], row_payload, row_payload_len, true);
+    int64_t row_count = do_select_int(db[1], "SELECT count(*) FROM tasks WHERE id='t1' AND title='title' AND description='desc';");
+
+    result = rejected_before_migration && applied_after_migration && row_count == 1;
+    if (!result) {
+        printf("row_payload_retry_after_migration: rejected=%d applied=%d rows=%lld\n",
+               rejected_before_migration, applied_after_migration, (long long)row_count);
+    }
+
+cleanup:
+    if (row_payload) sqlite3_free(row_payload);
+    if (migration_payload) sqlite3_free(migration_payload);
+    for (int i = 0; i < 2; ++i) if (db[i]) close_db(db[i]);
+    return result;
+}
+
 bool do_test_declarative_alter_apply_atomic_pending_save (void) {
     sqlite3 *db = do_create_database();
     bool result = false;
@@ -13527,6 +13726,10 @@ int main (int argc, const char * argv[]) {
     result += test_report("Migration Bad Bool Flags:", do_test_migration_rejects_non_boolean_column_flags());
     result += test_report("Migration Existing Table:", do_test_migration_create_table_rejects_existing_table());
     result += test_report("Migration Large JSON:", do_test_migration_large_dynamic_json_parse());
+    result += test_report("Migration Dialect Nullable:", do_test_declarative_alter_dialect_nullable_is_portable());
+    result += test_report("Migration Dialect Replace:", do_test_declarative_alter_dialect_replacement_clears_default());
+    result += test_report("Migration JSON Two Devices:", do_test_generated_migration_json_roundtrip_two_devices());
+    result += test_report("Migration Payload Retry:", do_test_row_payload_retry_after_migration_json());
     result += test_report("Declarative Alter API:", do_test_declarative_alter_builder());
     result += test_report("Declarative Alter Atomic:", do_test_declarative_alter_apply_atomic_pending_save());
     result += test_report("Stale Table Settings:", do_test_stale_table_settings(cleanup_databases));

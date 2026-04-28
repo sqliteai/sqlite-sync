@@ -136,6 +136,11 @@ RETURNS boolean
 AS 'MODULE_PATHNAME', 'pg_cloudsync_alter_add_column'
 LANGUAGE C VOLATILE;
 
+CREATE OR REPLACE FUNCTION cloudsync_alter_add_column(table_name text, column_name text, logical_type text, nullable boolean, default_value anyelement)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'pg_cloudsync_alter_add_column'
+LANGUAGE C VOLATILE;
+
 CREATE OR REPLACE FUNCTION cloudsync_alter_add_column_sqlite(table_name text, column_name text, type_sql text, nullable boolean)
 RETURNS boolean
 AS 'MODULE_PATHNAME', 'pg_cloudsync_alter_add_column_sqlite'

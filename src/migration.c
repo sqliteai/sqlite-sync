@@ -1837,7 +1837,6 @@ int cloudsync_alter_add_column_dialect(cloudsync_context *data, const char *tabl
     if (!table || !column || !dialect || !type_sql) return cloudsync_set_error(data, "cloudsync_alter_add_column_dialect requires table, column, dialect, and type SQL", DBRES_MISUSE);
     pending_alter_op *op = pending_find_add_column(data, table, column);
     if (!op) return cloudsync_set_error(data, "Dialect override requires a pending addColumn operation", DBRES_MISUSE);
-    op->flag = nullable;
     char **type_slot = NULL;
     char **default_slot = NULL;
     if (strcasecmp(dialect, "sqlite") == 0) {
@@ -1851,10 +1850,14 @@ int cloudsync_alter_add_column_dialect(cloudsync_context *data, const char *tabl
     }
     if (*type_slot) cloudsync_memory_free(*type_slot);
     *type_slot = cloudsync_string_dup(type_sql);
+    if (*default_slot) {
+        cloudsync_memory_free(*default_slot);
+        *default_slot = NULL;
+    }
     if (has_default_sql) {
-        if (*default_slot) cloudsync_memory_free(*default_slot);
         *default_slot = default_sql ? cloudsync_string_dup(default_sql) : cloudsync_string_dup("NULL");
     }
+    (void)nullable;
     return *type_slot ? DBRES_OK : DBRES_NOMEM;
 }
 

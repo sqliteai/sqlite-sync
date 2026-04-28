@@ -55,6 +55,21 @@ PG_MODULE_MAGIC;
 // External declaration
 Datum database_column_datum (dbvm_t *vm, int index);
 
+static char *pg_argument_to_cstring(PG_FUNCTION_ARGS, int argno) {
+    Oid argtype = get_fn_expr_argtype(fcinfo->flinfo, argno);
+    Oid typoutput = InvalidOid;
+    bool typisvarlena = false;
+
+    if (!OidIsValid(argtype)) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("Unable to determine argument type")));
+    }
+
+    getTypeOutputInfo(argtype, &typoutput, &typisvarlena);
+    return OidOutputFunctionCall(typoutput, PG_GETARG_DATUM(argno));
+}
+
 // MARK: - Context Management -
 
 // Global context stored per backend
@@ -1026,7 +1041,7 @@ Datum pg_cloudsync_alter_add_column(PG_FUNCTION_ARGS) {
     const char *default_value = NULL;
     bool has_default = PG_NARGS() >= 5;
     if (has_default) {
-        if (!PG_ARGISNULL(4)) default_value = text_to_cstring(PG_GETARG_TEXT_PP(4));
+        if (!PG_ARGISNULL(4)) default_value = pg_argument_to_cstring(fcinfo, 4);
     }
     cloudsync_context *data = get_cloudsync_context();
     int rc = DBRES_OK;

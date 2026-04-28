@@ -1027,6 +1027,65 @@ SELECT (:fail::int + 1) AS fail \gset
 \endif
 
 -- ============================================================================
+-- Declarative alter accepts non-text default arguments
+-- ============================================================================
+
+CREATE TABLE pg_default_tasks (
+  id UUID PRIMARY KEY
+);
+SELECT cloudsync_init('pg_default_tasks', 'CLS', 0) AS _init_pg_default_tasks \gset
+
+SELECT cloudsync_alter_add_column('pg_default_tasks', 'rank', 'integer', false, 0) AS alter_default_rank_ok \gset
+SELECT cloudsync_alter_add_column('pg_default_tasks', 'done', 'boolean', false, false) AS alter_default_done_ok \gset
+SELECT cloudsync_alter_add_column('pg_default_tasks', 'metadata', 'json', false, '{}'::jsonb) AS alter_default_metadata_ok \gset
+SELECT cloudsync_alter_apply() IS NOT NULL AS alter_non_text_defaults_apply_ok \gset
+
+INSERT INTO pg_default_tasks (id)
+VALUES ('cccccccc-cccc-cccc-cccc-cccccccccccc');
+
+SELECT count(*) = 3 AS alter_non_text_defaults_cols_ok
+FROM information_schema.columns
+WHERE table_name = 'pg_default_tasks'
+  AND column_name IN ('rank', 'done', 'metadata')
+  AND is_nullable = 'NO' \gset
+
+SELECT rank = 0 AND done = false AND metadata = '{}'::jsonb AS alter_non_text_defaults_values_ok
+FROM pg_default_tasks
+WHERE id = 'cccccccc-cccc-cccc-cccc-cccccccccccc' \gset
+
+\if :alter_default_rank_ok
+\if :alter_default_done_ok
+\if :alter_default_metadata_ok
+\if :alter_non_text_defaults_apply_ok
+\if :alter_non_text_defaults_cols_ok
+\if :alter_non_text_defaults_values_ok
+\echo [PASS] (:testid) Declarative alter accepted non-text default arguments
+\else
+\echo [FAIL] (:testid) Declarative alter non-text defaults did not populate inserted row
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+\else
+\echo [FAIL] (:testid) Declarative alter non-text defaults did not create NOT NULL columns
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+\else
+\echo [FAIL] (:testid) Declarative alter non-text defaults apply failed
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+\else
+\echo [FAIL] (:testid) Declarative alter JSON default argument failed
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+\else
+\echo [FAIL] (:testid) Declarative alter boolean default argument failed
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+\else
+\echo [FAIL] (:testid) Declarative alter integer default argument failed
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- ============================================================================
 -- Hash guards reject and roll back migrations
 -- ============================================================================
 
