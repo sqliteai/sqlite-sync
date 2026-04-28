@@ -85,6 +85,7 @@ jobs:
       INTEGRATION_TEST_APIKEY: ${{ secrets.INTEGRATION_TEST_APIKEY }}
       INTEGRATION_TEST_CLOUDSYNC_ADDRESS: ${{ secrets.INTEGRATION_TEST_CLOUDSYNC_ADDRESS }}
       INTEGRATION_TEST_OFFLINE_DATABASE_ID: ${{ secrets.INTEGRATION_TEST_OFFLINE_DATABASE_ID }}
+      INTEGRATION_TEST_FAILURE_DATABASE_ID: ${{ secrets.INTEGRATION_TEST_FAILURE_DATABASE_ID }}
 
     steps:
 
@@ -132,6 +133,7 @@ jobs:
             -e INTEGRATION_TEST_APIKEY="${{ env.INTEGRATION_TEST_APIKEY }}" \
             -e INTEGRATION_TEST_CLOUDSYNC_ADDRESS="${{ env.INTEGRATION_TEST_CLOUDSYNC_ADDRESS }}" \
             -e INTEGRATION_TEST_OFFLINE_DATABASE_ID="${{ env.INTEGRATION_TEST_OFFLINE_DATABASE_ID }}" \
+            -e INTEGRATION_TEST_FAILURE_DATABASE_ID="${{ env.INTEGRATION_TEST_FAILURE_DATABASE_ID }}" \
             alpine:latest \
             tail -f /dev/null
           docker exec alpine sh -c "apk update && apk add --no-cache gcc make curl sqlite openssl-dev musl-dev linux-headers"
@@ -206,6 +208,7 @@ jobs:
             export INTEGRATION_TEST_APIKEY="$INTEGRATION_TEST_APIKEY"
             export INTEGRATION_TEST_CLOUDSYNC_ADDRESS="$INTEGRATION_TEST_CLOUDSYNC_ADDRESS"
             export INTEGRATION_TEST_OFFLINE_DATABASE_ID="$INTEGRATION_TEST_OFFLINE_DATABASE_ID"
+            export INTEGRATION_TEST_FAILURE_DATABASE_ID="$INTEGRATION_TEST_FAILURE_DATABASE_ID"
             $(make test PLATFORM=$PLATFORM ARCH=$ARCH -n)
           EOF
           echo "::endgroup::"
