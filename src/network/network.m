@@ -61,7 +61,7 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
 }
 
 
-NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char *custom_header) {
+NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char **extra_headers, int nextra_headers) {
     
     NSString *urlString = [NSString stringWithUTF8String:endpoint];
     NSURL *url = [NSURL URLWithString:urlString];
@@ -78,11 +78,13 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.HTTPMethod = (json_payload || is_post_request) ? @"POST" : @"GET";
 
-    if (custom_header) {
-        NSString *header = [NSString stringWithUTF8String:custom_header];
-        NSArray<NSString *> *parts = [header componentsSeparatedByString:@": "];
-        if (parts.count == 2) {
-            [request setValue:parts[1] forHTTPHeaderField:parts[0]];
+    for (int i = 0; i < nextra_headers; i++) {
+        NSString *header = [NSString stringWithUTF8String:extra_headers[i]];
+        NSRange sep = [header rangeOfString:@": "];
+        if (sep.location != NSNotFound) {
+            NSString *name = [header substringToIndex:sep.location];
+            NSString *value = [header substringFromIndex:sep.location + sep.length];
+            [request setValue:value forHTTPHeaderField:name];
         }
     }
 

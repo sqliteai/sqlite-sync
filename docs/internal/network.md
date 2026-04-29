@@ -42,11 +42,12 @@ This is useful when:
    ```
 
    ```c
-   NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char *custom_header);
+   NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char **extra_headers, int nextra_headers);
 
    // Performs a network request (GET or POST depending on `is_post_request`) to the specified `endpoint`, using the given `authentication` token or header.
    // If `json_payload` is provided, it will be sent as the POST body (for `is_post_request == true`).
    // If `zero_terminated == true`, ensure that the returned buffer is null-terminated.
+   // `extra_headers` is an array of `nextra_headers` request-header lines (each formatted as `"Name: value"`) appended to the standard headers (`Authorization`, `X-CloudSync-Org`, `Content-Type`). Pass `NULL, 0` for none. Used by call sites to send `X-CloudSync-Version` on every cloudsync API call and `X-CloudSync-Capabilities: check-status-response` on calls to the `/check` endpoint.
    // Returns a `NETWORK_RESULT` enum value indicating success, error, or timeout.
    ```
 

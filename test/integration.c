@@ -488,6 +488,82 @@ int test_double_empty_network_init(const char *db_path) {
 ABORT_TEST
 }
 
+// Failure-path integration test.
+//
+// Targets a cloudsync database (INTEGRATION_TEST_FAILURE_DATABASE_ID)
+// configured server-side to fail apply and check jobs. Verifies that the
+// new failures.{apply,check} response shape is correctly parsed and emitted as
+// send.lastFailure (cloudsync_network_send_changes) and receive.lastFailure
+// (cloudsync_network_check_changes), and that cloudsync_network_sync surfaces
+// at least one of them.
+//
+// First invocation primes the server (sends data, queues a check) — server-side
+// async jobs may not have failed yet. After a sleep, the second invocation must
+// see lastFailure populated.
+int test_failure_path (const char *db_path) {
+    int rc = SQLITE_OK;
+    sqlite3 *db = NULL;
+
+    const char *test_db_id = getenv("INTEGRATION_TEST_FAILURE_DATABASE_ID");
+    if (!test_db_id) {
+        printf("(INTEGRATION_TEST_FAILURE_DATABASE_ID not set, skipping) ");
+        return SQLITE_OK;
+    }
+    const char *custom_address = getenv("INTEGRATION_TEST_CLOUDSYNC_ADDRESS");
+    if (!custom_address) {
+        printf("(INTEGRATION_TEST_CLOUDSYNC_ADDRESS not set, skipping) ");
+        return SQLITE_OK;
+    }
+
+    rc = open_load_ext(db_path, &db); RCHECK
+
+    rc = db_exec(db, "CREATE TABLE IF NOT EXISTS failure_users (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL DEFAULT '');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_init('failure_users');"); RCHECK
+
+    char network_init[1024];
+    snprintf(network_init, sizeof(network_init),
+        "SELECT cloudsync_network_init_custom('%s', '%s');", custom_address, test_db_id);
+    rc = db_exec(db, network_init); RCHECK
+
+    const char *apikey = getenv("INTEGRATION_TEST_APIKEY");
+    if (apikey) {
+        char set_apikey[512];
+        snprintf(set_apikey, sizeof(set_apikey),
+            "SELECT cloudsync_network_set_apikey('%s');", apikey);
+        rc = db_exec(db, set_apikey); RCHECK
+    }
+
+    // Insert a row so cloudsync_network_send_changes has a payload to upload.
+    char value[UUID_STR_MAXLEN];
+    cloudsync_uuid_v7_string(value, true);
+    char sql[256];
+    snprintf(sql, sizeof(sql), "INSERT INTO failure_users (id, name) VALUES ('%s', '%s');", value, value);
+    rc = db_exec(db, sql); RCHECK
+
+    // First invocation — primes the server. Failures may not yet be reported.
+    rc = db_exec(db, "SELECT cloudsync_network_send_changes();"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_network_check_changes();"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_network_sync(250, 1);"); RCHECK
+
+    // Give the server time to process and fail the queued apply/check jobs.
+    sqlite3_sleep(5000);
+
+    // Second invocation — failures must surface now.
+    // jobId is always > 0 when failure object is present, so ->> + GT0 doubles as
+    // an existence check (NULL → atoi returns 0 → fails GT0).
+    rc = db_expect_gt0(db,
+        "SELECT cloudsync_network_send_changes() ->> '$.send.lastFailure.jobId';"); RCHECK
+    rc = db_expect_gt0(db,
+        "SELECT cloudsync_network_check_changes() ->> '$.receive.lastFailure.jobId';"); RCHECK
+    // sync must surface at least one of the two; instr() catches either path.
+    rc = db_expect_gt0(db,
+        "SELECT instr(cloudsync_network_sync(250, 1), '\"lastFailure\":');"); RCHECK
+
+    rc = db_exec(db, "SELECT cloudsync_terminate();");
+
+ABORT_TEST
+}
+
 int version(void){
     sqlite3 *db = NULL;
     int rc = open_load_ext(":memory:", &db);
@@ -557,6 +633,7 @@ int main (void) {
     rc += test_report("Enable Disable Test:", test_enable_disable(DB_PATH));
     rc += test_report("Offline Error Test:", test_offline_error(":memory:"));
     rc += test_report("Double Empty Init Test:", test_double_empty_network_init(":memory:"));
+    rc += test_report("Failure Path Test:", test_failure_path(":memory:"));
 
     remove(DB_PATH); // remove the database file
 
