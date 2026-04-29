@@ -14,8 +14,11 @@
 #define CLOUDSYNC_ENDPOINT_CHECK            "check"
 #define CLOUDSYNC_ENDPOINT_APPLY            "apply"
 #define CLOUDSYNC_ENDPOINT_STATUS           "status"
-#define CLOUDSYNC_HEADER_SQLITECLOUD        "Accept: sqlc/plain"
 #define CLOUDSYNC_HEADER_ORG                "X-CloudSync-Org"
+#define CLOUDSYNC_HEADER_VERSION            "X-CloudSync-Version"
+// CLOUDSYNC_VERSION is defined in cloudsync.h — include it before this header at use sites.
+#define CLOUDSYNC_HEADER_VERSION_LINE       CLOUDSYNC_HEADER_VERSION ": " CLOUDSYNC_VERSION
+#define CLOUDSYNC_HEADER_CHECK_CAPABILITIES "X-CloudSync-Capabilities: check-status-response"
 
 #define CLOUDSYNC_NETWORK_OK                1
 #define CLOUDSYNC_NETWORK_ERROR             2
@@ -36,7 +39,7 @@ char *network_data_get_orgid (network_data *data);
 bool network_data_set_endpoints (network_data *data, char *auth, char *check, char *upload, char *apply, char *status);
 
 bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size);
-NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char *custom_header);
+NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char **extra_headers, int nextra_headers);
 
 
 #endif

@@ -72,6 +72,17 @@ typedef struct {
     size_t      read_pos;
 } network_read_data;
 
+static const char *cloudsync_default_headers[] = {
+    CLOUDSYNC_HEADER_VERSION_LINE,
+};
+
+static const char *cloudsync_check_headers[] = {
+    CLOUDSYNC_HEADER_VERSION_LINE,
+    CLOUDSYNC_HEADER_CHECK_CAPABILITIES,
+};
+
+#define ARRAY_LEN(a) ((int)(sizeof(a) / sizeof((a)[0])))
+
 // MARK: -
 
 void network_result_cleanup (NETWORK_RESULT *res) {
@@ -193,7 +204,7 @@ static size_t network_receive_callback (void *ptr, size_t size, size_t nmemb, vo
     return (size * nmemb);
 }
 
-NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char *custom_header) {
+NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char **extra_headers, int nextra_headers) {
     char *buffer = NULL;
     size_t blen = 0;
     struct curl_slist* headers = NULL;
@@ -219,8 +230,8 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &pem_blob);
     #endif
     
-    if (custom_header) {
-        struct curl_slist *tmp = curl_slist_append(headers, custom_header);
+    for (int i = 0; i < nextra_headers; i++) {
+        struct curl_slist *tmp = curl_slist_append(headers, extra_headers[i]);
         if (!tmp) {rc = CURLE_OUT_OF_MEMORY; goto cleanup;}
         headers = tmp;
     }
@@ -430,7 +441,7 @@ int network_download_changes (sqlite3_context *context, const char *download_url
         return -1;
     }
 
-    NETWORK_RESULT result = network_receive_buffer(netdata, download_url, NULL, false, false, NULL, NULL);
+    NETWORK_RESULT result = network_receive_buffer(netdata, download_url, NULL, false, false, NULL, NULL, 0);
 
     int rc = SQLITE_OK;
     if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
@@ -943,8 +954,8 @@ void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, s
         return;
     }
     
-    NETWORK_RESULT res = network_receive_buffer(netdata, netdata->status_endpoint, netdata->authentication, true, false, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
-    
+    NETWORK_RESULT res = network_receive_buffer(netdata, netdata->status_endpoint, netdata->authentication, true, false, NULL, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
+
     int64_t last_optimistic_version = -1;
 
     if (res.code == CLOUDSYNC_NETWORK_BUFFER && res.buffer) {
@@ -992,7 +1003,7 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     NETWORK_RESULT res;
     if (blob != NULL && blob_size > 0) {
         // there is data to send
-        res = network_receive_buffer(netdata, netdata->upload_endpoint, netdata->authentication, true, false, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
+        res = network_receive_buffer(netdata, netdata->upload_endpoint, netdata->authentication, true, false, NULL, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
         if (res.code != CLOUDSYNC_NETWORK_BUFFER) {
             cloudsync_memory_free(blob);
             network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to receive upload URL");
@@ -1027,11 +1038,11 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
         network_result_cleanup(&res);
         
         // notify remote host that we succesfully uploaded changes
-        res = network_receive_buffer(netdata, netdata->apply_endpoint, netdata->authentication, true, true, json_payload, CLOUDSYNC_HEADER_SQLITECLOUD);
+        res = network_receive_buffer(netdata, netdata->apply_endpoint, netdata->authentication, true, true, json_payload, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
     } else {
         // there is no data to send, just check the status to update the db_version value in settings and to reply the status
         new_db_version = db_version;
-        res = network_receive_buffer(netdata, netdata->status_endpoint, netdata->authentication, true, false, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
+        res = network_receive_buffer(netdata, netdata->status_endpoint, netdata->authentication, true, false, NULL, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
     }
 
     int64_t last_optimistic_version = -1;
@@ -1130,7 +1141,7 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
     char json_payload[2024];
     snprintf(json_payload, sizeof(json_payload), "{\"dbVersion\":%lld, \"seq\":%d}", (long long)db_version, seq);
 
-    NETWORK_RESULT result = network_receive_buffer(netdata, netdata->check_endpoint, netdata->authentication, true, true, json_payload, CLOUDSYNC_HEADER_SQLITECLOUD);
+    NETWORK_RESULT result = network_receive_buffer(netdata, netdata->check_endpoint, netdata->authentication, true, true, json_payload, cloudsync_check_headers, ARRAY_LEN(cloudsync_check_headers));
     int rc = SQLITE_OK;
     if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
         // The /check endpoint returns one of two shapes:
@@ -1419,7 +1430,7 @@ void cloudsync_network_status (sqlite3_context *context, int argc, sqlite3_value
         return;
     }
 
-    NETWORK_RESULT res = network_receive_buffer(netdata, netdata->status_endpoint, netdata->authentication, true, false, NULL, CLOUDSYNC_HEADER_SQLITECLOUD);
+    NETWORK_RESULT res = network_receive_buffer(netdata, netdata->status_endpoint, netdata->authentication, true, false, NULL, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
     network_set_sqlite_result(context, &res);
     network_result_cleanup(&res);
 }

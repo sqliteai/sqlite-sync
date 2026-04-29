@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [1.0.18] - 2026-04-28
+## [1.0.18] - 2026-04-29
 
 ### Changed
 
@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - **`receive.lastFailure`** JSON field on `cloudsync_network_check_changes()` and `cloudsync_network_sync()`. Forwarded verbatim from the server's `failures.check` (e.g. `encode_changes` job failures), and emitted alongside but distinct from `receive.error` (which remains a string for client-side `cloudsync_payload_apply` failures). Per-function scoping is strict: `cloudsync_network_send_changes()` is send/apply-scoped (only `send.lastFailure`); `cloudsync_network_check_changes()` is check-scoped (only `receive.lastFailure`); `cloudsync_network_sync()` reports both.
+- Updated the request headers sent to the cloudsync HTTP endpoints (version advertisement and per-endpoint capabilities; legacy `Accept` header removed).
 
 ## [1.0.17] - 2026-04-24
 
