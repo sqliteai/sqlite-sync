@@ -6,15 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [1.0.18] - 2026-04-29
 
-### Changed
+### Fixed
 
-- **`cloudsync_network_send_changes()` and `cloudsync_network_sync()`**: `send.lastFailure` is now sourced from the server's per-stage `failures.apply` object. The wire-format SQL field (`send.lastFailure`) is unchanged in shape — it is still forwarded verbatim from the server.
-- **`cloudsync_network_check_changes()`**: now correctly handles the `/check` endpoint's status snapshot response (returned when no artifact is yet available). Previously this path errored with `missing 'url' in check response`; the function now treats it as "no rows yet, not an error" and surfaces any server-reported check failure via the new `receive.lastFailure` field.
+- **`cloudsync_network_check_changes()`** no longer errors with `missing 'url' in check response` when the server has not yet prepared any incoming changes for this device. The function now returns the standard "no rows yet" response in that case, so polling loops keep working without spurious errors.
 
 ### Added
 
-- **`receive.lastFailure`** JSON field on `cloudsync_network_check_changes()` and `cloudsync_network_sync()`. Forwarded verbatim from the server's `failures.check` (e.g. `encode_changes` job failures), and emitted alongside but distinct from `receive.error` (which remains a string for client-side `cloudsync_payload_apply` failures). Per-function scoping is strict: `cloudsync_network_send_changes()` is send/apply-scoped (only `send.lastFailure`); `cloudsync_network_check_changes()` is check-scoped (only `receive.lastFailure`); `cloudsync_network_sync()` reports both.
-- Updated the request headers sent to the cloudsync HTTP endpoints (version advertisement and per-endpoint capabilities; legacy `Accept` header removed).
+- **`receive.lastFailure`** JSON field on `cloudsync_network_check_changes()` and `cloudsync_network_sync()`, surfacing the most recent server-side failure of the receive pipeline (e.g. the server failed to prepare the next batch of incoming changes for this device). It complements the existing `send.lastFailure` (server-side apply failures) and `receive.error` (local apply failures on this device), so applications can distinguish "the server has trouble producing my changes" from "I had trouble applying them locally". Each function reports only the failures relevant to its own scope: `cloudsync_network_send_changes()` reports `send.lastFailure`; `cloudsync_network_check_changes()` reports `receive.lastFailure`; `cloudsync_network_sync()` reports both.
+
+### Changed
+
+- Updated the request headers sent to the cloudsync HTTP endpoints (version advertisement, per-endpoint capabilities; legacy `Accept` header removed).
 
 ## [1.0.17] - 2026-04-24
 
