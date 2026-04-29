@@ -894,7 +894,9 @@ static int test_mock_migration_upload_error_keeps_pending(void) {
     if (rc != SQLITE_OK) goto cleanup;
     rc = db_exec(db, "INSERT INTO upload_notes (id) VALUES ('u1');");
     if (rc != SQLITE_OK) goto cleanup;
-    rc = expect_sql_error_contains(db, "SELECT cloudsync_network_send_changes();", "pending schema migration");
+    rc = expect_sql_error_contains(db, "SELECT cloudsync_network_send_changes();", "missing schema api key");
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = db_expect_int(db, "SELECT count(*) FROM cloudsync_pending_migration WHERE uploaded_at IS NULL;", 1);
 
 cleanup:
     if (db) {
@@ -932,7 +934,9 @@ static int test_mock_migration_upload_missing_status_keeps_pending(void) {
     if (rc != SQLITE_OK) goto cleanup;
     rc = db_exec(db, "INSERT INTO upload_missing_status_notes (id) VALUES ('u1');");
     if (rc != SQLITE_OK) goto cleanup;
-    rc = expect_sql_error_contains(db, "SELECT cloudsync_network_send_changes();", "pending schema migration");
+    rc = expect_sql_error_contains(db, "SELECT cloudsync_network_send_changes();", "accepted status");
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = db_expect_int(db, "SELECT count(*) FROM cloudsync_pending_migration WHERE uploaded_at IS NULL;", 1);
 
 cleanup:
     if (db) {

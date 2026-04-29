@@ -46,25 +46,56 @@ SELECT cloudsync_alter_apply();
 ```
 
 `cloudsync_alter_apply()` applies the queued migration locally and stores the
-generated payload in `cloudsync_pending_migration`. After that, an authorized
-client uploads it with:
+generated payload in `cloudsync_pending_migration`. On the next
+`cloudsync_network_sync()` or `cloudsync_network_send_changes()`, the network
+layer uploads every pending schema migration before it sends row data:
 
 ```sql
-SELECT cloudsync_network_migration_upload();
 SELECT cloudsync_network_sync();
 ```
 
-The zero-argument upload form uploads the next pending local migration and marks
-it uploaded only after the backend returns valid JSON. The one-argument form is
-still available for custom backends or tests:
+The zero-argument upload form is still available when an application wants to
+publish schema separately from row data. It uploads the next pending local
+migration and marks it uploaded only after the backend returns an accepted
+response. The one-argument form is available for custom backends or tests:
 
 ```sql
 SELECT cloudsync_network_migration_upload(:json_payload);
 ```
 
-While a local migration is pending upload, `cloudsync_network_send_changes()`
-returns an error instead of sending row changes. This prevents data produced
-with a new local schema from reaching a server that has not accepted that schema.
+If a pending migration upload fails, row changes are not sent. This prevents
+data produced with a new local schema from reaching a server that has not
+accepted that schema.
+
+## Initial Schema Sync
+
+The first version of a database is distributed with the same migration protocol
+used for later schema changes. There is no separate bootstrap format.
+
+Client-to-cloud first sync:
+
+1. The client must have `database_id` configured and must sync with an API key
+   that is allowed to initiate schema migrations.
+2. The app defines the first schema with `cloudsync_alter_create_table()`,
+   `cloudsync_alter_add_column()`, `cloudsync_alter_augment_table()`, and any
+   optional commands such as `cloudsync_alter_set_block_lww()`.
+3. `cloudsync_alter_apply()` creates the local tables, records the schema epoch,
+   and stores a pending upload in `cloudsync_pending_migration`.
+4. The app may insert initial data.
+5. `cloudsync_network_sync()` uploads the pending schema migration first. The
+   backend applies it to the cloud database, records it in the per-`database_id`
+   schema log, and only then can row data be uploaded.
+
+Cloud-to-client first sync:
+
+1. The backend applies and records the initial migration for the `database_id`.
+2. A new SQLite client only needs `database_id` and a valid API key.
+3. `cloudsync_network_sync()` detects that the local database has no augmented
+   tables, calls the schema check endpoint, applies the first migration locally,
+   and then continues with normal row download.
+
+An empty client that has no local schema and no server-side migration simply
+returns an empty sync result.
 
 ## Declarative API
 
@@ -259,7 +290,7 @@ Client-originated migration:
 1. Application queues operations with `cloudsync_alter_*`.
 2. Application calls `cloudsync_alter_apply()`.
 3. Extension applies the migration locally and writes `cloudsync_pending_migration`.
-4. Application or `cloudsync_network_sync()` uploads the pending migration.
+4. `cloudsync_network_sync()` uploads the pending migration before row changes; applications may call `cloudsync_network_migration_upload()` explicitly when they want a separate schema publish step.
 5. Backend authorizes the API key, applies the payload to the cloud database,
    records the migration, and returns success.
 6. Client sends row changes after the pending migration is uploaded.
@@ -286,7 +317,7 @@ Empty client first sync:
 - A migration id is idempotent through `cloudsync_migrations`.
 - Explicit hash guards are enforced when present.
 - Raw SQL runs inside the same savepoint as portable operations.
-- Row changes are not uploaded while `cloudsync_pending_migration` contains an unuploaded migration.
+- Row changes are uploaded only after all pending local schema migrations have been accepted by the backend.
 - V2 migrations should be blocked by the backend when stale/offline clients may still upload incompatible old-epoch payloads, unless the backend has an explicit rejection or translation policy.
 
 ## Tests

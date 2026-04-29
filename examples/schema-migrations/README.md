@@ -21,15 +21,26 @@ SELECT cloudsync_alter_add_column('notes', 'updated_at', 'timestamp', false, '19
 SELECT cloudsync_alter_augment_table('notes', 'CLS', 1);
 SELECT cloudsync_alter_set_block_lww('notes', 'body', char(10));
 SELECT cloudsync_alter_apply();
-SELECT cloudsync_network_migration_upload();
 SELECT cloudsync_network_sync();
 ```
 
-`cloudsync_alter_preview()` can be used before `cloudsync_alter_apply()` to inspect the generated payload. After apply, the payload is saved in `cloudsync_pending_migration`; `cloudsync_network_migration_upload()` uploads the next pending migration and marks it uploaded on success.
+`cloudsync_alter_preview()` can be used before `cloudsync_alter_apply()` to inspect the generated payload. After apply, the payload is saved in `cloudsync_pending_migration`; `cloudsync_network_sync()` uploads pending migrations before it sends row changes. `cloudsync_network_migration_upload()` is still available when schema should be published separately from data.
 
 The backend should authorize the API key, apply the payload to the cloud database, append it to the schema migration log for the `database_id`, and distribute it to other clients through `schema/check` or `schema/download`.
 
 `client-to-server.sql` contains the same flow as an executable SQLite example. `client-to-server-v1.json` is the manual JSON equivalent for backend tests or custom tooling; application code should normally let `cloudsync_alter_apply()` generate that payload.
+
+## Initial Database Sync
+
+The first version of a database uses the same flow. A schema-capable client
+queues the first `createTable` migration, calls `cloudsync_alter_apply()`,
+optionally inserts initial rows, and then calls `cloudsync_network_sync()`.
+The schema upload is accepted by the backend before any row payload is sent.
+
+For cloud-to-client bootstrap, the backend records the initial migration first.
+A new SQLite client with only `database_id` and an API key calls
+`cloudsync_network_sync()`; the client downloads the first schema migration,
+creates/augments the tables, and then downloads data normally.
 
 ## Server-Originated V2 Migration
 

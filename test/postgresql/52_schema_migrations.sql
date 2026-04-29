@@ -1482,6 +1482,37 @@ SELECT count(*) = 0 AS existing_create_unrecorded_ok
 FROM cloudsync_migrations
 WHERE migration_id = 'mig-pg-existing-create' \gset
 
+-- ============================================================================
+-- Initial schema sync generated from declarative API
+-- ============================================================================
+
+SELECT cloudsync_alter_create_table('initial_pg_notes');
+SELECT cloudsync_alter_add_column('initial_pg_notes', 'id', 'uuid', false);
+SELECT cloudsync_alter_add_primary_key('initial_pg_notes', 'id');
+SELECT cloudsync_alter_add_column('initial_pg_notes', 'body', 'text', false, '');
+SELECT cloudsync_alter_augment_table('initial_pg_notes', 'CLS', 0);
+SELECT cloudsync_alter_set_block_lww('initial_pg_notes', 'body', E'\n');
+SELECT cloudsync_alter_apply() IS NOT NULL AS initial_pg_apply_ok \gset
+
+SELECT count(*) = 1 AS initial_pg_pending_ok
+FROM cloudsync_pending_migration
+WHERE uploaded_at IS NULL
+  AND payload::jsonb->>'type' = 'cloudsync.schema.migration'
+  AND payload::jsonb->'ops' @> '[{"op":"createTable","table":"initial_pg_notes"}]'::jsonb \gset
+
+SELECT count(*) = 1 AS initial_pg_recorded_ok
+FROM cloudsync_migrations
+WHERE migration_id = (
+  SELECT migration_id
+  FROM cloudsync_pending_migration
+  WHERE uploaded_at IS NULL AND payload::jsonb->'ops' @> '[{"op":"createTable","table":"initial_pg_notes"}]'::jsonb
+  LIMIT 1
+) \gset
+
+SELECT count(*) = 1 AS initial_pg_block_ok
+FROM cloudsync_table_settings
+WHERE tbl_name = 'initial_pg_notes' AND col_name = 'body' AND key = 'algo' AND value = 'block' \gset
+
 SELECT count(*) AS migrations_before_atomic
 FROM cloudsync_migrations \gset
 
@@ -1533,6 +1564,28 @@ SELECT (:fail::int + 1) AS fail \gset
 \endif
 \else
 \echo [FAIL] (:testid) createTable accepted an existing conflicting table
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+\if :initial_pg_apply_ok
+\if :initial_pg_pending_ok
+\if :initial_pg_recorded_ok
+\if :initial_pg_block_ok
+\echo [PASS] (:testid) declarative initial schema sync generated pending PostgreSQL migration
+\else
+\echo [FAIL] (:testid) initial PostgreSQL schema sync missed block LWW settings
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+\else
+\echo [FAIL] (:testid) initial PostgreSQL schema sync was not recorded locally
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+\else
+\echo [FAIL] (:testid) initial PostgreSQL schema sync did not create pending upload
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+\else
+\echo [FAIL] (:testid) initial PostgreSQL schema sync apply failed
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 

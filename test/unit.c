@@ -13369,6 +13369,56 @@ cleanup:
     return result;
 }
 
+bool do_test_initial_schema_sync_to_empty_client (void) {
+    sqlite3 *db[2] = {NULL, NULL};
+    char *migration_payload = NULL;
+    bool result = false;
+
+    db[0] = do_create_database();
+    db[1] = do_create_database();
+    if (!db[0] || !db[1]) goto cleanup;
+
+    int rc = sqlite3_exec(db[0],
+        "SELECT cloudsync_alter_create_table('initial_notes');"
+        "SELECT cloudsync_alter_add_column('initial_notes', 'id', 'text', 0);"
+        "SELECT cloudsync_alter_add_primary_key('initial_notes', 'id');"
+        "SELECT cloudsync_alter_add_column('initial_notes', 'title', 'text', 0, '');"
+        "SELECT cloudsync_alter_add_column('initial_notes', 'body', 'text', 0, '');"
+        "SELECT cloudsync_alter_augment_table('initial_notes');"
+        "SELECT cloudsync_alter_set_block_lww('initial_notes', 'body', char(10));"
+        "SELECT cloudsync_alter_apply();",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    int64_t pending = do_select_int(db[0], "SELECT count(*) FROM cloudsync_pending_migration WHERE uploaded_at IS NULL;");
+    migration_payload = do_select_text(db[0], "SELECT payload FROM cloudsync_pending_migration WHERE uploaded_at IS NULL ORDER BY created_at, migration_id LIMIT 1;");
+    if (pending != 1 || !migration_payload) goto cleanup;
+
+    if (!do_apply_migration_json(db[1], migration_payload)) goto cleanup;
+
+    rc = sqlite3_exec(db[0],
+        "INSERT INTO initial_notes (id, title, body) VALUES ('n1', 'hello', 'line 1' || char(10) || 'line 2');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    if (!do_merge_using_payload(db[0], db[1], true, true)) goto cleanup;
+
+    int64_t table_exists = do_select_int(db[1], "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='initial_notes';");
+    int64_t block_settings = do_select_int(db[1], "SELECT count(*) FROM cloudsync_table_settings WHERE tbl_name='initial_notes' AND col_name='body' AND key='algo' AND value='block';");
+    int64_t row_count = do_select_int(db[1], "SELECT count(*) FROM initial_notes WHERE id='n1' AND title='hello' AND body='line 1' || char(10) || 'line 2';");
+    int64_t blocks_table = do_select_int(db[1], "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='initial_notes_cloudsync_blocks';");
+
+    result = (table_exists == 1 && block_settings == 1 && row_count == 1 && blocks_table == 1);
+    if (!result) {
+        printf("initial_schema_sync: table=%lld block_settings=%lld rows=%lld blocks_table=%lld\n",
+               (long long)table_exists, (long long)block_settings, (long long)row_count, (long long)blocks_table);
+    }
+
+cleanup:
+    if (migration_payload) sqlite3_free(migration_payload);
+    for (int i = 0; i < 2; ++i) if (db[i]) close_db(db[i]);
+    return result;
+}
+
 bool do_test_row_payload_retry_after_migration_json (void) {
     sqlite3 *db[2] = {NULL, NULL};
     char *migration_payload = NULL;
@@ -13729,6 +13779,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Migration Dialect Nullable:", do_test_declarative_alter_dialect_nullable_is_portable());
     result += test_report("Migration Dialect Replace:", do_test_declarative_alter_dialect_replacement_clears_default());
     result += test_report("Migration JSON Two Devices:", do_test_generated_migration_json_roundtrip_two_devices());
+    result += test_report("Initial Schema Sync:", do_test_initial_schema_sync_to_empty_client());
     result += test_report("Migration Payload Retry:", do_test_row_payload_retry_after_migration_json());
     result += test_report("Declarative Alter API:", do_test_declarative_alter_builder());
     result += test_report("Declarative Alter Atomic:", do_test_declarative_alter_apply_atomic_pending_save());

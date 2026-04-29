@@ -77,6 +77,7 @@ typedef struct {
 } network_read_data;
 
 static int cloudsync_network_migration_check_internal(sqlite3_context *context, char **result_json, char **err_out);
+static int cloudsync_network_migration_upload_next_pending(sqlite3_context *context, char **result_json, char **err_out);
 static bool network_migration_apply_error(const char *message);
 static void network_result_to_sqlite_error(sqlite3_context *context, NETWORK_RESULT res, const char *default_error_message);
 network_data *cloudsync_network_data(sqlite3_context *context);
@@ -979,71 +980,124 @@ void cloudsync_network_migration_download(sqlite3_context *context, int argc, sq
 }
 
 void cloudsync_network_migration_upload(sqlite3_context *context, int argc, sqlite3_value **argv) {
-    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     network_data *netdata = cloudsync_network_data(context);
     if (!netdata || !netdata->schema_upload_endpoint) {
         sqlite3_result_error(context, "Unable to retrieve CloudSync schema migration upload endpoint.", -1);
         return;
     }
 
-    bool from_pending = false;
-    char *pending_id = NULL;
-    char *pending_payload = NULL;
     const char *payload = NULL;
 
     if (argc == 0) {
-        pending_id = cloudsync_pending_migration_next_id(data);
-        if (!pending_id) {
-            sqlite3_result_error(context, "No pending schema migration to upload.", -1);
-            return;
-        }
-        pending_payload = cloudsync_pending_migration_payload(data, pending_id);
-        if (!pending_payload) {
-            sqlite3_result_error(context, "Unable to load pending schema migration payload.", -1);
-            cloudsync_memory_free(pending_id);
-            return;
-        }
-        payload = pending_payload;
-        from_pending = true;
+        char *result = NULL;
+        int rc = cloudsync_network_migration_upload_next_pending(context, &result, NULL);
+        if (rc == SQLITE_OK && result) sqlite3_result_text(context, result, -1, cloudsync_memory_free);
+        else if (rc == SQLITE_OK) sqlite3_result_text(context, "{\"status\":\"uploaded\"}", -1, SQLITE_TRANSIENT);
     } else {
         payload = (const char *)sqlite3_value_text(argv[0]);
-    }
 
-    if (!payload || payload[0] == '\0') {
-        sqlite3_result_error(context, "cloudsync_network_migration_upload expects a JSON text payload.", -1);
-        if (pending_id) cloudsync_memory_free(pending_id);
-        if (pending_payload) cloudsync_memory_free(pending_payload);
-        return;
-    }
-    if (!json_is_valid_root_object(payload, strlen(payload))) {
-        sqlite3_result_error(context, "cloudsync_network_migration_upload expects a valid JSON object payload.", -1);
-        if (pending_id) cloudsync_memory_free(pending_id);
-        if (pending_payload) cloudsync_memory_free(pending_payload);
-        return;
-    }
+        if (!payload || payload[0] == '\0') {
+            sqlite3_result_error(context, "cloudsync_network_migration_upload expects a JSON text payload.", -1);
+            return;
+        }
+        if (!json_is_valid_root_object(payload, strlen(payload))) {
+            sqlite3_result_error(context, "cloudsync_network_migration_upload expects a valid JSON object payload.", -1);
+            return;
+        }
 
-    NETWORK_RESULT res = network_receive_buffer(netdata, netdata->schema_upload_endpoint, netdata->authentication, true, true, (char *)payload, CLOUDSYNC_HEADER_SQLITECLOUD);
-    if (network_validate_json_response(context, &res, "CloudSync schema migration upload endpoint", NULL)) {
-        int rc = DBRES_OK;
-        char *upload_error = network_migration_upload_error_message(&res);
-        if (res.code == CLOUDSYNC_NETWORK_ERROR) {
-            network_set_sqlite_result(context, &res);
-        } else if (upload_error) {
-            sqlite3_result_error(context, upload_error, -1);
-        } else {
-            if (from_pending) rc = cloudsync_pending_migration_mark_uploaded(data, pending_id);
-            if (rc == DBRES_OK) {
+        NETWORK_RESULT res = network_receive_buffer(netdata, netdata->schema_upload_endpoint, netdata->authentication, true, true, (char *)payload, CLOUDSYNC_HEADER_SQLITECLOUD);
+        if (network_validate_json_response(context, &res, "CloudSync schema migration upload endpoint", NULL)) {
+            char *upload_error = network_migration_upload_error_message(&res);
+            if (res.code == CLOUDSYNC_NETWORK_ERROR) {
                 network_set_sqlite_result(context, &res);
+            } else if (upload_error) {
+                sqlite3_result_error(context, upload_error, -1);
             } else {
+                network_set_sqlite_result(context, &res);
+            }
+            if (upload_error) cloudsync_memory_free(upload_error);
+        }
+        network_result_cleanup(&res);
+    }
+}
+
+static int cloudsync_network_migration_upload_next_pending(sqlite3_context *context, char **result_json, char **err_out) {
+    if (result_json) *result_json = NULL;
+    if (err_out) *err_out = NULL;
+
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    network_data *netdata = cloudsync_network_data(context);
+    if (!netdata || !netdata->schema_upload_endpoint) {
+        const char *message = "Unable to retrieve CloudSync schema migration upload endpoint.";
+        if (err_out) *err_out = cloudsync_string_dup(message);
+        else sqlite3_result_error(context, message, -1);
+        return SQLITE_ERROR;
+    }
+
+    char *pending_id = cloudsync_pending_migration_next_id(data);
+    if (!pending_id) {
+        const char *message = "No pending schema migration to upload.";
+        if (err_out) *err_out = cloudsync_string_dup(message);
+        else sqlite3_result_error(context, message, -1);
+        return SQLITE_ERROR;
+    }
+
+    char *pending_payload = cloudsync_pending_migration_payload(data, pending_id);
+    if (!pending_payload) {
+        const char *message = "Unable to load pending schema migration payload.";
+        if (err_out) *err_out = cloudsync_string_dup(message);
+        else sqlite3_result_error(context, message, -1);
+        cloudsync_memory_free(pending_id);
+        return SQLITE_ERROR;
+    }
+
+    int rc = SQLITE_ERROR;
+    if (!json_is_valid_root_object(pending_payload, strlen(pending_payload))) {
+        const char *message = "cloudsync_network_migration_upload expects a valid JSON object payload.";
+        if (err_out) *err_out = cloudsync_string_dup(message);
+        else sqlite3_result_error(context, message, -1);
+        goto cleanup;
+    }
+
+    NETWORK_RESULT res = network_receive_buffer(netdata, netdata->schema_upload_endpoint, netdata->authentication, true, true, pending_payload, CLOUDSYNC_HEADER_SQLITECLOUD);
+    if (!network_validate_json_response(context, &res, "CloudSync schema migration upload endpoint", err_out)) {
+        network_result_cleanup(&res);
+        goto cleanup;
+    }
+
+    char *upload_error = network_migration_upload_error_message(&res);
+    if (res.code == CLOUDSYNC_NETWORK_ERROR) {
+        if (err_out) *err_out = res.buffer ? cloudsync_string_dup(res.buffer) : cloudsync_string_dup("CloudSync schema migration upload failed.");
+        else network_set_sqlite_result(context, &res);
+    } else if (upload_error) {
+        if (err_out) *err_out = cloudsync_string_dup(upload_error);
+        else sqlite3_result_error(context, upload_error, -1);
+    } else {
+        int db_rc = cloudsync_pending_migration_mark_uploaded(data, pending_id);
+        if (db_rc == DBRES_OK) {
+            if (result_json && res.code == CLOUDSYNC_NETWORK_BUFFER && res.buffer) {
+                *result_json = cloudsync_memory_zeroalloc(res.blen + 1);
+                if (*result_json) memcpy(*result_json, res.buffer, res.blen);
+                else rc = SQLITE_NOMEM;
+            }
+            if (rc != SQLITE_NOMEM) rc = SQLITE_OK;
+            else if (!err_out) sqlite3_result_error_code(context, SQLITE_NOMEM);
+            if (!result_json && !err_out) network_set_sqlite_result(context, &res);
+        } else {
+            if (err_out) *err_out = cloudsync_string_dup(cloudsync_errmsg(data));
+            else {
                 sqlite3_result_error(context, cloudsync_errmsg(data), -1);
-                sqlite3_result_error_code(context, rc);
+                sqlite3_result_error_code(context, db_rc);
             }
         }
-        if (upload_error) cloudsync_memory_free(upload_error);
     }
+    if (upload_error) cloudsync_memory_free(upload_error);
     network_result_cleanup(&res);
+
+cleanup:
     if (pending_id) cloudsync_memory_free(pending_id);
     if (pending_payload) cloudsync_memory_free(pending_payload);
+    return rc;
 }
 
 int network_extract_query_param (const char *query, const char *key, char *output, size_t output_size) {
@@ -1417,9 +1471,20 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
         }
     }
 
-    if (cloudsync_pending_migration_count(data) > 0) {
-        sqlite3_result_error(context, "A pending schema migration must be uploaded before sending row changes.", -1);
-        return SQLITE_ERROR;
+    while (cloudsync_pending_migration_count(data) > 0) {
+        char *migration_result = NULL;
+        char *migration_err = NULL;
+        int mrc = cloudsync_network_migration_upload_next_pending(context, &migration_result, &migration_err);
+        if (migration_result) cloudsync_memory_free(migration_result);
+        if (migration_err) {
+            sqlite3_result_error(context, migration_err, -1);
+            cloudsync_memory_free(migration_err);
+            return SQLITE_ERROR;
+        }
+        if (mrc != SQLITE_OK) {
+            if (mrc == SQLITE_NOMEM) sqlite3_result_error_code(context, SQLITE_NOMEM);
+            return mrc;
+        }
     }
     
     // retrieve payload
