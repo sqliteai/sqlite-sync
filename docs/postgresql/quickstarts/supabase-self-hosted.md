@@ -13,15 +13,15 @@ Follow [Supabase's Installing Supabase](https://supabase.com/docs/guides/self-ho
 ```yaml
 db:
   # Supabase on PostgreSQL 15
-  image: sqlitecloud/sqlite-sync-supabase:15.8.1.085
+  image: sqlitecloud/sqlite-sync-supabase:15
   # instead of: public.ecr.aws/supabase/postgres:15.8.1.085
 
   # OR Supabase on PostgreSQL 17
-  image: sqlitecloud/sqlite-sync-supabase:17.6.1.071
+  image: sqlitecloud/sqlite-sync-supabase:17
   # instead of: public.ecr.aws/supabase/postgres:17.6.1.071
 ```
 
-Use the tag that matches your Supabase Postgres base image exactly. Convenience tags `sqlitecloud/sqlite-sync-supabase:15` and `sqlitecloud/sqlite-sync-supabase:17` are also published, but the exact Supabase tag is the safest choice.
+Use the CloudSync image tag that matches your Supabase PostgreSQL major version. The published major tags `sqlitecloud/sqlite-sync-supabase:15` and `sqlitecloud/sqlite-sync-supabase:17` are the standard choice. Exact Supabase base-image tags may also be published for some releases, but they are optional and not required for normal setup.
 
 ### Add the CloudSync Init Script
 
@@ -59,8 +59,8 @@ Follow [Supabase's Updating](https://supabase.com/docs/guides/self-hosting/docke
 
 ```bash
 # Update docker-compose.yml to use:
-# sqlitecloud/sqlite-sync-supabase:15.8.1.085
-# or sqlitecloud/sqlite-sync-supabase:17.6.1.071
+# sqlitecloud/sqlite-sync-supabase:15
+# or sqlitecloud/sqlite-sync-supabase:17
 docker compose pull
 docker compose down && docker compose up -d
 ```
@@ -130,6 +130,8 @@ On the **Client Integration** tab you'll find your **Database ID** and authentic
 
 The fastest way to test CloudSync without per-user access control — no JWT setup needed.
 
+With API key authentication, CloudSync uses the database role resolved from the API-key-authenticated connection when available; otherwise it falls back to the role from the connection string.
+
 ```sql
 SELECT cloudsync_network_init('<database-id>');
 SELECT cloudsync_network_set_apikey('<username>:<password>');
@@ -140,9 +142,22 @@ SELECT cloudsync_network_sync();
 
 1. Set **Row Level Security** to **Yes, enforce RLS**
 2. Under **Authentication (JWT)**, click **Configure authentication** and choose:
-   - **HMAC Secret (HS256):** Enter your `JWT_SECRET` from Supabase's `.env`
-   - **JWKS Issuer Validation:** Enter the issuer base URL from your token's `iss` claim (e.g. `https://your-auth-domain`). CloudSync automatically fetches the JWKS document from `<issuer-url>/.well-known/jwks.json`
-3. In your client code:
+   - **HMAC Secret (HS256):**
+     - Enter your `JWT_SECRET` from Supabase's `.env`
+     - Optionally add **Expected audiences**. When configured, a token's `aud` claim must contain at least one of the configured audience values.
+   - **JWKS Issuer Validation:**
+     - Enter the issuer base URL from your token's `iss` claim (for example `https://your-auth-domain`)
+     - By default, CloudSync uses OIDC discovery: it requests `<issuer>/.well-known/openid-configuration` and reads the returned `jwks_uri`
+     - Optionally set an **Explicit JWKS URI** to bypass OIDC discovery and use a specific JWKS endpoint directly. This must be a full HTTPS URI.
+     - Optionally add **Expected audiences**. When configured, a token's `aud` claim must contain at least one of the configured audience values.
+3. CloudSync validates JWTs as follows:
+   - **HS256:** uses the configured JWT secret
+   - **JWKS:** uses the explicit `jwksUri` when provided; otherwise CloudSync requests `<issuer>/.well-known/openid-configuration` and reads `jwks_uri`
+   - CloudSync does not fall back directly to `<issuer>/.well-known/jwks.json` when discovery is used
+4. For claim details and RLS examples, see:
+   - [JWT Claims Reference](../reference/jwt-claims.md)
+   - [RLS Reference](../reference/rls.md)
+5. In your client code:
    ```sql
    SELECT cloudsync_network_init('<database-id>');
    SELECT cloudsync_network_set_token('<jwt-token>');

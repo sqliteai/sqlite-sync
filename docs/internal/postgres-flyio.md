@@ -289,17 +289,21 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Generate token
-  // POST /token { "sub": "user-id", "role": "authenticated", "expiresIn": "24h" }
+  // POST /token { "sub": "user-id", "role": "rls_role", "expiresIn": "24h" }
   if (req.method === "POST" && req.url === "/token") {
     try {
       const body = await parseBody(req);
       const sub = body.sub || "anonymous";
-      const role = body.role || "authenticated";
+      const role = body.role;
       const expiresIn = body.expiresIn || "24h";
       const claims = body.claims || {};
 
+      if (!role) {
+        return respond(res, 400, { error: "role is required" });
+      }
+
       const token = jwt.sign(
-        { sub, role, aud: "authenticated", ...claims },
+        { sub, role, ...claims },
         JWT_SECRET,
         { expiresIn, algorithm: "HS256" }
       );
@@ -403,17 +407,21 @@ const server = http.createServer(async (req, res) => {
     return res.end(jwksResponse);
   }
 
-  // POST /token { "sub": "user-id", "role": "authenticated", "expiresIn": "24h" }
+  // POST /token { "sub": "user-id", "role": "rls_role", "expiresIn": "24h" }
   if (req.method === "POST" && req.url === "/token") {
     try {
       const body = await parseBody(req);
       const sub = body.sub || "anonymous";
-      const role = body.role || "authenticated";
+      const role = body.role;
       const expiresIn = body.expiresIn || "24h";
       const claims = body.claims || {};
 
+      if (!role) {
+        return respond(res, 400, { error: "role is required" });
+      }
+
       const token = jwt.sign(
-        { sub, role, aud: "authenticated", iss: ISSUER, ...claims },
+        { sub, role, iss: ISSUER, ...claims },
         privateKey,
         { expiresIn, algorithm: "RS256", keyid: KID }
       );
@@ -486,12 +494,56 @@ curl http://localhost:3002/.well-known/jwks.json
 
 ## Step 8: Generate a JWT token
 
+Before generating JWTs for PostgreSQL, create the database role referenced by the token's `role` claim and grant it the permissions CloudSync needs.
+
+### 8a. Create and grant the JWT role
+
+Create the role:
+
+```bash
+cd /data/cloudsync-postgres
+docker compose exec db psql -U postgres -d postgres -c "CREATE ROLE rls_role NOLOGIN;"
+```
+
+Grant schema and table permissions on current and future tables:
+
+```bash
+cd /data/cloudsync-postgres
+docker compose exec db psql -U postgres -d test_database_1 -c "GRANT USAGE ON SCHEMA public TO rls_role;"
+docker compose exec db psql -U postgres -d test_database_1 -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO rls_role;"
+docker compose exec db psql -U postgres -d test_database_1 -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO rls_role;"
+docker compose exec db psql -U postgres -d test_database_1 -c "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO rls_role;"
+docker compose exec db psql -U postgres -d test_database_1 -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO rls_role;"
+```
+
+Allow the connection-string user to switch into that role:
+
+```bash
+cd /data/cloudsync-postgres
+docker compose exec db psql -U postgres -d postgres -c "GRANT rls_role TO postgres;"
+```
+
+Verify:
+
+```bash
+cd /data/cloudsync-postgres
+docker compose exec db psql -U postgres -d postgres -c "SELECT rolname, rolsuper, rolcanlogin, rolbypassrls FROM pg_roles WHERE rolname = 'rls_role';"
+docker compose exec db psql -U postgres -d test_database_1 -c "\\ddp"
+```
+
+If you want to test the exact session shape CloudSync uses:
+
+```bash
+cd /data/cloudsync-postgres
+docker compose exec db psql -U postgres -d test_database_1 -c "BEGIN; SELECT set_config('request.jwt.claims', '{\"sub\":\"test-user-1\",\"role\":\"rls_role\"}', true); SET LOCAL ROLE rls_role; SELECT current_role, current_setting('request.jwt.claims', true); ROLLBACK;"
+```
+
 **HS256 (shared secret):**
 
 ```bash
 curl -X POST http://localhost:3001/token \
   -H "Content-Type: application/json" \
-  -d '{"sub": "user-1", "role": "authenticated"}'
+  -d '{"sub": "user-1", "role": "rls_role"}'
 ```
 
 **RS256 (JWKS):**
@@ -499,7 +551,7 @@ curl -X POST http://localhost:3001/token \
 ```bash
 curl -X POST http://localhost:3002/token \
   -H "Content-Type: application/json" \
-  -d '{"sub": "user-1", "role": "authenticated"}'
+  -d '{"sub": "user-1", "role": "rls_role"}'
 ```
 
 Response (both):
