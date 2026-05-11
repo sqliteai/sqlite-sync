@@ -1,3 +1,41 @@
+<div align="center">
+  <a href="https://sqlite.ai">
+    <img src="https://www.sqlite.ai/social/logo-ai.png" alt="SQLite AI" height="56">
+  </a>
+
+  <h1>SQLite-Sync</h1>
+  <p><strong>Offline-first sync for SQLite, powered by CRDTs.</strong><br>
+  Local writes, conflict-free merges, real-time collaboration across devices. Sync to SQLite Cloud, PostgreSQL, or Supabase — no central coordinator required.</p>
+
+  <p>
+    <a href="https://dashboard.sqlitecloud.io/auth/sign-in"><strong>Free managed instance →</strong></a> ·
+    <a href="https://docs.sqlitecloud.io/docs/ai-overview">Docs</a> ·
+    <a href="https://www.sqlite.ai/sync-demo">Live Demo</a> ·
+    <a href="https://sqlite.ai">Website</a>
+  </p>
+
+  <p>
+    <sub><strong>Data:</strong>
+    <a href="https://github.com/sqliteai/sqlite-vector">Vector</a> ·
+    <a href="https://github.com/sqliteai/sqlite-sync">Sync</a> ·
+    <a href="https://github.com/sqliteai/sqlite-columnar">Columnar</a> ·
+    <a href="https://github.com/sqliteai/sqlite-js">JS</a>
+    <br>
+    <strong>AI:</strong>
+    <a href="https://github.com/sqliteai/sqlite-ai">AI</a> ·
+    <a href="https://github.com/sqliteai/sqlite-agent">Agent</a> ·
+    <a href="https://github.com/sqliteai/sqlite-memory">Memory</a> ·
+    <a href="https://github.com/sqliteai/sqlite-mcp">MCP</a>
+    </sub>
+  </p>
+</div>
+
+<br>
+
+> **Need a sync backend?** Plug into any PostgreSQL or Supabase instance, or use **[SQLite Cloud CloudSync](https://www.sqlite.ai/pricing)** — managed device sync with auth, ACL, and a free tier for up to 3 devices.
+
+---
+
 # SQLite Sync
 
 [![sqlite-sync coverage](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fsqliteai.github.io%2Fsqlite-sync%2F&search=Functions%3A%3C%5C%2Ftd%3E%5Cs*%3Ctd%20class%3D%22headerCovTableEntry(?:Hi|Med|Lo)%22%3E(%5B%5Cd.%5D%2B)%26nbsp%3B%25&replace=%241%25&label=coverage&labelColor=rgb(85%2C%2085%2C%2085)%3B&color=rgb(167%2C%20252%2C%20157)%3B&link=https%3A%2F%2Fsqliteai.github.io%2Fsqlite-sync%2F)](https://sqliteai.github.io/sqlite-sync/)
@@ -198,20 +236,6 @@ See the full guide: **[Row-Level Security Documentation](./docs/row-level-securi
 
 For token-based authentication (required for RLS), use `cloudsync_network_set_token()` instead of `cloudsync_network_set_apikey()`.
 
-## Integrations
-
-Part of the **[SQLite AI](https://sqlite.ai)** ecosystem:
-
-| Extension | Description |
-|-----------|-------------|
-| **[SQLite-AI](https://github.com/sqliteai/sqlite-ai)** | On-device inference and embedding generation |
-| **[SQLite-Memory](https://github.com/sqliteai/sqlite-memory)** | Markdown-based AI agent memory with semantic search |
-| **[SQLite-Vector](https://github.com/sqliteai/sqlite-vector)** | Vector search for embeddings stored as BLOBs |
-| **[SQLite-Agent](https://github.com/sqliteai/sqlite-agent)** | Run autonomous AI agents from within SQLite |
-| **[SQLite-MCP](https://github.com/sqliteai/sqlite-mcp)** | Connect SQLite databases to MCP servers |
-| **[SQLite-JS](https://github.com/sqliteai/sqlite-js)** | Custom SQLite functions in JavaScript |
-| **[Liteparser](https://github.com/sqliteai/liteparser)** | Fully compliant SQLite SQL parser |
-
 ## Versioning
 
 This project follows [semver](https://semver.org/). The single source of truth is `CLOUDSYNC_VERSION` in `src/cloudsync.h`; all packaged artifacts (NPM, Maven, pub.dev, Swift, Docker, native tarballs) inherit this version. PATCH releases never alter the exposed API — they ship bug fixes, performance improvements, and internal changes only.
@@ -221,3 +245,34 @@ The PostgreSQL extension differs only in how it surfaces the version: its catalo
 ## License
 
 This project is licensed under the [Elastic License 2.0](./LICENSE.md). For production or managed service use, [contact SQLite Cloud, Inc](mailto:info@sqlitecloud.io) for a commercial license.
+
+---
+
+## ☁️ Hosted version
+
+Don't want to run a sync server yourself? **[SQLite Cloud CloudSync](https://sqlite.ai)** is the managed backend for SQLite-Sync — works with SQLite Cloud, PostgreSQL, or Supabase as your source of truth, with auth, ACL, and observability included.
+
+[**Start free →**](https://dashboard.sqlitecloud.io/auth/sign-in)
+
+---
+
+## Part of the SQLite AI stack
+
+SQLite-Sync is one piece of a larger ecosystem that turns SQLite into a runtime for intelligent, distributed data:
+
+**Data layer**
+- [sqlite-vector](https://github.com/sqliteai/sqlite-vector) — ANN vector search inside SQLite
+- [**sqlite-sync**](https://github.com/sqliteai/sqlite-sync) — Offline-first CRDT sync across devices *(you are here)*
+- [sqlite-columnar](https://github.com/sqliteai/sqlite-columnar) — Column-oriented analytics for OLAP queries
+- [sqlite-js](https://github.com/sqliteai/sqlite-js) — Custom SQLite functions written in JavaScript
+
+**AI layer**
+- [sqlite-ai](https://github.com/sqliteai/sqlite-ai) — On-device LLM inference and embeddings
+- [sqlite-agent](https://github.com/sqliteai/sqlite-agent) — Autonomous AI agents running inside SQLite
+- [sqlite-memory](https://github.com/sqliteai/sqlite-memory) — Persistent, searchable memory for agents
+- [sqlite-mcp](https://github.com/sqliteai/sqlite-mcp) — Call MCP tools directly from SQL queries
+
+**Managed platform**
+- [SQLite Cloud](https://sqlite.ai) — Hosted SQLite with sync, auth, edge functions, and analytics. [Free tier →](https://dashboard.sqlitecloud.io/auth/sign-in)
+
+Built by [SQLite AI](https://sqlite.ai). Questions? [Contact us](https://sqlite.ai/support).
