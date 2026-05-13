@@ -14,9 +14,17 @@ void network_buffer_cleanup (void *xdata) {
 }
 
 bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size) {
+#ifdef CLOUDSYNC_NETWORK_TRACE
+    double trace_start_ms = network_trace_now_ms();
+#endif
     NSString *urlString = [NSString stringWithUTF8String:endpoint];
     NSURL *url = [NSURL URLWithString:urlString];
-    if (!url) return false;
+    if (!url) {
+        #ifdef CLOUDSYNC_NETWORK_TRACE
+        network_trace_log(data, "PUT", endpoint, 0, CLOUDSYNC_NETWORK_ERROR, 0, network_trace_now_ms() - trace_start_ms);
+        #endif
+        return false;
+    }
 
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     [request setHTTPMethod:@"PUT"];
@@ -37,6 +45,7 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
     [request setHTTPBody:bodyData];
 
     __block bool success = false;
+    __block NSInteger statusCode = 0;
     dispatch_semaphore_t sema = dispatch_semaphore_create(0);
 
     NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
@@ -47,7 +56,7 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
                                                                 NSURLResponse * _Nullable response,
                                                                 NSError * _Nullable error) {
         if (!error && [response isKindOfClass:[NSHTTPURLResponse class]]) {
-            NSInteger statusCode = [(NSHTTPURLResponse *)response statusCode];
+            statusCode = [(NSHTTPURLResponse *)response statusCode];
             success = (statusCode >= 200 && statusCode < 300);
         }
         dispatch_semaphore_signal(sema);
@@ -57,11 +66,22 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
     dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
     [session finishTasksAndInvalidate];
 
+    #ifdef CLOUDSYNC_NETWORK_TRACE
+    network_trace_log(data, "PUT", endpoint, (long)statusCode,
+                      success ? CLOUDSYNC_NETWORK_OK : CLOUDSYNC_NETWORK_ERROR,
+                      success ? (size_t)blob_size : 0,
+                      network_trace_now_ms() - trace_start_ms);
+    #endif
+
     return success;
 }
 
 
 NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char **extra_headers, int nextra_headers) {
+#ifdef CLOUDSYNC_NETWORK_TRACE
+    double trace_start_ms = network_trace_now_ms();
+#endif
+    const char *method = (json_payload || is_post_request) ? "POST" : "GET";
     
     NSString *urlString = [NSString stringWithUTF8String:endpoint];
     NSURL *url = [NSURL URLWithString:urlString];
@@ -72,6 +92,9 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
         result.buffer = (char *)msg.UTF8String;
         result.xdata = (void *)CFBridgingRetain(msg);
         result.xfree = network_buffer_cleanup;
+        #ifdef CLOUDSYNC_NETWORK_TRACE
+        network_trace_log(data, method, endpoint, 0, result.code, 0, network_trace_now_ms() - trace_start_ms);
+        #endif
         return result;
     }
 
@@ -134,7 +157,11 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
     if (!responseError && (statusCode >= 200 && statusCode < 300)) {
         // check if OK should be returned
         if (responseData == nil || [responseData length] == 0) {
-            return (NETWORK_RESULT){CLOUDSYNC_NETWORK_OK, NULL, 0, NULL, NULL};
+            NETWORK_RESULT result = {CLOUDSYNC_NETWORK_OK, NULL, 0, NULL, NULL};
+            #ifdef CLOUDSYNC_NETWORK_TRACE
+            network_trace_log(data, method, endpoint, (long)statusCode, result.code, 0, network_trace_now_ms() - trace_start_ms);
+            #endif
+            return result;
         }
         
         // otherwise return a buffer
@@ -144,7 +171,11 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
             NSString *utf8String = [[NSString alloc] initWithData:responseData encoding:NSUTF8StringEncoding];
             if (!utf8String) {
                 NSString *msg = @"Response is not valid UTF-8";
-                return (NETWORK_RESULT){CLOUDSYNC_NETWORK_ERROR, (char *)msg.UTF8String, 0, (void *)CFBridgingRetain(msg), network_buffer_cleanup};
+                NETWORK_RESULT error_result = {CLOUDSYNC_NETWORK_ERROR, (char *)msg.UTF8String, 0, (void *)CFBridgingRetain(msg), network_buffer_cleanup};
+                #ifdef CLOUDSYNC_NETWORK_TRACE
+                network_trace_log(data, method, endpoint, (long)statusCode, error_result.code, 0, network_trace_now_ms() - trace_start_ms);
+                #endif
+                return error_result;
             }
             result.buffer = (char *)utf8String.UTF8String;
             result.xdata = (void *)CFBridgingRetain(utf8String);
@@ -155,6 +186,9 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
         result.blen = [responseData length];
         result.xfree = network_buffer_cleanup;
         
+        #ifdef CLOUDSYNC_NETWORK_TRACE
+        network_trace_log(data, method, endpoint, (long)statusCode, result.code, result.blen, network_trace_now_ms() - trace_start_ms);
+        #endif
         return result;
     }
     
@@ -178,5 +212,8 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
     result.xfree = network_buffer_cleanup;
     result.blen = responseError ? (size_t)errorCode : (size_t)statusCode;
     
+    #ifdef CLOUDSYNC_NETWORK_TRACE
+    network_trace_log(data, method, endpoint, (long)statusCode, result.code, 0, network_trace_now_ms() - trace_start_ms);
+    #endif
     return result;
 }

@@ -11,6 +11,14 @@
 #include <inttypes.h>
 #include <stdlib.h>
 
+#ifdef CLOUDSYNC_NETWORK_TRACE
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+#endif
+
 #include "network.h"
 #include "../utils.h"
 #include "../dbutils.h"
@@ -57,6 +65,47 @@ struct network_data {
     char        *apply_endpoint;
     char        *status_endpoint;
 };
+
+#ifdef CLOUDSYNC_NETWORK_TRACE
+double network_trace_now_ms(void) {
+#ifdef _WIN32
+    LARGE_INTEGER freq;
+    LARGE_INTEGER counter;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&counter);
+    return ((double)counter.QuadPart * 1000.0) / (double)freq.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ((double)ts.tv_sec * 1000.0) + ((double)ts.tv_nsec / 1000000.0);
+#endif
+}
+
+const char *network_trace_endpoint_name(network_data *data, const char *endpoint) {
+    if (!data || !endpoint) return "unknown";
+    if (data->check_endpoint && strcmp(endpoint, data->check_endpoint) == 0) return "check";
+    if (data->upload_endpoint && strcmp(endpoint, data->upload_endpoint) == 0) return "upload-url";
+    if (data->apply_endpoint && strcmp(endpoint, data->apply_endpoint) == 0) return "apply";
+    if (data->status_endpoint && strcmp(endpoint, data->status_endpoint) == 0) return "status";
+    return "artifact";
+}
+
+const char *network_trace_result_name(int code) {
+    switch (code) {
+        case CLOUDSYNC_NETWORK_OK: return "ok";
+        case CLOUDSYNC_NETWORK_ERROR: return "error";
+        case CLOUDSYNC_NETWORK_BUFFER: return "buffer";
+        default: return "unknown";
+    }
+}
+
+void network_trace_log(network_data *data, const char *method, const char *endpoint, long http_status, int result_code, size_t bytes, double elapsed_ms) {
+    fprintf(stderr,
+            "[cloudsync-network] endpoint=%s method=%s http_status=%ld result=%s bytes=%zu elapsed_ms=%.2f\n",
+            network_trace_endpoint_name(data, endpoint), method, http_status,
+            network_trace_result_name(result_code), bytes, elapsed_ms);
+}
+#endif
 
 typedef struct {
     char        *buffer;
@@ -210,6 +259,10 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     struct curl_slist* headers = NULL;
     char errbuf[CURL_ERROR_SIZE] = {0};
     long response_code = 0;
+    const char *method = (json_payload || is_post_request) ? "POST" : "GET";
+#ifdef CLOUDSYNC_NETWORK_TRACE
+    double trace_start_ms = network_trace_now_ms();
+#endif
 
     CURL *curl = curl_easy_init();
     if (!curl) return (NETWORK_RESULT){CLOUDSYNC_NETWORK_ERROR, NULL, 0, NULL, NULL};
@@ -299,6 +352,9 @@ cleanup:
         result.blen = buffer ? blen : rc;
     }
     
+    #ifdef CLOUDSYNC_NETWORK_TRACE
+    network_trace_log(data, method, endpoint, response_code, result.code, result.blen, network_trace_now_ms() - trace_start_ms);
+    #endif
     return result;
 }
 
@@ -321,6 +377,10 @@ bool network_send_buffer (network_data *data, const char *endpoint, const char *
     bool result = false;
     char errbuf[CURL_ERROR_SIZE] = {0};
     CURLcode rc = CURLE_OK;
+    long response_code = 0;
+#ifdef CLOUDSYNC_NETWORK_TRACE
+    double trace_start_ms = network_trace_now_ms();
+#endif
 
     // init curl
     CURL *curl = curl_easy_init();
@@ -393,9 +453,16 @@ bool network_send_buffer (network_data *data, const char *endpoint, const char *
     
     // perform the upload
     rc = curl_easy_perform(curl);
+    if (curl) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
     if (rc == CURLE_OK) result = true;
        
 cleanup:
+    #ifdef CLOUDSYNC_NETWORK_TRACE
+    network_trace_log(data, "PUT", endpoint, response_code,
+                      result ? CLOUDSYNC_NETWORK_OK : CLOUDSYNC_NETWORK_ERROR,
+                      result ? (size_t)blob_size : 0,
+                      network_trace_now_ms() - trace_start_ms);
+    #endif
     if (curl) curl_easy_cleanup(curl);
     if (headers) curl_slist_free_all(headers);
     return result;

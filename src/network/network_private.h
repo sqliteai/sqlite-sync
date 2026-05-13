@@ -41,5 +41,12 @@ bool network_data_set_endpoints (network_data *data, char *auth, char *check, ch
 bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size);
 NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char **extra_headers, int nextra_headers);
 
+#ifdef CLOUDSYNC_NETWORK_TRACE
+const char *network_trace_endpoint_name(network_data *data, const char *endpoint);
+const char *network_trace_result_name(int code);
+void network_trace_log(network_data *data, const char *method, const char *endpoint, long http_status, int result_code, size_t bytes, double elapsed_ms);
+double network_trace_now_ms(void);
+#endif
+
 
 #endif
