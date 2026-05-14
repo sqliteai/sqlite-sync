@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <stdlib.h>
+#include <string.h>
 
 #ifdef CLOUDSYNC_NETWORK_TRACE
 #ifdef _WIN32
@@ -45,6 +46,16 @@ static size_t cacert_len = sizeof(cacert_pem) - 1;
 #define CLOUDSYNC_NETWORK_MINBUF_SIZE           512
 #define CLOUDSYNC_SESSION_TOKEN_MAXSIZE         4096
 
+#ifndef CLOUDSYNC_CURL_MAXCONNECTS
+#define CLOUDSYNC_CURL_MAXCONNECTS              2L
+#endif
+#ifndef CLOUDSYNC_CURL_MAXAGE_CONN_SECONDS
+#define CLOUDSYNC_CURL_MAXAGE_CONN_SECONDS      15L
+#endif
+#ifndef CLOUDSYNC_CURL_MAXLIFETIME_CONN_SECONDS
+#define CLOUDSYNC_CURL_MAXLIFETIME_CONN_SECONDS 60L
+#endif
+
 #define DEFAULT_SYNC_WAIT_MS                    100
 #define DEFAULT_SYNC_MAX_RETRIES                1
  
@@ -64,6 +75,11 @@ struct network_data {
     char        *upload_endpoint;
     char        *apply_endpoint;
     char        *status_endpoint;
+#ifndef CLOUDSYNC_OMIT_CURL
+    CURL        *api_curl;
+    CURL        *artifact_curl;
+    int         curl_pool_enabled;
+#endif
 };
 
 #ifdef CLOUDSYNC_NETWORK_TRACE
@@ -105,6 +121,32 @@ void network_trace_log(network_data *data, const char *method, const char *endpo
             network_trace_endpoint_name(data, endpoint), method, http_status,
             network_trace_result_name(result_code), bytes, elapsed_ms);
 }
+
+#ifndef CLOUDSYNC_OMIT_CURL
+void network_trace_log_curl(network_data *data, const char *method, const char *endpoint, long http_status, int result_code, size_t bytes, CURL *curl, bool pooled, double elapsed_ms) {
+    double namelookup = 0.0;
+    double connect = 0.0;
+    double appconnect = 0.0;
+    double starttransfer = 0.0;
+    double total = 0.0;
+    long num_connects = 0;
+    if (curl) {
+        curl_easy_getinfo(curl, CURLINFO_NAMELOOKUP_TIME, &namelookup);
+        curl_easy_getinfo(curl, CURLINFO_CONNECT_TIME, &connect);
+        curl_easy_getinfo(curl, CURLINFO_APPCONNECT_TIME, &appconnect);
+        curl_easy_getinfo(curl, CURLINFO_STARTTRANSFER_TIME, &starttransfer);
+        curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME, &total);
+        curl_easy_getinfo(curl, CURLINFO_NUM_CONNECTS, &num_connects);
+    }
+    fprintf(stderr,
+            "[cloudsync-network] endpoint=%s method=%s pool=%s http_status=%ld result=%s bytes=%zu elapsed_ms=%.2f curl_total_ms=%.2f dns_ms=%.2f connect_ms=%.2f tls_ms=%.2f starttransfer_ms=%.2f num_connects=%ld\n",
+            network_trace_endpoint_name(data, endpoint), method,
+            pooled ? "on" : "off", http_status,
+            network_trace_result_name(result_code), bytes, elapsed_ms,
+            total * 1000.0, namelookup * 1000.0, connect * 1000.0,
+            appconnect * 1000.0, starttransfer * 1000.0, num_connects);
+}
+#endif
 #endif
 
 typedef struct {
@@ -211,6 +253,10 @@ abort_endpoints:
 void network_data_free (network_data *data) {
     if (!data) return;
 
+#ifndef CLOUDSYNC_OMIT_CURL
+    if (data->api_curl) curl_easy_cleanup(data->api_curl);
+    if (data->artifact_curl) curl_easy_cleanup(data->artifact_curl);
+#endif
     if (data->authentication) cloudsync_memory_free(data->authentication);
     if (data->org_id) cloudsync_memory_free(data->org_id);
     if (data->check_endpoint) cloudsync_memory_free(data->check_endpoint);
@@ -223,6 +269,47 @@ void network_data_free (network_data *data) {
 // MARK: - Utils -
 
 #ifndef CLOUDSYNC_OMIT_CURL
+static bool network_curl_pool_enabled(network_data *data) {
+    if (!data) return false;
+    if (data->curl_pool_enabled == 0) {
+        const char *value = getenv("CLOUDSYNC_CURL_POOL");
+        data->curl_pool_enabled = 1;
+        if (value && (strcmp(value, "0") == 0 || strcmp(value, "false") == 0 || strcmp(value, "off") == 0 || strcmp(value, "no") == 0)) {
+            data->curl_pool_enabled = -1;
+        }
+    }
+    return data->curl_pool_enabled > 0;
+}
+
+static bool network_endpoint_is_api(network_data *data, const char *endpoint) {
+    if (!data || !endpoint) return false;
+    return (data->check_endpoint && strcmp(endpoint, data->check_endpoint) == 0) ||
+           (data->upload_endpoint && strcmp(endpoint, data->upload_endpoint) == 0) ||
+           (data->apply_endpoint && strcmp(endpoint, data->apply_endpoint) == 0) ||
+           (data->status_endpoint && strcmp(endpoint, data->status_endpoint) == 0);
+}
+
+static CURL *network_curl_for_endpoint(network_data *data, const char *endpoint, bool *pooled) {
+    if (pooled) *pooled = false;
+    if (!network_curl_pool_enabled(data)) {
+        return curl_easy_init();
+    }
+
+    CURL **slot = network_endpoint_is_api(data, endpoint) ? &data->api_curl : &data->artifact_curl;
+    if (!*slot) {
+        *slot = curl_easy_init();
+    } else {
+        curl_easy_reset(*slot);
+    }
+    if (!*slot) return NULL;
+
+    curl_easy_setopt(*slot, CURLOPT_MAXCONNECTS, CLOUDSYNC_CURL_MAXCONNECTS);
+    curl_easy_setopt(*slot, CURLOPT_MAXAGE_CONN, CLOUDSYNC_CURL_MAXAGE_CONN_SECONDS);
+    curl_easy_setopt(*slot, CURLOPT_MAXLIFETIME_CONN, CLOUDSYNC_CURL_MAXLIFETIME_CONN_SECONDS);
+    if (pooled) *pooled = true;
+    return *slot;
+}
+
 static bool network_buffer_check (network_buffer *data, size_t needed) {
     // alloc/resize buffer
     if (data->bused + needed > data->balloc) {
@@ -259,12 +346,13 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     struct curl_slist* headers = NULL;
     char errbuf[CURL_ERROR_SIZE] = {0};
     long response_code = 0;
+    bool pooled = false;
     const char *method = (json_payload || is_post_request) ? "POST" : "GET";
 #ifdef CLOUDSYNC_NETWORK_TRACE
     double trace_start_ms = network_trace_now_ms();
 #endif
 
-    CURL *curl = curl_easy_init();
+    CURL *curl = network_curl_for_endpoint(data, endpoint, &pooled);
     if (!curl) return (NETWORK_RESULT){CLOUDSYNC_NETWORK_ERROR, NULL, 0, NULL, NULL};
     
     // a buffer to store errors in
@@ -337,7 +425,6 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     }
 
 cleanup:
-    if (curl) curl_easy_cleanup(curl);
     if (headers) curl_slist_free_all(headers);
     
     // build result
@@ -353,8 +440,9 @@ cleanup:
     }
     
     #ifdef CLOUDSYNC_NETWORK_TRACE
-    network_trace_log(data, method, endpoint, response_code, result.code, result.blen, network_trace_now_ms() - trace_start_ms);
+    network_trace_log_curl(data, method, endpoint, response_code, result.code, result.blen, curl, pooled, network_trace_now_ms() - trace_start_ms);
     #endif
+    if (curl && !pooled) curl_easy_cleanup(curl);
     return result;
 }
 
@@ -378,12 +466,13 @@ bool network_send_buffer (network_data *data, const char *endpoint, const char *
     char errbuf[CURL_ERROR_SIZE] = {0};
     CURLcode rc = CURLE_OK;
     long response_code = 0;
+    bool pooled = false;
 #ifdef CLOUDSYNC_NETWORK_TRACE
     double trace_start_ms = network_trace_now_ms();
 #endif
 
-    // init curl
-    CURL *curl = curl_easy_init();
+    // init/reuse curl
+    CURL *curl = network_curl_for_endpoint(data, endpoint, &pooled);
     if (!curl) return false;
 
     // set the URL
@@ -458,12 +547,12 @@ bool network_send_buffer (network_data *data, const char *endpoint, const char *
        
 cleanup:
     #ifdef CLOUDSYNC_NETWORK_TRACE
-    network_trace_log(data, "PUT", endpoint, response_code,
-                      result ? CLOUDSYNC_NETWORK_OK : CLOUDSYNC_NETWORK_ERROR,
-                      result ? (size_t)blob_size : 0,
-                      network_trace_now_ms() - trace_start_ms);
+    network_trace_log_curl(data, "PUT", endpoint, response_code,
+                           result ? CLOUDSYNC_NETWORK_OK : CLOUDSYNC_NETWORK_ERROR,
+                           result ? (size_t)blob_size : 0,
+                           curl, pooled, network_trace_now_ms() - trace_start_ms);
     #endif
-    if (curl) curl_easy_cleanup(curl);
+    if (curl && !pooled) curl_easy_cleanup(curl);
     if (headers) curl_slist_free_all(headers);
     return result;
 }
