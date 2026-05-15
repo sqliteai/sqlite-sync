@@ -5,7 +5,7 @@ import PackageDescription
 
 let package = Package(
     name: "CloudSync",
-    platforms: [.macOS(.v11), .iOS(.v11)],
+    platforms: [.macOS(.v11), .iOS(.v11), .macCatalyst(.v14)],
     products: [
         .library(
             name: "CloudSync",
