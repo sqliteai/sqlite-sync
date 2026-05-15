@@ -11,6 +11,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #ifdef CLOUDSYNC_NETWORK_TRACE
 #ifdef _WIN32
@@ -71,10 +72,13 @@ struct network_data {
     char        site_id[UUID_STR_MAXLEN];
     char        *authentication; // apikey or token
     char        *org_id;         // organization ID for X-CloudSync-Org header
+    char        *ticket;         // optional short-lived sync runtime ticket
+    char        *ticket_expires_at;
     char        *check_endpoint;
     char        *upload_endpoint;
     char        *apply_endpoint;
     char        *status_endpoint;
+    int         ticket_enabled;
 #ifndef CLOUDSYNC_OMIT_CURL
     CURL        *api_curl;
     CURL        *artifact_curl;
@@ -163,6 +167,11 @@ typedef struct {
     size_t      read_pos;
 } network_read_data;
 
+typedef struct {
+    char        *ticket;
+    char        *expires_at;
+} network_ticket_headers;
+
 static const char *cloudsync_default_headers[] = {
     CLOUDSYNC_HEADER_VERSION_LINE,
 };
@@ -192,12 +201,25 @@ char *network_data_get_orgid (network_data *data) {
     return data->org_id;
 }
 
+char *network_data_get_ticket (network_data *data) {
+    return data->ticket;
+}
+
+static void network_data_clear_ticket (network_data *data) {
+    if (!data) return;
+    if (data->ticket) cloudsync_memory_free(data->ticket);
+    if (data->ticket_expires_at) cloudsync_memory_free(data->ticket_expires_at);
+    data->ticket = NULL;
+    data->ticket_expires_at = NULL;
+}
+
 bool network_data_set_endpoints (network_data *data, char *auth, char *check, char *upload, char *apply, char *status) {
     // sanity check
     if (!check || !upload) return false;
 
     // always free previous owned pointers
     if (data->authentication) cloudsync_memory_free(data->authentication);
+    network_data_clear_ticket(data);
     if (data->check_endpoint) cloudsync_memory_free(data->check_endpoint);
     if (data->upload_endpoint) cloudsync_memory_free(data->upload_endpoint);
     if (data->apply_endpoint) cloudsync_memory_free(data->apply_endpoint);
@@ -259,6 +281,7 @@ void network_data_free (network_data *data) {
 #endif
     if (data->authentication) cloudsync_memory_free(data->authentication);
     if (data->org_id) cloudsync_memory_free(data->org_id);
+    network_data_clear_ticket(data);
     if (data->check_endpoint) cloudsync_memory_free(data->check_endpoint);
     if (data->upload_endpoint) cloudsync_memory_free(data->upload_endpoint);
     if (data->apply_endpoint) cloudsync_memory_free(data->apply_endpoint);
@@ -268,25 +291,66 @@ void network_data_free (network_data *data) {
 
 // MARK: - Utils -
 
-#ifndef CLOUDSYNC_OMIT_CURL
-static bool network_curl_pool_enabled(network_data *data) {
-    if (!data) return false;
-    if (data->curl_pool_enabled == 0) {
-        const char *value = getenv("CLOUDSYNC_CURL_POOL");
-        data->curl_pool_enabled = 1;
-        if (value && (strcmp(value, "0") == 0 || strcmp(value, "false") == 0 || strcmp(value, "off") == 0 || strcmp(value, "no") == 0)) {
-            data->curl_pool_enabled = -1;
-        }
-    }
-    return data->curl_pool_enabled > 0;
-}
-
 static bool network_endpoint_is_api(network_data *data, const char *endpoint) {
     if (!data || !endpoint) return false;
     return (data->check_endpoint && strcmp(endpoint, data->check_endpoint) == 0) ||
            (data->upload_endpoint && strcmp(endpoint, data->upload_endpoint) == 0) ||
            (data->apply_endpoint && strcmp(endpoint, data->apply_endpoint) == 0) ||
            (data->status_endpoint && strcmp(endpoint, data->status_endpoint) == 0);
+}
+
+static bool network_env_disabled(const char *value) {
+    return value && (strcmp(value, "0") == 0 || strcmp(value, "false") == 0 || strcmp(value, "off") == 0 || strcmp(value, "no") == 0);
+}
+
+static bool network_ticket_enabled(network_data *data) {
+    if (!data) return false;
+    if (data->ticket_enabled == 0) {
+        const char *value = getenv("CLOUDSYNC_NETWORK_TICKET");
+        data->ticket_enabled = network_env_disabled(value) ? -1 : 1;
+    }
+    return data->ticket_enabled > 0;
+}
+
+bool network_data_should_use_ticket (network_data *data, const char *endpoint, const char *authentication) {
+    return data && authentication && authentication[0] != '\0' && data->ticket && data->ticket[0] != '\0' &&
+           network_ticket_enabled(data) && network_endpoint_is_api(data, endpoint);
+}
+
+void network_data_update_ticket (network_data *data, const char *ticket, const char *expires_at) {
+    if (!data || !ticket || ticket[0] == '\0') return;
+
+    char *ticket_copy = cloudsync_string_dup(ticket);
+    if (!ticket_copy) return;
+
+    char *expires_copy = NULL;
+    if (expires_at && expires_at[0] != '\0') {
+        expires_copy = cloudsync_string_dup(expires_at);
+        if (!expires_copy) {
+            cloudsync_memory_free(ticket_copy);
+            return;
+        }
+    }
+
+    network_data_clear_ticket(data);
+    data->ticket = ticket_copy;
+    data->ticket_expires_at = expires_copy;
+
+#ifdef CLOUDSYNC_NETWORK_TRACE
+    fprintf(stderr,
+            "[cloudsync-network] received_ticket=%s expires_at=%s\n",
+            data->ticket, data->ticket_expires_at ? data->ticket_expires_at : "");
+#endif
+}
+
+#ifndef CLOUDSYNC_OMIT_CURL
+static bool network_curl_pool_enabled(network_data *data) {
+    if (!data) return false;
+    if (data->curl_pool_enabled == 0) {
+        const char *value = getenv("CLOUDSYNC_CURL_POOL");
+        data->curl_pool_enabled = network_env_disabled(value) ? -1 : 1;
+    }
+    return data->curl_pool_enabled > 0;
 }
 
 static CURL *network_curl_for_endpoint(network_data *data, const char *endpoint, bool *pooled) {
@@ -340,14 +404,65 @@ static size_t network_receive_callback (void *ptr, size_t size, size_t nmemb, vo
     return (size * nmemb);
 }
 
+static bool network_header_eq(const char *line, size_t len, const char *name) {
+    size_t name_len = strlen(name);
+    if (len <= name_len || line[name_len] != ':') return false;
+    for (size_t i = 0; i < name_len; i++) {
+        if (tolower((unsigned char)line[i]) != tolower((unsigned char)name[i])) return false;
+    }
+    return true;
+}
+
+static char *network_header_value_dup(const char *line, size_t len, const char *name) {
+    size_t name_len = strlen(name);
+    const char *start = line + name_len + 1;
+    const char *end = line + len;
+
+    while (start < end && (*start == ' ' || *start == '\t')) start++;
+    while (end > start && (end[-1] == '\r' || end[-1] == '\n' || end[-1] == ' ' || end[-1] == '\t')) end--;
+
+    size_t value_len = (size_t)(end - start);
+    char *value = cloudsync_memory_zeroalloc(value_len + 1);
+    if (!value) return NULL;
+    memcpy(value, start, value_len);
+    value[value_len] = '\0';
+    return value;
+}
+
+static size_t network_header_callback(char *buffer, size_t size, size_t nitems, void *userdata) {
+    network_ticket_headers *ticket_headers = (network_ticket_headers *)userdata;
+    size_t len = size * nitems;
+
+    if (network_header_eq(buffer, len, CLOUDSYNC_HEADER_TICKET)) {
+        char *ticket = network_header_value_dup(buffer, len, CLOUDSYNC_HEADER_TICKET);
+        if (ticket) {
+            if (ticket_headers->ticket) cloudsync_memory_free(ticket_headers->ticket);
+            ticket_headers->ticket = ticket;
+        }
+    } else if (network_header_eq(buffer, len, CLOUDSYNC_HEADER_TICKET_EXPIRES_AT)) {
+        char *expires_at = network_header_value_dup(buffer, len, CLOUDSYNC_HEADER_TICKET_EXPIRES_AT);
+        if (expires_at) {
+            if (ticket_headers->expires_at) cloudsync_memory_free(ticket_headers->expires_at);
+            ticket_headers->expires_at = expires_at;
+        }
+    }
+
+    return len;
+}
+
 NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char **extra_headers, int nextra_headers) {
     char *buffer = NULL;
     size_t blen = 0;
     struct curl_slist* headers = NULL;
+    network_ticket_headers ticket_headers = {NULL, NULL};
     char errbuf[CURL_ERROR_SIZE] = {0};
     long response_code = 0;
     bool pooled = false;
+    bool using_ticket = network_data_should_use_ticket(data, endpoint, authentication);
     const char *method = (json_payload || is_post_request) ? "POST" : "GET";
+#ifndef CLOUDSYNC_NETWORK_TRACE
+    (void)method;
+#endif
 #ifdef CLOUDSYNC_NETWORK_TRACE
     double trace_start_ms = network_trace_now_ms();
 #endif
@@ -397,12 +512,21 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
         if (!tmp) {rc = CURLE_OUT_OF_MEMORY; goto cleanup;}
         headers = tmp;
     }
+    if (using_ticket) {
+        char ticket_header[CLOUDSYNC_SESSION_TOKEN_MAXSIZE];
+        snprintf(ticket_header, sizeof(ticket_header), "%s: %s", CLOUDSYNC_HEADER_TICKET, data->ticket);
+        struct curl_slist *tmp = curl_slist_append(headers, ticket_header);
+        if (!tmp) {rc = CURLE_OUT_OF_MEMORY; goto cleanup;}
+        headers = tmp;
+    }
     
     if (headers) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     
     network_buffer netdata = {NULL, 0, 0, (zero_terminated) ? 1 : 0};
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &netdata);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, network_receive_callback);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &ticket_headers);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, network_header_callback);
 
     // add optional JSON payload (implies setting CURLOPT_POST to 1)
     // or set the CURLOPT_POST option
@@ -419,6 +543,9 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     if (rc == CURLE_OK) {
         buffer = netdata.buffer;
         blen = netdata.bused;
+        if (response_code < 400 && ticket_headers.ticket) {
+            network_data_update_ticket(data, ticket_headers.ticket, ticket_headers.expires_at);
+        }
     } else if (netdata.buffer) {
         cloudsync_memory_free(netdata.buffer);
         netdata.buffer = NULL;
@@ -426,6 +553,8 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
 
 cleanup:
     if (headers) curl_slist_free_all(headers);
+    if (ticket_headers.ticket) cloudsync_memory_free(ticket_headers.ticket);
+    if (ticket_headers.expires_at) cloudsync_memory_free(ticket_headers.expires_at);
     
     // build result
     NETWORK_RESULT result = {0, NULL, 0, NULL, NULL};
@@ -440,6 +569,10 @@ cleanup:
     }
     
     #ifdef CLOUDSYNC_NETWORK_TRACE
+    fprintf(stderr,
+            "[cloudsync-network] endpoint=%s using_ticket=%s\n",
+            network_trace_endpoint_name(data, endpoint),
+            using_ticket ? "true" : "false");
     network_trace_log_curl(data, method, endpoint, response_code, result.code, result.blen, curl, pooled, network_trace_now_ms() - trace_start_ms);
     #endif
     if (curl && !pooled) curl_easy_cleanup(curl);
@@ -886,6 +1019,8 @@ static bool network_compute_endpoints_with_address (sqlite3_context *context, ne
     snprintf(status_endpoint, requested, "%s/%s/%s/%s/%s",
              address, CLOUDSYNC_ENDPOINT_PREFIX, managedDatabaseId, data->site_id, CLOUDSYNC_ENDPOINT_STATUS);
 
+    network_data_clear_ticket(data);
+
     if (data->check_endpoint) cloudsync_memory_free(data->check_endpoint);
     data->check_endpoint = check_endpoint;
 
@@ -1001,6 +1136,7 @@ bool cloudsync_network_set_authentication_token (sqlite3_context *context, const
     if (!new_auth_token) return false;
     
     if (data->authentication) cloudsync_memory_free(data->authentication);
+    network_data_clear_ticket(data);
     data->authentication = new_auth_token;
     
     return true;

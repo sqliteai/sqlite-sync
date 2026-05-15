@@ -82,6 +82,10 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
     double trace_start_ms = network_trace_now_ms();
 #endif
     const char *method = (json_payload || is_post_request) ? "POST" : "GET";
+    bool using_ticket = network_data_should_use_ticket(data, endpoint, authentication);
+#ifndef CLOUDSYNC_NETWORK_TRACE
+    (void)method;
+#endif
     
     NSString *urlString = [NSString stringWithUTF8String:endpoint];
     NSURL *url = [NSURL URLWithString:urlString];
@@ -120,6 +124,10 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
         NSString *authString = [NSString stringWithFormat:@"Bearer %s", authentication];
         [request setValue:authString forHTTPHeaderField:@"Authorization"];
     }
+    if (using_ticket) {
+        char *ticket = network_data_get_ticket(data);
+        [request setValue:[NSString stringWithUTF8String:ticket] forHTTPHeaderField:@CLOUDSYNC_HEADER_TICKET];
+    }
 
     if (json_payload) {
         [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
@@ -133,6 +141,8 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
     __block NSString *responseError = nil;
     __block NSInteger statusCode = 0;
     __block NSInteger errorCode = 0;
+    __block NSString *responseTicket = nil;
+    __block NSString *responseTicketExpiresAt = nil;
 
     dispatch_semaphore_t sema = dispatch_semaphore_create(0);
 
@@ -145,7 +155,18 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
             errorCode = [error code];
         }
         if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-            statusCode = [(NSHTTPURLResponse *)response statusCode];
+            NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+            statusCode = [httpResponse statusCode];
+            NSDictionary *headers = [httpResponse allHeaderFields];
+            for (id key in headers) {
+                NSString *name = [key description];
+                NSString *value = [[headers objectForKey:key] description];
+                if ([name caseInsensitiveCompare:@CLOUDSYNC_HEADER_TICKET] == NSOrderedSame) {
+                    responseTicket = value;
+                } else if ([name caseInsensitiveCompare:@CLOUDSYNC_HEADER_TICKET_EXPIRES_AT] == NSOrderedSame) {
+                    responseTicketExpiresAt = value;
+                }
+            }
         }
         dispatch_semaphore_signal(sema);
     }];
@@ -154,11 +175,20 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
     dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
     [session finishTasksAndInvalidate];
 
+    if (!responseError && (statusCode >= 200 && statusCode < 300) && responseTicket && [responseTicket length] > 0) {
+        network_data_update_ticket(data, [responseTicket UTF8String],
+                                   responseTicketExpiresAt ? [responseTicketExpiresAt UTF8String] : NULL);
+    }
+
     if (!responseError && (statusCode >= 200 && statusCode < 300)) {
         // check if OK should be returned
         if (responseData == nil || [responseData length] == 0) {
             NETWORK_RESULT result = {CLOUDSYNC_NETWORK_OK, NULL, 0, NULL, NULL};
             #ifdef CLOUDSYNC_NETWORK_TRACE
+            fprintf(stderr,
+                    "[cloudsync-network] endpoint=%s using_ticket=%s\n",
+                    network_trace_endpoint_name(data, endpoint),
+                    using_ticket ? "true" : "false");
             network_trace_log(data, method, endpoint, (long)statusCode, result.code, 0, network_trace_now_ms() - trace_start_ms);
             #endif
             return result;
@@ -187,6 +217,10 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
         result.xfree = network_buffer_cleanup;
         
         #ifdef CLOUDSYNC_NETWORK_TRACE
+        fprintf(stderr,
+                "[cloudsync-network] endpoint=%s using_ticket=%s\n",
+                network_trace_endpoint_name(data, endpoint),
+                using_ticket ? "true" : "false");
         network_trace_log(data, method, endpoint, (long)statusCode, result.code, result.blen, network_trace_now_ms() - trace_start_ms);
         #endif
         return result;
@@ -213,6 +247,10 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
     result.blen = responseError ? (size_t)errorCode : (size_t)statusCode;
     
     #ifdef CLOUDSYNC_NETWORK_TRACE
+    fprintf(stderr,
+            "[cloudsync-network] endpoint=%s using_ticket=%s\n",
+            network_trace_endpoint_name(data, endpoint),
+            using_ticket ? "true" : "false");
     network_trace_log(data, method, endpoint, (long)statusCode, result.code, 0, network_trace_now_ms() - trace_start_ms);
     #endif
     return result;
