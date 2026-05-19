@@ -517,7 +517,7 @@ int test_failure_path (const char *db_path) {
 
     rc = open_load_ext(db_path, &db); RCHECK
 
-    rc = db_exec(db, "CREATE TABLE IF NOT EXISTS failure_users (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL DEFAULT '');"); RCHECK
+    rc = db_exec(db, "CREATE TABLE IF NOT EXISTS failure_users (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL DEFAULT '', value BLOB);"); RCHECK
     rc = db_exec(db, "SELECT cloudsync_init('failure_users');"); RCHECK
 
     char network_init[1024];
@@ -534,10 +534,12 @@ int test_failure_path (const char *db_path) {
     }
 
     // Insert a row so cloudsync_network_send_changes has a payload to upload.
+    // Insert a 1MB value to skip the fast-lane and force using the normal s3 path with async job, 
+    // otherwise the error would be immediately returned by the apply endpoint.
     char value[UUID_STR_MAXLEN];
     cloudsync_uuid_v7_string(value, true);
     char sql[256];
-    snprintf(sql, sizeof(sql), "INSERT INTO failure_users (id, name) VALUES ('%s', '%s');", value, value);
+    snprintf(sql, sizeof(sql), "INSERT INTO failure_users (id, name, value) VALUES ('%s', '%s', randomblob(1048576));", value, value);
     rc = db_exec(db, sql); RCHECK
 
     // First invocation — primes the server. Failures may not yet be reported.
