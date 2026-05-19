@@ -26,6 +26,8 @@
 #define EXT_PATH        "./dist/cloudsync"
 #define DEFAULT_POLL_DELAY_MS 250
 #define DEFAULT_MAX_POLLS 40
+#define DEFAULT_RANDOM_BLOB_SIZE_BYTES (100 * 1024)
+#define DEFAULT_CLEANUP_OLDER_THAN_SECONDS (24 * 60 * 60)
 
 typedef struct {
     const char *operation;
@@ -170,6 +172,7 @@ static int init_schema(sqlite3 *db, const char *label) {
         "id TEXT PRIMARY KEY NOT NULL,"
         "payload TEXT NOT NULL DEFAULT '',"
         "marker TEXT NOT NULL DEFAULT '',"
+        "random_blob BLOB NOT NULL DEFAULT X'',"
         "updated_at TEXT NOT NULL DEFAULT ''"
         ");");
     if (rc != SQLITE_OK) {
@@ -227,9 +230,10 @@ static int setup_database(const char *label, const char *path, const char *datab
     return rc;
 }
 
-static int verify_row(sqlite3 *db, const char *id, const char *payload, const char *marker, bool *verified) {
+static int verify_row(sqlite3 *db, const char *id, const char *payload, const char *marker,
+                      const void *random_blob, int random_blob_size, bool *verified) {
     sqlite3_stmt *stmt = NULL;
-    const char *sql = "SELECT payload, marker FROM sync_bench_items WHERE id = ?;";
+    const char *sql = "SELECT payload, marker, random_blob FROM sync_bench_items WHERE id = ?;";
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "Error while preparing verification query: %s\n", sqlite3_errmsg(db));
@@ -241,7 +245,15 @@ static int verify_row(sqlite3 *db, const char *id, const char *payload, const ch
     if (rc == SQLITE_ROW) {
         const char *actual_payload = (const char *)sqlite3_column_text(stmt, 0);
         const char *actual_marker = (const char *)sqlite3_column_text(stmt, 1);
-        *verified = actual_payload && actual_marker && strcmp(actual_payload, payload) == 0 && strcmp(actual_marker, marker) == 0;
+        const void *actual_blob = sqlite3_column_blob(stmt, 2);
+        int actual_blob_size = sqlite3_column_bytes(stmt, 2);
+        bool blob_matches = (actual_blob_size == random_blob_size) &&
+                            (random_blob_size == 0 ||
+                             (actual_blob && random_blob && memcmp(actual_blob, random_blob, (size_t)random_blob_size) == 0));
+        *verified = actual_payload && actual_marker &&
+                    strcmp(actual_payload, payload) == 0 &&
+                    strcmp(actual_marker, marker) == 0 &&
+                    blob_matches;
         rc = SQLITE_OK;
     } else if (rc == SQLITE_DONE) {
         *verified = false;
@@ -255,10 +267,11 @@ static int verify_row(sqlite3 *db, const char *id, const char *payload, const ch
     return rc;
 }
 
-static int insert_benchmark_row(sqlite3 *db, const char *id, const char *payload, const char *marker) {
-    bench_trace("step=insert-source-row db=db_a row_id=%s begin", id);
+static int insert_benchmark_row(sqlite3 *db, const char *id, const char *payload, const char *marker,
+                                const void *random_blob, int random_blob_size) {
+    bench_trace("step=insert-source-row db=db_a row_id=%s random_blob_size_bytes=%d begin", id, random_blob_size);
     sqlite3_stmt *stmt = NULL;
-    const char *sql = "INSERT INTO sync_bench_items (id, payload, marker, updated_at) VALUES (?, ?, ?, datetime('now'));";
+    const char *sql = "INSERT INTO sync_bench_items (id, payload, marker, random_blob, updated_at) VALUES (?, ?, ?, ?, datetime('now'));";
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "Error while preparing insert: %s\n", sqlite3_errmsg(db));
@@ -266,9 +279,16 @@ static int insert_benchmark_row(sqlite3 *db, const char *id, const char *payload
         return rc;
     }
 
-    sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, payload, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 3, marker, -1, SQLITE_TRANSIENT);
+    rc = sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT);
+    if (rc == SQLITE_OK) rc = sqlite3_bind_text(stmt, 2, payload, -1, SQLITE_TRANSIENT);
+    if (rc == SQLITE_OK) rc = sqlite3_bind_text(stmt, 3, marker, -1, SQLITE_TRANSIENT);
+    if (rc == SQLITE_OK) rc = sqlite3_bind_blob(stmt, 4, random_blob, random_blob_size, SQLITE_TRANSIENT);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Error while binding benchmark row: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        bench_trace("step=insert-source-row db=db_a row_id=%s random_blob_size_bytes=%d end rc=%d", id, random_blob_size, rc);
+        return rc;
+    }
 
     rc = sqlite3_step(stmt);
     if (rc == SQLITE_DONE) rc = SQLITE_OK;
@@ -276,7 +296,52 @@ static int insert_benchmark_row(sqlite3 *db, const char *id, const char *payload
 
     int finalize_rc = sqlite3_finalize(stmt);
     if (rc == SQLITE_OK && finalize_rc != SQLITE_OK) rc = finalize_rc;
-    bench_trace("step=insert-source-row db=db_a row_id=%s end rc=%d", id, rc);
+    bench_trace("step=insert-source-row db=db_a row_id=%s random_blob_size_bytes=%d end rc=%d", id, random_blob_size, rc);
+    return rc;
+}
+
+static int cleanup_old_benchmark_rows(sqlite3 *db, int older_than_seconds, int *deleted_count) {
+    if (deleted_count) *deleted_count = 0;
+    if (older_than_seconds <= 0) {
+        bench_trace("step=cleanup-old-source-rows db=db_a enabled=false");
+        return SQLITE_OK;
+    }
+
+    char modifier[64];
+    snprintf(modifier, sizeof(modifier), "-%d seconds", older_than_seconds);
+
+    bench_trace("step=cleanup-old-source-rows db=db_a older_than_seconds=%d begin", older_than_seconds);
+    sqlite3_stmt *stmt = NULL;
+    const char *sql =
+        "DELETE FROM sync_bench_items "
+        "WHERE marker LIKE 'sync-bench-%' "
+        "AND updated_at < datetime('now', ?);";
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Error while preparing cleanup delete: %s\n", sqlite3_errmsg(db));
+        bench_trace("step=cleanup-old-source-rows db=db_a end rc=%d deleted=0", rc);
+        return rc;
+    }
+
+    rc = sqlite3_bind_text(stmt, 1, modifier, -1, SQLITE_TRANSIENT);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Error while binding cleanup delete: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        bench_trace("step=cleanup-old-source-rows db=db_a end rc=%d deleted=0", rc);
+        return rc;
+    }
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_DONE) {
+        rc = SQLITE_OK;
+        if (deleted_count) *deleted_count = sqlite3_changes(db);
+    } else {
+        fprintf(stderr, "Error while deleting old benchmark rows: %s\n", sqlite3_errmsg(db));
+    }
+
+    int finalize_rc = sqlite3_finalize(stmt);
+    if (rc == SQLITE_OK && finalize_rc != SQLITE_OK) rc = finalize_rc;
+    bench_trace("step=cleanup-old-source-rows db=db_a end rc=%d deleted=%d", rc, deleted_count ? *deleted_count : 0);
     return rc;
 }
 
@@ -340,7 +405,9 @@ static void json_print_escaped(const char *value) {
     putchar('"');
 }
 
-static void print_text_report(const char *database_id, int poll_delay_ms, int max_polls, const char *row_id, bool applied,
+static void print_text_report(const char *database_id, int poll_delay_ms, int max_polls, int random_blob_size,
+                              int cleanup_older_than_seconds, int cleanup_deleted_rows,
+                              const char *row_id, bool applied,
                               int polls, double total_ms, double verify_ms, double request_ms, double poll_sleep_ms,
                               double measured_overhead_ms, sync_bench_send_summary send_summary,
                               sync_bench_request *requests, int request_count) {
@@ -348,6 +415,9 @@ static void print_text_report(const char *database_id, int poll_delay_ms, int ma
     printf("database_id: %s\n", database_id);
     printf("poll_delay_ms: %d\n", poll_delay_ms);
     printf("max_polls: %d\n", max_polls);
+    printf("random_blob_size_bytes: %d\n", random_blob_size);
+    printf("cleanup_older_than_seconds: %d\n", cleanup_older_than_seconds);
+    printf("cleanup_deleted_rows: %d\n", cleanup_deleted_rows);
     printf("row_id: %s\n", row_id);
     printf("\nRequests:\n");
     for (int i = 0; i < request_count; i++) {
@@ -371,7 +441,9 @@ static void print_text_report(const char *database_id, int poll_delay_ms, int ma
     printf("verification_select_ms: %.2f\n", verify_ms);
 }
 
-static void print_json_report(int poll_delay_ms, int max_polls, const char *row_id, bool applied,
+static void print_json_report(int poll_delay_ms, int max_polls, int random_blob_size,
+                              int cleanup_older_than_seconds, int cleanup_deleted_rows,
+                              const char *row_id, bool applied,
                               int polls, double total_ms, double verify_ms, double request_ms, double poll_sleep_ms,
                               double measured_overhead_ms, sync_bench_send_summary send_summary,
                               sync_bench_request *requests, int request_count) {
@@ -379,6 +451,9 @@ static void print_json_report(int poll_delay_ms, int max_polls, const char *row_
     printf("  \"applied\": %s,\n", applied ? "true" : "false");
     printf("  \"pollDelayMs\": %d,\n", poll_delay_ms);
     printf("  \"maxPolls\": %d,\n", max_polls);
+    printf("  \"randomBlobSizeBytes\": %d,\n", random_blob_size);
+    printf("  \"cleanupOlderThanSeconds\": %d,\n", cleanup_older_than_seconds);
+    printf("  \"cleanupDeletedRows\": %d,\n", cleanup_deleted_rows);
     printf("  \"polls\": %d,\n", polls);
     printf("  \"rowId\": "); json_print_escaped(row_id); printf(",\n");
     printf("  \"totalSendToApplyCheckEndMs\": %.2f,\n", total_ms);
@@ -419,9 +494,12 @@ int main(void) {
     double request_ms = 0.0;
     double measured_overhead_ms = 0.0;
     sync_bench_send_summary send_summary = {-1, -1, NULL};
+    int cleanup_deleted_rows = 0;
     char row_id[UUID_STR_MAXLEN] = "";
     char marker[96] = "";
     char payload[128] = "";
+    unsigned char empty_blob = 0;
+    void *random_blob = NULL;
 
     const char *database_id = getenv("SYNC_BENCH_DATABASE_ID");
     const char *address = getenv("SYNC_BENCH_CLOUDSYNC_ADDRESS");
@@ -429,6 +507,8 @@ int main(void) {
     const char *output = getenv("SYNC_BENCH_OUTPUT");
     int poll_delay_ms = env_int("SYNC_BENCH_POLL_DELAY_MS", DEFAULT_POLL_DELAY_MS);
     int max_polls = env_int("SYNC_BENCH_MAX_POLLS", DEFAULT_MAX_POLLS);
+    int random_blob_size = env_int("SYNC_BENCH_RANDOM_BLOB_SIZE_BYTES", DEFAULT_RANDOM_BLOB_SIZE_BYTES);
+    int cleanup_older_than_seconds = env_int("SYNC_BENCH_CLEANUP_OLDER_THAN_SECONDS", DEFAULT_CLEANUP_OLDER_THAN_SECONDS);
 
     if (!database_id || !*database_id) {
         fprintf(stderr, "Error: SYNC_BENCH_DATABASE_ID not set.\n");
@@ -449,15 +529,35 @@ int main(void) {
     if (rc != SQLITE_OK) goto cleanup;
     bench_trace("step=benchmark-setup end rc=%d", rc);
 
+    rc = cleanup_old_benchmark_rows(db_a, cleanup_older_than_seconds, &cleanup_deleted_rows);
+    if (rc != SQLITE_OK) goto cleanup;
+    if (cleanup_deleted_rows > 0) {
+        bench_trace("step=cleanup-send db=db_a deleted=%d begin sql=cloudsync_network_send_changes", cleanup_deleted_rows);
+        rc = db_exec(db_a, "SELECT cloudsync_network_send_changes();");
+        bench_trace("step=cleanup-send db=db_a deleted=%d end rc=%d", cleanup_deleted_rows, rc);
+        if (rc != SQLITE_OK) goto cleanup;
+    }
+
     cloudsync_uuid_v7_string(row_id, true);
     snprintf(marker, sizeof(marker), "sync-bench-%s", row_id);
     snprintf(payload, sizeof(payload), "payload-%s", row_id);
 
-    rc = insert_benchmark_row(db_a, row_id, payload, marker);
+    if (random_blob_size > 0) {
+        random_blob = malloc((size_t)random_blob_size);
+        if (!random_blob) {
+            rc = SQLITE_NOMEM;
+            goto cleanup;
+        }
+        sqlite3_randomness(random_blob_size, random_blob);
+    } else {
+        random_blob = &empty_blob;
+    }
+
+    rc = insert_benchmark_row(db_a, row_id, payload, marker, random_blob, random_blob_size);
     if (rc != SQLITE_OK) goto cleanup;
 
     bench_trace("step=verify-before-send db=db_b row_id=%s begin", row_id);
-    rc = verify_row(db_b, row_id, payload, marker, &applied);
+    rc = verify_row(db_b, row_id, payload, marker, random_blob, random_blob_size, &applied);
     bench_trace("step=verify-before-send db=db_b row_id=%s end rc=%d applied=%s", row_id, rc, applied ? "true" : "false");
     if (rc != SQLITE_OK) goto cleanup;
     if (applied) {
@@ -492,7 +592,7 @@ int main(void) {
 
         bench_trace("step=verify-after-check db=db_b attempt=%d row_id=%s begin", i + 1, row_id);
         double verify_start_ms = monotonic_ms();
-        rc = verify_row(db_b, row_id, payload, marker, &applied);
+        rc = verify_row(db_b, row_id, payload, marker, random_blob, random_blob_size, &applied);
         double verify_end_ms = monotonic_ms();
         verify_ms = verify_end_ms - verify_start_ms;
         bench_trace("step=verify-after-check db=db_b attempt=%d row_id=%s end rc=%d applied=%s elapsed_ms=%.2f", i + 1, row_id, rc, applied ? "true" : "false", verify_ms);
@@ -516,11 +616,13 @@ int main(void) {
 cleanup:
     bench_trace("step=report begin rc=%d applied=%s request_count=%d", rc, applied ? "true" : "false", request_count);
     if (output && strcmp(output, "json") == 0) {
-        print_json_report(poll_delay_ms, max_polls, row_id, applied, polls, total_ms, verify_ms,
+        print_json_report(poll_delay_ms, max_polls, random_blob_size, cleanup_older_than_seconds, cleanup_deleted_rows,
+                          row_id, applied, polls, total_ms, verify_ms,
                           request_ms, poll_sleep_ms, measured_overhead_ms, send_summary,
                           requests, request_count);
     } else {
-        print_text_report(database_id, poll_delay_ms, max_polls, row_id, applied, polls, total_ms, verify_ms,
+        print_text_report(database_id, poll_delay_ms, max_polls, random_blob_size, cleanup_older_than_seconds, cleanup_deleted_rows,
+                          row_id, applied, polls, total_ms, verify_ms,
                           request_ms, poll_sleep_ms, measured_overhead_ms, send_summary,
                           requests, request_count);
     }
@@ -544,6 +646,7 @@ cleanup:
     }
     free_requests(requests, request_count);
     free(send_summary.status);
+    if (random_blob && random_blob != &empty_blob) free(random_blob);
     free(requests);
     cloudsync_memory_finalize();
     return rc == SQLITE_OK ? 0 : rc;

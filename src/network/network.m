@@ -21,7 +21,7 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
     NSURL *url = [NSURL URLWithString:urlString];
     if (!url) {
         #ifdef CLOUDSYNC_NETWORK_TRACE
-        network_trace_log(data, "PUT", endpoint, 0, CLOUDSYNC_NETWORK_ERROR, 0, network_trace_now_ms() - trace_start_ms);
+        network_trace_log(data, "PUT", endpoint, 0, CLOUDSYNC_NETWORK_ERROR, (size_t)blob_size, 0, network_trace_now_ms() - trace_start_ms);
         #endif
         return false;
     }
@@ -69,6 +69,7 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
     #ifdef CLOUDSYNC_NETWORK_TRACE
     network_trace_log(data, "PUT", endpoint, (long)statusCode,
                       success ? CLOUDSYNC_NETWORK_OK : CLOUDSYNC_NETWORK_ERROR,
+                      (size_t)blob_size,
                       success ? (size_t)blob_size : 0,
                       network_trace_now_ms() - trace_start_ms);
     #endif
@@ -80,6 +81,7 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
 NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char **extra_headers, int nextra_headers) {
 #ifdef CLOUDSYNC_NETWORK_TRACE
     double trace_start_ms = network_trace_now_ms();
+    size_t request_bytes = json_payload ? strlen(json_payload) : 0;
 #endif
     const char *method = (json_payload || is_post_request) ? "POST" : "GET";
     bool using_ticket = network_data_should_use_ticket(data, endpoint, authentication);
@@ -97,7 +99,7 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
         result.xdata = (void *)CFBridgingRetain(msg);
         result.xfree = network_buffer_cleanup;
         #ifdef CLOUDSYNC_NETWORK_TRACE
-        network_trace_log(data, method, endpoint, 0, result.code, 0, network_trace_now_ms() - trace_start_ms);
+        network_trace_log(data, method, endpoint, 0, result.code, request_bytes, 0, network_trace_now_ms() - trace_start_ms);
         #endif
         return result;
     }
@@ -189,7 +191,7 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
                     "[cloudsync-network] endpoint=%s using_ticket=%s\n",
                     network_trace_endpoint_name(data, endpoint),
                     using_ticket ? "true" : "false");
-            network_trace_log(data, method, endpoint, (long)statusCode, result.code, 0, network_trace_now_ms() - trace_start_ms);
+            network_trace_log(data, method, endpoint, (long)statusCode, result.code, request_bytes, 0, network_trace_now_ms() - trace_start_ms);
             #endif
             return result;
         }
@@ -203,7 +205,7 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
                 NSString *msg = @"Response is not valid UTF-8";
                 NETWORK_RESULT error_result = {CLOUDSYNC_NETWORK_ERROR, (char *)msg.UTF8String, 0, (void *)CFBridgingRetain(msg), network_buffer_cleanup};
                 #ifdef CLOUDSYNC_NETWORK_TRACE
-                network_trace_log(data, method, endpoint, (long)statusCode, error_result.code, 0, network_trace_now_ms() - trace_start_ms);
+                network_trace_log(data, method, endpoint, (long)statusCode, error_result.code, request_bytes, 0, network_trace_now_ms() - trace_start_ms);
                 #endif
                 return error_result;
             }
@@ -221,7 +223,7 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
                 "[cloudsync-network] endpoint=%s using_ticket=%s\n",
                 network_trace_endpoint_name(data, endpoint),
                 using_ticket ? "true" : "false");
-        network_trace_log(data, method, endpoint, (long)statusCode, result.code, result.blen, network_trace_now_ms() - trace_start_ms);
+        network_trace_log(data, method, endpoint, (long)statusCode, result.code, request_bytes, result.blen, network_trace_now_ms() - trace_start_ms);
         #endif
         return result;
     }
@@ -251,7 +253,7 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
             "[cloudsync-network] endpoint=%s using_ticket=%s\n",
             network_trace_endpoint_name(data, endpoint),
             using_ticket ? "true" : "false");
-    network_trace_log(data, method, endpoint, (long)statusCode, result.code, 0, network_trace_now_ms() - trace_start_ms);
+    network_trace_log(data, method, endpoint, (long)statusCode, result.code, request_bytes, 0, network_trace_now_ms() - trace_start_ms);
     #endif
     return result;
 }

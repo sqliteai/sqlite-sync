@@ -49,7 +49,7 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
 #ifdef CLOUDSYNC_NETWORK_TRACE
 const char *network_trace_endpoint_name(network_data *data, const char *endpoint);
 const char *network_trace_result_name(int code);
-void network_trace_log(network_data *data, const char *method, const char *endpoint, long http_status, int result_code, size_t bytes, double elapsed_ms);
+void network_trace_log(network_data *data, const char *method, const char *endpoint, long http_status, int result_code, size_t request_bytes, size_t bytes, double elapsed_ms);
 double network_trace_now_ms(void);
 #endif
 

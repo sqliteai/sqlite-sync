@@ -57,7 +57,7 @@ static size_t cacert_len = sizeof(cacert_pem) - 1;
 #define CLOUDSYNC_CURL_MAXLIFETIME_CONN_SECONDS 60L
 #endif
 #ifndef CLOUDSYNC_NETWORK_FAST_LANE_MAX_BLOB_SIZE
-#define CLOUDSYNC_NETWORK_FAST_LANE_MAX_BLOB_SIZE (32 * 1024)
+#define CLOUDSYNC_NETWORK_FAST_LANE_MAX_BLOB_SIZE (128 * 1024)
 #endif
 
 #define DEFAULT_SYNC_WAIT_MS                    100
@@ -122,15 +122,15 @@ const char *network_trace_result_name(int code) {
     }
 }
 
-void network_trace_log(network_data *data, const char *method, const char *endpoint, long http_status, int result_code, size_t bytes, double elapsed_ms) {
+void network_trace_log(network_data *data, const char *method, const char *endpoint, long http_status, int result_code, size_t request_bytes, size_t bytes, double elapsed_ms) {
     fprintf(stderr,
-            "[cloudsync-network] endpoint=%s method=%s http_status=%ld result=%s bytes=%zu elapsed_ms=%.2f\n",
+            "[cloudsync-network] endpoint=%s method=%s http_status=%ld result=%s request_bytes=%zu bytes=%zu elapsed_ms=%.2f\n",
             network_trace_endpoint_name(data, endpoint), method, http_status,
-            network_trace_result_name(result_code), bytes, elapsed_ms);
+            network_trace_result_name(result_code), request_bytes, bytes, elapsed_ms);
 }
 
 #ifndef CLOUDSYNC_OMIT_CURL
-void network_trace_log_curl(network_data *data, const char *method, const char *endpoint, long http_status, int result_code, size_t bytes, CURL *curl, bool pooled, double elapsed_ms) {
+void network_trace_log_curl(network_data *data, const char *method, const char *endpoint, long http_status, int result_code, size_t request_bytes, size_t bytes, CURL *curl, bool pooled, double elapsed_ms) {
     double namelookup = 0.0;
     double connect = 0.0;
     double appconnect = 0.0;
@@ -146,10 +146,10 @@ void network_trace_log_curl(network_data *data, const char *method, const char *
         curl_easy_getinfo(curl, CURLINFO_NUM_CONNECTS, &num_connects);
     }
     fprintf(stderr,
-            "[cloudsync-network] endpoint=%s method=%s pool=%s http_status=%ld result=%s bytes=%zu elapsed_ms=%.2f curl_total_ms=%.2f dns_ms=%.2f connect_ms=%.2f tls_ms=%.2f starttransfer_ms=%.2f num_connects=%ld\n",
+            "[cloudsync-network] endpoint=%s method=%s pool=%s http_status=%ld result=%s request_bytes=%zu bytes=%zu elapsed_ms=%.2f curl_total_ms=%.2f dns_ms=%.2f connect_ms=%.2f tls_ms=%.2f starttransfer_ms=%.2f num_connects=%ld\n",
             network_trace_endpoint_name(data, endpoint), method,
             pooled ? "on" : "off", http_status,
-            network_trace_result_name(result_code), bytes, elapsed_ms,
+            network_trace_result_name(result_code), request_bytes, bytes, elapsed_ms,
             total * 1000.0, namelookup * 1000.0, connect * 1000.0,
             appconnect * 1000.0, starttransfer * 1000.0, num_connects);
 }
@@ -468,6 +468,7 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
 #endif
 #ifdef CLOUDSYNC_NETWORK_TRACE
     double trace_start_ms = network_trace_now_ms();
+    size_t request_bytes = json_payload ? strlen(json_payload) : 0;
 #endif
 
     CURL *curl = network_curl_for_endpoint(data, endpoint, &pooled);
@@ -576,7 +577,7 @@ cleanup:
             "[cloudsync-network] endpoint=%s using_ticket=%s\n",
             network_trace_endpoint_name(data, endpoint),
             using_ticket ? "true" : "false");
-    network_trace_log_curl(data, method, endpoint, response_code, result.code, result.blen, curl, pooled, network_trace_now_ms() - trace_start_ms);
+    network_trace_log_curl(data, method, endpoint, response_code, result.code, request_bytes, result.blen, curl, pooled, network_trace_now_ms() - trace_start_ms);
     #endif
     if (curl && !pooled) curl_easy_cleanup(curl);
     return result;
@@ -685,6 +686,7 @@ cleanup:
     #ifdef CLOUDSYNC_NETWORK_TRACE
     network_trace_log_curl(data, "PUT", endpoint, response_code,
                            result ? CLOUDSYNC_NETWORK_OK : CLOUDSYNC_NETWORK_ERROR,
+                           (size_t)blob_size,
                            result ? (size_t)blob_size : 0,
                            curl, pooled, network_trace_now_ms() - trace_start_ms);
     #endif
