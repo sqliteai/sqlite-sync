@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.0.20] - 2026-05-26
+
+### Changed
+
+- **Improved network sync performance** by reducing request overhead during `cloudsync_network_send_changes()`, especially for small payloads that can now be applied without the extra upload-URL round trip.
+- **Improved repeated sync request latency** by allowing the network layer to reuse HTTP connections across CloudSync API calls.
+
+## [1.0.19] - 2026-05-15
+
+### Added
+
+- **Mac Catalyst support**.
+
 ## [1.0.18] - 2026-04-29
 
 ### Fixed
