@@ -342,7 +342,7 @@ void network_data_update_ticket (network_data *data, const char *ticket, const c
 #ifdef CLOUDSYNC_NETWORK_TRACE
     fprintf(stderr,
             "[cloudsync-network] received_ticket=%s expires_at=%s\n",
-            data->ticket, data->ticket_expires_at ? data->ticket_expires_at : "");
+            data->ticket ? "true" : "false", data->ticket_expires_at ? data->ticket_expires_at : "");
 #endif
 }
 
