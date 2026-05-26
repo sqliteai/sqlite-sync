@@ -30,6 +30,12 @@ endif
 # Speed up builds by using all available CPU cores
 MAKEFLAGS += -j$(CPUS)
 
+# Mac Catalyst uses the Apple-native NSURLSession networking path. This needs to
+# be set before the common linker flags decide whether libcurl is required.
+ifeq ($(PLATFORM),mac-catalyst)
+	override NATIVE_NETWORK := ON
+endif
+
 # Compiler and flags
 CC = gcc
 CFLAGS = -Wall -Wextra -Wno-unused-parameter -I$(SRC_DIR) -I$(SRC_DIR)/sqlite -I$(SRC_DIR)/postgresql -I$(SRC_DIR)/network -I$(SQLITE_DIR) -I$(CURL_DIR)/include -Imodules/fractional-indexing
@@ -150,6 +156,19 @@ else ifeq ($(PLATFORM),ios-sim)
 	CFLAGS += -arch x86_64 -arch arm64 $(SDK)
 	CURL_CONFIG = --host=arm64-apple-darwin --with-secure-transport CFLAGS="-arch x86_64 -arch arm64 -isysroot $$(xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0"
 	STRIP = strip -x -S $@
+else ifeq ($(PLATFORM),mac-catalyst)
+	TARGET := $(DIST_DIR)/cloudsync.dylib
+	MAC_CATALYST_DEPLOYMENT_TARGET ?= 14.0
+	ifndef ARCH
+		MAC_CATALYST_UNIVERSAL := true
+		STRIP = strip -x -S $@
+	else
+		SDK := -isysroot $(shell xcrun --sdk macosx --show-sdk-path) -target $(ARCH)-apple-ios$(MAC_CATALYST_DEPLOYMENT_TARGET)-macabi
+		LDFLAGS += -framework Security -framework CoreFoundation -dynamiclib $(SDK) -headerpad_max_install_names
+		T_LDFLAGS = -framework Security
+		CFLAGS += $(SDK)
+		STRIP = strip -x -S $@
+	endif
 else # linux
 	TARGET := $(DIST_DIR)/cloudsync.so
 	LDFLAGS += -shared -lssl -lcrypto -lm
@@ -195,6 +214,20 @@ $(shell mkdir -p $(BUILD_DIRS) $(DIST_DIR))
 extension: $(TARGET)
 all: $(TARGET) 
 
+ifeq ($(MAC_CATALYST_UNIVERSAL),true)
+MAC_CATALYST_ARCHS = x86_64 arm64
+MAC_CATALYST_DYLIBS = $(foreach arch,$(MAC_CATALYST_ARCHS),$(DIST_DIR)/cloudsync-mac-catalyst-$(arch).dylib)
+
+$(TARGET):
+	@for arch in $(MAC_CATALYST_ARCHS); do \
+		rm -rf $(BUILD_DIRS); \
+		$(MAKE) PLATFORM=mac-catalyst ARCH=$$arch MAC_CATALYST_DEPLOYMENT_TARGET=$(MAC_CATALYST_DEPLOYMENT_TARGET); \
+		mv $(DIST_DIR)/cloudsync.dylib $(DIST_DIR)/cloudsync-mac-catalyst-$$arch.dylib; \
+	done
+	lipo -create $(MAC_CATALYST_DYLIBS) -output $@
+	rm -f $(MAC_CATALYST_DYLIBS)
+	$(STRIP)
+else
 # Loadable library
 ifdef NATIVE_NETWORK
 $(TARGET): $(RELEASE_OBJ) $(DEF_FILE)
@@ -208,6 +241,7 @@ ifeq ($(PLATFORM),windows)
 endif
 	# Strip debug symbols
 	$(STRIP)
+endif
 
 # Test executable
 $(TEST_TARGET): $(TEST_OBJ)
@@ -404,10 +438,10 @@ framework module CloudSync {\
 }
 endef
 
-LIB_NAMES = ios.dylib ios-sim.dylib macos.dylib
-FMWK_NAMES = ios-arm64 ios-arm64_x86_64-simulator macos-arm64_x86_64
+LIB_NAMES = ios.dylib ios-sim.dylib mac-catalyst.dylib macos.dylib
+FMWK_NAMES = ios-arm64 ios-arm64_x86_64-simulator ios-arm64_x86_64-maccatalyst macos-arm64_x86_64
 $(DIST_DIR)/%.xcframework: $(LIB_NAMES)
-	@$(foreach i,1 2,\
+	@$(foreach i,1 2 3,\
 		lib=$(word $(i),$(LIB_NAMES)); \
 		fmwk=$(word $(i),$(FMWK_NAMES)); \
 		mkdir -p $(DIST_DIR)/$$fmwk/CloudSync.framework/Headers; \
@@ -418,8 +452,8 @@ $(DIST_DIR)/%.xcframework: $(LIB_NAMES)
 		mv $(DIST_DIR)/$$lib $(DIST_DIR)/$$fmwk/CloudSync.framework/CloudSync; \
 		install_name_tool -id "@rpath/CloudSync.framework/CloudSync" $(DIST_DIR)/$$fmwk/CloudSync.framework/CloudSync; \
 	)
-	@lib=$(word 3,$(LIB_NAMES)); \
-	fmwk=$(word 3,$(FMWK_NAMES)); \
+	@lib=$(word 4,$(LIB_NAMES)); \
+	fmwk=$(word 4,$(FMWK_NAMES)); \
 	mkdir -p $(DIST_DIR)/$$fmwk/CloudSync.framework/Versions/A/Headers; \
 	mkdir -p $(DIST_DIR)/$$fmwk/CloudSync.framework/Versions/A/Modules; \
 	mkdir -p $(DIST_DIR)/$$fmwk/CloudSync.framework/Versions/A/Resources; \
@@ -473,6 +507,7 @@ help:
 	@echo "  android (needs ARCH to be set to x86_64, arm64-v8a, or armeabi-v7a and ANDROID_NDK to be set)"
 	@echo "  ios (only on macOS - can be compiled with native network support)"
 	@echo "  ios-sim (only on macOS - can be compiled with native network support)"
+	@echo "  mac-catalyst (only on macOS - builds a universal arm64 + x86_64 Catalyst dylib)"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all	   				- Build the extension (default)"
