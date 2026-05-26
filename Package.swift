@@ -14,8 +14,8 @@ let package = Package(
     targets: [
         .binaryTarget(
             name: "CloudSyncBinary",
-            url: "https://github.com/sqliteai/sqlite-sync/releases/download/1.0.19/cloudsync-apple-xcframework-1.0.19.zip",
-            checksum: "1b7beca51414844cd7ad1cae483f08f208b0a717dcbaaffd764034f9385deb1f"
+            url: "https://github.com/sqliteai/sqlite-sync/releases/download/1.0.20/cloudsync-apple-xcframework-1.0.20.zip",
+            checksum: "21d2c3e8e3770fd7498502eff4910b6f1867cd9c0ce00e707931f5ffdd9ad4fc"
         ),
         .target(
             name: "CloudSync",
