@@ -16,6 +16,8 @@
 #define CLOUDSYNC_ENDPOINT_STATUS           "status"
 #define CLOUDSYNC_HEADER_ORG                "X-CloudSync-Org"
 #define CLOUDSYNC_HEADER_VERSION            "X-CloudSync-Version"
+#define CLOUDSYNC_HEADER_TICKET             "X-CloudSync-Ticket"
+#define CLOUDSYNC_HEADER_TICKET_EXPIRES_AT  "X-CloudSync-Ticket-Expires-At"
 // CLOUDSYNC_VERSION is defined in cloudsync.h — include it before this header at use sites.
 #define CLOUDSYNC_HEADER_VERSION_LINE       CLOUDSYNC_HEADER_VERSION ": " CLOUDSYNC_VERSION
 #define CLOUDSYNC_HEADER_CHECK_CAPABILITIES "X-CloudSync-Capabilities: check-status-response"
@@ -36,10 +38,20 @@ typedef struct {
 
 char *network_data_get_siteid (network_data *data);
 char *network_data_get_orgid (network_data *data);
+char *network_data_get_ticket (network_data *data);
+bool network_data_should_use_ticket (network_data *data, const char *endpoint, const char *authentication);
+void network_data_update_ticket (network_data *data, const char *ticket, const char *expires_at);
 bool network_data_set_endpoints (network_data *data, char *auth, char *check, char *upload, char *apply, char *status);
 
 bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size);
 NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char **extra_headers, int nextra_headers);
+
+#ifdef CLOUDSYNC_NETWORK_TRACE
+const char *network_trace_endpoint_name(network_data *data, const char *endpoint);
+const char *network_trace_result_name(int code);
+void network_trace_log(network_data *data, const char *method, const char *endpoint, long http_status, int result_code, size_t request_bytes, size_t bytes, double elapsed_ms);
+double network_trace_now_ms(void);
+#endif
 
 
 #endif

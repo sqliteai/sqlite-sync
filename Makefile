@@ -185,6 +185,10 @@ endif
 	T_LDFLAGS += -fprofile-arcs -ftest-coverage
 endif
 
+ifdef SYNC_BENCH_DEBUG
+	CFLAGS += -DCLOUDSYNC_NETWORK_TRACE
+endif
+
 # Native network support only for Apple platforms
 ifdef NATIVE_NETWORK
 	RELEASE_OBJ += $(patsubst %.m, $(BUILD_RELEASE)/%_m.o, $(notdir $(wildcard $(NETWORK_DIR)/*.m)))
@@ -270,6 +274,25 @@ e2e: $(TARGET) $(DIST_DIR)/integration$(EXE)
 		export $$(grep -v '^#' .env | xargs); \
 	fi; \
 	./$(DIST_DIR)/integration$(EXE)
+
+# Run the sync performance benchmark. This is intentionally separate from e2e
+# because timings depend on network/server load and polling configuration.
+sync-bench: $(TARGET) $(DIST_DIR)/sync_bench$(EXE)
+	@if [ -f .env ]; then \
+		export $$(grep -v '^#' .env | xargs); \
+	fi; \
+	if [ -n "$(SYNC_BENCH_DATABASE_ID)" ]; then export SYNC_BENCH_DATABASE_ID="$(SYNC_BENCH_DATABASE_ID)"; fi; \
+	if [ -n "$(SYNC_BENCH_CLOUDSYNC_ADDRESS)" ]; then export SYNC_BENCH_CLOUDSYNC_ADDRESS="$(SYNC_BENCH_CLOUDSYNC_ADDRESS)"; fi; \
+	if [ -n "$(SYNC_BENCH_APIKEY)" ]; then export SYNC_BENCH_APIKEY="$(SYNC_BENCH_APIKEY)"; fi; \
+	if [ -n "$(SYNC_BENCH_POLL_DELAY_MS)" ]; then export SYNC_BENCH_POLL_DELAY_MS="$(SYNC_BENCH_POLL_DELAY_MS)"; fi; \
+	if [ -n "$(SYNC_BENCH_MAX_POLLS)" ]; then export SYNC_BENCH_MAX_POLLS="$(SYNC_BENCH_MAX_POLLS)"; fi; \
+	if [ -n "$(SYNC_BENCH_RANDOM_BLOB_SIZE_BYTES)" ]; then export SYNC_BENCH_RANDOM_BLOB_SIZE_BYTES="$(SYNC_BENCH_RANDOM_BLOB_SIZE_BYTES)"; fi; \
+	if [ -n "$(SYNC_BENCH_CLEANUP_OLDER_THAN_SECONDS)" ]; then export SYNC_BENCH_CLEANUP_OLDER_THAN_SECONDS="$(SYNC_BENCH_CLEANUP_OLDER_THAN_SECONDS)"; fi; \
+	if [ -n "$(SYNC_BENCH_OUTPUT)" ]; then export SYNC_BENCH_OUTPUT="$(SYNC_BENCH_OUTPUT)"; fi; \
+	./$(DIST_DIR)/sync_bench$(EXE)
+
+sync-bench-debug:
+	$(MAKE) SYNC_BENCH_DEBUG=1 sync-bench
 
 OPENSSL_TARBALL = $(OPENSSL_DIR)/$(OPENSSL_VERSION).tar.gz
 

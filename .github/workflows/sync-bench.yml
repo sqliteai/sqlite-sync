@@ -1,0 +1,63 @@
+name: sync benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      poll_delay_ms:
+        description: Polling delay between receiver checks, in milliseconds
+        required: false
+        default: '250'
+      max_polls:
+        description: Maximum number of receiver polling attempts
+        required: false
+        default: '40'
+      curl_pool:
+        description: Enable curl connection pool; use 0 to disable
+        required: false
+        default: '1'
+
+permissions:
+  contents: read
+
+jobs:
+  sync-bench-debug:
+    name: sync-bench-debug linux x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    env:
+      SYNC_BENCH_DATABASE_ID: ${{ secrets.SYNC_BENCH_DATABASE_ID }}
+      SYNC_BENCH_CLOUDSYNC_ADDRESS: ${{ secrets.SYNC_BENCH_CLOUDSYNC_ADDRESS }}
+      SYNC_BENCH_APIKEY: ${{ secrets.SYNC_BENCH_APIKEY }}
+      SYNC_BENCH_OUTPUT: json
+      SYNC_BENCH_POLL_DELAY_MS: ${{ inputs.poll_delay_ms }}
+      SYNC_BENCH_MAX_POLLS: ${{ inputs.max_polls }}
+      CLOUDSYNC_CURL_POOL: ${{ inputs.curl_pool }}
+
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          submodules: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make curl sqlite3 unzip
+
+      - name: Build debug benchmark
+        run: make SYNC_BENCH_DEBUG=1 extension dist/sync_bench
+
+      - name: Run sync benchmark
+        run: |
+          mkdir -p artifacts
+          ./dist/sync_bench > artifacts/sync-bench.json 2> artifacts/sync-bench.trace.log
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-bench-debug-${{ github.run_id }}
+          path: |
+            artifacts/sync-bench.json
+            artifacts/sync-bench.trace.log
+          if-no-files-found: warn
