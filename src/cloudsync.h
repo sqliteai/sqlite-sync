@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define CLOUDSYNC_VERSION                       "1.0.20"
+#define CLOUDSYNC_VERSION                       "1.1.0"
 #define CLOUDSYNC_MAX_TABLENAME_LEN             512
 
 #define CLOUDSYNC_VALUE_NOTSET                  -1
@@ -26,6 +26,9 @@ extern "C" {
 #define CLOUDSYNC_RLS_RESTRICTED_VALUE          "__[RLS]__"
 #define CLOUDSYNC_DISABLE_ROWIDONLY_TABLES      1
 #define CLOUDSYNC_DEFAULT_ALGO                  "cls"
+#define CLOUDSYNC_PAYLOAD_CHUNK_DEFAULT_SIZE    (5 * 1024 * 1024)
+#define CLOUDSYNC_PAYLOAD_CHUNK_MIN_SIZE        (256 * 1024)
+#define CLOUDSYNC_PAYLOAD_CHUNK_SAFETY_MARGIN   (16 * 1024)
 
 #define CLOUDSYNC_CHANGES_NCOLS                 9
 
@@ -92,8 +95,35 @@ int    cloudsync_payload_encode_step (cloudsync_payload_context *payload, clouds
 int    cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsync_context *data);
 char  *cloudsync_payload_blob (cloudsync_payload_context *payload, int64_t *blob_size, int64_t *nrows);
 size_t cloudsync_payload_context_size (size_t *header_size);
+uint64_t cloudsync_payload_context_nrows (cloudsync_payload_context *payload);
+size_t cloudsync_payload_context_bused (cloudsync_payload_context *payload);
 int    cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int64_t *new_db_version);
 int    cloudsync_payload_save (cloudsync_context *data, const char *payload_path, int *blob_size); // available only on Desktop OS (no WASM, no mobile)
+int    cloudsync_payload_max_chunk_size (cloudsync_context *data);
+int    cloudsync_payload_encode_fragment_step (cloudsync_payload_context *payload, cloudsync_context *data,
+                                               const char *tbl, int tbl_len,
+                                               const void *pk, int pk_len,
+                                               const char *col_name, int col_name_len,
+                                               const void *fragment, int fragment_len,
+                                               int64_t col_version, int64_t db_version,
+                                               const void *site_id, int site_id_len,
+                                               int64_t cl, int64_t seq,
+                                               uint64_t value_checksum,
+                                               int64_t total_size,
+                                               int part_index, int part_count);
+int    cloudsync_payload_fragment_target_size (cloudsync_context *data);
+int    cloudsync_payload_fragment_count (int64_t total_size, int target_size);
+int    cloudsync_payload_fragment_data_size (cloudsync_context *data,
+                                             const char *tbl, int tbl_len,
+                                             const void *pk, int pk_len,
+                                             const char *col_name, int col_name_len,
+                                             int64_t col_version, int64_t db_version,
+                                             const void *site_id, int site_id_len,
+                                             int64_t cl, int64_t seq,
+                                             int64_t total_size,
+                                             int part_index, int part_count);
+uint64_t cloudsync_payload_encoded_value_checksum (dbvalue_t *value);
+int    cloudsync_payload_encoded_value_header (dbvalue_t *value, char *header, int header_cap, int64_t *payload_len);
 
 // CloudSync table context
 int cloudsync_refill_metatable (cloudsync_context *data, const char *table_name);

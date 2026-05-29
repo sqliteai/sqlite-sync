@@ -44,7 +44,9 @@ RUN set -eux; \
     cd /usr/src/postgresql-17; \
     ./configure --enable-debug --enable-cassert --without-icu CFLAGS="-O0 -g3 -fno-omit-frame-pointer"; \
     make -j"$(nproc)"; \
-    make install
+    make install; \
+    make -C contrib/dblink -j"$(nproc)"; \
+    make -C contrib/dblink install
 
 ENV PATH="/usr/local/pgsql/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/usr/local/pgsql/lib:${LD_LIBRARY_PATH}"

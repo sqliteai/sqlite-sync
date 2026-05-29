@@ -6,6 +6,7 @@ FROM postgres:${POSTGRES_TAG}
 # and install the matching server-dev package
 RUN apt-get update && apt-get install -y \
     build-essential \
+    postgresql-contrib-${PG_MAJOR} \
     postgresql-server-dev-${PG_MAJOR} \
     git \
     make \

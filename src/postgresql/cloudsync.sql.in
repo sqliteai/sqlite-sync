@@ -149,6 +149,23 @@ CREATE OR REPLACE AGGREGATE cloudsync_payload_encode(text, bytea, text, bytea, b
     FINALFUNC = cloudsync_payload_encode_finalfn
 );
 
+CREATE OR REPLACE FUNCTION cloudsync_payload_chunks(
+  since_db_version bigint DEFAULT NULL,
+  filter_site_id bytea DEFAULT NULL,
+  until_db_version bigint DEFAULT NULL
+)
+RETURNS TABLE (
+  payload bytea,
+  chunk_index bigint,
+  payload_size bigint,
+  rows bigint,
+  db_version_min bigint,
+  db_version_max bigint,
+  watermark_db_version bigint
+)
+AS 'MODULE_PATHNAME', 'cloudsync_payload_chunks'
+LANGUAGE C VOLATILE;
+
 -- Payload decoding and application
 CREATE OR REPLACE FUNCTION cloudsync_payload_decode(payload bytea)
 RETURNS integer

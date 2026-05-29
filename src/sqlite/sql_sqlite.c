@@ -280,6 +280,37 @@ const char * const SQL_CHANGES_INSERT_ROW =
     "INSERT INTO cloudsync_changes(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) "
     "VALUES (?,?,?,?,?,?,?,?,?);";
 
+const char * const SQL_PAYLOAD_FRAGMENTS_CREATE_TABLE =
+    "CREATE TABLE IF NOT EXISTS cloudsync_payload_fragments ("
+    "value_id TEXT NOT NULL, part_index INTEGER NOT NULL, part_count INTEGER NOT NULL, total_size INTEGER NOT NULL, "
+    "checksum TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()), "
+    "tbl TEXT NOT NULL, pk BLOB NOT NULL, col_name TEXT NOT NULL, col_version INTEGER NOT NULL, db_version INTEGER NOT NULL, "
+    "site_id BLOB NOT NULL, cl INTEGER NOT NULL, seq INTEGER NOT NULL, fragment BLOB NOT NULL, "
+    "PRIMARY KEY(value_id, part_index)) WITHOUT ROWID;";
+
+const char * const SQL_PAYLOAD_FRAGMENTS_UPSERT =
+    "INSERT OR REPLACE INTO cloudsync_payload_fragments "
+    "(value_id, part_index, part_count, total_size, checksum, created_at, tbl, pk, col_name, col_version, db_version, site_id, cl, seq, fragment) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
+
+const char * const SQL_PAYLOAD_FRAGMENTS_COUNT =
+    "SELECT COUNT(*), MIN(part_count), MAX(part_count), MIN(total_size), MAX(total_size), "
+    "MIN(checksum), MAX(checksum), MIN(part_index), MAX(part_index) "
+    "FROM cloudsync_payload_fragments WHERE value_id=?;";
+
+const char * const SQL_PAYLOAD_FRAGMENTS_SELECT =
+    "SELECT fragment, tbl, pk, col_name, col_version, db_version, site_id, cl, seq, checksum "
+    "FROM cloudsync_payload_fragments WHERE value_id=? ORDER BY part_index ASC;";
+
+const char * const SQL_PAYLOAD_FRAGMENTS_DELETE =
+    "DELETE FROM cloudsync_payload_fragments WHERE value_id=?;";
+
+const char * const SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE =
+    "DELETE FROM cloudsync_payload_fragments "
+    "WHERE created_at < ? AND value_id IN ("
+    "SELECT value_id FROM cloudsync_payload_fragments GROUP BY value_id "
+    "HAVING COUNT(*) < MAX(part_count));";
+
 // MARK: Blocks (block-level LWW)
 
 const char * const SQL_BLOCKS_CREATE_TABLE =

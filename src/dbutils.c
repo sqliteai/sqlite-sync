@@ -144,7 +144,13 @@ int dbutils_settings_get_value (cloudsync_context *data, const char *key, char *
         
         // INT case
         if (intvalue) {
-            *intvalue = database_column_int(vm, 0);
+            int type = database_column_type(vm, 0);
+            if (type == DBTYPE_TEXT) {
+                const char *value = database_column_text(vm, 0);
+                *intvalue = value ? strtoll(value, NULL, 0) : 0;
+            } else {
+                *intvalue = database_column_int(vm, 0);
+            }
             goto finalize_get_value;
         }
         

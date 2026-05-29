@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Chunked payload generation** via `cloudsync_payload_chunks()`, available as a SQLite virtual table and as a PostgreSQL set-returning function. The API emits transport-sized payload chunks and transparently fragments oversized BLOB/TEXT values into v3 fragment payloads.
+- **`payload_max_chunk_size` global setting** for controlling generated chunk size. The default is 5 MB and values below the 256 KB technical minimum are clamped.
+- **Payload chunking documentation** in `API.md` and `PERFORMANCE.md`, including the explicit memory note that chunking bounds transport payloads but the database must still materialize a completed single BLOB/TEXT value when it is applied.
+
+### Changed
+
+- `cloudsync_payload_apply()` now accepts legacy payloads, monolithic payloads, and v3 fragment payloads without enforcing the local `payload_max_chunk_size`, preserving compatibility between peers with different settings.
+- `cloudsync_network_send_changes()` now streams outgoing changes through `cloudsync_payload_chunks()` instead of first building one monolithic payload. This bounds transport payload size for the built-in network path and lets large rowsets or oversized BLOB/TEXT values flow through the same `/apply` endpoint as regular payloads.
+
 ## [1.0.20] - 2026-05-26
 
 ### Changed

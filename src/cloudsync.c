@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <math.h>
+#include <time.h>
 
 #include "cloudsync.h"
 #include "lz4.h"
@@ -55,8 +56,11 @@
 #define CLOUDSYNC_PAYLOAD_VERSION_ORIGNAL               1
 #define CLOUDSYNC_PAYLOAD_VERSION_1                     CLOUDSYNC_PAYLOAD_VERSION_ORIGNAL
 #define CLOUDSYNC_PAYLOAD_VERSION_2                     2
+#define CLOUDSYNC_PAYLOAD_VERSION_3                     3
 #define CLOUDSYNC_PAYLOAD_VERSION_LATEST                CLOUDSYNC_PAYLOAD_VERSION_2
 #define CLOUDSYNC_PAYLOAD_MIN_VERSION_WITH_CHECKSUM     CLOUDSYNC_PAYLOAD_VERSION_2
+#define CLOUDSYNC_PAYLOAD_FRAGMENT_PREFIX               "__cloudsync_frag_v1__:"
+#define CLOUDSYNC_PAYLOAD_FRAGMENT_STALE_SECONDS        (24*60*60)
 
 #ifndef MAX
 #define MAX(a, b)                               (((a)>(b))?(a):(b))
@@ -237,6 +241,7 @@ struct cloudsync_payload_context {
     size_t      bused;
     uint64_t    nrows;
     uint16_t    ncols;
+    uint8_t     version;
 };
 
 #ifdef _MSC_VER
@@ -3029,7 +3034,15 @@ size_t cloudsync_payload_context_size (size_t *header_size) {
     return sizeof(cloudsync_payload_context);
 }
 
-void cloudsync_payload_header_init (cloudsync_payload_header *header, uint32_t expanded_size, uint16_t ncols, uint32_t nrows, uint64_t hash) {
+uint64_t cloudsync_payload_context_nrows (cloudsync_payload_context *payload) {
+    return payload ? payload->nrows : 0;
+}
+
+size_t cloudsync_payload_context_bused (cloudsync_payload_context *payload) {
+    return payload ? payload->bused : 0;
+}
+
+void cloudsync_payload_header_init (cloudsync_payload_header *header, uint8_t version, uint32_t expanded_size, uint16_t ncols, uint32_t nrows, uint64_t hash) {
     memset(header, 0, sizeof(cloudsync_payload_header));
     assert(sizeof(cloudsync_payload_header)==32);
     
@@ -3037,7 +3050,7 @@ void cloudsync_payload_header_init (cloudsync_payload_header *header, uint32_t e
     sscanf(CLOUDSYNC_VERSION, "%d.%d.%d", &major, &minor, &patch);
     
     header->signature = htonl(CLOUDSYNC_PAYLOAD_SIGNATURE);
-    header->version = CLOUDSYNC_PAYLOAD_VERSION_2;
+    header->version = version;
     header->libversion[0] = (uint8_t)major;
     header->libversion[1] = (uint8_t)minor;
     header->libversion[2] = (uint8_t)patch;
@@ -3071,6 +3084,320 @@ int cloudsync_payload_encode_step (cloudsync_payload_context *payload, cloudsync
     ++payload->nrows;
     
     return DBRES_OK;
+}
+
+static bool cloudsync_payload_append_raw (cloudsync_payload_context *payload, cloudsync_context *data, const char **fields, const size_t *field_sizes, int nfields, uint8_t version) {
+    size_t needed = 0;
+    for (int i = 0; i < nfields; ++i) {
+        if (field_sizes[i] > SIZE_MAX - needed) {
+            cloudsync_set_error(data, "cloudsync payload raw row too large", DBRES_NOMEM);
+            return false;
+        }
+        needed += field_sizes[i];
+    }
+    if (!cloudsync_payload_encode_check(payload, needed)) {
+        cloudsync_set_error(data, "Not enough memory to resize payload internal buffer", DBRES_NOMEM);
+        return false;
+    }
+    if (payload->nrows == 0) {
+        payload->ncols = (uint16_t)nfields;
+        payload->version = version;
+    }
+    char *dst = payload->buffer + payload->bused;
+    for (int i = 0; i < nfields; ++i) {
+        memcpy(dst, fields[i], field_sizes[i]);
+        dst += field_sizes[i];
+    }
+    payload->bused += needed;
+    ++payload->nrows;
+    return true;
+}
+
+int cloudsync_payload_max_chunk_size (cloudsync_context *data) {
+    int64_t value = dbutils_settings_get_int64_value(data, CLOUDSYNC_KEY_PAYLOAD_MAX_CHUNK_SIZE);
+    if (value <= 0) value = CLOUDSYNC_PAYLOAD_CHUNK_DEFAULT_SIZE;
+    if (value < CLOUDSYNC_PAYLOAD_CHUNK_MIN_SIZE) value = CLOUDSYNC_PAYLOAD_CHUNK_MIN_SIZE;
+    if (value > INT_MAX) value = INT_MAX;
+    return (int)value;
+}
+
+int cloudsync_payload_fragment_target_size (cloudsync_context *data) {
+    int max_size = cloudsync_payload_max_chunk_size(data);
+    int target = max_size - (int)sizeof(cloudsync_payload_header) - CLOUDSYNC_PAYLOAD_CHUNK_SAFETY_MARGIN;
+    if (target < 1024) target = 1024;
+    return target;
+}
+
+static size_t cloudsync_payload_decimal_len_i64 (int64_t value) {
+    size_t len = value < 0 ? 1 : 0;
+    uint64_t v = (value < 0) ? (uint64_t)(-(value + 1)) + 1u : (uint64_t)value;
+    do {
+        len++;
+        v /= 10u;
+    } while (v != 0);
+    return len;
+}
+
+static bool cloudsync_payload_size_add (size_t *acc, size_t value) {
+    if (value > SIZE_MAX - *acc) return false;
+    *acc += value;
+    return true;
+}
+
+int cloudsync_payload_fragment_count (int64_t total_size, int target_size) {
+    if (total_size <= 0 || target_size <= 0) return 0;
+    uint64_t total = (uint64_t)total_size;
+    uint64_t target = (uint64_t)target_size;
+    uint64_t count = total / target + ((total % target) != 0);
+    if (count == 0 || count > INT_MAX) return 0;
+    return (int)count;
+}
+
+int cloudsync_payload_fragment_data_size (cloudsync_context *data,
+                                          const char *tbl, int tbl_len,
+                                          const void *pk, int pk_len,
+                                          const char *col_name, int col_name_len,
+                                          int64_t col_version, int64_t db_version,
+                                          const void *site_id, int site_id_len,
+                                          int64_t cl, int64_t seq,
+                                          int64_t total_size,
+                                          int part_index, int part_count) {
+    UNUSED_PARAMETER(pk);
+    UNUSED_PARAMETER(site_id);
+    if (tbl_len < 0 && tbl) tbl_len = (int)strlen(tbl);
+    if (col_name_len < 0 && col_name) col_name_len = (int)strlen(col_name);
+    if (tbl_len < 0 || pk_len < 0 || col_name_len < 0 || site_id_len < 0 || total_size < 0 || part_index < 0 || part_count <= 0) {
+        return 0;
+    }
+
+    size_t fixed = sizeof(cloudsync_payload_header);
+    size_t frag_col_len = strlen(CLOUDSYNC_PAYLOAD_FRAGMENT_PREFIX) + 32 + 1 + 16 + 1 +
+                          cloudsync_payload_decimal_len_i64(part_index) + 1 +
+                          cloudsync_payload_decimal_len_i64(part_count) + 1 +
+                          cloudsync_payload_decimal_len_i64(total_size) + 1 +
+                          (size_t)col_name_len;
+    size_t sizes[] = {
+        pk_encode_raw_size(DBTYPE_TEXT, tbl_len),
+        pk_encode_raw_size(DBTYPE_BLOB, pk_len),
+        pk_encode_raw_size(DBTYPE_TEXT, (int64_t)frag_col_len),
+        pk_encode_raw_size(DBTYPE_INTEGER, col_version),
+        pk_encode_raw_size(DBTYPE_INTEGER, db_version),
+        pk_encode_raw_size(DBTYPE_BLOB, site_id_len),
+        pk_encode_raw_size(DBTYPE_INTEGER, cl),
+        pk_encode_raw_size(DBTYPE_INTEGER, seq)
+    };
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+        if (sizes[i] == SIZE_MAX || !cloudsync_payload_size_add(&fixed, sizes[i])) return 0;
+    }
+
+    int max_size = cloudsync_payload_max_chunk_size(data);
+    if (fixed >= (size_t)max_size) return 0;
+
+    size_t candidate = (size_t)max_size - fixed;
+    if (candidate > INT_MAX) candidate = INT_MAX;
+    while (candidate > 0) {
+        size_t frag_size = pk_encode_raw_size(DBTYPE_BLOB, (int64_t)candidate);
+        if (frag_size == SIZE_MAX) return 0;
+        if (fixed <= (size_t)max_size && frag_size <= (size_t)max_size - fixed) return (int)candidate;
+        size_t total = fixed + frag_size;
+        size_t over = total > (size_t)max_size ? total - (size_t)max_size : 1;
+        if (candidate <= over) return 0;
+        candidate -= over;
+    }
+    return 0;
+}
+
+int cloudsync_payload_encoded_value_header (dbvalue_t *value, char *header, int header_cap, int64_t *payload_len) {
+    if (!value || !header || header_cap <= 0 || !payload_len) return -1;
+    int type = database_value_type(value);
+    *payload_len = 0;
+    if (type != DBTYPE_TEXT && type != DBTYPE_BLOB) return 0;
+    int64_t len = database_value_bytes(value);
+    if (len < 0) return -1;
+    *payload_len = len;
+    size_t total = pk_encode_raw_size(type, len);
+    if (total == SIZE_MAX || total < (size_t)len || total - (size_t)len > (size_t)header_cap) return -1;
+    if (type == DBTYPE_TEXT) {
+        size_t nbytes = pk_encode_raw_size(type, len) - (size_t)len - 1;
+        uint8_t type_byte = (uint8_t)((nbytes << 3) | DBTYPE_TEXT);
+        header[0] = (char)type_byte;
+        for (size_t i = 0; i < nbytes; i++) header[1 + i] = (uint8_t)(((uint64_t)len >> (8 * (nbytes - 1 - i))) & 0xFFu);
+        return (int)(1 + nbytes);
+    } else {
+        size_t nbytes = pk_encode_raw_size(type, len) - (size_t)len - 1;
+        uint8_t type_byte = (uint8_t)((nbytes << 3) | DBTYPE_BLOB);
+        header[0] = (char)type_byte;
+        for (size_t i = 0; i < nbytes; i++) header[1 + i] = (uint8_t)(((uint64_t)len >> (8 * (nbytes - 1 - i))) & 0xFFu);
+        return (int)(1 + nbytes);
+    }
+}
+
+uint64_t cloudsync_payload_encoded_value_checksum (dbvalue_t *value) {
+    if (!value) return 0;
+    int type = database_value_type(value);
+    if (type != DBTYPE_TEXT && type != DBTYPE_BLOB) {
+        size_t len = pk_encode_size(&value, 1, 0, -1);
+        char stack[32];
+        char *buf = stack;
+        if (len > sizeof(stack)) buf = cloudsync_memory_alloc((uint64_t)len);
+        if (!buf) return 0;
+        size_t bsize = len;
+        pk_encode(&value, 1, buf, false, &bsize, -1);
+        uint64_t h = pk_checksum(buf, bsize);
+        if (buf != stack) cloudsync_memory_free(buf);
+        return h;
+    }
+    char header[16];
+    int64_t payload_len = 0;
+    int header_len = cloudsync_payload_encoded_value_header(value, header, sizeof(header), &payload_len);
+    if (header_len <= 0) return 0;
+    uint64_t h = pk_checksum(header, (size_t)header_len);
+    const char *p = (const char *)database_value_blob(value);
+    if (p && payload_len > 0) {
+        const uint8_t *bytes = (const uint8_t *)p;
+        for (int64_t i = 0; i < payload_len; ++i) {
+            h ^= bytes[i];
+            h *= 1099511628211ULL;
+        }
+    }
+    return h;
+}
+
+static uint64_t cloudsync_checksum_update (uint64_t h, const void *data, size_t len) {
+    const uint8_t *p = (const uint8_t *)data;
+    for (size_t i = 0; i < len; ++i) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static uint64_t cloudsync_checksum_update_i64 (uint64_t h, int64_t value) {
+    uint64_t v = (uint64_t)value;
+    for (int i = 7; i >= 0; --i) {
+        uint8_t b = (uint8_t)((v >> (8 * i)) & 0xffu);
+        h = cloudsync_checksum_update(h, &b, 1);
+    }
+    return h;
+}
+
+static void cloudsync_payload_fragment_value_id (char out[33],
+                                                 const char *tbl, int tbl_len,
+                                                 const void *pk, int pk_len,
+                                                 const char *col_name, int col_name_len,
+                                                 int64_t col_version, int64_t db_version,
+                                                 const void *site_id, int site_id_len,
+                                                 int64_t cl, int64_t seq,
+                                                 uint64_t value_checksum,
+                                                 int64_t total_size) {
+    uint64_t h1 = 14695981039346656037ULL;
+    uint64_t h2 = 1099511628211ULL;
+    const char sep = '\x1f';
+
+    h1 = cloudsync_checksum_update(h1, tbl, (size_t)tbl_len);
+    h1 = cloudsync_checksum_update(h1, &sep, 1);
+    h1 = cloudsync_checksum_update(h1, pk, (size_t)pk_len);
+    h1 = cloudsync_checksum_update(h1, &sep, 1);
+    h1 = cloudsync_checksum_update(h1, col_name, (size_t)col_name_len);
+    h1 = cloudsync_checksum_update(h1, &sep, 1);
+    h1 = cloudsync_checksum_update(h1, site_id, (size_t)site_id_len);
+    h1 = cloudsync_checksum_update_i64(h1, col_version);
+    h1 = cloudsync_checksum_update_i64(h1, db_version);
+    h1 = cloudsync_checksum_update_i64(h1, cl);
+    h1 = cloudsync_checksum_update_i64(h1, seq);
+    h1 = cloudsync_checksum_update_i64(h1, (int64_t)value_checksum);
+    h1 = cloudsync_checksum_update_i64(h1, total_size);
+
+    h2 = cloudsync_checksum_update_i64(h2, total_size);
+    h2 = cloudsync_checksum_update_i64(h2, (int64_t)value_checksum);
+    h2 = cloudsync_checksum_update(h2, site_id, (size_t)site_id_len);
+    h2 = cloudsync_checksum_update(h2, col_name, (size_t)col_name_len);
+    h2 = cloudsync_checksum_update(h2, pk, (size_t)pk_len);
+    h2 = cloudsync_checksum_update(h2, tbl, (size_t)tbl_len);
+    h2 = cloudsync_checksum_update_i64(h2, seq);
+    h2 = cloudsync_checksum_update_i64(h2, cl);
+    h2 = cloudsync_checksum_update_i64(h2, db_version);
+    h2 = cloudsync_checksum_update_i64(h2, col_version);
+
+    snprintf(out, 33, "%016" PRIx64 "%016" PRIx64, h1, h2);
+}
+
+int cloudsync_payload_encode_fragment_step (cloudsync_payload_context *payload, cloudsync_context *data,
+                                            const char *tbl, int tbl_len,
+                                            const void *pk, int pk_len,
+                                            const char *col_name, int col_name_len,
+                                            const void *fragment, int fragment_len,
+                                            int64_t col_version, int64_t db_version,
+                                            const void *site_id, int site_id_len,
+                                            int64_t cl, int64_t seq,
+                                            uint64_t value_checksum,
+                                            int64_t total_size,
+                                            int part_index, int part_count) {
+    if (!payload || !data || !tbl || !pk || !col_name || !fragment || !site_id) return DBRES_MISUSE;
+    if (tbl_len < 0) tbl_len = (int)strlen(tbl);
+    if (col_name_len < 0) col_name_len = (int)strlen(col_name);
+    if (tbl_len < 0 || pk_len < 0 || col_name_len < 0 || fragment_len <= 0 || site_id_len < 0 ||
+        total_size <= 0 || part_index < 0 || part_count <= 0 || part_index >= part_count) {
+        return DBRES_MISUSE;
+    }
+
+    char value_id[33];
+    char checksum_hex[17];
+    cloudsync_payload_fragment_value_id(value_id, tbl, tbl_len, pk, pk_len, col_name, col_name_len,
+                                        col_version, db_version, site_id, site_id_len, cl, seq,
+                                        value_checksum, total_size);
+    snprintf(checksum_hex, sizeof(checksum_hex), "%016" PRIx64, value_checksum);
+
+    char *frag_col = cloudsync_memory_mprintf("%s%s:%s:%d:%d:%" PRId64 ":%.*s",
+                                              CLOUDSYNC_PAYLOAD_FRAGMENT_PREFIX,
+                                              value_id, checksum_hex, part_index, part_count, total_size,
+                                              col_name_len, col_name);
+    if (!frag_col) return DBRES_NOMEM;
+
+    size_t sizes[9] = {0};
+    sizes[0] = pk_encode_raw_size(DBTYPE_TEXT, tbl_len);
+    sizes[1] = pk_encode_raw_size(DBTYPE_BLOB, pk_len);
+    sizes[2] = pk_encode_raw_size(DBTYPE_TEXT, (int64_t)strlen(frag_col));
+    sizes[3] = pk_encode_raw_size(DBTYPE_BLOB, fragment_len);
+    sizes[4] = pk_encode_raw_size(DBTYPE_INTEGER, col_version);
+    sizes[5] = pk_encode_raw_size(DBTYPE_INTEGER, db_version);
+    sizes[6] = pk_encode_raw_size(DBTYPE_BLOB, site_id_len);
+    sizes[7] = pk_encode_raw_size(DBTYPE_INTEGER, cl);
+    sizes[8] = pk_encode_raw_size(DBTYPE_INTEGER, seq);
+    for (int i = 0; i < 9; ++i) {
+        if (sizes[i] == SIZE_MAX) { cloudsync_memory_free(frag_col); return DBRES_NOMEM; }
+    }
+
+    char stack[9][64];
+    char *fields[9] = {0};
+    for (int i = 0; i < 9; ++i) {
+        fields[i] = sizes[i] <= sizeof(stack[0]) ? stack[i] : cloudsync_memory_alloc((uint64_t)sizes[i]);
+        if (!fields[i]) {
+            for (int j = 0; j < i; ++j) if (fields[j] && (fields[j] < (char *)stack || fields[j] >= (char *)(stack + 9))) cloudsync_memory_free(fields[j]);
+            cloudsync_memory_free(frag_col);
+            return DBRES_NOMEM;
+        }
+    }
+
+    pk_encode_raw_text(fields[0], tbl, (size_t)tbl_len);
+    pk_encode_raw_blob(fields[1], pk, (size_t)pk_len);
+    pk_encode_raw_text(fields[2], frag_col, strlen(frag_col));
+    pk_encode_raw_blob(fields[3], fragment, (size_t)fragment_len);
+    pk_encode_raw_int(fields[4], col_version);
+    pk_encode_raw_int(fields[5], db_version);
+    pk_encode_raw_blob(fields[6], site_id, (size_t)site_id_len);
+    pk_encode_raw_int(fields[7], cl);
+    pk_encode_raw_int(fields[8], seq);
+
+    const char *cfields[9];
+    for (int i = 0; i < 9; ++i) cfields[i] = fields[i];
+    bool ok = cloudsync_payload_append_raw(payload, data, cfields, sizes, 9, CLOUDSYNC_PAYLOAD_VERSION_3);
+
+    for (int i = 0; i < 9; ++i) {
+        if (!(fields[i] >= (char *)stack && fields[i] < (char *)(stack + 9))) cloudsync_memory_free(fields[i]);
+    }
+    cloudsync_memory_free(frag_col);
+    return ok ? DBRES_OK : cloudsync_errcode(data);
 }
 
 int cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsync_context *data) {
@@ -3122,7 +3449,8 @@ int cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsyn
     // setup payload header
     cloudsync_payload_header header = {0};
     uint32_t expanded_size = (use_uncompressed_buffer) ? 0 : real_buffer_size;
-    cloudsync_payload_header_init(&header, expanded_size, payload->ncols, (uint32_t)payload->nrows, data->schema_hash);
+    uint8_t version = payload->version ? payload->version : CLOUDSYNC_PAYLOAD_VERSION_LATEST;
+    cloudsync_payload_header_init(&header, version, expanded_size, payload->ncols, (uint32_t)payload->nrows, data->schema_hash);
     
     // if compression fails or if compressed size is bigger than original buffer, then use the uncompressed buffer
     if (use_uncompressed_buffer) {
@@ -3208,6 +3536,435 @@ static int cloudsync_payload_decode_callback (void *xdata, int index, int type, 
     return rc;
 }
 
+typedef struct {
+    const char *tbl;
+    int64_t tbl_len;
+    const void *pk;
+    int64_t pk_len;
+    const char *col_name;
+    int64_t col_name_len;
+    const void *col_value;
+    int64_t col_value_len;
+    int64_t col_version;
+    int64_t db_version;
+    const void *site_id;
+    int64_t site_id_len;
+    int64_t cl;
+    int64_t seq;
+} cloudsync_payload_fragment_row;
+
+static int cloudsync_payload_fragment_decode_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
+    UNUSED_PARAMETER(dval);
+    cloudsync_payload_fragment_row *row = (cloudsync_payload_fragment_row *)xdata;
+    switch (index) {
+        case CLOUDSYNC_PK_INDEX_TBL:
+            if (type != DBTYPE_TEXT) return DBRES_ERROR;
+            row->tbl = pval; row->tbl_len = ival;
+            break;
+        case CLOUDSYNC_PK_INDEX_PK:
+            if (type != DBTYPE_BLOB) return DBRES_ERROR;
+            row->pk = pval; row->pk_len = ival;
+            break;
+        case CLOUDSYNC_PK_INDEX_COLNAME:
+            if (type != DBTYPE_TEXT) return DBRES_ERROR;
+            row->col_name = pval; row->col_name_len = ival;
+            break;
+        case CLOUDSYNC_PK_INDEX_COLVALUE:
+            if (type != DBTYPE_BLOB) return DBRES_ERROR;
+            row->col_value = pval; row->col_value_len = ival;
+            break;
+        case CLOUDSYNC_PK_INDEX_COLVERSION:
+            if (type != DBTYPE_INTEGER) return DBRES_ERROR;
+            row->col_version = ival;
+            break;
+        case CLOUDSYNC_PK_INDEX_DBVERSION:
+            if (type != DBTYPE_INTEGER) return DBRES_ERROR;
+            row->db_version = ival;
+            break;
+        case CLOUDSYNC_PK_INDEX_SITEID:
+            if (type != DBTYPE_BLOB) return DBRES_ERROR;
+            row->site_id = pval; row->site_id_len = ival;
+            break;
+        case CLOUDSYNC_PK_INDEX_CL:
+            if (type != DBTYPE_INTEGER) return DBRES_ERROR;
+            row->cl = ival;
+            break;
+        case CLOUDSYNC_PK_INDEX_SEQ:
+            if (type != DBTYPE_INTEGER) return DBRES_ERROR;
+            row->seq = ival;
+            break;
+    }
+    return DBRES_OK;
+}
+
+static bool cloudsync_payload_is_hex (const char *value, size_t len) {
+    for (size_t i = 0; i < len; ++i) {
+        char c = value[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+    }
+    return true;
+}
+
+static bool cloudsync_payload_parse_u64_segment (const char *start, const char *end, uint64_t max_value, uint64_t *out, const char **next) {
+    if (!start || !end || start >= end) return false;
+    uint64_t value = 0;
+    const char *p = start;
+    while (p < end && *p >= '0' && *p <= '9') {
+        uint64_t digit = (uint64_t)(*p - '0');
+        if (value > (max_value - digit) / 10u) return false;
+        value = value * 10u + digit;
+        p++;
+    }
+    if (p == start || p >= end || *p != ':') return false;
+    *out = value;
+    *next = p + 1;
+    return true;
+}
+
+static bool cloudsync_payload_fragment_parse_colname (const char *col_name, int64_t col_name_len,
+                                                      char *value_id, size_t value_id_len,
+                                                      char *checksum_hex, size_t checksum_hex_len,
+                                                      int *part_index, int *part_count,
+                                                      int64_t *total_size,
+                                                      const char **base_col, int64_t *base_col_len) {
+    size_t prefix_len = strlen(CLOUDSYNC_PAYLOAD_FRAGMENT_PREFIX);
+    if (!col_name || col_name_len <= (int64_t)prefix_len) return false;
+    if (strncmp(col_name, CLOUDSYNC_PAYLOAD_FRAGMENT_PREFIX, prefix_len) != 0) return false;
+
+    const char *p = col_name + prefix_len;
+    const char *end = col_name + col_name_len;
+    const char *sep = memchr(p, ':', (size_t)(end - p));
+    if (!sep || (size_t)(sep - p) + 1 > value_id_len) return false;
+    if ((sep - p) != 32 || !cloudsync_payload_is_hex(p, (size_t)(sep - p))) return false;
+    memcpy(value_id, p, (size_t)(sep - p));
+    value_id[sep - p] = 0;
+
+    p = sep + 1;
+    sep = memchr(p, ':', (size_t)(end - p));
+    if (!sep || (size_t)(sep - p) + 1 > checksum_hex_len) return false;
+    if ((sep - p) != 16 || !cloudsync_payload_is_hex(p, (size_t)(sep - p))) return false;
+    memcpy(checksum_hex, p, (size_t)(sep - p));
+    checksum_hex[sep - p] = 0;
+
+    const char *next = NULL;
+    uint64_t parsed = 0;
+    if (!cloudsync_payload_parse_u64_segment(sep + 1, end, INT_MAX, &parsed, &next)) return false;
+    *part_index = (int)parsed;
+
+    if (!cloudsync_payload_parse_u64_segment(next, end, INT_MAX, &parsed, &next)) return false;
+    *part_count = (int)parsed;
+
+    if (!cloudsync_payload_parse_u64_segment(next, end, INT64_MAX, &parsed, &next)) return false;
+    *total_size = (int64_t)parsed;
+
+    *base_col = next;
+    *base_col_len = end - *base_col;
+    return (*part_count > 0 && *part_index < *part_count && *base_col_len > 0);
+}
+
+typedef struct {
+    dbvm_t *vm;
+    int param_index;
+} cloudsync_payload_bind_param_context;
+
+static int cloudsync_payload_bind_param_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
+    UNUSED_PARAMETER(index);
+    cloudsync_payload_bind_param_context *ctx = (cloudsync_payload_bind_param_context *)xdata;
+    switch (type) {
+        case DBTYPE_INTEGER: return databasevm_bind_int(ctx->vm, ctx->param_index, ival);
+        case DBTYPE_FLOAT: return databasevm_bind_double(ctx->vm, ctx->param_index, dval);
+        case DBTYPE_NULL: return databasevm_bind_null(ctx->vm, ctx->param_index);
+        case DBTYPE_TEXT: return databasevm_bind_text(ctx->vm, ctx->param_index, pval, (int)ival);
+        case DBTYPE_BLOB: return databasevm_bind_blob(ctx->vm, ctx->param_index, pval, (uint64_t)ival);
+    }
+    return DBRES_MISUSE;
+}
+
+static int cloudsync_payload_fragments_cleanup_stale (cloudsync_context *data) {
+    dbvm_t *vm = NULL;
+    int rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE, &vm, 0);
+    if (rc != DBRES_OK) return rc;
+    int64_t cutoff = (int64_t)time(NULL) - CLOUDSYNC_PAYLOAD_FRAGMENT_STALE_SECONDS;
+    rc = databasevm_bind_int(vm, 1, cutoff);
+    if (rc == DBRES_OK) rc = databasevm_step(vm);
+    databasevm_finalize(vm);
+    return (rc == DBRES_DONE) ? DBRES_OK : rc;
+}
+
+static int cloudsync_payload_apply_single_decoded_row (cloudsync_context *data,
+                                                       const char *tbl, size_t tbl_len,
+                                                       const char *pk, size_t pk_len,
+                                                       const char *col_name, size_t col_name_len,
+                                                       const char *encoded_value, size_t encoded_value_len,
+                                                       int64_t col_version, int64_t db_version,
+                                                       const char *site_id, size_t site_id_len,
+                                                       int64_t cl, int64_t seq,
+                                                       int *pnrows) {
+    int rc = DBRES_OK;
+    dbvm_t *vm = NULL;
+    bool in_savepoint = false;
+    merge_pending_batch batch = {0};
+
+    rc = databasevm_prepare(data, SQL_CHANGES_INSERT_ROW, &vm, 0);
+    if (rc != DBRES_OK) return cloudsync_set_error(data, "Error on cloudsync_payload_apply: error while compiling SQL statement", rc);
+
+    rc = databasevm_bind_text(vm, 1, tbl, (int)tbl_len);
+    if (rc == DBRES_OK) rc = databasevm_bind_blob(vm, 2, pk, (uint64_t)pk_len);
+    if (rc == DBRES_OK) rc = databasevm_bind_text(vm, 3, col_name, (int)col_name_len);
+    if (rc == DBRES_OK) {
+        if (data->skip_decode_idx == CLOUDSYNC_PK_INDEX_COLVALUE) {
+            rc = databasevm_bind_blob(vm, 4, encoded_value, (uint64_t)encoded_value_len);
+        } else {
+            size_t seek = 0;
+            cloudsync_payload_bind_param_context bind_ctx = {.vm = vm, .param_index = 4};
+            int res = pk_decode((char *)encoded_value, encoded_value_len, 1, &seek, -1, cloudsync_payload_bind_param_callback, &bind_ctx);
+            if (res == -1 || seek != encoded_value_len) rc = cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid v3 encoded value", DBRES_MISUSE);
+        }
+    }
+    if (rc == DBRES_OK) rc = databasevm_bind_int(vm, 5, col_version);
+    if (rc == DBRES_OK) rc = databasevm_bind_int(vm, 6, db_version);
+    if (rc == DBRES_OK) rc = databasevm_bind_blob(vm, 7, site_id, (uint64_t)site_id_len);
+    if (rc == DBRES_OK) rc = databasevm_bind_int(vm, 8, cl);
+    if (rc == DBRES_OK) rc = databasevm_bind_int(vm, 9, seq);
+    if (rc != DBRES_OK) goto cleanup;
+
+    if (!database_in_transaction(data)) {
+        rc = database_begin_savepoint(data, "cloudsync_payload_apply");
+        if (rc != DBRES_OK) goto cleanup;
+        in_savepoint = true;
+    }
+
+    data->pending_batch = &batch;
+    rc = databasevm_step(vm);
+    if (rc == DBRES_DONE) rc = DBRES_OK;
+    if (rc != DBRES_OK) {
+        cloudsync_set_dberror(data);
+        goto cleanup;
+    }
+
+    rc = merge_flush_pending(data);
+    if (rc != DBRES_OK) goto cleanup;
+    data->pending_batch = NULL;
+
+    if (in_savepoint) {
+        rc = database_commit_savepoint(data, "cloudsync_payload_apply");
+        in_savepoint = false;
+        if (rc != DBRES_OK) goto cleanup;
+    }
+
+    int dbversion = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION);
+    int seq_setting = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_SEQ);
+    if (db_version >= dbversion) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "%" PRId64, db_version);
+        dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
+        if (seq != seq_setting) {
+            snprintf(buf, sizeof(buf), "%" PRId64, seq);
+            dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_SEQ, buf);
+        }
+    }
+
+    if (pnrows) *pnrows += 1;
+
+cleanup:
+    if (rc != DBRES_OK && in_savepoint) database_rollback_savepoint(data, "cloudsync_payload_apply");
+    data->pending_batch = NULL;
+    merge_pending_free_entries(&batch);
+    if (batch.cached_vm) databasevm_finalize(batch.cached_vm);
+    if (batch.cached_col_names) cloudsync_memory_free(batch.cached_col_names);
+    if (batch.entries) cloudsync_memory_free(batch.entries);
+    if (vm) databasevm_finalize(vm);
+    return rc;
+}
+
+static int cloudsync_payload_apply_reassembled_fragment (cloudsync_context *data, const char *value_id, const char *expected_checksum_hex, int *pnrows) {
+    int rc = DBRES_OK;
+    dbvm_t *vm = NULL;
+    char *value = NULL;
+    char *tbl = NULL, *col_name = NULL;
+    char *pk = NULL, *site_id = NULL;
+    size_t tbl_len = 0, col_name_len = 0, pk_len = 0, site_id_len = 0;
+    int64_t col_version = 0, db_version = 0, cl = 0, seq = 0;
+    int64_t total_size = 0, copied = 0;
+
+    rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_COUNT, &vm, 0);
+    if (rc != DBRES_OK) return rc;
+    rc = databasevm_bind_text(vm, 1, value_id, -1);
+    if (rc != DBRES_OK) { databasevm_finalize(vm); return rc; }
+    rc = databasevm_step(vm);
+    if (rc != DBRES_ROW) { databasevm_finalize(vm); return DBRES_OK; }
+    int64_t have = database_column_int(vm, 0);
+    int64_t part_count_min = database_column_int(vm, 1);
+    int64_t part_count_max = database_column_int(vm, 2);
+    int64_t total_size_min = database_column_int(vm, 3);
+    int64_t total_size_max = database_column_int(vm, 4);
+    const char *checksum_min = database_column_text(vm, 5);
+    const char *checksum_max = database_column_text(vm, 6);
+    char checksum_min_copy[32] = {0};
+    char checksum_max_copy[32] = {0};
+    if (checksum_min) snprintf(checksum_min_copy, sizeof(checksum_min_copy), "%s", checksum_min);
+    if (checksum_max) snprintf(checksum_max_copy, sizeof(checksum_max_copy), "%s", checksum_max);
+    int64_t part_index_min = database_column_int(vm, 7);
+    int64_t part_index_max = database_column_int(vm, 8);
+    databasevm_finalize(vm);
+    vm = NULL;
+    if (have <= 0 || part_count_min <= 0 || have < part_count_max) return DBRES_OK;
+    if (part_count_min != part_count_max || total_size_min != total_size_max || !checksum_min_copy[0] || !checksum_max_copy[0] ||
+        strcmp(checksum_min_copy, checksum_max_copy) != 0 || strcmp(checksum_min_copy, expected_checksum_hex) != 0 ||
+        part_index_min != 0 || part_index_max != part_count_max - 1 || have != part_count_max) {
+        return cloudsync_set_error(data, "Error on cloudsync_payload_apply: inconsistent v3 fragments", DBRES_MISUSE);
+    }
+    total_size = total_size_max;
+
+    value = cloudsync_memory_alloc((uint64_t)total_size);
+    if (!value) return DBRES_NOMEM;
+
+    rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_SELECT, &vm, 0);
+    if (rc != DBRES_OK) goto cleanup;
+    rc = databasevm_bind_text(vm, 1, value_id, -1);
+    if (rc != DBRES_OK) goto cleanup;
+
+    uint64_t checksum = 14695981039346656037ULL;
+    while ((rc = databasevm_step(vm)) == DBRES_ROW) {
+        size_t frag_len = 0;
+        const char *frag = database_column_blob(vm, 0, &frag_len);
+        if (copied + (int64_t)frag_len > total_size) { rc = DBRES_MISUSE; goto cleanup; }
+        memcpy(value + copied, frag, frag_len);
+        checksum = cloudsync_checksum_update(checksum, frag, frag_len);
+        copied += (int64_t)frag_len;
+
+        if (!tbl) {
+            const char *t = database_column_text(vm, 1);
+            const char *c = database_column_text(vm, 3);
+            size_t pkl = 0, sidl = 0;
+            const char *p = database_column_blob(vm, 2, &pkl);
+            const char *sid = database_column_blob(vm, 6, &sidl);
+            tbl_len = (size_t)database_column_bytes(vm, 1);
+            col_name_len = (size_t)database_column_bytes(vm, 3);
+            pk_len = pkl;
+            site_id_len = sidl;
+            tbl = cloudsync_memory_alloc((uint64_t)tbl_len);
+            col_name = cloudsync_memory_alloc((uint64_t)col_name_len);
+            pk = cloudsync_memory_alloc((uint64_t)pk_len);
+            site_id = cloudsync_memory_alloc((uint64_t)site_id_len);
+            if (!tbl || !col_name || !pk || !site_id) { rc = DBRES_NOMEM; goto cleanup; }
+            memcpy(tbl, t, tbl_len);
+            memcpy(col_name, c, col_name_len);
+            memcpy(pk, p, pk_len);
+            memcpy(site_id, sid, site_id_len);
+            col_version = database_column_int(vm, 4);
+            db_version = database_column_int(vm, 5);
+            cl = database_column_int(vm, 7);
+            seq = database_column_int(vm, 8);
+        } else {
+            size_t pkl = 0, sidl = 0;
+            const char *t = database_column_text(vm, 1);
+            const char *c = database_column_text(vm, 3);
+            const char *p = database_column_blob(vm, 2, &pkl);
+            const char *sid = database_column_blob(vm, 6, &sidl);
+            if ((size_t)database_column_bytes(vm, 1) != tbl_len || memcmp(tbl, t, tbl_len) != 0 ||
+                pkl != pk_len || memcmp(pk, p, pk_len) != 0 ||
+                (size_t)database_column_bytes(vm, 3) != col_name_len || memcmp(col_name, c, col_name_len) != 0 ||
+                database_column_int(vm, 4) != col_version ||
+                database_column_int(vm, 5) != db_version ||
+                sidl != site_id_len || memcmp(site_id, sid, site_id_len) != 0 ||
+                database_column_int(vm, 7) != cl ||
+                database_column_int(vm, 8) != seq) {
+                rc = DBRES_MISUSE;
+                goto cleanup;
+            }
+        }
+    }
+    if (rc == DBRES_DONE) rc = DBRES_OK;
+    if (rc != DBRES_OK) goto cleanup;
+    if (copied != total_size) { rc = DBRES_MISUSE; goto cleanup; }
+    char checksum_hex[17];
+    snprintf(checksum_hex, sizeof(checksum_hex), "%016" PRIx64, checksum);
+    if (strcmp(checksum_hex, expected_checksum_hex) != 0) { rc = DBRES_MISUSE; goto cleanup; }
+    databasevm_finalize(vm);
+    vm = NULL;
+
+    rc = cloudsync_payload_apply_single_decoded_row(data, tbl, tbl_len, pk, pk_len, col_name, col_name_len,
+                                                    value, (size_t)total_size, col_version, db_version,
+                                                    site_id, site_id_len, cl, seq, pnrows);
+    if (rc != DBRES_OK) goto cleanup;
+
+    rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_DELETE, &vm, 0);
+    if (rc == DBRES_OK) {
+        databasevm_bind_text(vm, 1, value_id, -1);
+        int step_rc = databasevm_step(vm);
+        if (step_rc == DBRES_DONE) rc = DBRES_OK;
+    }
+
+cleanup:
+    if (vm) databasevm_finalize(vm);
+    if (value) cloudsync_memory_free(value);
+    if (tbl) cloudsync_memory_free(tbl);
+    if (col_name) cloudsync_memory_free(col_name);
+    if (pk) cloudsync_memory_free(pk);
+    if (site_id) cloudsync_memory_free(site_id);
+    return rc;
+}
+
+static int cloudsync_payload_apply_fragment_row (cloudsync_context *data, cloudsync_payload_fragment_row *row, int *pnrows) {
+    char value_id[64];
+    char checksum_hex[17];
+    int part_index = 0, part_count = 0;
+    int64_t total_size = 0;
+    const char *base_col = NULL;
+    int64_t base_col_len = 0;
+    if (!row || !row->tbl || row->tbl_len <= 0 || !row->pk || row->pk_len <= 0 ||
+        !row->col_name || row->col_name_len <= 0 || !row->col_value || row->col_value_len <= 0 ||
+        !row->site_id || row->site_id_len <= 0) {
+        return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid v3 payload row", DBRES_MISUSE);
+    }
+    if (!cloudsync_payload_fragment_parse_colname(row->col_name, row->col_name_len, value_id, sizeof(value_id),
+                                                  checksum_hex, sizeof(checksum_hex),
+                                                  &part_index, &part_count, &total_size, &base_col, &base_col_len)) {
+        return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid v3 fragment metadata", DBRES_MISUSE);
+    }
+
+    uint64_t value_checksum = strtoull(checksum_hex, NULL, 16);
+    char expected_value_id[33];
+    cloudsync_payload_fragment_value_id(expected_value_id, row->tbl, (int)row->tbl_len, row->pk, (int)row->pk_len,
+                                        base_col, (int)base_col_len, row->col_version, row->db_version,
+                                        row->site_id, (int)row->site_id_len, row->cl, row->seq,
+                                        value_checksum, total_size);
+    if (strcmp(value_id, expected_value_id) != 0) {
+        return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid v3 fragment identity", DBRES_MISUSE);
+    }
+
+    int rc = database_exec(data, SQL_PAYLOAD_FRAGMENTS_CREATE_TABLE);
+    if (rc != DBRES_OK) return rc;
+    rc = cloudsync_payload_fragments_cleanup_stale(data);
+    if (rc != DBRES_OK) return rc;
+
+    dbvm_t *vm = NULL;
+    rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_UPSERT, &vm, 0);
+    if (rc != DBRES_OK) return rc;
+    databasevm_bind_text(vm, 1, value_id, -1);
+    databasevm_bind_int(vm, 2, part_index);
+    databasevm_bind_int(vm, 3, part_count);
+    databasevm_bind_int(vm, 4, total_size);
+    databasevm_bind_text(vm, 5, checksum_hex, -1);
+    databasevm_bind_int(vm, 6, (int64_t)time(NULL));
+    databasevm_bind_text(vm, 7, row->tbl, (int)row->tbl_len);
+    databasevm_bind_blob(vm, 8, row->pk, (uint64_t)row->pk_len);
+    databasevm_bind_text(vm, 9, base_col, (int)base_col_len);
+    databasevm_bind_int(vm, 10, row->col_version);
+    databasevm_bind_int(vm, 11, row->db_version);
+    databasevm_bind_blob(vm, 12, row->site_id, (uint64_t)row->site_id_len);
+    databasevm_bind_int(vm, 13, row->cl);
+    databasevm_bind_int(vm, 14, row->seq);
+    databasevm_bind_blob(vm, 15, row->col_value, (uint64_t)row->col_value_len);
+    rc = databasevm_step(vm);
+    databasevm_finalize(vm);
+    if (rc == DBRES_DONE) rc = DBRES_OK;
+    if (rc != DBRES_OK) return rc;
+
+    return cloudsync_payload_apply_reassembled_fragment(data, value_id, checksum_hex, pnrows);
+}
+
 // #ifndef CLOUDSYNC_OMIT_RLS_VALIDATION
 
 int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int blen, int *pnrows) {
@@ -3243,7 +4000,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         if (header.schema_hash != data->schema_hash) {
             if (!database_check_schema_hash(data, header.schema_hash)) {
                 char buffer[1024];
-                snprintf(buffer, sizeof(buffer), "Cannot apply the received payload because the schema hash is unknown %llu.", header.schema_hash);
+                snprintf(buffer, sizeof(buffer), "Cannot apply the received payload because the schema hash is unknown %" PRIu64 ".", header.schema_hash);
                 return cloudsync_set_error(data, buffer, DBRES_MISUSE);
             }
         }
@@ -3252,6 +4009,9 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     // sanity check header
     if ((header.signature != CLOUDSYNC_PAYLOAD_SIGNATURE) || (header.ncols == 0)) {
         return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid signature or column size", DBRES_MISUSE);
+    }
+    if (header.version < CLOUDSYNC_PAYLOAD_VERSION_1 || header.version > CLOUDSYNC_PAYLOAD_VERSION_3) {
+        return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unsupported payload version", DBRES_MISUSE);
     }
     
     const char *buffer = payload + sizeof(cloudsync_payload_header);
@@ -3279,6 +4039,34 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
 
         buffer = (const char *)clone;
         buf_len = (size_t)header.expanded_size;
+    }
+
+    if (header.version == CLOUDSYNC_PAYLOAD_VERSION_3) {
+        int rc = DBRES_OK;
+        int applied_rows = 0;
+        if (header.ncols != CLOUDSYNC_CHANGES_NCOLS) {
+            if (clone) cloudsync_memory_free(clone);
+            return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid v3 column count", DBRES_MISUSE);
+        }
+        for (uint32_t i = 0; i < header.nrows; ++i) {
+            size_t seek = 0;
+            cloudsync_payload_fragment_row row = {0};
+            int res = pk_decode((char *)buffer, buf_len, header.ncols, &seek, -1,
+                                cloudsync_payload_fragment_decode_callback, &row);
+            if (res == -1 || seek == 0 || seek > buf_len) {
+                rc = cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid v3 payload row", DBRES_MISUSE);
+                break;
+            }
+            int n = 0;
+            rc = cloudsync_payload_apply_fragment_row(data, &row, &n);
+            if (rc != DBRES_OK) break;
+            applied_rows += n;
+            buffer += seek;
+            buf_len -= seek;
+        }
+        if (clone) cloudsync_memory_free(clone);
+        if (pnrows) *pnrows = applied_rows;
+        return rc;
     }
     
     // precompile the insert statement

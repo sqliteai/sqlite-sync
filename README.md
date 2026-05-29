@@ -219,6 +219,7 @@ See the full guide: **[Row-Level Security Documentation](./docs/row-level-securi
 ## Documentation
 
 - **[API Reference](./API.md)**: all functions, parameters, and examples
+- **[Performance & Overhead](./PERFORMANCE.md)**: sync cost model, payload chunking, and large-value memory notes
 - **[Installation Guide](./docs/installation.md)**: platform-specific setup (Swift, Android, Expo, React Native, Flutter, WASM)
 - **[Block-Level LWW Guide](./docs/block-lww.md)**: line-level text merge for markdown and documents
 - **[Row-Level Security Guide](./docs/row-level-security.md)**: multi-tenant access control with server-enforced policies

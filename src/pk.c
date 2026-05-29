@@ -423,6 +423,56 @@ size_t pk_encode_data (char *buffer, size_t bseek, char *data, size_t datalen) {
     memcpy(buffer + bseek, data, datalen);
     return bseek + datalen;
 }
+
+size_t pk_encode_raw_size (int type, int64_t len_or_value) {
+    switch (type) {
+        case DBTYPE_INTEGER: {
+            if (len_or_value == INT64_MIN) return 1;
+            if (len_or_value < 0) len_or_value = -len_or_value;
+            return 1 + pk_encode_nbytes_needed(len_or_value);
+        }
+        case DBTYPE_FLOAT:
+            return 1 + sizeof(uint64_t);
+        case DBTYPE_TEXT:
+        case DBTYPE_BLOB: {
+            if (len_or_value < 0) return SIZE_MAX;
+            size_t nbytes = pk_encode_nbytes_needed(len_or_value);
+            return 1 + nbytes + (size_t)len_or_value;
+        }
+        case DBTYPE_NULL:
+            return 1;
+    }
+    return SIZE_MAX;
+}
+
+size_t pk_encode_raw_int (char *buffer, int64_t value) {
+    int type = DBTYPE_INTEGER;
+    size_t bseek = 0;
+    if (value == INT64_MIN) {
+        return pk_encode_u8(buffer, bseek, DATABASE_TYPE_MAX_NEGATIVE_INTEGER);
+    }
+    if (value < 0) { value = -value; type = DATABASE_TYPE_NEGATIVE_INTEGER; }
+    size_t nbytes = pk_encode_nbytes_needed(value);
+    uint8_t type_byte = (uint8_t)((nbytes << 3) | type);
+    bseek = pk_encode_u8(buffer, bseek, type_byte);
+    return pk_encode_uint64(buffer, bseek, (uint64_t)value, nbytes);
+}
+
+size_t pk_encode_raw_text (char *buffer, const char *value, size_t len) {
+    size_t nbytes = pk_encode_nbytes_needed((int64_t)len);
+    uint8_t type_byte = (uint8_t)((nbytes << 3) | DBTYPE_TEXT);
+    size_t bseek = pk_encode_u8(buffer, 0, type_byte);
+    bseek = pk_encode_uint64(buffer, bseek, (uint64_t)len, nbytes);
+    return pk_encode_data(buffer, bseek, (char *)value, len);
+}
+
+size_t pk_encode_raw_blob (char *buffer, const void *value, size_t len) {
+    size_t nbytes = pk_encode_nbytes_needed((int64_t)len);
+    uint8_t type_byte = (uint8_t)((nbytes << 3) | DBTYPE_BLOB);
+    size_t bseek = pk_encode_u8(buffer, 0, type_byte);
+    bseek = pk_encode_uint64(buffer, bseek, (uint64_t)len, nbytes);
+    return pk_encode_data(buffer, bseek, (char *)value, len);
+}
     
 char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bsize, int skip_idx) {
     size_t bseek = 0;

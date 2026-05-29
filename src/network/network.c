@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -1256,7 +1257,7 @@ static char *network_base64_encode(const unsigned char *src, size_t len) {
 }
 
 static char *network_apply_json_payload(const char *transport_key, const char *transport_value,
-                                        int db_version_min, int db_version_max) {
+                                        int64_t db_version_min, int64_t db_version_max) {
     if (!transport_key || !transport_value) return NULL;
 
     char *escaped_value = json_escape_string(transport_value);
@@ -1270,11 +1271,119 @@ static char *network_apply_json_payload(const char *transport_key, const char *t
     }
 
     snprintf(json_payload, requested,
-             "{\"%s\":\"%s\", \"dbVersionMin\":%d, \"dbVersionMax\":%d}",
+             "{\"%s\":\"%s\", \"dbVersionMin\":%" PRId64 ", \"dbVersionMax\":%" PRId64 "}",
              transport_key, escaped_value, db_version_min, db_version_max);
 
     cloudsync_memory_free(escaped_value);
     return json_payload;
+}
+
+static int network_send_payload_to_apply(sqlite3_context *context, network_data *netdata,
+                                         const void *blob, int blob_size,
+                                         int64_t db_version_min, int64_t db_version_max,
+                                         NETWORK_RESULT *res_out) {
+    memset(res_out, 0, sizeof(*res_out));
+    if (!blob || blob_size <= 0) {
+        sqlite3_result_error(context, "cloudsync_network_send_changes: invalid empty payload chunk.", -1);
+        return SQLITE_ERROR;
+    }
+
+    #ifdef CLOUDSYNC_NETWORK_TRACE
+    fprintf(stderr,
+        "[cloudsync-network] send_changes chunk_size=%d fast-lane:%s db_version_min=%" PRId64 " db_version_max=%" PRId64 "\n",
+        blob_size,
+        blob_size <= CLOUDSYNC_NETWORK_FAST_LANE_MAX_BLOB_SIZE ? "true" : "false",
+        db_version_min,
+        db_version_max);
+    #endif
+
+    if (blob_size <= CLOUDSYNC_NETWORK_FAST_LANE_MAX_BLOB_SIZE) {
+        char *blob_base64 = network_base64_encode((const unsigned char *)blob, (size_t)blob_size);
+        if (!blob_base64) {
+            sqlite3_result_error(context, "cloudsync_network_send_changes: unable to encode payload chunk.", -1);
+            sqlite3_result_error_code(context, SQLITE_NOMEM);
+            return SQLITE_NOMEM;
+        }
+
+        char *json_payload = network_apply_json_payload("blob", blob_base64, db_version_min, db_version_max);
+        cloudsync_memory_free(blob_base64);
+        if (!json_payload) {
+            sqlite3_result_error(context, "cloudsync_network_send_changes: unable to allocate apply request payload.", -1);
+            sqlite3_result_error_code(context, SQLITE_NOMEM);
+            return SQLITE_NOMEM;
+        }
+
+        *res_out = network_receive_buffer(netdata, netdata->apply_endpoint, netdata->authentication, true, true,
+                                          json_payload, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
+        cloudsync_memory_free(json_payload);
+        return SQLITE_OK;
+    }
+
+    NETWORK_RESULT upload_res = network_receive_buffer(netdata, netdata->upload_endpoint, netdata->authentication, true, false,
+                                                       NULL, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
+    if (upload_res.code != CLOUDSYNC_NETWORK_BUFFER) {
+        network_result_to_sqlite_error(context, upload_res, "cloudsync_network_send_changes unable to receive upload URL");
+        network_result_cleanup(&upload_res);
+        return SQLITE_ERROR;
+    }
+
+    char *s3_url = json_extract_string(upload_res.buffer, upload_res.blen, "url");
+    if (!s3_url) {
+        sqlite3_result_error(context, "cloudsync_network_send_changes: missing 'url' in upload response.", -1);
+        network_result_cleanup(&upload_res);
+        return SQLITE_ERROR;
+    }
+
+    bool sent = network_send_buffer(netdata, s3_url, NULL, blob, blob_size);
+    if (sent == false) {
+        cloudsync_memory_free(s3_url);
+        network_result_to_sqlite_error(context, upload_res, "cloudsync_network_send_changes unable to upload payload chunk to remote host.");
+        network_result_cleanup(&upload_res);
+        return SQLITE_ERROR;
+    }
+
+    char *json_payload = network_apply_json_payload("url", s3_url, db_version_min, db_version_max);
+    cloudsync_memory_free(s3_url);
+    if (!json_payload) {
+        sqlite3_result_error(context, "cloudsync_network_send_changes: unable to allocate apply request payload.", -1);
+        sqlite3_result_error_code(context, SQLITE_NOMEM);
+        network_result_cleanup(&upload_res);
+        return SQLITE_NOMEM;
+    }
+
+    network_result_cleanup(&upload_res);
+    *res_out = network_receive_buffer(netdata, netdata->apply_endpoint, netdata->authentication, true, true,
+                                      json_payload, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
+    cloudsync_memory_free(json_payload);
+    return SQLITE_OK;
+}
+
+static void network_sync_state_update_from_response(NETWORK_RESULT *res,
+                                                    int64_t *last_optimistic_version,
+                                                    int64_t *last_confirmed_version,
+                                                    int *gaps_size,
+                                                    char **apply_failure_json,
+                                                    char **check_failure_json) {
+    if (!res || res->code != CLOUDSYNC_NETWORK_BUFFER || !res->buffer) return;
+
+    int64_t parsed_version = json_extract_int(res->buffer, res->blen, "lastOptimisticVersion", -1);
+    if (parsed_version > *last_optimistic_version) *last_optimistic_version = parsed_version;
+    parsed_version = json_extract_int(res->buffer, res->blen, "lastConfirmedVersion", -1);
+    if (parsed_version > *last_confirmed_version) *last_confirmed_version = parsed_version;
+    int parsed_gaps_size = json_extract_array_size(res->buffer, res->blen, "gaps");
+    if (parsed_gaps_size >= 0) *gaps_size = parsed_gaps_size;
+
+    char *apply_failure = json_extract_failure_stage(res->buffer, res->blen, "apply");
+    if (apply_failure) {
+        if (*apply_failure_json) cloudsync_memory_free(*apply_failure_json);
+        *apply_failure_json = apply_failure;
+    }
+
+    char *check_failure = json_extract_failure_stage(res->buffer, res->blen, "check");
+    if (check_failure) {
+        if (*check_failure_json) cloudsync_memory_free(*check_failure_json);
+        *check_failure_json = check_failure;
+    }
 }
 
 static const char *network_compute_status(int64_t last_optimistic, int64_t last_confirmed,
@@ -1326,6 +1435,8 @@ void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, s
 
 int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc, sqlite3_value **argv, sync_result *out) {
     DEBUG_FUNCTION("cloudsync_network_send_changes");
+    UNUSED_PARAMETER(argc);
+    UNUSED_PARAMETER(argv);
     
     // retrieve global context
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
@@ -1333,125 +1444,100 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     network_data *netdata = (network_data *)cloudsync_auxdata(data);
     if (!netdata) {sqlite3_result_error(context, "Unable to retrieve CloudSync network context.", -1); return SQLITE_ERROR;}
     
-    // retrieve payload
-    char *blob = NULL;
-    int blob_size = 0, db_version = 0;
-    int64_t new_db_version = 0;
-    int rc = cloudsync_payload_get(data, &blob, &blob_size, &db_version, &new_db_version);
+    int64_t db_version = dbutils_settings_get_int64_value(data, CLOUDSYNC_KEY_SEND_DBVERSION);
+    if (db_version < 0) {
+        sqlite3_result_error(context, "Unable to retrieve db_version.", -1);
+        return SQLITE_ERROR;
+    }
+
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    sqlite3_stmt *stmt = NULL;
+    const char *chunk_sql =
+        "SELECT payload, payload_size, db_version_min, db_version_max, watermark_db_version "
+        "FROM cloudsync_payload_chunks WHERE since_db_version = ?";
+    int rc = sqlite3_prepare_v2(db, chunk_sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        if (db_version < 0) sqlite3_result_error(context, "Unable to retrieve db_version.", -1);
-        else sqlite3_result_error(context, "Unable to retrieve changes in cloudsync_network_send_changes", -1);
+        sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+        sqlite3_result_error_code(context, rc);
         return rc;
     }
-    
-    // Case 1: empty local db — no payload and no server state, skip network entirely
-    if ((blob == NULL || blob_size == 0) && db_version == 0) {
-        if (out) {
-            out->server_version = 0;
-            out->local_version = 0;
-            out->status = network_compute_status(0, 0, 0, 0);
-        }
-        return SQLITE_OK;
-    }
+    sqlite3_bind_int64(stmt, 1, db_version);
 
-    NETWORK_RESULT res;
-    if (blob != NULL && blob_size > 0) {
-        int db_version_min = db_version+1;
-        int db_version_max = (int)new_db_version;
-        if (db_version_min > db_version_max) db_version_min = db_version_max;
-
-        #ifdef CLOUDSYNC_NETWORK_TRACE
-        fprintf(stderr,
-            "[cloudsync-network] send_changes blob_size=%d fast-lane:%s\n",
-            blob_size,
-            blob_size <= CLOUDSYNC_NETWORK_FAST_LANE_MAX_BLOB_SIZE ? "true" : "false");
-        #endif
-
-        if (blob_size <= CLOUDSYNC_NETWORK_FAST_LANE_MAX_BLOB_SIZE) {
-            char *blob_base64 = network_base64_encode((const unsigned char *)blob, (size_t)blob_size);
-            cloudsync_memory_free(blob);
-            if (!blob_base64) {
-                sqlite3_result_error(context, "cloudsync_network_send_changes: unable to encode BLOB changes.", -1);
-                sqlite3_result_error_code(context, SQLITE_NOMEM);
-                return SQLITE_NOMEM;
-            }
-
-            char *json_payload = network_apply_json_payload("blob", blob_base64, db_version_min, db_version_max);
-            cloudsync_memory_free(blob_base64);
-            if (!json_payload) {
-                sqlite3_result_error(context, "cloudsync_network_send_changes: unable to allocate apply request payload.", -1);
-                sqlite3_result_error_code(context, SQLITE_NOMEM);
-                return SQLITE_NOMEM;
-            }
-
-            res = network_receive_buffer(netdata, netdata->apply_endpoint, netdata->authentication, true, true, json_payload, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
-            cloudsync_memory_free(json_payload);
-        } else {
-            // bulk lane: stage the payload through the upload endpoint and apply by URL
-            res = network_receive_buffer(netdata, netdata->upload_endpoint, netdata->authentication, true, false, NULL, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
-            if (res.code != CLOUDSYNC_NETWORK_BUFFER) {
-                cloudsync_memory_free(blob);
-                network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to receive upload URL");
-                network_result_cleanup(&res);
-                return SQLITE_ERROR;
-            }
-
-            char *s3_url = json_extract_string(res.buffer, res.blen, "url");
-            if (!s3_url) {
-                cloudsync_memory_free(blob);
-                sqlite3_result_error(context, "cloudsync_network_send_changes: missing 'url' in upload response.", -1);
-                network_result_cleanup(&res);
-                return SQLITE_ERROR;
-            }
-            bool sent = network_send_buffer(netdata, s3_url, NULL, blob, blob_size);
-            cloudsync_memory_free(blob);
-            if (sent == false) {
-                cloudsync_memory_free(s3_url);
-                network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to upload BLOB changes to remote host.");
-                network_result_cleanup(&res);
-                return SQLITE_ERROR;
-            }
-
-            char *json_payload = network_apply_json_payload("url", s3_url, db_version_min, db_version_max);
-            cloudsync_memory_free(s3_url);
-            if (!json_payload) {
-                sqlite3_result_error(context, "cloudsync_network_send_changes: unable to allocate apply request payload.", -1);
-                sqlite3_result_error_code(context, SQLITE_NOMEM);
-                network_result_cleanup(&res);
-                return SQLITE_NOMEM;
-            }
-
-            // free res
-            network_result_cleanup(&res);
-
-            // notify remote host that we successfully uploaded changes
-            res = network_receive_buffer(netdata, netdata->apply_endpoint, netdata->authentication, true, true, json_payload, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
-            cloudsync_memory_free(json_payload);
-        }
-    } else {
-        // there is no data to send, just check the status to update the db_version value in settings and to reply the status
-        new_db_version = db_version;
-        res = network_receive_buffer(netdata, netdata->status_endpoint, netdata->authentication, true, false, NULL, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
-    }
-
+    int64_t new_db_version = db_version;
     int64_t last_optimistic_version = -1;
     int64_t last_confirmed_version = -1;
     int gaps_size = -1;
     char *apply_failure_json = NULL;
     char *check_failure_json = NULL;
+    bool sent_any = false;
 
-    if (res.code == CLOUDSYNC_NETWORK_BUFFER && res.buffer) {
-        last_optimistic_version = json_extract_int(res.buffer, res.blen, "lastOptimisticVersion", -1);
-        last_confirmed_version = json_extract_int(res.buffer, res.blen, "lastConfirmedVersion", -1);
-        gaps_size = json_extract_array_size(res.buffer, res.blen, "gaps");
-        if (gaps_size < 0) gaps_size = 0;
-        apply_failure_json = json_extract_failure_stage(res.buffer, res.blen, "apply");
-        check_failure_json = json_extract_failure_stage(res.buffer, res.blen, "check");
-    } else if (res.code != CLOUDSYNC_NETWORK_OK) {
-        network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to apply changes to remote host.");
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const void *blob = sqlite3_column_blob(stmt, 0);
+        int blob_size = sqlite3_column_bytes(stmt, 0);
+        int64_t payload_size = sqlite3_column_int64(stmt, 1);
+        int64_t db_version_min = sqlite3_column_int64(stmt, 2);
+        int64_t db_version_max = sqlite3_column_int64(stmt, 3);
+        int64_t watermark = sqlite3_column_int64(stmt, 4);
+
+        if (!blob || blob_size <= 0 || payload_size != blob_size || payload_size > INT_MAX ||
+            db_version_min <= 0 || db_version_max <= 0 || db_version_min > db_version_max) {
+            sqlite3_result_error(context, "cloudsync_network_send_changes: invalid payload chunk generated.", -1);
+            rc = SQLITE_ERROR;
+            goto cleanup;
+        }
+
+        NETWORK_RESULT res = {0};
+        rc = network_send_payload_to_apply(context, netdata, blob, blob_size, db_version_min, db_version_max, &res);
+        if (rc != SQLITE_OK) goto cleanup;
+
+        if (res.code == CLOUDSYNC_NETWORK_BUFFER && res.buffer) {
+            network_sync_state_update_from_response(&res, &last_optimistic_version, &last_confirmed_version, &gaps_size,
+                                                    &apply_failure_json, &check_failure_json);
+        } else if (res.code != CLOUDSYNC_NETWORK_OK) {
+            network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to apply changes to remote host.");
+            network_result_cleanup(&res);
+            rc = SQLITE_ERROR;
+            goto cleanup;
+        }
         network_result_cleanup(&res);
-        return SQLITE_ERROR;
+
+        sent_any = true;
+        if (watermark > new_db_version) new_db_version = watermark;
     }
+    if (rc != SQLITE_DONE) {
+        sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+        sqlite3_result_error_code(context, rc);
+        goto cleanup;
+    }
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    if (!sent_any) {
+        // Empty local db with no server state: preserve the previous fast no-op path.
+        if (db_version == 0) {
+            if (out) {
+                out->server_version = 0;
+                out->local_version = 0;
+                out->status = network_compute_status(0, 0, 0, 0);
+            }
+            rc = SQLITE_OK;
+            goto cleanup;
+        }
+
+        NETWORK_RESULT res = network_receive_buffer(netdata, netdata->status_endpoint, netdata->authentication, true, false,
+                                                    NULL, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
+        if (res.code == CLOUDSYNC_NETWORK_BUFFER && res.buffer) {
+            network_sync_state_update_from_response(&res, &last_optimistic_version, &last_confirmed_version, &gaps_size,
+                                                    &apply_failure_json, &check_failure_json);
+        } else if (res.code != CLOUDSYNC_NETWORK_OK) {
+            network_result_to_sqlite_error(context, res, "cloudsync_network_send_changes unable to apply changes to remote host.");
+            network_result_cleanup(&res);
+            rc = SQLITE_ERROR;
+            goto cleanup;
+        }
+        network_result_cleanup(&res);
+    }
+    if (gaps_size < 0) gaps_size = 0;
 
     // update db_version in settings
     char buf[256];
@@ -1477,9 +1563,13 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     }
     if (apply_failure_json) cloudsync_memory_free(apply_failure_json);
     if (check_failure_json) cloudsync_memory_free(check_failure_json);
-
-    network_result_cleanup(&res);
     return SQLITE_OK;
+
+cleanup:
+    if (stmt) sqlite3_finalize(stmt);
+    if (apply_failure_json) cloudsync_memory_free(apply_failure_json);
+    if (check_failure_json) cloudsync_memory_free(check_failure_json);
+    return rc == SQLITE_DONE ? SQLITE_OK : rc;
 }
 
 void cloudsync_network_send_changes (sqlite3_context *context, int argc, sqlite3_value **argv) {

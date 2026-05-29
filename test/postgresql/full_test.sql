@@ -46,6 +46,7 @@
 \ir 36_block_lww_round3.sql
 \ir 37_block_lww_round4.sql
 \ir 38_block_lww_round5.sql
+\ir 39_payload_chunks.sql
 \ir 39_concurrent_write_apply.sql
 \ir 40_unsupported_algorithms.sql
 \ir 41_corrupted_payload.sql

@@ -67,6 +67,12 @@ extern const char * const SQL_CLOUDSYNC_INSERT_MISSING_PKS_FROM_BASE_EXCEPT_SYNC
 extern const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL;
 extern const char * const SQL_CLOUDSYNC_SELECT_PKS_NOT_IN_SYNC_FOR_COL_FILTERED;
 extern const char * const SQL_CHANGES_INSERT_ROW;
+extern const char * const SQL_PAYLOAD_FRAGMENTS_CREATE_TABLE;
+extern const char * const SQL_PAYLOAD_FRAGMENTS_UPSERT;
+extern const char * const SQL_PAYLOAD_FRAGMENTS_COUNT;
+extern const char * const SQL_PAYLOAD_FRAGMENTS_SELECT;
+extern const char * const SQL_PAYLOAD_FRAGMENTS_DELETE;
+extern const char * const SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE;
 
 // BLOCKS (block-level LWW)
 extern const char * const SQL_BLOCKS_CREATE_TABLE;
