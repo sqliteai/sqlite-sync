@@ -86,6 +86,12 @@ COV_FILES = $(filter-out $(SRC_DIR)/lz4.c $(NETWORK_DIR)/network.c $(SQLITE_IMPL
 CURL_LIB = $(CURL_DIR)/$(PLATFORM)/libcurl.a
 TEST_TARGET = $(patsubst %.c,$(DIST_DIR)/%$(EXE), $(notdir $(TEST_SRC)))
 
+# Build curl hermetically: neutralize the developer's ambient build env so
+# curl's ./configure compile tests aren't broken by overrides leaking in
+# (e.g. exported LDFLAGS/CPPFLAGS/LIBS pointing at Homebrew). Build flags for
+# curl are supplied explicitly via CURL_CONFIG.
+CURL_CONFIG_ENV = LDFLAGS= CPPFLAGS= LIBS= CFLAGS=
+
 # Platform-specific settings
 ifeq ($(PLATFORM),windows)
 	TARGET := $(DIST_DIR)/cloudsync.dll
@@ -326,7 +332,7 @@ else
 	unzip $(CURL_DIR)/src/curl.zip -d $(CURL_DIR)/src/.
 endif
 	
-	cd $(CURL_SRC) && ./configure \
+	cd $(CURL_SRC) && $(CURL_CONFIG_ENV) ./configure \
 	--without-libpsl \
 	--disable-alt-svc \
 	--disable-ares \

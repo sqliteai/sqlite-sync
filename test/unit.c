@@ -12091,6 +12091,13 @@ bool do_test_payload_chunks_large_values (bool print_result, bool cleanup_databa
     if (!test_payload_chunks_tables_equal(db[0], db[1])) goto finalize;
 
     if (first_v3_chunk < 0) goto finalize;
+
+    // Reopen db[1] so the v3-fragment stale-GC throttle starts fresh on this
+    // connection: the first fragment applied below runs the stale cleanup.
+    close_db(db[1]);
+    db[1] = do_create_database_file(1, timestamp, saved_counter);
+    if (!db[1]) goto finalize;
+
     rc = sqlite3_exec(db[1],
         "CREATE TABLE IF NOT EXISTS cloudsync_payload_fragments ("
         "value_id TEXT NOT NULL, part_index INTEGER NOT NULL, part_count INTEGER NOT NULL, total_size INTEGER NOT NULL, "
@@ -12104,7 +12111,31 @@ bool do_test_payload_chunks_large_values (bool print_result, bool cleanup_databa
         NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
 
+    // First fragment apply on the fresh connection -> stale GC runs -> removed.
     rc = sqlite3_prepare_v2(db[1], "SELECT cloudsync_payload_apply(?);", -1, &apply, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_bind_blob(apply, 1, chunks[first_v3_chunk].data, chunks[first_v3_chunk].len, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_step(apply);
+    if (rc != SQLITE_ROW) goto finalize;
+    sqlite3_reset(apply);
+    sqlite3_clear_bindings(apply);
+
+    rc = sqlite3_prepare_v2(db[1], "SELECT COUNT(*) FROM cloudsync_payload_fragments WHERE value_id='stale-incomplete';", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 0) goto finalize;
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // Throttle check: an old group inserted now must NOT be removed by the very
+    // next fragment apply, because the GC just ran (within the throttle window).
+    // This proves the cleanup is not re-scanned on every applied fragment.
+    rc = sqlite3_exec(db[1],
+        "INSERT OR REPLACE INTO cloudsync_payload_fragments "
+        "(value_id, part_index, part_count, total_size, checksum, created_at, tbl, pk, col_name, col_version, db_version, site_id, cl, seq, fragment) "
+        "VALUES ('stale-incomplete-2', 0, 2, 10, '0000000000000000', 0, 'payload_chunk_test', x'02', 'data', 1, 1, zeroblob(16), 1, 1, x'00');",
+        NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
     rc = sqlite3_bind_blob(apply, 1, chunks[first_v3_chunk].data, chunks[first_v3_chunk].len, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto finalize;
@@ -12113,10 +12144,10 @@ bool do_test_payload_chunks_large_values (bool print_result, bool cleanup_databa
     sqlite3_finalize(apply);
     apply = NULL;
 
-    rc = sqlite3_prepare_v2(db[1], "SELECT COUNT(*) FROM cloudsync_payload_fragments WHERE value_id='stale-incomplete';", -1, &stmt, NULL);
+    rc = sqlite3_prepare_v2(db[1], "SELECT COUNT(*) FROM cloudsync_payload_fragments WHERE value_id='stale-incomplete-2';", -1, &stmt, NULL);
     if (rc != SQLITE_OK) goto finalize;
     rc = sqlite3_step(stmt);
-    if (rc != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 0) goto finalize;
+    if (rc != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 1) goto finalize;  // throttled -> still present
     sqlite3_finalize(stmt);
     stmt = NULL;
 
@@ -12169,6 +12200,123 @@ finalize:
         }
     }
 
+    return result;
+}
+
+// Apply every payload chunk produced by `q` (column 0 = payload blob, run on
+// src) into `dst`. Returns SQLITE_OK on success.
+static int test_chunks_apply_all (sqlite3_stmt *q, sqlite3 *dst) {
+    sqlite3_stmt *apply = NULL;
+    int rc = sqlite3_prepare_v2(dst, "SELECT cloudsync_payload_apply(?);", -1, &apply, NULL);
+    if (rc != SQLITE_OK) return rc;
+    while ((rc = sqlite3_step(q)) == SQLITE_ROW) {
+        sqlite3_bind_blob(apply, 1, sqlite3_column_blob(q, 0), sqlite3_column_bytes(q, 0), SQLITE_STATIC);
+        if (sqlite3_step(apply) != SQLITE_ROW) { sqlite3_finalize(apply); return SQLITE_ERROR; }
+        sqlite3_reset(apply);
+        sqlite3_clear_bindings(apply);
+    }
+    sqlite3_finalize(apply);
+    return (rc == SQLITE_DONE) ? SQLITE_OK : rc;
+}
+
+// Verify table t holds exactly the ids in expected_csv (sorted, '|'-joined).
+static bool test_chunks_ids_equal (sqlite3 *db, const char *expected_csv) {
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT coalesce(group_concat(id, '|'), '') FROM (SELECT id FROM t ORDER BY id);", -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = false;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(s, 0);
+        ok = v && strcmp(v, expected_csv) == 0;
+    }
+    sqlite3_finalize(s);
+    return ok;
+}
+
+bool do_test_payload_chunks_site_exclusion (bool print_result, bool cleanup_databases) {
+    sqlite3 *db[4] = {NULL, NULL, NULL, NULL};
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+    int rc = SQLITE_OK;
+    unsigned char s1[16] = {0};
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter++;
+
+    for (int i = 0; i < 4; ++i) {
+        db[i] = do_create_database_file(i, timestamp, saved_counter);
+        if (!db[i]) goto finalize;
+        rc = sqlite3_exec(db[i],
+            "CREATE TABLE t (id TEXT PRIMARY KEY, note TEXT DEFAULT '');"
+            "SELECT cloudsync_init('t');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // db[0] = local site S0 changes; db[1] = remote site S1 changes
+    rc = sqlite3_exec(db[0], "INSERT INTO t(id, note) VALUES ('a0','n'),('b0','n');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[1], "INSERT INTO t(id, note) VALUES ('a1','n'),('b1','n');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // capture S1 (db[1]'s site id)
+    if (sqlite3_prepare_v2(db[1], "SELECT cloudsync_siteid();", -1, &stmt, NULL) != SQLITE_OK) goto finalize;
+    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_bytes(stmt, 0) != 16) goto finalize;
+    memcpy(s1, sqlite3_column_blob(stmt, 0), 16);
+    sqlite3_finalize(stmt); stmt = NULL;
+
+    // transfer db[1]'s changes into db[0] (now db[0] has S0 and S1 changes)
+    if (sqlite3_prepare_v2(db[1], "SELECT payload FROM cloudsync_payload_chunks WHERE since_db_version=0 ORDER BY chunk_index;", -1, &stmt, NULL) != SQLITE_OK) goto finalize;
+    if (test_chunks_apply_all(stmt, db[0]) != SQLITE_OK) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+    if (!test_chunks_ids_equal(db[0], "a0|a1|b0|b1")) goto finalize;
+
+    // exclude S1 -> only S0 changes (a0,b0) into db[2]
+    if (sqlite3_prepare_v2(db[0], "SELECT payload FROM cloudsync_payload_chunks WHERE since_db_version=0 AND site_id=? AND exclude_filter_site_id=1 ORDER BY chunk_index;", -1, &stmt, NULL) != SQLITE_OK) goto finalize;
+    sqlite3_bind_blob(stmt, 1, s1, 16, SQLITE_STATIC);
+    if (test_chunks_apply_all(stmt, db[2]) != SQLITE_OK) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+    if (!test_chunks_ids_equal(db[2], "a0|b0")) goto finalize;
+
+    // inclusive filter S1 -> only S1 changes (a1,b1) into db[3]
+    if (sqlite3_prepare_v2(db[0], "SELECT payload FROM cloudsync_payload_chunks WHERE since_db_version=0 AND site_id=? ORDER BY chunk_index;", -1, &stmt, NULL) != SQLITE_OK) goto finalize;
+    sqlite3_bind_blob(stmt, 1, s1, 16, SQLITE_STATIC);
+    if (test_chunks_apply_all(stmt, db[3]) != SQLITE_OK) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+    if (!test_chunks_ids_equal(db[3], "a1|b1")) goto finalize;
+
+    // exclude=true without a site_id must error
+    if (sqlite3_prepare_v2(db[0], "SELECT payload FROM cloudsync_payload_chunks WHERE exclude_filter_site_id=1;", -1, &stmt, NULL) != SQLITE_OK) goto finalize;
+    if (sqlite3_step(stmt) != SQLITE_ERROR) goto finalize; // expected: xFilter raises an error
+    sqlite3_finalize(stmt); stmt = NULL;
+
+    // UUID text<->blob roundtrip (dashed and undashed) must recover S1
+    if (sqlite3_prepare_v2(db[0],
+        "SELECT cloudsync_uuid_blob(cloudsync_uuid_text(?1)) = ?1 "
+        "AND cloudsync_uuid_blob(cloudsync_uuid_text(?1, 0)) = ?1 "
+        "AND length(cloudsync_uuid_text(?1)) = 36 "
+        "AND length(cloudsync_uuid_text(?1, 0)) = 32;", -1, &stmt, NULL) != SQLITE_OK) goto finalize;
+    sqlite3_bind_blob(stmt, 1, s1, 16, SQLITE_STATIC);
+    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 1) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+
+    result = true;
+
+finalize:
+    if (!result && print_result) {
+        printf("do_test_payload_chunks_site_exclusion error: %s\n", db[0] ? sqlite3_errmsg(db[0]) : "no db");
+    }
+    if (stmt) sqlite3_finalize(stmt);
+    for (int i = 0; i < 4; ++i) if (db[i]) close_db(db[i]);
+    if (cleanup_databases) {
+        for (int i = 0; i < 4; ++i) {
+            char path[256], walpath[300], shmpath[300];
+            do_build_database_path(path, i, timestamp, saved_counter);
+            snprintf(walpath, sizeof(walpath), "%s-wal", path);
+            snprintf(shmpath, sizeof(shmpath), "%s-shm", path);
+            file_delete_internal(path);
+            file_delete_internal(walpath);
+            file_delete_internal(shmpath);
+        }
+    }
     return result;
 }
 
@@ -12620,6 +12768,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Payload Buffer Test (1MB):", do_test_payload_buffer(1024 * 1024));
     result += test_report("Payload Buffer Test (10MB):", do_test_payload_buffer(10 * 1024 * 1024));
     result += test_report("Payload Chunks Large Values:", do_test_payload_chunks_large_values(print_result, cleanup_databases));
+    result += test_report("Payload Chunks Site Exclusion:", do_test_payload_chunks_site_exclusion(print_result, cleanup_databases));
 
     // close local database
     close_db(db);

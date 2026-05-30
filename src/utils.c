@@ -112,9 +112,38 @@ char *cloudsync_uuid_v7_stringify (uint8_t uuid[UUID_LEN], char value[UUID_STR_M
 
 char *cloudsync_uuid_v7_string (char value[UUID_STR_MAXLEN], bool dash_format) {
     uint8_t uuid[UUID_LEN];
-    
+
     if (cloudsync_uuid_v7(uuid) != 0) return NULL;
     return cloudsync_uuid_v7_stringify(uuid, value, dash_format);
+}
+
+static int cloudsync_hex_nibble (char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+int cloudsync_uuid_v7_parse (const char *str, int len, uint8_t out[UUID_LEN]) {
+    if (!str || !out) return -1;
+    if (len < 0) len = (int)strlen(str);
+
+    // Accept the canonical dashed form (8-4-4-4-12) or bare 32-hex; dashes,
+    // if present, must be at the canonical positions. Parse 32 hex nibbles.
+    int nibbles = 0;
+    for (int i = 0; i < len; ++i) {
+        char c = str[i];
+        if (c == '-') continue;
+        int hi = cloudsync_hex_nibble(c);
+        if (hi < 0) return -1;
+        if (i + 1 >= len) return -1;
+        int lo = cloudsync_hex_nibble(str[i + 1]);
+        if (lo < 0) return -1;
+        if (nibbles >= UUID_LEN) return -1;
+        out[nibbles++] = (uint8_t)((hi << 4) | lo);
+        ++i; // consumed the low nibble too
+    }
+    return (nibbles == UUID_LEN) ? 0 : -1;
 }
 
 int cloudsync_uuid_v7_compare (uint8_t value1[UUID_LEN], uint8_t value2[UUID_LEN]) {

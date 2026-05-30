@@ -46,7 +46,6 @@
 \ir 36_block_lww_round3.sql
 \ir 37_block_lww_round4.sql
 \ir 38_block_lww_round5.sql
-\ir 39_payload_chunks.sql
 \ir 39_concurrent_write_apply.sql
 \ir 40_unsupported_algorithms.sql
 \ir 41_corrupted_payload.sql
@@ -60,6 +59,7 @@
 \ir 49_row_filter_prefill.sql
 \ir 50_block_lww_existing_data.sql
 \ir 51_stale_table_settings_dropped_meta.sql
+\ir 52_payload_chunks.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

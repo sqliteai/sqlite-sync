@@ -194,8 +194,39 @@ Datum cloudsync_uuid (PG_FUNCTION_ARGS) {
 
     // Parse into PostgreSQL UUID type
     Datum uuid_datum = DirectFunctionCall1(uuid_in, CStringGetDatum(uuid_str));
-    
+
     PG_RETURN_DATUM(uuid_datum);
+}
+
+// cloudsync_uuid_text(bytea, [dash_format]) - 16-byte UUID -> canonical string
+PG_FUNCTION_INFO_V1(cloudsync_uuid_text);
+Datum cloudsync_uuid_text (PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0)) PG_RETURN_NULL();
+    bytea *b = PG_GETARG_BYTEA_PP(0);
+    if (VARSIZE_ANY_EXHDR(b) != UUID_LEN) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+            errmsg("cloudsync_uuid_text: expected a 16-byte value")));
+    }
+    bool dash_format = PG_ARGISNULL(1) ? true : PG_GETARG_BOOL(1);
+    char uuid_str[UUID_STR_MAXLEN];
+    cloudsync_uuid_v7_stringify((uint8_t *)VARDATA_ANY(b), uuid_str, dash_format);
+    PG_RETURN_TEXT_P(cstring_to_text(uuid_str));
+}
+
+// cloudsync_uuid_blob(text) - UUID string -> 16-byte value (dashed/undashed)
+PG_FUNCTION_INFO_V1(cloudsync_uuid_blob);
+Datum cloudsync_uuid_blob (PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0)) PG_RETURN_NULL();
+    text *t = PG_GETARG_TEXT_PP(0);
+    uint8_t uuid[UUID_LEN];
+    if (cloudsync_uuid_v7_parse(VARDATA_ANY(t), (int)VARSIZE_ANY_EXHDR(t), uuid) != 0) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+            errmsg("cloudsync_uuid_blob: malformed UUID string")));
+    }
+    bytea *result = (bytea *)palloc(VARHDRSZ + UUID_LEN);
+    SET_VARSIZE(result, VARHDRSZ + UUID_LEN);
+    memcpy(VARDATA(result), uuid, UUID_LEN);
+    PG_RETURN_BYTEA_P(result);
 }
 
 // cloudsync_db_version() - Get current database version
@@ -1271,7 +1302,16 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
 
         int64 since = PG_ARGISNULL(0) ? dbutils_settings_get_int64_value(data, CLOUDSYNC_KEY_SEND_DBVERSION) : PG_GETARG_INT64(0);
         bytea *site_id = PG_ARGISNULL(1) ? NULL : PG_GETARG_BYTEA_PP(1);
-        if (!site_id) {
+        bool exclude = PG_ARGISNULL(3) ? false : PG_GETARG_BOOL(3);
+        // Site filter resolution:
+        //   exclude=true  -> all sites except filter_site_id (CHECK path); site required
+        //   filter given  -> only that site
+        //   default       -> local site (send path, unchanged)
+        if (exclude && !site_id) {
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                errmsg("cloudsync_payload_chunks: exclude_filter_site_id requires a non-NULL filter_site_id")));
+        }
+        if (!exclude && !site_id) {
             site_id = (bytea *)palloc(VARHDRSZ + UUID_LEN);
             SET_VARSIZE(site_id, VARHDRSZ + UUID_LEN);
             memcpy(VARDATA(site_id), cloudsync_siteid(data), UUID_LEN);
@@ -1282,7 +1322,10 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
             Oid mt[1] = {BYTEAOID};
             Datum mv[1] = {PointerGetDatum(site_id)};
             char mn[1] = {' '};
-            int mrc = SPI_execute_with_args("SELECT COALESCE(MAX(db_version),0) FROM cloudsync_changes_select(0,$1)", 1, mt, mv, mn, true, 1);
+            const char *mxq = exclude
+                ? "SELECT COALESCE(MAX(db_version),0) FROM cloudsync_changes_select(0,NULL) WHERE site_id <> $1"
+                : "SELECT COALESCE(MAX(db_version),0) FROM cloudsync_changes_select(0,$1)";
+            int mrc = SPI_execute_with_args(mxq, 1, mt, mv, mn, true, 1);
             if (mrc == SPI_OK_SELECT && SPI_processed > 0) {
                 bool isnull = false;
                 Datum d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
@@ -1294,9 +1337,16 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
 
         StringInfoData q;
         initStringInfo(&q);
-        appendStringInfoString(&q,
-            "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
-            "FROM cloudsync_changes_select($1,$2) WHERE db_version <= $3 ORDER BY db_version, seq ASC");
+        if (exclude) {
+            // $1=since (into changes_select), $2=site to exclude, $3=until watermark
+            appendStringInfoString(&q,
+                "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                "FROM cloudsync_changes_select($1,NULL) WHERE site_id <> $2 AND db_version <= $3 ORDER BY db_version, seq ASC");
+        } else {
+            appendStringInfoString(&q,
+                "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                "FROM cloudsync_changes_select($1,$2) WHERE db_version <= $3 ORDER BY db_version, seq ASC");
+        }
         Oid argtypes[3] = {INT8OID, BYTEAOID, INT8OID};
         Datum values[3] = {Int64GetDatum(since), PointerGetDatum(site_id), Int64GetDatum(until)};
         char nulls[3] = {' ', ' ', ' '};

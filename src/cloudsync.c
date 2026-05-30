@@ -61,6 +61,7 @@
 #define CLOUDSYNC_PAYLOAD_MIN_VERSION_WITH_CHECKSUM     CLOUDSYNC_PAYLOAD_VERSION_2
 #define CLOUDSYNC_PAYLOAD_FRAGMENT_PREFIX               "__cloudsync_frag_v1__:"
 #define CLOUDSYNC_PAYLOAD_FRAGMENT_STALE_SECONDS        (24*60*60)
+#define CLOUDSYNC_PAYLOAD_FRAGMENT_CLEANUP_MIN_INTERVAL (60)
 
 #ifndef MAX
 #define MAX(a, b)                               (((a)>(b))?(a):(b))
@@ -165,7 +166,11 @@ struct cloudsync_context {
     int64_t    pending_db_version;
     // used to set an order inside each transaction
     int        seq;
-    
+
+    // wall-clock (time()) of the last stale v3-fragment GC; throttles the GC so
+    // it does not run a full table scan on every applied fragment (0 = never run)
+    int64_t    last_fragment_cleanup;
+
     // optional schema_name to be set in the cloudsync_table_context
     char       *current_schema;
     
@@ -3681,10 +3686,23 @@ static int cloudsync_payload_bind_param_callback (void *xdata, int index, int ty
 }
 
 static int cloudsync_payload_fragments_cleanup_stale (cloudsync_context *data) {
+    // Stale-fragment GC is pure maintenance (it removes incomplete fragment groups
+    // older than CLOUDSYNC_PAYLOAD_FRAGMENT_STALE_SECONDS), so it has no correctness
+    // deadline. It runs a full GROUP BY scan of the fragments table; calling it on
+    // every applied fragment would be O(n^2) for a heavily-fragmented value, since
+    // each fragment arrives as its own apply call. Throttle it to at most once per
+    // CLOUDSYNC_PAYLOAD_FRAGMENT_CLEANUP_MIN_INTERVAL per connection.
+    int64_t now = (int64_t)time(NULL);
+    if (data->last_fragment_cleanup != 0 &&
+        now - data->last_fragment_cleanup < CLOUDSYNC_PAYLOAD_FRAGMENT_CLEANUP_MIN_INTERVAL) {
+        return DBRES_OK;
+    }
+    data->last_fragment_cleanup = now;
+
     dbvm_t *vm = NULL;
     int rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE, &vm, 0);
     if (rc != DBRES_OK) return rc;
-    int64_t cutoff = (int64_t)time(NULL) - CLOUDSYNC_PAYLOAD_FRAGMENT_STALE_SECONDS;
+    int64_t cutoff = now - CLOUDSYNC_PAYLOAD_FRAGMENT_STALE_SECONDS;
     rc = databasevm_bind_int(vm, 1, cutoff);
     if (rc == DBRES_OK) rc = databasevm_step(vm);
     databasevm_finalize(vm);
