@@ -1901,6 +1901,11 @@ bool do_test_dbutils (void) {
     rc = dbutils_settings_get_value(data, "key2", buffer, &blen, NULL);
     if (rc != SQLITE_OK) goto finalize;
     if (buffer[0] != 0) goto finalize;
+
+    dbutils_settings_set_key_value(data, "decimal_key", "010");
+    int64_t intvalue = 0;
+    rc = dbutils_settings_get_value(data, "decimal_key", NULL, NULL, &intvalue);
+    if (rc != SQLITE_OK || intvalue != 10) goto finalize;
     
     // test table settings
     rc = dbutils_table_settings_set_key_value(data, NULL, NULL, NULL, NULL);
