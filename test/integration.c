@@ -237,6 +237,32 @@ int test_chunked_schema_init(sqlite3 *db) {
     return db_exec(db, "SELECT cloudsync_init('chunked_payload_items');");
 }
 
+int test_chunked_failure_schema_init(sqlite3 *db) {
+    int rc = db_exec(db,
+        "CREATE TABLE IF NOT EXISTS chunked_payload_failure_items ("
+        "id TEXT PRIMARY KEY NOT NULL,"
+        "body TEXT NOT NULL DEFAULT ''"
+        ");");
+    if (rc != SQLITE_OK) return rc;
+
+    return db_exec(db, "SELECT cloudsync_init('chunked_payload_failure_items');");
+}
+
+int test_chunked_sender_open(sqlite3 **sender, char *network_init, size_t network_init_len) {
+    const char* test_db_id = getenv("INTEGRATION_TEST_CHUNKED_DATABASE_ID");
+    if (!test_db_id) {
+        printf("(INTEGRATION_TEST_CHUNKED_DATABASE_ID not set, skipping) ");
+        return TEST_SKIPPED;
+    }
+
+    int rc = open_load_ext(":memory:", sender);
+    if (rc != SQLITE_OK) return rc;
+    rc = integration_network_init(*sender, test_db_id, network_init, network_init_len);
+    if (rc != SQLITE_OK) return rc;
+
+    return rc;
+}
+
 int test_chunked_pair_open(sqlite3 **sender, sqlite3 **receiver, char *network_init, size_t network_init_len) {
     const char* test_db_id = getenv("INTEGRATION_TEST_CHUNKED_DATABASE_ID");
     if (!test_db_id) {
@@ -277,6 +303,13 @@ void test_chunked_pair_close(sqlite3 *sender, sqlite3 *receiver) {
     if (receiver) {
         db_exec(receiver, "SELECT cloudsync_terminate();");
         sqlite3_close(receiver);
+    }
+}
+
+void test_chunked_sender_close(sqlite3 *sender) {
+    if (sender) {
+        db_exec(sender, "SELECT cloudsync_terminate();");
+        sqlite3_close(sender);
     }
 }
 
@@ -636,6 +669,72 @@ cleanup:
     return rc;
 }
 
+int test_chunked_send_failure_preserves_checkpoint(void) {
+    int rc = SQLITE_OK;
+    sqlite3 *sender = NULL;
+    char network_init[1024];
+    char batch_id[UUID_STR_MAXLEN];
+    char sql[1024];
+    char *errmsg = NULL;
+    int send_dbversion_before = 0;
+    int send_dbversion_after = -1;
+    const int row_count = 500;
+    const int body_bytes = 1600;
+
+    rc = test_chunked_sender_open(&sender, network_init, sizeof(network_init));
+    if (rc == TEST_SKIPPED) return SQLITE_OK;
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = test_chunked_failure_schema_init(sender); if (rc != SQLITE_OK) goto cleanup;
+    rc = db_exec(sender, "SELECT cloudsync_set('payload_max_chunk_size', '262144');"); if (rc != SQLITE_OK) goto cleanup;
+
+    cloudsync_uuid_v7_string(batch_id, true);
+    snprintf(sql, sizeof(sql),
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < %d) "
+        "INSERT INTO chunked_payload_failure_items (id, body) "
+        "SELECT '%s-' || printf('%%03d', i), lower(hex(zeroblob(%d))) FROM c;",
+        row_count, batch_id, body_bytes);
+    rc = db_exec(sender, sql); if (rc != SQLITE_OK) goto cleanup;
+
+    rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks();", 2); if (rc != SQLITE_OK) goto cleanup;
+    rc = db_expect_int(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks() WHERE hex(substr(payload,5,1))='03';", 0); if (rc != SQLITE_OK) goto cleanup;
+
+    rc = db_select_int(sender,
+        "SELECT CAST(COALESCE((SELECT value FROM cloudsync_settings WHERE key='send_dbversion'), '0') AS INTEGER);",
+        &send_dbversion_before);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_exec(sender, "SELECT cloudsync_network_send_changes();", NULL, NULL, &errmsg);
+    if (rc == SQLITE_OK) {
+        printf("Error: chunked send failure test expected cloudsync_network_send_changes to fail.\n");
+        rc = SQLITE_ERROR;
+        goto cleanup;
+    }
+    if (errmsg) {
+        sqlite3_free(errmsg);
+        errmsg = NULL;
+    }
+
+    rc = db_select_int(sender,
+        "SELECT CAST(COALESCE((SELECT value FROM cloudsync_settings WHERE key='send_dbversion'), '0') AS INTEGER);",
+        &send_dbversion_after);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    if (send_dbversion_after != send_dbversion_before) {
+        printf("Error: send_dbversion advanced after failed chunked send (before=%d after=%d).\n",
+               send_dbversion_before, send_dbversion_after);
+        rc = SQLITE_ERROR;
+        goto cleanup;
+    }
+
+    rc = SQLITE_OK;
+
+cleanup:
+    if (errmsg) sqlite3_free(errmsg);
+    test_chunked_sender_close(sender);
+    return rc;
+}
+
 int test_offline_error(const char *db_path) {
     sqlite3 *db = NULL;
     int rc = open_load_ext(db_path, &db);
@@ -897,6 +996,7 @@ int main (void) {
     rc += test_report("Enable Disable Test:", test_enable_disable(DB_PATH));
     rc += test_report("Chunked Paths Test:", test_chunked_payload_paths());
     rc += test_report("Chunked Rowset Test:", test_chunked_payload_rowset_path());
+    rc += test_report("Chunked Failure Test:", test_chunked_send_failure_preserves_checkpoint());
     rc += test_report("Offline Error Test:", test_offline_error(":memory:"));
     rc += test_report("Double Empty Init Test:", test_double_empty_network_init(":memory:"));
     rc += test_report("Failure Path Test:", test_failure_path(":memory:"));
