@@ -1359,8 +1359,9 @@ static int payload_chunks_filter(sqlite3_vtab_cursor *cursor, int idxnum, const 
     cloudsync_context *data = c->vtab->data;
     if (c->src) { sqlite3_finalize(c->src); c->src = NULL; }
     if (c->payload) { cloudsync_memory_free(c->payload); c->payload = NULL; }
-    bool old_eof = c->eof;
-    UNUSED_PARAMETER(old_eof);
+    // Contract: all per-scan state that can be bulk-reset here must live at or
+    // after eof. Fields before eof are cursor lifetime state preserved across
+    // xFilter calls.
     memset(&c->eof, 0, sizeof(*c) - offsetof(cloudsync_payload_chunks_cursor, eof));
 
     int argi = 0;
