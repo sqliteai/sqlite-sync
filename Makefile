@@ -191,7 +191,7 @@ endif
 	T_LDFLAGS += -fprofile-arcs -ftest-coverage
 endif
 
-ifdef SYNC_BENCH_DEBUG
+ifdef NETWORK_TRACE
 	CFLAGS += -DCLOUDSYNC_NETWORK_TRACE
 endif
 
@@ -298,7 +298,7 @@ sync-bench: $(TARGET) $(DIST_DIR)/sync_bench$(EXE)
 	./$(DIST_DIR)/sync_bench$(EXE)
 
 sync-bench-debug:
-	$(MAKE) SYNC_BENCH_DEBUG=1 sync-bench
+	$(MAKE) NETWORK_TRACE=1 sync-bench
 
 OPENSSL_TARBALL = $(OPENSSL_DIR)/$(OPENSSL_VERSION).tar.gz
 

@@ -4,6 +4,7 @@
 //
 //  Created by Gioele Cantoni on 05/06/25.
 //  Set INTEGRATION_TEST_OFFLINE_DATABASE_ID and INTEGRATION_TEST_DATABASE_ID environment variables before running this test.
+//  Set INTEGRATION_TEST_CHUNKED_DATABASE_ID to enable the chunked-payload e2e test against an isolated remote database.
 //
 
 #include <stdio.h>
@@ -36,6 +37,7 @@
 
 #define DB_PATH         "health-track.sqlite"
 #define EXT_PATH        "./dist/cloudsync"
+#define TEST_SKIPPED    100001
 #define RCHECK          if (rc != SQLITE_OK) goto abort_test;
 #define ERROR_MSG       if (rc != SQLITE_OK) printf("Error: %s\n", sqlite3_errmsg(db));
 #define TERMINATE       if (db) { db_exec(db, "SELECT cloudsync_terminate();"); }
@@ -50,6 +52,8 @@ typedef struct {
         const char *s; // for future use, if needed
     } value;
 } expected_t;
+
+int open_load_ext(const char *db_path, sqlite3 **out_db);
 
 static int callback(void *data, int argc, char **argv, char **names) {
     expected_t *expect = (expected_t *)data;
@@ -153,6 +157,127 @@ int db_expect_str (sqlite3 *db, const char *sql, const char *expect) {
     int rc = sqlite3_exec(db, sql, callback, &data, NULL);
     if (rc != SQLITE_OK) printf("Error while executing %s: %s\n", sql, sqlite3_errmsg(db));
     return rc;
+}
+
+int db_select_int (sqlite3 *db, const char *sql, int *out) {
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        printf("Error while preparing %s: %s\n", sql, sqlite3_errmsg(db));
+        return rc;
+    }
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        printf("Error while executing %s: expected one row, got rc=%d\n", sql, rc);
+        sqlite3_finalize(stmt);
+        return SQLITE_ERROR;
+    }
+
+    *out = sqlite3_column_int(stmt, 0);
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE) {
+        printf("Error while executing %s: expected one row only, got rc=%d\n", sql, rc);
+        sqlite3_finalize(stmt);
+        return SQLITE_ERROR;
+    }
+
+    return sqlite3_finalize(stmt);
+}
+
+int db_expect_min (sqlite3 *db, const char *sql, int expect_min) {
+    int value = 0;
+    int rc = db_select_int(db, sql, &value);
+    if (rc != SQLITE_OK) return rc;
+    if (value < expect_min) {
+        printf("Error: expected %s to be >= %d, got %d\n", sql, expect_min, value);
+        return SQLITE_ERROR;
+    }
+    return SQLITE_OK;
+}
+
+int integration_network_init(sqlite3 *db, const char *database_id, char *network_init, size_t network_init_len) {
+    if (!database_id) {
+        fprintf(stderr, "Error: integration database ID not set.\n");
+        return SQLITE_ERROR;
+    }
+
+    const char* custom_address = getenv("INTEGRATION_TEST_CLOUDSYNC_ADDRESS");
+    if (custom_address) {
+        snprintf(network_init, network_init_len,
+            "SELECT cloudsync_network_init_custom('%s', '%s');", custom_address, database_id);
+    } else {
+        snprintf(network_init, network_init_len,
+            "SELECT cloudsync_network_init('%s');", database_id);
+    }
+
+    int rc = db_exec(db, network_init);
+    if (rc != SQLITE_OK) return rc;
+
+    const char* apikey = getenv("INTEGRATION_TEST_APIKEY");
+    if (apikey) {
+        char set_apikey[512];
+        snprintf(set_apikey, sizeof(set_apikey),
+            "SELECT cloudsync_network_set_apikey('%s');", apikey);
+        rc = db_exec(db, set_apikey);
+    }
+
+    return rc;
+}
+
+int test_chunked_schema_init(sqlite3 *db) {
+    int rc = db_exec(db,
+        "CREATE TABLE IF NOT EXISTS chunked_payload_items ("
+        "id TEXT PRIMARY KEY NOT NULL,"
+        "body TEXT NOT NULL DEFAULT ''"
+        ");");
+    if (rc != SQLITE_OK) return rc;
+
+    return db_exec(db, "SELECT cloudsync_init('chunked_payload_items');");
+}
+
+int test_chunked_pair_open(sqlite3 **sender, sqlite3 **receiver, char *network_init, size_t network_init_len) {
+    const char* test_db_id = getenv("INTEGRATION_TEST_CHUNKED_DATABASE_ID");
+    if (!test_db_id) {
+        printf("(INTEGRATION_TEST_CHUNKED_DATABASE_ID not set, skipping) ");
+        return TEST_SKIPPED;
+    }
+
+    int rc = open_load_ext(":memory:", sender);
+    if (rc != SQLITE_OK) return rc;
+    rc = test_chunked_schema_init(*sender);
+    if (rc != SQLITE_OK) return rc;
+    rc = integration_network_init(*sender, test_db_id, network_init, network_init_len);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = open_load_ext(":memory:", receiver);
+    if (rc != SQLITE_OK) return rc;
+    rc = test_chunked_schema_init(*receiver);
+    if (rc != SQLITE_OK) return rc;
+    rc = db_exec(*receiver, network_init);
+    if (rc != SQLITE_OK) return rc;
+
+    const char* apikey = getenv("INTEGRATION_TEST_APIKEY");
+    if (apikey) {
+        char set_apikey[512];
+        snprintf(set_apikey, sizeof(set_apikey),
+            "SELECT cloudsync_network_set_apikey('%s');", apikey);
+        rc = db_exec(*receiver, set_apikey);
+    }
+
+    return rc;
+}
+
+void test_chunked_pair_close(sqlite3 *sender, sqlite3 *receiver) {
+    if (sender) {
+        db_exec(sender, "SELECT cloudsync_terminate();");
+        sqlite3_close(sender);
+    }
+    if (receiver) {
+        db_exec(receiver, "SELECT cloudsync_terminate();");
+        sqlite3_close(receiver);
+    }
 }
 
 int open_load_ext(const char *db_path, sqlite3 **out_db) {
@@ -372,6 +497,143 @@ int test_enable_disable(const char *db_path) {
     sqlite3_close(db2);
 
 ABORT_TEST
+}
+
+int test_chunked_payload_paths(void) {
+    int rc = SQLITE_OK;
+    sqlite3 *sender = NULL;
+    sqlite3 *receiver = NULL;
+    char network_init[1024];
+    char row_id[UUID_STR_MAXLEN];
+    char sql[1024];
+    bool found = false;
+    bool cleanup_remote_row = false;
+
+    rc = test_chunked_pair_open(&sender, &receiver, network_init, sizeof(network_init));
+    if (rc == TEST_SKIPPED) return SQLITE_OK;
+    if (rc != SQLITE_OK) goto cleanup;
+
+    cloudsync_uuid_v7_string(row_id, true);
+    rc = db_exec(sender, "SELECT cloudsync_set('payload_max_chunk_size', '262144');"); if (rc != SQLITE_OK) goto cleanup;
+    snprintf(sql, sizeof(sql),
+        "INSERT INTO chunked_payload_items (id, body) "
+        "VALUES ('%s', lower(hex(zeroblob(360000))));",
+        row_id);
+    rc = db_exec(sender, sql); if (rc != SQLITE_OK) goto cleanup;
+
+    rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks();", 2); if (rc != SQLITE_OK) goto cleanup;
+    rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks() WHERE hex(substr(payload,5,1))='03';", 2); if (rc != SQLITE_OK) goto cleanup;
+
+    rc = db_exec(sender, "SELECT cloudsync_network_send_changes();"); if (rc != SQLITE_OK) goto cleanup;
+    cleanup_remote_row = true;
+
+    for (int attempt = 0; attempt < 30; ++attempt) {
+        int matches = 0;
+
+        rc = db_exec(receiver, "SELECT cloudsync_network_check_changes();");
+        if (rc != SQLITE_OK) goto cleanup;
+
+        snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM chunked_payload_items "
+            "WHERE id='%s' "
+            "AND length(body)=720000 "
+            "AND body=lower(hex(zeroblob(360000)));",
+            row_id);
+        rc = db_select_int(receiver, sql, &matches);
+        if (rc != SQLITE_OK) goto cleanup;
+        if (matches == 1) {
+            found = true;
+            break;
+        }
+
+        sqlite3_sleep(500);
+    }
+
+    if (!found) {
+        printf("Error: chunked e2e row %s was not received.\n", row_id);
+        rc = SQLITE_ERROR;
+        goto cleanup;
+    }
+
+cleanup:
+    if (cleanup_remote_row && sender) {
+        snprintf(sql, sizeof(sql), "DELETE FROM chunked_payload_items WHERE id='%s';", row_id);
+        if (db_exec(sender, sql) == SQLITE_OK) {
+            db_exec(sender, "SELECT cloudsync_network_send_changes();");
+        }
+    }
+    test_chunked_pair_close(sender, receiver);
+    return rc;
+}
+
+int test_chunked_payload_rowset_path(void) {
+    int rc = SQLITE_OK;
+    sqlite3 *sender = NULL;
+    sqlite3 *receiver = NULL;
+    char network_init[1024];
+    char batch_id[UUID_STR_MAXLEN];
+    char sql[1024];
+    bool found = false;
+    bool cleanup_remote_rows = false;
+    const int row_count = 500;
+    const int body_bytes = 1600;
+
+    rc = test_chunked_pair_open(&sender, &receiver, network_init, sizeof(network_init));
+    if (rc == TEST_SKIPPED) return SQLITE_OK;
+    if (rc != SQLITE_OK) goto cleanup;
+
+    cloudsync_uuid_v7_string(batch_id, true);
+    rc = db_exec(sender, "SELECT cloudsync_set('payload_max_chunk_size', '262144');"); if (rc != SQLITE_OK) goto cleanup;
+    snprintf(sql, sizeof(sql),
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < %d) "
+        "INSERT INTO chunked_payload_items (id, body) "
+        "SELECT '%s-' || printf('%%03d', i), lower(hex(zeroblob(%d))) FROM c;",
+        row_count, batch_id, body_bytes);
+    rc = db_exec(sender, sql); if (rc != SQLITE_OK) goto cleanup;
+
+    rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks();", 2); if (rc != SQLITE_OK) goto cleanup;
+    rc = db_expect_int(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks() WHERE hex(substr(payload,5,1))='03';", 0); if (rc != SQLITE_OK) goto cleanup;
+
+    rc = db_exec(sender, "SELECT cloudsync_network_send_changes();"); if (rc != SQLITE_OK) goto cleanup;
+    cleanup_remote_rows = true;
+
+    for (int attempt = 0; attempt < 30; ++attempt) {
+        int matches = 0;
+
+        rc = db_exec(receiver, "SELECT cloudsync_network_check_changes();");
+        if (rc != SQLITE_OK) goto cleanup;
+
+        snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM chunked_payload_items "
+            "WHERE id LIKE '%s-%%' "
+            "AND length(body)=%d "
+            "AND body=lower(hex(zeroblob(%d)));",
+            batch_id, body_bytes * 2, body_bytes);
+        rc = db_select_int(receiver, sql, &matches);
+        if (rc != SQLITE_OK) goto cleanup;
+        if (matches == row_count) {
+            found = true;
+            break;
+        }
+
+        sqlite3_sleep(500);
+    }
+
+    if (!found) {
+        printf("Error: chunked rowset e2e batch %s was not received.\n", batch_id);
+        rc = SQLITE_ERROR;
+        goto cleanup;
+    }
+
+cleanup:
+    if (cleanup_remote_rows && sender) {
+        snprintf(sql, sizeof(sql), "DELETE FROM chunked_payload_items WHERE id LIKE '%s-%%';", batch_id);
+        if (db_exec(sender, sql) == SQLITE_OK) {
+            db_exec(sender, "SELECT cloudsync_network_send_changes();");
+        }
+    }
+    test_chunked_pair_close(sender, receiver);
+    return rc;
 }
 
 int test_offline_error(const char *db_path) {
@@ -633,6 +895,8 @@ int main (void) {
     rc += test_report("Is Enabled Test:", test_is_enabled(DB_PATH));
     rc += test_report("DB Version Test:", test_db_version(DB_PATH));
     rc += test_report("Enable Disable Test:", test_enable_disable(DB_PATH));
+    rc += test_report("Chunked Paths Test:", test_chunked_payload_paths());
+    rc += test_report("Chunked Rowset Test:", test_chunked_payload_rowset_path());
     rc += test_report("Offline Error Test:", test_offline_error(":memory:"));
     rc += test_report("Double Empty Init Test:", test_double_empty_network_init(":memory:"));
     rc += test_report("Failure Path Test:", test_failure_path(":memory:"));
