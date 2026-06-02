@@ -1220,7 +1220,7 @@ static int payload_chunks_plan_fragment(cloudsync_payload_chunks_cursor *c) {
     if (target <= 0) return SQLITE_TOOBIG;
 
     int count = 0;
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < CLOUDSYNC_PAYLOAD_FRAGMENT_SIZE_FIXPOINT_ITERATIONS; ++i) {
         count = cloudsync_payload_fragment_count(c->frag_total, target);
         if (count <= 0) return SQLITE_TOOBIG;
         int planned = cloudsync_payload_fragment_data_size(data,

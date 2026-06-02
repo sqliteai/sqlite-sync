@@ -1228,7 +1228,7 @@ static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_con
                 st->cl, st->seq,
                 st->frag_total, 0, 1);
             if (st->frag_target <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg("payload fragment metadata exceeds max chunk size")));
-            for (int i = 0; i < 8; ++i) {
+            for (int i = 0; i < CLOUDSYNC_PAYLOAD_FRAGMENT_SIZE_FIXPOINT_ITERATIONS; ++i) {
                 int count = cloudsync_payload_fragment_count(st->frag_total, st->frag_target);
                 if (count <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg("payload requires too many fragments")));
                 int planned = cloudsync_payload_fragment_data_size(data,

@@ -29,6 +29,10 @@ extern "C" {
 #define CLOUDSYNC_PAYLOAD_CHUNK_DEFAULT_SIZE    (5 * 1024 * 1024)
 #define CLOUDSYNC_PAYLOAD_CHUNK_MIN_SIZE        (256 * 1024)
 #define CLOUDSYNC_PAYLOAD_CHUNK_SAFETY_MARGIN   (16 * 1024)
+// Fragment sizing is a small fixpoint: after the first target estimate, only
+// decimal metadata widths for part_index/part_count can change, so eight passes
+// is ample while still preventing an accidental unbounded planning loop.
+#define CLOUDSYNC_PAYLOAD_FRAGMENT_SIZE_FIXPOINT_ITERATIONS 8
 
 #define CLOUDSYNC_CHANGES_NCOLS                 9
 
