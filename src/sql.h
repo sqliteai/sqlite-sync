@@ -74,6 +74,13 @@ extern const char * const SQL_PAYLOAD_FRAGMENTS_SELECT;
 extern const char * const SQL_PAYLOAD_FRAGMENTS_DELETE;
 extern const char * const SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE;
 
+extern const char * const SQL_PAYLOAD_SPOOL_CREATE_TABLE;
+extern const char * const SQL_PAYLOAD_SPOOL_COUNT;
+extern const char * const SQL_PAYLOAD_SPOOL_FILL_INSERT;
+extern const char * const SQL_PAYLOAD_SPOOL_MARK_FINAL;
+extern const char * const SQL_PAYLOAD_SPOOL_DELETE;
+extern const char * const SQL_PAYLOAD_SPOOL_CLEANUP_STALE;
+
 // BLOCKS (block-level LWW)
 extern const char * const SQL_BLOCKS_CREATE_TABLE;
 extern const char * const SQL_BLOCKS_UPSERT;

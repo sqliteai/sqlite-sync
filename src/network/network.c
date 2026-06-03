@@ -83,6 +83,13 @@ struct network_data {
     char        *apply_endpoint;
     char        *status_endpoint;
     int         ticket_enabled;
+    // Best-effort page cursor for the chunked /check download drain. The durable
+    // receive cursor (check_dbversion/check_seq) is frozen at "since" for the whole
+    // drain, so the server (which is stateless across /check calls) needs the client
+    // to echo which spool page to serve next. In-memory only: losing it just
+    // restarts the drain from page 0, which is safe because apply is idempotent.
+    int64_t     check_cursor;        // next page index to request (0 = fresh drain)
+    int64_t     check_cursor_since;  // the check_dbversion check_cursor belongs to
 #ifndef CLOUDSYNC_OMIT_CURL
     CURL        *api_curl;
     CURL        *artifact_curl;
@@ -1636,11 +1643,22 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
     int seq = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_SEQ);
     if (seq<0) {sqlite3_result_error(context, "Unable to retrieve seq.", -1); return -1;}
 
+    // Restart paging whenever the durable receive window changes: the page cursor
+    // is only meaningful within a single drain (check_dbversion held at "since").
+    if (netdata->check_cursor_since != db_version) {
+        netdata->check_cursor = 0;
+        netdata->check_cursor_since = db_version;
+    }
+
     // Capture local db_version before download so we can query cloudsync_changes afterwards
     int64_t prev_dbv = cloudsync_dbversion(data);
 
+    // "cursor" is the spool page to serve. Old/legacy servers ignore the unknown
+    // request field and omit it from the response; the client then never self-pages
+    // (check_cursor stays 0), preserving current behavior.
     char json_payload[2024];
-    snprintf(json_payload, sizeof(json_payload), "{\"dbVersion\":%lld, \"seq\":%d}", (long long)db_version, seq);
+    snprintf(json_payload, sizeof(json_payload), "{\"dbVersion\":%lld, \"seq\":%d, \"cursor\":%lld}",
+             (long long)db_version, seq, (long long)netdata->check_cursor);
 
     NETWORK_RESULT result = network_receive_buffer(netdata, netdata->check_endpoint, netdata->authentication, true, true, json_payload, cloudsync_check_headers, ARRAY_LEN(cloudsync_check_headers));
     int rc = SQLITE_OK;
@@ -1663,20 +1681,36 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
             //                              (CHECKPOINT_NONE) so it never lands in
             //                              the middle of a source db_version.
             // The server serves successive chunks of the same stream across /check
-            // calls (the durable cursor stays at "since" until "final"), tracking
-            // chunk-level progress on its side; apply is idempotent, so a stop
-            // before "final" simply re-delivers the stream from "since".
+            // calls (the durable cursor stays at "since" until "final"). The server
+            // is stateless between calls, so it tells us the next spool page via
+            // "cursor" and we echo it back (netdata->check_cursor); apply is
+            // idempotent, so a stop before "final" simply re-delivers from "since".
             int64_t watermark = json_extract_int(result.buffer, result.blen, "watermark", -1);
             int64_t checkpoint_db_version;
             int64_t checkpoint_seq = 0;
+            bool final_chunk = true;
             if (watermark < 0) {
                 checkpoint_db_version = CLOUDSYNC_CHECKPOINT_LAST_APPLIED;
             } else {
-                bool final_chunk = json_extract_bool(result.buffer, result.blen, "final", true);
+                final_chunk = json_extract_bool(result.buffer, result.blen, "final", true);
                 checkpoint_db_version = final_chunk ? watermark : CLOUDSYNC_CHECKPOINT_NONE;
             }
+            // Optional next-page cursor. Absent on legacy/old servers (-1 sentinel)
+            // -> the client does not self-page.
+            int64_t next_cursor = json_extract_int(result.buffer, result.blen, "cursor", -1);
             rc = network_download_changes(context, download_url, pnrows, err_out, checkpoint_db_version, checkpoint_seq);
             cloudsync_memory_free(download_url);
+            if (rc == SQLITE_OK) {
+                // Advance only after the page is applied/staged, mirroring the durable
+                // cursor: a non-final chunk that carried a cursor pages forward;
+                // final or no-cursor ends the drain and resets paging to 0. On a
+                // download/apply failure we leave check_cursor unchanged so a retry
+                // re-requests the same page.
+                netdata->check_cursor = (next_cursor >= 0 && !final_chunk) ? next_cursor : 0;
+            }
+        } else {
+            // 202 / "up to date": no artifact in flight -> reset paging.
+            netdata->check_cursor = 0;
         }
         // failures.check may appear in either shape; extract opportunistically.
         if (out) {
