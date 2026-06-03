@@ -1420,7 +1420,9 @@ Datum cloudsync_payload_decode (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
-        rc = cloudsync_payload_apply(data, payload, blen, &nrows);
+        // PostgreSQL applies a complete monolithic payload: legacy last-applied
+        // checkpoint (ends on a db_version boundary, so it is safe).
+        rc = cloudsync_payload_apply(data, payload, blen, &nrows, CLOUDSYNC_CHECKPOINT_LAST_APPLIED, 0);
     }
     PG_CATCH();
     {

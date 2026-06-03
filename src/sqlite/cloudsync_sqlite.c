@@ -1092,11 +1092,16 @@ void dbsync_payload_decode (sqlite3_context *context, int argc, sqlite3_value **
     
     // obtain payload
     const char *payload = (const char *)database_value_blob(argv[0]);
-    
+
     // apply changes
+    // The public SQL function applies a single complete payload: advance the
+    // receive cursor to its last applied (db_version, seq) (legacy behavior, safe
+    // for a payload that ends on a db_version boundary). The chunked-download
+    // receive path gates cursor advancement on stream completion via the C-level
+    // checkpoint argument instead (see cloudsync_payload_apply in cloudsync.h).
     int nrows = 0;
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    int rc = cloudsync_payload_apply(data, payload, blen, &nrows);
+    int rc = cloudsync_payload_apply(data, payload, blen, &nrows, CLOUDSYNC_CHECKPOINT_LAST_APPLIED, 0);
     if (rc != SQLITE_OK) {
         sqlite3_result_error(context, cloudsync_errmsg(data), -1);
         sqlite3_result_error_code(context, rc);
@@ -1541,7 +1546,9 @@ void dbsync_payload_load (sqlite3_context *context, int argc, sqlite3_value **ar
     
     int nrows = 0;
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    int rc = cloudsync_payload_apply (data, payload, (int)payload_size, &nrows);
+    // File-based load applies a complete monolithic payload: legacy last-applied
+    // checkpoint (ends on a db_version boundary, so it is safe).
+    int rc = cloudsync_payload_apply (data, payload, (int)payload_size, &nrows, CLOUDSYNC_CHECKPOINT_LAST_APPLIED, 0);
     if (payload) cloudsync_memory_free(payload);
     
     if (rc != SQLITE_OK) {

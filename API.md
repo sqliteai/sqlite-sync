@@ -759,6 +759,8 @@ If a package of new changes is already available for the local site, the server 
 This function is designed to be called periodically to keep the local database in sync.
 To force an update and wait for changes (with a timeout), use [`cloudsync_network_sync(wait_ms, max_retries)`].
 
+When the server delivers a download as a stream of chunks, the local receive checkpoint is advanced only after the **whole stream** has been applied — never in the middle of a source `db_version`. Mirroring the send path, the server tags the stream with its watermark and marks the final chunk; the checkpoint jumps straight to that watermark on completion. A stop between chunks therefore re-delivers the stream from the unchanged checkpoint on the next call (apply is idempotent, so re-delivered rows are harmless), so no changes can be skipped. A non-chunked (monolithic) download advances the checkpoint to the artifact's last applied position, as before.
+
 If the network is misconfigured or the remote server is unreachable, the function raises a SQL error. If the received payload cannot be applied locally (for example because of an unknown schema hash), the error is returned as a `receive.error` field in the JSON response. If the server reports an unresolved failed check job (e.g. an `encode_changes` failure), that failure is forwarded as a `receive.lastFailure` object.
 
 **Parameters:** None.

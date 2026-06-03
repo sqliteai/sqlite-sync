@@ -186,6 +186,12 @@ struct cloudsync_context {
 
     // deferred column-batch merge (active during payload_apply)
     merge_pending_batch *pending_batch;
+
+    // last (db_version, seq) successfully applied during the current
+    // cloudsync_payload_apply call; used to resolve the
+    // CLOUDSYNC_CHECKPOINT_LAST_APPLIED receive-checkpoint mode (-1 = none yet).
+    int64_t    apply_last_db_version;
+    int64_t    apply_last_seq;
 };
 
 struct cloudsync_table_context {
@@ -3770,16 +3776,17 @@ static int cloudsync_payload_apply_single_decoded_row (cloudsync_context *data,
         if (rc != DBRES_OK) goto cleanup;
     }
 
-    int dbversion = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION);
-    int seq_setting = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_SEQ);
-    if (db_version >= dbversion) {
-        char buf[256];
-        snprintf(buf, sizeof(buf), "%" PRId64, db_version);
-        dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
-        if (seq != seq_setting) {
-            snprintf(buf, sizeof(buf), "%" PRId64, seq);
-            dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_SEQ, buf);
-        }
+    // Do NOT advance the receive cursor here: a v3 value carries a single
+    // (db_version, seq) that can be in the middle of its source db_version, and a
+    // db_version's chunks can span multiple /check artifacts. Advancing per value
+    // would leave the cursor mid-db_version. The durable cursor is advanced once,
+    // after the whole payload/stream is applied, via cloudsync_payload_apply's
+    // checkpoint argument. Record the last applied position for the
+    // CLOUDSYNC_CHECKPOINT_LAST_APPLIED mode.
+    if (db_version > data->apply_last_db_version ||
+        (db_version == data->apply_last_db_version && seq > data->apply_last_seq)) {
+        data->apply_last_db_version = db_version;
+        data->apply_last_seq = seq;
     }
 
     if (pnrows) *pnrows += 1;
@@ -3985,7 +3992,42 @@ static int cloudsync_payload_apply_fragment_row (cloudsync_context *data, clouds
 
 // #ifndef CLOUDSYNC_OMIT_RLS_VALIDATION
 
-int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int blen, int *pnrows) {
+// Advance the durable receive cursor (check_dbversion/check_seq) after a payload
+// (or a fully-applied chunk stream) has been applied. See the checkpoint-mode
+// documentation on cloudsync_payload_apply in cloudsync.h. The advance is
+// strictly monotonic so re-delivered rows never regress the cursor.
+static void cloudsync_payload_apply_checkpoint (cloudsync_context *data, int64_t checkpoint_db_version, int64_t checkpoint_seq) {
+    int64_t target_db_version;
+    int64_t target_seq;
+
+    if (checkpoint_db_version == CLOUDSYNC_CHECKPOINT_NONE) return;
+    if (checkpoint_db_version == CLOUDSYNC_CHECKPOINT_LAST_APPLIED) {
+        // Nothing applied -> nothing to checkpoint.
+        if (data->apply_last_db_version < 0) return;
+        target_db_version = data->apply_last_db_version;
+        target_seq = data->apply_last_seq;
+    } else {
+        target_db_version = checkpoint_db_version;
+        target_seq = checkpoint_seq;
+    }
+
+    int64_t cur_db_version = dbutils_settings_get_int64_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION);
+    int64_t cur_seq = dbutils_settings_get_int64_value(data, CLOUDSYNC_KEY_CHECK_SEQ);
+
+    // monotonic guard: never move the cursor backwards
+    if (target_db_version < cur_db_version) return;
+    if (target_db_version == cur_db_version && target_seq <= cur_seq) return;
+
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%" PRId64, target_db_version);
+    dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
+    if (target_seq != cur_seq) {
+        snprintf(buf, sizeof(buf), "%" PRId64, target_seq);
+        dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_SEQ, buf);
+    }
+}
+
+int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int blen, int *pnrows, int64_t checkpoint_db_version, int64_t checkpoint_seq) {
     // Guard against calling payload_apply before cloudsync_init: without this,
     // the settings lookups at the top of this function would each emit a
     // "no such table: cloudsync_settings" debug line, control would fall
@@ -4001,7 +4043,12 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
 
     // sanity check
     if (blen < (int)sizeof(cloudsync_payload_header)) return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid payload length", DBRES_MISUSE);
-    
+
+    // track the last (db_version, seq) applied by this call so the receive
+    // checkpoint can be computed once, after the whole payload is applied
+    data->apply_last_db_version = -1;
+    data->apply_last_seq = -1;
+
     // decode header
     cloudsync_payload_header header;
     memcpy(&header, payload, sizeof(cloudsync_payload_header));
@@ -4084,9 +4131,13 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         }
         if (clone) cloudsync_memory_free(clone);
         if (pnrows) *pnrows = applied_rows;
+        // Advance the receive cursor only after the whole payload is applied,
+        // gated on the caller-supplied checkpoint (a non-final chunk passes
+        // CLOUDSYNC_CHECKPOINT_NONE and leaves the cursor untouched).
+        if (rc == DBRES_OK) cloudsync_payload_apply_checkpoint(data, checkpoint_db_version, checkpoint_seq);
         return rc;
     }
-    
+
     // precompile the insert statement
     dbvm_t *vm = NULL;
     int rc = databasevm_prepare(data, SQL_CHANGES_INSERT_ROW, &vm, 0);
@@ -4099,8 +4150,6 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     uint16_t ncols = header.ncols;
     uint32_t nrows = header.nrows;
     int64_t last_payload_db_version = -1;
-    int dbversion = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION);
-    int seq = dbutils_settings_get_int_value(data, CLOUDSYNC_KEY_CHECK_SEQ);
     cloudsync_pk_decode_bind_context decoded_context = {.vm = vm};
 
     // Initialize deferred column-batch merge
@@ -4213,16 +4262,15 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
 
     if (rc == DBRES_DONE) rc = DBRES_OK;
     if (rc == DBRES_OK) {
-        char buf[256];
-        if (decoded_context.db_version >= dbversion) {
-            snprintf(buf, sizeof(buf), "%" PRId64, decoded_context.db_version);
-            dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
-            
-            if (decoded_context.seq != seq) {
-                snprintf(buf, sizeof(buf), "%" PRId64, decoded_context.seq);
-                dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_SEQ, buf);
-            }
+        // Record the last applied (db_version, seq) and advance the receive cursor
+        // once, gated on the caller-supplied checkpoint. A non-final chunk passes
+        // CLOUDSYNC_CHECKPOINT_NONE so the cursor never lands mid-db_version.
+        if (decoded_context.db_version > data->apply_last_db_version ||
+            (decoded_context.db_version == data->apply_last_db_version && decoded_context.seq > data->apply_last_seq)) {
+            data->apply_last_db_version = decoded_context.db_version;
+            data->apply_last_seq = decoded_context.seq;
         }
+        cloudsync_payload_apply_checkpoint(data, checkpoint_db_version, checkpoint_seq);
     }
 
 cleanup:

@@ -726,7 +726,7 @@ int network_set_sqlite_result (sqlite3_context *context, NETWORK_RESULT *result)
 // on the sqlite3_context. This lets composite callers (cloudsync_network_sync)
 // surface apply errors as structured JSON. Endpoint/network errors always raise
 // a SQL error regardless of err_out.
-int network_download_changes (sqlite3_context *context, const char *download_url, int *pnrows, char **err_out) {
+int network_download_changes (sqlite3_context *context, const char *download_url, int *pnrows, char **err_out, int64_t checkpoint_db_version, int64_t checkpoint_seq) {
     DEBUG_FUNCTION("network_download_changes");
 
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
@@ -740,7 +740,7 @@ int network_download_changes (sqlite3_context *context, const char *download_url
 
     int rc = SQLITE_OK;
     if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
-        rc = cloudsync_payload_apply(data, result.buffer, (int)result.blen, pnrows);
+        rc = cloudsync_payload_apply(data, result.buffer, (int)result.blen, pnrows, checkpoint_db_version, checkpoint_seq);
         if (rc != DBRES_OK) {
             const char *msg = cloudsync_errmsg(data);
             if (!msg || !msg[0]) msg = "cloudsync_payload_apply failed";
@@ -859,6 +859,28 @@ static int64_t json_extract_int(const char *json, size_t json_len, const char *k
     if (val->type != JSMN_PRIMITIVE) return default_value;
 
     return strtoll(json + val->start, NULL, 10);
+}
+
+static bool json_extract_bool(const char *json, size_t json_len, const char *key, bool default_value) {
+    if (!json || json_len == 0 || !key) return default_value;
+
+    jsmn_parser parser;
+    jsmntok_t tokens[JSMN_MAX_TOKENS];
+    jsmn_init(&parser);
+    int ntokens = jsmn_parse(&parser, json, json_len, tokens, JSMN_MAX_TOKENS);
+    if (ntokens < 1 || tokens[0].type != JSMN_OBJECT) return default_value;
+
+    int i = jsmn_find_key(json, tokens, ntokens, key);
+    if (i < 0 || i + 1 >= ntokens) return default_value;
+
+    jsmntok_t *val = &tokens[i + 1];
+    if (val->type != JSMN_PRIMITIVE) return default_value;
+
+    // JSON booleans (true/false) and numeric flags (1/0) are both accepted.
+    char c = json[val->start];
+    if (c == 't' || c == 'T') return true;
+    if (c == 'f' || c == 'F' || c == 'n' || c == 'N') return false;
+    return strtoll(json + val->start, NULL, 10) != 0;
 }
 
 static int json_extract_array_size(const char *json, size_t json_len, const char *key) {
@@ -1630,7 +1652,30 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
         // Branch on the presence of "url" rather than HTTP status; both shapes arrive as BUFFER.
         char *download_url = json_extract_string(result.buffer, result.blen, "url");
         if (download_url) {
-            rc = network_download_changes(context, download_url, pnrows, err_out);
+            // Receive checkpoint, mirroring the send-path watermark. The /check
+            // response signals how far the durable cursor may advance:
+            //   no "watermark"          -> legacy / monolithic artifact: advance
+            //                              to the artifact's last applied
+            //                              (db_version, seq) (CHECKPOINT_LAST_APPLIED).
+            //   "watermark" + "final":  -> chunked stream. Advance the cursor to
+            //                              watermark only on the final chunk;
+            //                              non-final chunks leave it untouched
+            //                              (CHECKPOINT_NONE) so it never lands in
+            //                              the middle of a source db_version.
+            // The server serves successive chunks of the same stream across /check
+            // calls (the durable cursor stays at "since" until "final"), tracking
+            // chunk-level progress on its side; apply is idempotent, so a stop
+            // before "final" simply re-delivers the stream from "since".
+            int64_t watermark = json_extract_int(result.buffer, result.blen, "watermark", -1);
+            int64_t checkpoint_db_version;
+            int64_t checkpoint_seq = 0;
+            if (watermark < 0) {
+                checkpoint_db_version = CLOUDSYNC_CHECKPOINT_LAST_APPLIED;
+            } else {
+                bool final_chunk = json_extract_bool(result.buffer, result.blen, "final", true);
+                checkpoint_db_version = final_chunk ? watermark : CLOUDSYNC_CHECKPOINT_NONE;
+            }
+            rc = network_download_changes(context, download_url, pnrows, err_out, checkpoint_db_version, checkpoint_seq);
             cloudsync_memory_free(download_url);
         }
         // failures.check may appear in either shape; extract opportunistically.

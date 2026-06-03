@@ -12325,6 +12325,202 @@ finalize:
     return result;
 }
 
+// Read the persisted receive cursor (check_dbversion) of a connection.
+static int64_t test_read_check_dbversion (sqlite3 *db) {
+    sqlite3_stmt *s = NULL;
+    int64_t v = -1;
+    if (sqlite3_prepare_v2(db, "SELECT coalesce((SELECT value FROM cloudsync_settings WHERE key='check_dbversion'),'0');", -1, &s, NULL) == SQLITE_OK) {
+        if (sqlite3_step(s) == SQLITE_ROW) v = sqlite3_column_int64(s, 0);
+    }
+    if (s) sqlite3_finalize(s);
+    return v;
+}
+
+// Compare the split_test(id, body) table across two connections row by row.
+static bool test_split_tables_equal (sqlite3 *src, sqlite3 *dst) {
+    sqlite3_stmt *s1 = NULL, *s2 = NULL;
+    bool result = false;
+    const char *sql = "SELECT id, body FROM split_test ORDER BY id;";
+    if (sqlite3_prepare_v2(src, sql, -1, &s1, NULL) != SQLITE_OK) goto done;
+    if (sqlite3_prepare_v2(dst, sql, -1, &s2, NULL) != SQLITE_OK) goto done;
+    while (1) {
+        int rc1 = sqlite3_step(s1);
+        int rc2 = sqlite3_step(s2);
+        if (rc1 != rc2) goto done;
+        if (rc1 == SQLITE_DONE) break;
+        if (rc1 != SQLITE_ROW) goto done;
+        for (int col = 0; col < 2; ++col) {
+            int n1 = sqlite3_column_bytes(s1, col);
+            int n2 = sqlite3_column_bytes(s2, col);
+            if (n1 != n2) goto done;
+            const void *v1 = sqlite3_column_text(s1, col);
+            const void *v2 = sqlite3_column_text(s2, col);
+            if (n1 > 0 && (!v1 || !v2 || memcmp(v1, v2, n1) != 0)) goto done;
+        }
+    }
+    result = true;
+done:
+    if (s1) sqlite3_finalize(s1);
+    if (s2) sqlite3_finalize(s2);
+    return result;
+}
+
+// Reproduces the chunked-download data-loss bug: a single source db_version split
+// across >= 2 v2 transport chunks. Applying only the first chunk must NOT advance
+// the durable receive cursor into the middle of that db_version, and a re-check
+// (from the unchanged cursor) must re-deliver every row (no loss).
+bool do_test_payload_chunks_split_dbversion (bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    sqlite3_stmt *stmt = NULL;
+    cloudsync_context *ctx = NULL;
+    test_payload_chunk *chunks = NULL;
+    int chunk_count = 0, chunk_cap = 0;
+    int64_t split_db_version = -1;
+    int64_t watermark = -1;
+    bool single_db_version = true;
+    bool result = false;
+    int rc = SQLITE_OK;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter++;
+
+    for (int i = 0; i < 2; ++i) {
+        db[i] = do_create_database_file(i, timestamp, saved_counter);
+        if (!db[i]) goto finalize;
+        rc = sqlite3_exec(db[i],
+            "CREATE TABLE split_test (id TEXT PRIMARY KEY, body TEXT DEFAULT '');"
+            "SELECT cloudsync_init('split_test');",
+            NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // A single CTE INSERT is one transaction -> one source db_version. With a
+    // small chunk budget the ~500 medium rows split across multiple v2 chunks
+    // (every value is small, so no v3 fragments are produced).
+    rc = sqlite3_exec(db[0],
+        "SELECT cloudsync_set('payload_max_chunk_size', '262144');"
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 500) "
+        "INSERT INTO split_test(id, body) SELECT printf('row-%04d', i), hex(randomblob(700)) FROM c;",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Collect the transport chunks for the whole window (since_db_version=0).
+    rc = sqlite3_prepare_v2(db[0],
+        "SELECT payload, db_version_min, db_version_max, watermark_db_version "
+        "FROM cloudsync_payload_chunks WHERE since_db_version=0 ORDER BY chunk_index;",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        int len = sqlite3_column_bytes(stmt, 0);
+        const void *payload = sqlite3_column_blob(stmt, 0);
+        int64_t dbv_min = sqlite3_column_int64(stmt, 1);
+        int64_t dbv_max = sqlite3_column_int64(stmt, 2);
+        int64_t wm = sqlite3_column_int64(stmt, 3);
+        if (!payload || len <= 0) goto finalize;
+        // every chunk must be a plain v2 payload (version byte at offset 4)
+        if (((const unsigned char *)payload)[4] != 2) goto finalize;
+        if (split_db_version < 0) split_db_version = dbv_min;
+        watermark = wm;
+        if (dbv_min != split_db_version || dbv_max != split_db_version) single_db_version = false;
+
+        if (chunk_count == chunk_cap) {
+            int new_cap = chunk_cap ? chunk_cap * 2 : 8;
+            test_payload_chunk *nc = realloc(chunks, sizeof(*chunks) * new_cap);
+            if (!nc) goto finalize;
+            memset(nc + chunk_cap, 0, sizeof(*chunks) * (new_cap - chunk_cap));
+            chunks = nc;
+            chunk_cap = new_cap;
+        }
+        chunks[chunk_count].data = malloc(len);
+        if (!chunks[chunk_count].data) goto finalize;
+        memcpy(chunks[chunk_count].data, payload, len);
+        chunks[chunk_count].len = len;
+        ++chunk_count;
+    }
+    if (rc != SQLITE_DONE) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+
+    // Preconditions for the scenario: a single db_version split into >= 2 chunks,
+    // and the watermark equals that db_version.
+    if (chunk_count < 2 || !single_db_version || watermark != split_db_version) goto finalize;
+
+    // The server's chunk vtab resumes on db_version > since (no seq cursor). So
+    // advancing the cursor to split_db_version mid-stream would make the next
+    // /check (since=split_db_version) return NOTHING -> the un-applied chunks are
+    // lost. Prove that here:
+    rc = sqlite3_prepare_v2(db[0],
+        "SELECT count(*) FROM cloudsync_payload_chunks WHERE since_db_version=?;", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    sqlite3_bind_int64(stmt, 1, split_db_version);
+    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 0) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+
+    // The chunked-download receive cursor is controlled at the C level (the
+    // public cloudsync_payload_apply() SQL function stays single-argument). Drive
+    // cloudsync_payload_apply() directly on an initialized context to exercise the
+    // checkpoint gating exactly as the network /check path does.
+    ctx = cloudsync_context_create(db[1]);
+    if (!ctx || cloudsync_context_init(ctx) == NULL) goto finalize;
+
+    // --- Apply ONLY the first chunk as a NON-FINAL chunk (checkpoint NONE) ---
+    {
+        int n = 0;
+        if (cloudsync_payload_apply(ctx, chunks[0].data, chunks[0].len, &n, CLOUDSYNC_CHECKPOINT_NONE, 0) != DBRES_OK) goto finalize;
+    }
+
+    // Cursor MUST NOT have advanced into the incomplete db_version.
+    if (test_read_check_dbversion(db[1]) != 0) goto finalize;
+    // ...but the first chunk's rows are applied.
+    {
+        sqlite3_stmt *cnt = NULL;
+        int n = -1;
+        if (sqlite3_prepare_v2(db[1], "SELECT count(*) FROM split_test;", -1, &cnt, NULL) == SQLITE_OK &&
+            sqlite3_step(cnt) == SQLITE_ROW) n = sqlite3_column_int(cnt, 0);
+        if (cnt) sqlite3_finalize(cnt);
+        if (n <= 0) goto finalize;
+    }
+
+    // --- Re-check: cursor is still 0, so the server re-delivers the whole window.
+    // Apply every chunk; the first is re-applied (idempotent). The final chunk
+    // carries the watermark checkpoint, advancing the cursor only now. ---
+    for (int i = 0; i < chunk_count; ++i) {
+        bool final_chunk = (i == chunk_count - 1);
+        int n = 0;
+        int64_t checkpoint = final_chunk ? watermark : CLOUDSYNC_CHECKPOINT_NONE;
+        if (cloudsync_payload_apply(ctx, chunks[i].data, chunks[i].len, &n, checkpoint, 0) != DBRES_OK) goto finalize;
+    }
+
+    // No data lost: destination matches source exactly.
+    if (!test_split_tables_equal(db[0], db[1])) goto finalize;
+    // Cursor advanced to the watermark only after the full stream was applied.
+    if (test_read_check_dbversion(db[1]) != watermark) goto finalize;
+
+    result = true;
+
+finalize:
+    if (!result && print_result) {
+        printf("do_test_payload_chunks_split_dbversion error: %s / %s (chunks=%d, split_dbv=%lld, watermark=%lld, single=%d)\n",
+               db[0] ? sqlite3_errmsg(db[0]) : "no src", db[1] ? sqlite3_errmsg(db[1]) : "no dst",
+               chunk_count, (long long)split_db_version, (long long)watermark, (int)single_db_version);
+    }
+    if (ctx) cloudsync_context_free(ctx);
+    if (stmt) sqlite3_finalize(stmt);
+    test_payload_chunks_free(chunks, chunk_count);
+    for (int i = 0; i < 2; ++i) if (db[i]) close_db(db[i]);
+    if (cleanup_databases) {
+        for (int i = 0; i < 2; ++i) {
+            char path[256], walpath[300], shmpath[300];
+            do_build_database_path(path, i, timestamp, saved_counter);
+            snprintf(walpath, sizeof(walpath), "%s-wal", path);
+            snprintf(shmpath, sizeof(shmpath), "%s-shm", path);
+            file_delete_internal(path);
+            file_delete_internal(walpath);
+            file_delete_internal(shmpath);
+        }
+    }
+    return result;
+}
+
 bool do_test_payload_idempotency (int nclients, bool print_result, bool cleanup_databases) {
     sqlite3 *db[2] = {NULL, NULL};
     bool result = false;
@@ -12774,6 +12970,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Payload Buffer Test (10MB):", do_test_payload_buffer(10 * 1024 * 1024));
     result += test_report("Payload Chunks Large Values:", do_test_payload_chunks_large_values(print_result, cleanup_databases));
     result += test_report("Payload Chunks Site Exclusion:", do_test_payload_chunks_site_exclusion(print_result, cleanup_databases));
+    result += test_report("Payload Chunks Split db_version:", do_test_payload_chunks_split_dbversion(print_result, cleanup_databases));
 
     // close local database
     close_db(db);
