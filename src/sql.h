@@ -79,6 +79,7 @@ extern const char * const SQL_PAYLOAD_SPOOL_COUNT;
 extern const char * const SQL_PAYLOAD_SPOOL_FILL_INSERT;
 extern const char * const SQL_PAYLOAD_SPOOL_MARK_FINAL;
 extern const char * const SQL_PAYLOAD_SPOOL_DELETE;
+extern const char * const SQL_PAYLOAD_SPOOL_DELETE_CHUNK;
 extern const char * const SQL_PAYLOAD_SPOOL_CLEANUP_STALE;
 
 // BLOCKS (block-level LWW)

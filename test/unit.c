@@ -12647,10 +12647,42 @@ bool do_test_payload_spool (bool print_result, bool cleanup_databases) {
     if (sqlite3_column_int(stmt, 0) != 0 || sqlite3_column_int(stmt, 1) != chunk_count) goto finalize;
     sqlite3_finalize(stmt); stmt = NULL;
 
+    // --- chunk drop removes only one matching chunk and reports the count ---
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_payload_spool_drop_chunk('stream-A', 1);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 1) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_payload_spool_drop_chunk('stream-A', 1);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 0) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_payload_spool_drop_chunk('stream-A', 999999);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 0) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+    rc = sqlite3_prepare_v2(db,
+        "SELECT "
+        "(SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-A'), "
+        "(SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-A' AND chunk_index=0), "
+        "(SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-A' AND chunk_index=1), "
+        "(SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-A' AND chunk_index=2), "
+        "(SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-B'), "
+        "(SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-B' AND chunk_index=1);",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    if (sqlite3_step(stmt) != SQLITE_ROW) goto finalize;
+    if (sqlite3_column_int(stmt, 0) != chunk_count - 1 ||
+        sqlite3_column_int(stmt, 1) != 1 ||
+        sqlite3_column_int(stmt, 2) != 0 ||
+        sqlite3_column_int(stmt, 3) != 1 ||
+        sqlite3_column_int(stmt, 4) != chunk_count ||
+        sqlite3_column_int(stmt, 5) != 1) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+
     // --- drop removes the stream and reports the number of chunks removed ---
     rc = sqlite3_prepare_v2(db, "SELECT cloudsync_payload_spool_drop('stream-A');", -1, &stmt, NULL);
     if (rc != SQLITE_OK) goto finalize;
-    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != chunk_count) goto finalize;
+    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != chunk_count - 1) goto finalize;
     sqlite3_finalize(stmt); stmt = NULL;
     rc = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-A';", -1, &stmt, NULL);
     if (rc != SQLITE_OK) goto finalize;

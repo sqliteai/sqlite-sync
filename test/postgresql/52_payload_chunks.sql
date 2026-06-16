@@ -200,6 +200,37 @@ SELECT (:stale_remaining::int = 0 AND :streamb_count::int = :chunk_count::int) A
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
+-- Chunk drop: explicit early cleanup for one S3-backed chunk is scoped to one
+-- (stream_id, chunk_index), idempotent, and leaves other chunks/streams intact.
+SELECT cloudsync_payload_spool_fill('stream-A', 0, cloudsync_siteid(), false) AS spool_refill_for_chunk_drop \gset
+SELECT cloudsync_payload_spool_drop_chunk('stream-A', 1) AS spool_chunk_drop_count \gset
+SELECT cloudsync_payload_spool_drop_chunk('stream-A', 1) AS spool_chunk_drop_repeat_count \gset
+SELECT cloudsync_payload_spool_drop_chunk('stream-A', 999999) AS spool_chunk_drop_missing_count \gset
+SELECT
+  (SELECT count(*) FROM cloudsync_payload_spool WHERE stream_id = 'stream-A') AS streama_after_chunk_drop,
+  (SELECT count(*) FROM cloudsync_payload_spool WHERE stream_id = 'stream-A' AND chunk_index = 0) AS streama_chunk0,
+  (SELECT count(*) FROM cloudsync_payload_spool WHERE stream_id = 'stream-A' AND chunk_index = 1) AS streama_chunk1,
+  (SELECT count(*) FROM cloudsync_payload_spool WHERE stream_id = 'stream-A' AND chunk_index = 2) AS streama_chunk2,
+  (SELECT count(*) FROM cloudsync_payload_spool WHERE stream_id = 'stream-B') AS streamb_after_chunk_drop,
+  (SELECT count(*) FROM cloudsync_payload_spool WHERE stream_id = 'stream-B' AND chunk_index = 1) AS streamb_chunk1 \gset
+SELECT (:spool_refill_for_chunk_drop::int = :chunk_count::int
+  AND :spool_chunk_drop_count::int = 1
+  AND :spool_chunk_drop_repeat_count::int = 0
+  AND :spool_chunk_drop_missing_count::int = 0
+  AND :streama_after_chunk_drop::int = :chunk_count::int - 1
+  AND :streama_chunk0::int = 1
+  AND :streama_chunk1::int = 0
+  AND :streama_chunk2::int = 1
+  AND :streamb_after_chunk_drop::int = :chunk_count::int
+  AND :streamb_chunk1::int = 1) AS spool_chunk_drop_ok \gset
+\if :spool_chunk_drop_ok
+\echo [PASS] (:testid) Spool chunk drop is scoped and idempotent
+\else
+\echo [FAIL] (:testid) Spool chunk drop mismatch (drop=:spool_chunk_drop_count repeat=:spool_chunk_drop_repeat_count missing=:spool_chunk_drop_missing_count streamA=:streama_after_chunk_drop streamB=:streamb_after_chunk_drop)
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+SELECT cloudsync_payload_spool_drop('stream-A');
 SELECT cloudsync_payload_spool_drop('stream-B');
 
 SELECT

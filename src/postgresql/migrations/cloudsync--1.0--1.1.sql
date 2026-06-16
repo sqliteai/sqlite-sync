@@ -105,3 +105,23 @@ BEGIN
   RETURN deleted;
 END;
 $$ LANGUAGE plpgsql VOLATILE;
+
+CREATE OR REPLACE FUNCTION cloudsync_payload_spool_drop_chunk(p_stream_id text, p_chunk_index bigint)
+RETURNS bigint AS $$
+DECLARE
+  deleted bigint := 0;
+BEGIN
+  IF p_stream_id IS NULL THEN
+    RAISE EXCEPTION 'cloudsync_payload_spool_drop_chunk: stream_id is required.';
+  END IF;
+  IF p_chunk_index IS NULL THEN
+    RAISE EXCEPTION 'cloudsync_payload_spool_drop_chunk: chunk_index is required.';
+  END IF;
+
+  DELETE FROM cloudsync_payload_spool
+  WHERE stream_id = p_stream_id
+    AND chunk_index = p_chunk_index;
+  GET DIAGNOSTICS deleted = ROW_COUNT;
+  RETURN deleted;
+END;
+$$ LANGUAGE plpgsql VOLATILE;

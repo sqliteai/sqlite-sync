@@ -1679,6 +1679,36 @@ static void dbsync_payload_spool_drop (sqlite3_context *context, int argc, sqlit
     sqlite3_result_int64(context, sqlite3_changes(db));
 }
 
+// cloudsync_payload_spool_drop_chunk(stream_id, chunk_index) -> number of chunks removed.
+// Called after one S3-backed chunk has been safely persisted outside the spool.
+static void dbsync_payload_spool_drop_chunk (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_payload_spool_drop_chunk");
+    UNUSED_PARAMETER(argc);
+
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        sqlite3_result_error(context, "cloudsync_payload_spool_drop_chunk: stream_id is required.", -1);
+        return;
+    }
+    if (sqlite3_value_type(argv[1]) == SQLITE_NULL) {
+        sqlite3_result_error(context, "cloudsync_payload_spool_drop_chunk: chunk_index is required.", -1);
+        return;
+    }
+
+    int rc = sqlite3_exec(db, SQL_PAYLOAD_SPOOL_CREATE_TABLE, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { sqlite3_result_error(context, sqlite3_errmsg(db), -1); return; }
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, SQL_PAYLOAD_SPOOL_DELETE_CHUNK, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) { sqlite3_result_error(context, sqlite3_errmsg(db), -1); return; }
+    sqlite3_bind_text(stmt, 1, (const char *)sqlite3_value_text(argv[0]), sqlite3_value_bytes(argv[0]), SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, sqlite3_value_int64(argv[1]));
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) { sqlite3_result_error(context, sqlite3_errmsg(db), -1); return; }
+    sqlite3_result_int64(context, sqlite3_changes(db));
+}
+
 // MARK: - Register -
 
 int dbsync_register_with_flags (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_context*,int,sqlite3_value**), void (*xstep)(sqlite3_context*,int,sqlite3_value**), void (*xfinal)(sqlite3_context*), int nargs, int flags, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
@@ -2001,6 +2031,8 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     rc = dbsync_register_function(db, "cloudsync_payload_spool_fill", dbsync_payload_spool_fill, 4, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     rc = dbsync_register_function(db, "cloudsync_payload_spool_drop", dbsync_payload_spool_drop, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_payload_spool_drop_chunk", dbsync_payload_spool_drop_chunk, 2, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
 
     #ifdef CLOUDSYNC_DESKTOP_OS

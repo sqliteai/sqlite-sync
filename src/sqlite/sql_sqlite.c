@@ -346,6 +346,9 @@ const char * const SQL_PAYLOAD_SPOOL_MARK_FINAL =
 const char * const SQL_PAYLOAD_SPOOL_DELETE =
     "DELETE FROM cloudsync_payload_spool WHERE stream_id=?;";
 
+const char * const SQL_PAYLOAD_SPOOL_DELETE_CHUNK =
+    "DELETE FROM cloudsync_payload_spool WHERE stream_id=? AND chunk_index=?;";
+
 // Drop whole abandoned streams (every chunk older than the cutoff). fill is
 // coarse-grained (once per stream), so unlike per-fragment cleanup there is no
 // O(n^2) risk and no throttle is needed.
