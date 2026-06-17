@@ -167,6 +167,17 @@ RETURNS TABLE (
 AS 'MODULE_PATHNAME', 'cloudsync_payload_chunks'
 LANGUAGE C VOLATILE;
 
+CREATE OR REPLACE FUNCTION cloudsync_payload_blob_checked(
+  since_db_version bigint,
+  since_seq bigint,
+  filter_site_id bytea,
+  exclude_filter_site_id boolean,
+  max_estimated_payload_size bigint
+)
+RETURNS bytea
+AS 'MODULE_PATHNAME', 'cloudsync_payload_blob_checked'
+LANGUAGE C VOLATILE;
+
 -- UUID binary <-> canonical string helpers (the changes table stores site_id as
 -- the 16-byte binary UUID; these let string-based callers such as the /check
 -- endpoint pass a site_id to cloudsync_payload_chunks).

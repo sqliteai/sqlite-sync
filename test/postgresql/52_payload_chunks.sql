@@ -84,11 +84,23 @@ FROM cloudsync_payload_chunks(0, cloudsync_siteid(), NULL, true) \gset
 SELECT count(*) AS incl_local_chunks
 FROM cloudsync_payload_chunks(0, cloudsync_siteid(), NULL, false) \gset
 
+SELECT
+  cloudsync_payload_blob_checked(0, 0, cloudsync_siteid(), true, 10000000) IS NULL AS excl_local_blob_is_null,
+  octet_length(cloudsync_payload_blob_checked(0, 0, cloudsync_siteid(), false, 10000000)) AS incl_local_blob_size \gset
+
 SELECT (:excl_local_chunks::int = 0 AND :incl_local_chunks::int > 0) AS exclude_flag_ok \gset
 \if :exclude_flag_ok
 \echo [PASS] (:testid) exclude_filter_site_id flips the site filter (exclude local -> 0, include -> :incl_local_chunks)
 \else
 \echo [FAIL] (:testid) exclude_filter_site_id did not flip the filter (exclude=:excl_local_chunks include=:incl_local_chunks)
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+SELECT (:excl_local_blob_is_null AND :incl_local_blob_size::bigint > 0) AS blob_checked_exclude_flag_ok \gset
+\if :blob_checked_exclude_flag_ok
+\echo [PASS] (:testid) cloudsync_payload_blob_checked honors include/exclude site filters
+\else
+\echo [FAIL] (:testid) cloudsync_payload_blob_checked include/exclude mismatch (exclude_null=:excl_local_blob_is_null include=:incl_local_blob_size)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -107,6 +119,23 @@ DROP TABLE _excl_err;
 \echo [PASS] (:testid) exclude_filter_site_id without a site_id raises an error
 \else
 \echo [FAIL] (:testid) exclude_filter_site_id without a site_id did not error
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+CREATE TEMP TABLE _blob_checked_excl_err(ok bool);
+DO $$
+BEGIN
+  PERFORM cloudsync_payload_blob_checked(0, 0, NULL, true, 10000000);
+  INSERT INTO _blob_checked_excl_err VALUES (false);
+EXCEPTION WHEN OTHERS THEN
+  INSERT INTO _blob_checked_excl_err VALUES (true);
+END $$;
+SELECT ok AS blob_checked_exclude_no_site_errors FROM _blob_checked_excl_err \gset
+DROP TABLE _blob_checked_excl_err;
+\if :blob_checked_exclude_no_site_errors
+\echo [PASS] (:testid) cloudsync_payload_blob_checked exclude without a site_id raises an error
+\else
+\echo [FAIL] (:testid) cloudsync_payload_blob_checked exclude without a site_id did not error
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -247,11 +276,40 @@ SELECT
 FROM cloudsync_changes
 WHERE site_id = cloudsync_siteid() \gset
 
+SELECT
+  octet_length(cloudsync_payload_blob_checked(0, 0, cloudsync_siteid(), false, 10000000)) AS checked_payload_len,
+  cloudsync_payload_blob_checked(999999, 0, cloudsync_siteid(), false, 10000000) IS NULL AS checked_empty_is_null \gset
+
 SELECT (:legacy_payload_len::int > 262144) AS legacy_payload_large_ok \gset
 \if :legacy_payload_large_ok
 \echo [PASS] (:testid) Legacy monolithic payload is larger than local chunk setting (:legacy_payload_len bytes)
 \else
 \echo [FAIL] (:testid) Legacy monolithic payload was expected to exceed the chunk setting
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+SELECT (:checked_payload_len::bigint = :legacy_payload_len::bigint AND :checked_empty_is_null) AS blob_checked_ok \gset
+\if :blob_checked_ok
+\echo [PASS] (:testid) cloudsync_payload_blob_checked returns the legacy payload and empty windows return NULL
+\else
+\echo [FAIL] (:testid) cloudsync_payload_blob_checked mismatch (checked=:checked_payload_len legacy=:legacy_payload_len empty=:checked_empty_is_null)
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+CREATE TEMP TABLE _blob_checked_limit_err(ok bool);
+DO $$
+BEGIN
+  PERFORM cloudsync_payload_blob_checked(0, 0, cloudsync_siteid(), false, 1);
+  INSERT INTO _blob_checked_limit_err VALUES (false);
+EXCEPTION WHEN OTHERS THEN
+  INSERT INTO _blob_checked_limit_err VALUES (true);
+END $$;
+SELECT ok AS blob_checked_limit_errors FROM _blob_checked_limit_err \gset
+DROP TABLE _blob_checked_limit_err;
+\if :blob_checked_limit_errors
+\echo [PASS] (:testid) cloudsync_payload_blob_checked raises a limit-exceeded error
+\else
+\echo [FAIL] (:testid) cloudsync_payload_blob_checked did not raise a limit-exceeded error
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 

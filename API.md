@@ -29,6 +29,7 @@ This document provides a reference for the SQL functions provided by the `sqlite
   - [`cloudsync_commit_alter()`](#cloudsync_commit_altertable_name)
 - [Payload Functions](#payload-functions)
   - [`cloudsync_payload_encode()`](#cloudsync_payload_encodetbl-pk-col_name-col_value-col_version-db_version-site_id-cl-seq)
+  - [`cloudsync_payload_blob_checked()`](#cloudsync_payload_blob_checkedsince_db_version-since_seq-filter_site_id-exclude_filter_site_id-max_estimated_payload_size)
   - [`cloudsync_payload_chunks()`](#cloudsync_payload_chunkssince_db_version-filter_site_id-until_db_version-exclude_filter_site_id)
   - [`cloudsync_payload_apply()`](#cloudsync_payload_applypayload)
 - [Network Functions](#network-functions)
@@ -515,6 +516,39 @@ SELECT cloudsync_payload_encode(
   tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq
 ) AS payload
 FROM cloudsync_changes;
+```
+
+---
+
+### `cloudsync_payload_blob_checked(since_db_version, since_seq, filter_site_id, exclude_filter_site_id, max_estimated_payload_size)`
+
+**Description:** Generates one monolithic payload BLOB for a selected change window, but only after an internal conservative size check passes.
+
+This helper is intended for servers that still need to support old clients on a `/check` path that expects one monolithic payload. It keeps the server to a single SQL round trip while avoiding payload allocation when the selected window is too large.
+
+Internally, CloudSync first estimates the uncompressed payload body plus header. If that estimate exceeds `max_estimated_payload_size`, the function raises a limit-exceeded error and does not materialize the payload. Empty windows return `NULL`.
+
+**Parameters:**
+
+- `since_db_version` (INTEGER/BIGINT): Start after this source database version, except rows at the same version with `seq > since_seq` are still included.
+- `since_seq` (INTEGER/BIGINT): Sequence cursor within `since_db_version`.
+- `filter_site_id` (BLOB): Site ID to filter on. With `exclude_filter_site_id` unset/`false` it selects changes **from** this site; with `exclude_filter_site_id` `true` it selects changes from every site **except** this one. If `NULL` and not excluding, CloudSync uses the local site ID.
+- `exclude_filter_site_id` (BOOLEAN): When `true`, encode changes from all sites **except** `filter_site_id`. Setting it `true` without a `filter_site_id` is an error.
+- `max_estimated_payload_size` (INTEGER/BIGINT): Maximum allowed conservative payload-size estimate, in bytes. Must be positive.
+
+**Returns:** A monolithic payload BLOB, or `NULL` when no changes match.
+
+**Examples:**
+
+```sql
+-- /check download guard: all changes EXCEPT the requesting peer's site
+SELECT cloudsync_payload_blob_checked(
+  100,
+  0,
+  cloudsync_uuid_blob('0190a1b2-c3d4-7e5f-8a9b-001122334455'),
+  true,
+  10485760
+);
 ```
 
 ---

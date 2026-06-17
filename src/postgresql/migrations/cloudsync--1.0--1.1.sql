@@ -3,6 +3,8 @@
 -- Adds the chunked-payload SQL surface introduced in 1.1:
 --   * cloudsync_payload_chunks() set-returning function (with the
 --     exclude_filter_site_id flag used by the /check download path)
+--   * cloudsync_payload_blob_checked() scalar helper for guarded legacy
+--     monolithic payload materialization
 --   * cloudsync_uuid_text() / cloudsync_uuid_blob() UUID conversion helpers
 --
 -- Run automatically by: ALTER EXTENSION cloudsync UPDATE;
@@ -23,6 +25,17 @@ RETURNS TABLE (
   watermark_db_version bigint
 )
 AS 'MODULE_PATHNAME', 'cloudsync_payload_chunks'
+LANGUAGE C VOLATILE;
+
+CREATE OR REPLACE FUNCTION cloudsync_payload_blob_checked(
+  since_db_version bigint,
+  since_seq bigint,
+  filter_site_id bytea,
+  exclude_filter_site_id boolean,
+  max_estimated_payload_size bigint
+)
+RETURNS bytea
+AS 'MODULE_PATHNAME', 'cloudsync_payload_blob_checked'
 LANGUAGE C VOLATILE;
 
 CREATE OR REPLACE FUNCTION cloudsync_uuid_text(uuid bytea, dash_format boolean DEFAULT true)

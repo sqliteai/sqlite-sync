@@ -12005,6 +12005,7 @@ bool do_test_payload_chunks_large_values (bool print_result, bool cleanup_databa
     int chunk_cap = 0;
     int v3_count = 0;
     int first_v3_chunk = -1;
+    int legacy_payload_len = 0;
     bool result = false;
     int rc = SQLITE_OK;
     const int max_chunk_size = CLOUDSYNC_PAYLOAD_CHUNK_MIN_SIZE;
@@ -12164,6 +12165,8 @@ bool do_test_payload_chunks_large_values (bool print_result, bool cleanup_databa
     if (rc != SQLITE_OK) goto finalize;
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_ROW) goto finalize;
+    legacy_payload_len = sqlite3_column_bytes(stmt, 0);
+    if (legacy_payload_len <= max_chunk_size) goto finalize;
     rc = sqlite3_prepare_v2(db[2], "SELECT cloudsync_payload_apply(?);", -1, &apply, NULL);
     if (rc != SQLITE_OK) goto finalize;
     rc = sqlite3_bind_value(apply, 1, sqlite3_column_value(stmt, 0));
@@ -12176,6 +12179,26 @@ bool do_test_payload_chunks_large_values (bool print_result, bool cleanup_databa
     stmt = NULL;
 
     if (!test_payload_chunks_tables_equal(db[0], db[2])) goto finalize;
+
+    rc = sqlite3_prepare_v2(db[0], "SELECT length(cloudsync_payload_blob_checked(0, 0, NULL, 0, 10000000));", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW || sqlite3_column_int(stmt, 0) != legacy_payload_len) goto finalize;
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    rc = sqlite3_prepare_v2(db[0], "SELECT cloudsync_payload_blob_checked(999999, 0, NULL, 0, 10000000) IS NULL;", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 1) goto finalize;
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    rc = sqlite3_prepare_v2(db[0], "SELECT cloudsync_payload_blob_checked(0, 0, NULL, 0, 1);", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    if (sqlite3_step(stmt) != SQLITE_ERROR) goto finalize;
+    sqlite3_finalize(stmt);
+    stmt = NULL;
 
     result = true;
 
@@ -12291,6 +12314,18 @@ bool do_test_payload_chunks_site_exclusion (bool print_result, bool cleanup_data
     // exclude=true without a site_id must error
     if (sqlite3_prepare_v2(db[0], "SELECT payload FROM cloudsync_payload_chunks WHERE exclude_filter_site_id=1;", -1, &stmt, NULL) != SQLITE_OK) goto finalize;
     if (sqlite3_step(stmt) != SQLITE_ERROR) goto finalize; // expected: xFilter raises an error
+    sqlite3_finalize(stmt); stmt = NULL;
+
+    if (sqlite3_prepare_v2(db[0],
+        "SELECT length(cloudsync_payload_blob_checked(0, 0, ?1, 1, 1000000)) > 0 "
+        "AND length(cloudsync_payload_blob_checked(0, 0, ?1, 0, 1000000)) > 0 "
+        "AND cloudsync_payload_blob_checked(999999, 0, ?1, 1, 1000000) IS NULL;", -1, &stmt, NULL) != SQLITE_OK) goto finalize;
+    sqlite3_bind_blob(stmt, 1, s1, 16, SQLITE_STATIC);
+    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 1) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+
+    if (sqlite3_prepare_v2(db[0], "SELECT cloudsync_payload_blob_checked(0, 0, NULL, 1, 1000000);", -1, &stmt, NULL) != SQLITE_OK) goto finalize;
+    if (sqlite3_step(stmt) != SQLITE_ERROR) goto finalize;
     sqlite3_finalize(stmt); stmt = NULL;
 
     // UUID text<->blob roundtrip (dashed and undashed) must recover S1

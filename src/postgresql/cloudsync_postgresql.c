@@ -1389,6 +1389,233 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
     SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(outtup));
 }
 
+static void payload_blob_checked_pg_add(int64 *acc, int64 value) {
+    if (value < 0 || *acc > PG_INT64_MAX - value) {
+        ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            errmsg("cloudsync_payload_blob_checked: payload estimate is too large")));
+    }
+    *acc += value;
+}
+
+static int64 payload_blob_checked_pg_estimate(cloudsync_context *data, int64 since, int64 since_seq,
+                                              bytea *site_id, bool exclude, int64 *watermark) {
+    PayloadChunksState st = {0};
+    int64 estimated = 0;
+    bool has_rows = false;
+
+    int64 until = 0;
+    Oid mt[1] = {BYTEAOID};
+    Datum mv[1] = {PointerGetDatum(site_id)};
+    char mn[1] = {' '};
+    const char *mxq = exclude
+        ? "SELECT COALESCE(MAX(db_version),0) FROM cloudsync_changes_select(0,NULL) WHERE site_id <> $1"
+        : "SELECT COALESCE(MAX(db_version),0) FROM cloudsync_changes_select(0,$1)";
+    int mrc = SPI_execute_with_args(mxq, 1, mt, mv, mn, true, 1);
+    if (mrc == SPI_OK_SELECT && SPI_processed > 0) {
+        bool isnull = false;
+        Datum d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
+        until = isnull ? 0 : DatumGetInt64(d);
+    } else {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+            errmsg("cloudsync_payload_blob_checked: failed to capture payload watermark")));
+    }
+    if (SPI_tuptable) { SPI_freetuptable(SPI_tuptable); SPI_tuptable = NULL; }
+    if (watermark) *watermark = until;
+
+    if (until >= since) {
+        StringInfoData q;
+        initStringInfo(&q);
+        if (exclude) {
+            appendStringInfoString(&q,
+                "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                "FROM cloudsync_changes_select(0,NULL) "
+                "WHERE site_id <> $2 AND db_version <= $3 AND (db_version > $1 OR (db_version = $1 AND seq > $4)) "
+                "ORDER BY db_version, seq ASC");
+        } else {
+            appendStringInfoString(&q,
+                "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                "FROM cloudsync_changes_select(0,$2) "
+                "WHERE db_version <= $3 AND (db_version > $1 OR (db_version = $1 AND seq > $4)) "
+                "ORDER BY db_version, seq ASC");
+        }
+        Oid argtypes[4] = {INT8OID, BYTEAOID, INT8OID, INT8OID};
+        Datum values[4] = {Int64GetDatum(since), PointerGetDatum(site_id), Int64GetDatum(until), Int64GetDatum(since_seq)};
+        char nulls[4] = {' ', ' ', ' ', ' '};
+        st.portal = SPI_cursor_open_with_args(NULL, q.data, 4, argtypes, values, nulls, true, 0);
+        pfree(q.data);
+        if (!st.portal) ereport(ERROR, (errmsg("SPI_cursor_open failed")));
+
+        size_t header_size = 0;
+        cloudsync_payload_context_size(&header_size);
+        if (header_size > (size_t)PG_INT64_MAX) {
+            ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                errmsg("cloudsync_payload_blob_checked: payload estimate is too large")));
+        }
+
+        while (payload_chunks_fetch_current(&st)) {
+            pgvalue_t *vals[9] = {0};
+            text *owned_texts[2] = {0};
+            payload_chunks_make_pgvalues(&st, vals, owned_texts);
+            size_t row_size = pk_encode_size((dbvalue_t **)vals, 9, 0, 3);
+            payload_chunks_free_pgvalues(vals, owned_texts);
+            if (row_size == SIZE_MAX || row_size > (size_t)PG_INT64_MAX) {
+                ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                    errmsg("cloudsync_payload_blob_checked: payload row is too large")));
+            }
+            if (!has_rows) {
+                payload_blob_checked_pg_add(&estimated, (int64)header_size);
+                has_rows = true;
+            }
+            payload_blob_checked_pg_add(&estimated, (int64)row_size);
+            payload_chunks_free_current(&st);
+        }
+    }
+
+    if (st.portal) SPI_cursor_close(st.portal);
+    payload_chunks_free_current(&st);
+    return estimated;
+}
+
+PG_FUNCTION_INFO_V1(cloudsync_payload_blob_checked);
+Datum cloudsync_payload_blob_checked(PG_FUNCTION_ARGS) {
+    cloudsync_context *data = get_cloudsync_context();
+    bool spi_connected = false;
+    bytea *site_id = PG_ARGISNULL(2) ? NULL : PG_GETARG_BYTEA_PP(2);
+    bool exclude = PG_ARGISNULL(3) ? false : PG_GETARG_BOOL(3);
+
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(4)) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+            errmsg("cloudsync_payload_blob_checked: since_db_version, since_seq, and max_estimated_payload_size are required")));
+    }
+    int64 since = PG_GETARG_INT64(0);
+    int64 since_seq = PG_GETARG_INT64(1);
+    int64 max_estimated_size = PG_GETARG_INT64(4);
+    if (max_estimated_size <= 0) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+            errmsg("cloudsync_payload_blob_checked: max_estimated_payload_size must be positive")));
+    }
+    if (exclude && !site_id) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+            errmsg("cloudsync_payload_blob_checked: exclude_filter_site_id requires a non-NULL filter_site_id")));
+    }
+    if (!exclude && !site_id) {
+        site_id = (bytea *)palloc(VARHDRSZ + UUID_LEN);
+        SET_VARSIZE(site_id, VARHDRSZ + UUID_LEN);
+        memcpy(VARDATA(site_id), cloudsync_siteid(data), UUID_LEN);
+    }
+
+    if (SPI_connect() != SPI_OK_CONNECT) ereport(ERROR, (errmsg("SPI_connect failed")));
+    spi_connected = true;
+
+    int64 watermark = 0;
+    int64 estimated = payload_blob_checked_pg_estimate(data, since, since_seq, site_id, exclude, &watermark);
+    if (estimated == 0) {
+        if (spi_connected) SPI_finish();
+        PG_RETURN_NULL();
+    }
+    if (estimated > max_estimated_size) {
+        if (spi_connected) SPI_finish();
+        ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            errmsg("cloudsync_payload_blob_checked: estimated payload size %lld exceeds max_estimated_payload_size %lld",
+                   (long long)estimated, (long long)max_estimated_size)));
+    }
+
+    StringInfoData q;
+    initStringInfo(&q);
+    if (exclude) {
+        appendStringInfoString(&q,
+            "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+            "FROM cloudsync_changes_select(0,NULL) "
+            "WHERE site_id <> $2 AND db_version <= $3 AND (db_version > $1 OR (db_version = $1 AND seq > $4)) "
+            "ORDER BY db_version, seq ASC");
+    } else {
+        appendStringInfoString(&q,
+            "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+            "FROM cloudsync_changes_select(0,$2) "
+            "WHERE db_version <= $3 AND (db_version > $1 OR (db_version = $1 AND seq > $4)) "
+            "ORDER BY db_version, seq ASC");
+    }
+    Oid argtypes[4] = {INT8OID, BYTEAOID, INT8OID, INT8OID};
+    Datum values[4] = {Int64GetDatum(since), PointerGetDatum(site_id), Int64GetDatum(watermark), Int64GetDatum(since_seq)};
+    char nulls[4] = {' ', ' ', ' ', ' '};
+    Portal portal = SPI_cursor_open_with_args(NULL, q.data, 4, argtypes, values, nulls, true, 0);
+    pfree(q.data);
+    if (!portal) ereport(ERROR, (errmsg("SPI_cursor_open failed")));
+
+    cloudsync_payload_context *payload = cloudsync_memory_zeroalloc((uint64_t)cloudsync_payload_context_size(NULL));
+    if (!payload) ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("out of memory")));
+
+    for (;;) {
+        SPI_cursor_fetch(portal, true, 1);
+        if (SPI_processed == 0) {
+            if (SPI_tuptable) { SPI_freetuptable(SPI_tuptable); SPI_tuptable = NULL; }
+            break;
+        }
+        SPITupleTable *tuptable = SPI_tuptable;
+        HeapTuple tup = tuptable->vals[0];
+        TupleDesc td = tuptable->tupdesc;
+        bool isnull = false;
+        Datum d;
+
+        char *tbl = NULL;
+        bytea *pk = NULL;
+        char *col_name = NULL;
+        bytea *col_value = NULL;
+        bytea *row_site_id = NULL;
+        int64 col_version = 0, db_version = 0, cl = 0, seq = 0;
+
+        d = SPI_getbinval(tup, td, 1, &isnull); tbl = isnull ? pstrdup("") : text_to_cstring(DatumGetTextPP(d));
+        d = SPI_getbinval(tup, td, 2, &isnull); if (!isnull) pk = DatumGetByteaPP(d);
+        d = SPI_getbinval(tup, td, 3, &isnull); col_name = isnull ? pstrdup("") : text_to_cstring(DatumGetTextPP(d));
+        d = SPI_getbinval(tup, td, 4, &isnull); if (!isnull) col_value = DatumGetByteaPP(d);
+        d = SPI_getbinval(tup, td, 5, &isnull); col_version = isnull ? 0 : DatumGetInt64(d);
+        d = SPI_getbinval(tup, td, 6, &isnull); db_version = isnull ? 0 : DatumGetInt64(d);
+        d = SPI_getbinval(tup, td, 7, &isnull); if (!isnull) row_site_id = DatumGetByteaPP(d);
+        d = SPI_getbinval(tup, td, 8, &isnull); cl = isnull ? 0 : DatumGetInt64(d);
+        d = SPI_getbinval(tup, td, 9, &isnull); seq = isnull ? 0 : DatumGetInt64(d);
+
+        pgvalue_t *vals[9] = {0};
+        text *owned_texts[2] = {0};
+        owned_texts[0] = cstring_to_text(tbl);
+        owned_texts[1] = cstring_to_text(col_name);
+        vals[0] = pgvalue_create(PointerGetDatum(owned_texts[0]), TEXTOID, -1, InvalidOid, false);
+        vals[1] = pgvalue_create(PointerGetDatum(pk), BYTEAOID, -1, InvalidOid, false);
+        vals[2] = pgvalue_create(PointerGetDatum(owned_texts[1]), TEXTOID, -1, InvalidOid, false);
+        vals[3] = pgvalue_create(PointerGetDatum(col_value), BYTEAOID, -1, InvalidOid, false);
+        vals[4] = pgvalue_create(Int64GetDatum(col_version), INT8OID, -1, InvalidOid, false);
+        vals[5] = pgvalue_create(Int64GetDatum(db_version), INT8OID, -1, InvalidOid, false);
+        vals[6] = pgvalue_create(PointerGetDatum(row_site_id), BYTEAOID, -1, InvalidOid, false);
+        vals[7] = pgvalue_create(Int64GetDatum(cl), INT8OID, -1, InvalidOid, false);
+        vals[8] = pgvalue_create(Int64GetDatum(seq), INT8OID, -1, InvalidOid, false);
+        int rc = cloudsync_payload_encode_step(payload, data, 9, (dbvalue_t **)vals);
+        payload_chunks_free_pgvalues(vals, owned_texts);
+        pfree(tbl);
+        pfree(col_name);
+        if (rc != DBRES_OK) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+
+        if (tuptable) SPI_freetuptable(tuptable);
+        SPI_tuptable = NULL;
+    }
+    SPI_cursor_close(portal);
+
+    int rc = cloudsync_payload_encode_final(payload, data);
+    if (rc != DBRES_OK) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+    int64 blob_size = 0;
+    char *blob = cloudsync_payload_blob(payload, &blob_size, NULL);
+    if (spi_connected) SPI_finish();
+    if (!blob) {
+        cloudsync_memory_free(payload);
+        PG_RETURN_NULL();
+    }
+
+    bytea *result = (bytea *)palloc(VARHDRSZ + blob_size);
+    SET_VARSIZE(result, VARHDRSZ + blob_size);
+    memcpy(VARDATA(result), blob, blob_size);
+    cloudsync_memory_free(blob);
+    cloudsync_memory_free(payload);
+    PG_RETURN_BYTEA_P(result);
+}
+
 // Payload decode - Apply changes from payload
 PG_FUNCTION_INFO_V1(cloudsync_payload_decode);
 Datum cloudsync_payload_decode (PG_FUNCTION_ARGS) {

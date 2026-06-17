@@ -13,6 +13,7 @@
 #include "../database.h"
 #include "../dbutils.h"
 #include "../sql.h"
+#include <inttypes.h>
 #include <stddef.h>
 
 #ifndef CLOUDSYNC_OMIT_NETWORK
@@ -1492,6 +1493,188 @@ static sqlite3_module cloudsync_payload_chunks_module = {
     /* xIntegrity  */ NULL
 };
 
+static int payload_estimated_size_add(sqlite3_int64 *acc, sqlite3_int64 value) {
+    if (value < 0 || *acc > INT64_MAX - value) return SQLITE_TOOBIG;
+    *acc += value;
+    return SQLITE_OK;
+}
+
+static int payload_blob_checked_estimate(sqlite3 *db, const void *site_id, int site_id_len,
+                                         sqlite3_int64 since, sqlite3_int64 since_seq,
+                                         bool exclude, sqlite3_int64 *estimated,
+                                         sqlite3_int64 *watermark) {
+    sqlite3_stmt *stmt = NULL;
+    sqlite3_stmt *mx = NULL;
+    int rc = SQLITE_OK;
+    sqlite3_int64 until = 0;
+    size_t header_size = 0;
+    const char *site_op = exclude ? "<>" : "=";
+    *estimated = 0;
+
+    char *mxsql = sqlite3_mprintf(
+        "SELECT COALESCE(MAX(db_version),0) FROM cloudsync_changes WHERE site_id%s?", site_op);
+    if (!mxsql) return SQLITE_NOMEM;
+    rc = sqlite3_prepare_v2(db, mxsql, -1, &mx, NULL);
+    sqlite3_free(mxsql);
+    if (rc != SQLITE_OK) goto error;
+    sqlite3_bind_blob(mx, 1, site_id, site_id_len, SQLITE_TRANSIENT);
+    rc = sqlite3_step(mx);
+    if (rc == SQLITE_ROW) until = sqlite3_column_int64(mx, 0);
+    else if (rc != SQLITE_DONE) goto error;
+    sqlite3_finalize(mx);
+    mx = NULL;
+    if (watermark) *watermark = until;
+
+    if (until < since) return SQLITE_OK;
+
+    char *sql = sqlite3_mprintf(
+        "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+        "FROM cloudsync_changes WHERE (db_version>? OR (db_version=? AND seq>?)) "
+        "AND site_id%s? AND db_version<=? ORDER BY db_version, seq ASC",
+        site_op);
+    if (!sql) return SQLITE_NOMEM;
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) goto error;
+    sqlite3_bind_int64(stmt, 1, since);
+    sqlite3_bind_int64(stmt, 2, since);
+    sqlite3_bind_int64(stmt, 3, since_seq);
+    sqlite3_bind_blob(stmt, 4, site_id, site_id_len, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 5, until);
+
+    cloudsync_payload_context_size(&header_size);
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        sqlite3_value *rowv[9];
+        for (int i = 0; i < 9; ++i) rowv[i] = sqlite3_column_value(stmt, i);
+        size_t row_size = pk_encode_size((dbvalue_t **)rowv, 9, 0, -1);
+        if (row_size == SIZE_MAX || row_size > (size_t)INT64_MAX) {
+            rc = SQLITE_TOOBIG;
+            goto error;
+        }
+        if (*estimated == 0) {
+            if (header_size > (size_t)INT64_MAX) {
+                rc = SQLITE_TOOBIG;
+                goto error;
+            }
+            rc = payload_estimated_size_add(estimated, (sqlite3_int64)header_size);
+            if (rc != SQLITE_OK) goto error;
+        }
+        rc = payload_estimated_size_add(estimated, (sqlite3_int64)row_size);
+        if (rc != SQLITE_OK) goto error;
+    }
+    if (rc != SQLITE_DONE) goto error;
+    sqlite3_finalize(stmt);
+    return SQLITE_OK;
+
+error:
+    if (stmt) sqlite3_finalize(stmt);
+    if (mx) sqlite3_finalize(mx);
+    return rc;
+}
+
+void dbsync_payload_blob_checked(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_payload_blob_checked");
+    UNUSED_PARAMETER(argc);
+
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    sqlite3_stmt *stmt = NULL;
+    cloudsync_payload_context *payload = NULL;
+    int rc = SQLITE_OK;
+    sqlite3_int64 since = 0;
+    sqlite3_int64 since_seq = 0;
+    sqlite3_int64 max_estimated_size = 0;
+    sqlite3_int64 estimated = 0;
+    sqlite3_int64 watermark = 0;
+    const void *site_id = NULL;
+    int site_id_len = 0;
+    bool exclude = false;
+
+    if (sqlite3_value_type(argv[0]) != SQLITE_NULL) since = sqlite3_value_int64(argv[0]);
+    if (sqlite3_value_type(argv[1]) != SQLITE_NULL) since_seq = sqlite3_value_int64(argv[1]);
+    if (sqlite3_value_type(argv[2]) != SQLITE_NULL) {
+        site_id = sqlite3_value_blob(argv[2]);
+        site_id_len = sqlite3_value_bytes(argv[2]);
+    }
+    exclude = sqlite3_value_type(argv[3]) != SQLITE_NULL && sqlite3_value_int(argv[3]) != 0;
+    if (sqlite3_value_type(argv[4]) == SQLITE_NULL || sqlite3_value_int64(argv[4]) <= 0) {
+        sqlite3_result_error(context, "cloudsync_payload_blob_checked: max_estimated_payload_size must be positive", -1);
+        return;
+    }
+    max_estimated_size = sqlite3_value_int64(argv[4]);
+
+    if (exclude && !site_id) {
+        sqlite3_result_error(context,
+            "cloudsync_payload_blob_checked: exclude_filter_site_id requires a non-NULL site_id", -1);
+        return;
+    }
+    if (!exclude && !site_id) {
+        site_id = cloudsync_siteid(data);
+        site_id_len = UUID_LEN;
+    }
+
+    rc = payload_blob_checked_estimate(db, site_id, site_id_len, since, since_seq, exclude, &estimated, &watermark);
+    if (rc != SQLITE_OK) goto error;
+    if (estimated == 0) {
+        sqlite3_result_null(context);
+        return;
+    }
+    if (estimated > max_estimated_size) {
+        dbsync_set_error(context,
+            "cloudsync_payload_blob_checked: estimated payload size %" PRId64 " exceeds max_estimated_payload_size %" PRId64,
+            (int64_t)estimated, (int64_t)max_estimated_size);
+        return;
+    }
+
+    const char *site_op = exclude ? "<>" : "=";
+    char *sql = sqlite3_mprintf(
+        "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+        "FROM cloudsync_changes WHERE (db_version>? OR (db_version=? AND seq>?)) "
+        "AND site_id%s? AND db_version<=? ORDER BY db_version, seq ASC",
+        site_op);
+    if (!sql) { rc = SQLITE_NOMEM; goto error; }
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) goto error;
+    sqlite3_bind_int64(stmt, 1, since);
+    sqlite3_bind_int64(stmt, 2, since);
+    sqlite3_bind_int64(stmt, 3, since_seq);
+    sqlite3_bind_blob(stmt, 4, site_id, site_id_len, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 5, watermark);
+
+    payload = cloudsync_memory_zeroalloc((uint64_t)cloudsync_payload_context_size(NULL));
+    if (!payload) { rc = SQLITE_NOMEM; goto error; }
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        sqlite3_value *rowv[9];
+        for (int i = 0; i < 9; ++i) rowv[i] = sqlite3_column_value(stmt, i);
+        rc = cloudsync_payload_encode_step(payload, data, 9, (dbvalue_t **)rowv);
+        if (rc != SQLITE_OK) goto error;
+    }
+    if (rc != SQLITE_DONE) goto error;
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    rc = cloudsync_payload_encode_final(payload, data);
+    if (rc != SQLITE_OK) goto error;
+    int64_t blob_size = 0;
+    char *blob = cloudsync_payload_blob(payload, &blob_size, NULL);
+    if (!blob) {
+        sqlite3_result_null(context);
+    } else {
+        sqlite3_result_blob64(context, blob, (sqlite3_uint64)blob_size, cloudsync_memory_free);
+    }
+    cloudsync_memory_free(payload);
+    return;
+
+error:
+    if (stmt) sqlite3_finalize(stmt);
+    if (payload) cloudsync_memory_free(payload);
+    if (rc == SQLITE_NOMEM) sqlite3_result_error_nomem(context);
+    else if (rc == SQLITE_TOOBIG) sqlite3_result_error(context, "cloudsync_payload_blob_checked: payload estimate is too large", -1);
+    else sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+}
+
 #ifdef CLOUDSYNC_DESKTOP_OS
 void dbsync_payload_save (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("dbsync_payload_save");
@@ -2025,6 +2208,9 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     if (rc != SQLITE_OK) return rc;
 
     rc = sqlite3_create_module(db, "cloudsync_payload_chunks", &cloudsync_payload_chunks_module, (void *)ctx);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbsync_register_function(db, "cloudsync_payload_blob_checked", dbsync_payload_blob_checked, 5, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
 
     // Download spool (server-side /check chunk staging)
