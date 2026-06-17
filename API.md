@@ -528,6 +528,8 @@ This helper is intended for servers that still need to support old clients on a 
 
 Internally, CloudSync first estimates the uncompressed payload body plus header. If that estimate exceeds `max_estimated_payload_size`, the function raises a limit-exceeded error and does not materialize the payload. Empty windows return `NULL`.
 
+When the check passes, this function scans the selected change window twice: once to estimate and once to encode. This avoids unsafe monolithic allocation, but successful calls are more I/O-expensive than a direct single-pass `cloudsync_payload_encode()` over the same rows.
+
 **Parameters:**
 
 - `since_db_version` (INTEGER/BIGINT): Start after this source database version, except rows at the same version with `seq > since_seq` are still included.

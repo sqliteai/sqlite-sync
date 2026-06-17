@@ -3045,6 +3045,12 @@ size_t cloudsync_payload_context_size (size_t *header_size) {
     return sizeof(cloudsync_payload_context);
 }
 
+void cloudsync_payload_context_free (cloudsync_payload_context *payload) {
+    if (!payload) return;
+    if (payload->buffer) cloudsync_memory_free(payload->buffer);
+    cloudsync_memory_free(payload);
+}
+
 uint64_t cloudsync_payload_context_nrows (cloudsync_payload_context *payload) {
     return payload ? payload->nrows : 0;
 }

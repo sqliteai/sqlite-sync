@@ -115,6 +115,7 @@ int    cloudsync_payload_encode_step (cloudsync_payload_context *payload, clouds
 int    cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsync_context *data);
 char  *cloudsync_payload_blob (cloudsync_payload_context *payload, int64_t *blob_size, int64_t *nrows);
 size_t cloudsync_payload_context_size (size_t *header_size);
+void   cloudsync_payload_context_free (cloudsync_payload_context *payload);
 uint64_t cloudsync_payload_context_nrows (cloudsync_payload_context *payload);
 size_t cloudsync_payload_context_bused (cloudsync_payload_context *payload);
 int    cloudsync_payload_get (cloudsync_context *data, char **blob, int *blob_size, int *db_version, int64_t *new_db_version);

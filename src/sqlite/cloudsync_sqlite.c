@@ -1508,6 +1508,7 @@ static int payload_blob_checked_estimate(sqlite3 *db, const void *site_id, int s
     int rc = SQLITE_OK;
     sqlite3_int64 until = 0;
     size_t header_size = 0;
+    bool has_rows = false;
     const char *site_op = exclude ? "<>" : "=";
     *estimated = 0;
 
@@ -1551,13 +1552,14 @@ static int payload_blob_checked_estimate(sqlite3 *db, const void *site_id, int s
             rc = SQLITE_TOOBIG;
             goto error;
         }
-        if (*estimated == 0) {
+        if (!has_rows) {
             if (header_size > (size_t)INT64_MAX) {
                 rc = SQLITE_TOOBIG;
                 goto error;
             }
             rc = payload_estimated_size_add(estimated, (sqlite3_int64)header_size);
             if (rc != SQLITE_OK) goto error;
+            has_rows = true;
         }
         rc = payload_estimated_size_add(estimated, (sqlite3_int64)row_size);
         if (rc != SQLITE_OK) goto error;
@@ -1661,15 +1663,16 @@ void dbsync_payload_blob_checked(sqlite3_context *context, int argc, sqlite3_val
     char *blob = cloudsync_payload_blob(payload, &blob_size, NULL);
     if (!blob) {
         sqlite3_result_null(context);
+        cloudsync_payload_context_free(payload);
     } else {
         sqlite3_result_blob64(context, blob, (sqlite3_uint64)blob_size, cloudsync_memory_free);
+        cloudsync_memory_free(payload);
     }
-    cloudsync_memory_free(payload);
     return;
 
 error:
     if (stmt) sqlite3_finalize(stmt);
-    if (payload) cloudsync_memory_free(payload);
+    if (payload) cloudsync_payload_context_free(payload);
     if (rc == SQLITE_NOMEM) sqlite3_result_error_nomem(context);
     else if (rc == SQLITE_TOOBIG) sqlite3_result_error(context, "cloudsync_payload_blob_checked: payload estimate is too large", -1);
     else sqlite3_result_error(context, sqlite3_errmsg(db), -1);

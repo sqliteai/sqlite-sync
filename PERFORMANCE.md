@@ -43,6 +43,8 @@ Each metadata table has an **index on `db_version`**, so payload generation scal
 
 The legacy `cloudsync_payload_encode()` API builds one monolithic LZ4-compressed payload before transmission. For large deltas, `cloudsync_payload_chunks()` can be used instead: it streams a sequence of payload chunks bounded by the `payload_max_chunk_size` setting (default 5 MB, minimum 256 KB). If a single encoded BLOB/TEXT value is larger than the chunk budget, the value is split into transparent v3 fragments and reassembled by `cloudsync_payload_apply()` on the receiver.
 
+For legacy `/check` callers that still need one monolithic payload, `cloudsync_payload_blob_checked()` performs an internal size estimate before encoding. Successful calls scan the selected change window twice (estimate, then encode), so they trade extra I/O for avoiding unsafe monolithic payload allocation when the estimate exceeds the configured limit.
+
 #### Pull: Payload Application
 
 ```
