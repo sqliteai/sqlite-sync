@@ -20,7 +20,7 @@
 #define CLOUDSYNC_HEADER_TICKET_EXPIRES_AT  "X-CloudSync-Ticket-Expires-At"
 // CLOUDSYNC_VERSION is defined in cloudsync.h — include it before this header at use sites.
 #define CLOUDSYNC_HEADER_VERSION_LINE       CLOUDSYNC_HEADER_VERSION ": " CLOUDSYNC_VERSION
-#define CLOUDSYNC_HEADER_CHECK_CAPABILITIES "X-CloudSync-Capabilities: check-status-response"
+#define CLOUDSYNC_HEADER_CHECK_CAPABILITIES "X-CloudSync-Capabilities: check-status-response, check-spool-cursor"
 
 #define CLOUDSYNC_NETWORK_OK                1
 #define CLOUDSYNC_NETWORK_ERROR             2

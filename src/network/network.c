@@ -768,6 +768,22 @@ int network_download_changes (sqlite3_context *context, const char *download_url
     return rc;
 }
 
+static int network_apply_payload_buffer(sqlite3_context *context, const char *payload, int payload_size,
+                                        int *pnrows, char **err_out,
+                                        int64_t checkpoint_db_version, int64_t checkpoint_seq,
+                                        const char *error_prefix) {
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    int rc = cloudsync_payload_apply(data, payload, payload_size, pnrows, checkpoint_db_version, checkpoint_seq);
+    if (rc != DBRES_OK) {
+        const char *msg = cloudsync_errmsg(data);
+        if (!msg || !msg[0]) msg = error_prefix ? error_prefix : "cloudsync_payload_apply failed";
+        if (err_out) *err_out = cloudsync_string_dup(msg);
+        else sqlite3_result_error(context, msg, -1);
+        if (pnrows) *pnrows = 0;
+    }
+    return rc;
+}
+
 char *network_authentication_token (const char *key, const char *value) {
     size_t len = strlen(key) + strlen(value) + 64;
     char *buffer = cloudsync_memory_zeroalloc(len);
@@ -1285,6 +1301,76 @@ static char *network_base64_encode(const unsigned char *src, size_t len) {
     return out;
 }
 
+static int network_base64_value(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+static unsigned char *network_base64_decode(const char *src, size_t len, size_t *out_len) {
+    if (!src || !out_len) return NULL;
+    *out_len = 0;
+
+    size_t effective_len = 0;
+    for (size_t i = 0; i < len; ++i) {
+        if (!isspace((unsigned char)src[i])) ++effective_len;
+    }
+    if (effective_len == 0 || effective_len % 4 != 0) return NULL;
+
+    size_t max_out_len = (effective_len / 4) * 3;
+    unsigned char *out = cloudsync_memory_alloc((uint64_t)max_out_len);
+    if (!out) return NULL;
+
+    int quartet[4];
+    int q = 0;
+    size_t j = 0;
+    bool seen_padding = false;
+
+    for (size_t i = 0; i < len; ++i) {
+        unsigned char c = (unsigned char)src[i];
+        if (isspace(c)) continue;
+
+        if (c == '=') {
+            quartet[q++] = -2;
+            seen_padding = true;
+        } else {
+            int v = network_base64_value((char)c);
+            if (v < 0 || seen_padding) goto invalid;
+            quartet[q++] = v;
+        }
+
+        if (q == 4) {
+            if (quartet[0] < 0 || quartet[1] < 0) goto invalid;
+            if (quartet[2] == -2 && quartet[3] != -2) goto invalid;
+
+            uint32_t triple = ((uint32_t)quartet[0] << 18) | ((uint32_t)quartet[1] << 12);
+            out[j++] = (unsigned char)((triple >> 16) & 0xff);
+
+            if (quartet[2] >= 0) {
+                triple |= (uint32_t)quartet[2] << 6;
+                out[j++] = (unsigned char)((triple >> 8) & 0xff);
+            }
+            if (quartet[3] >= 0) {
+                triple |= (uint32_t)quartet[3];
+                out[j++] = (unsigned char)(triple & 0xff);
+            }
+            q = 0;
+        }
+    }
+
+    if (q != 0) goto invalid;
+    *out_len = j;
+    return out;
+
+invalid:
+    cloudsync_memory_free(out);
+    *out_len = 0;
+    return NULL;
+}
+
 static char *network_apply_json_payload(const char *transport_key, const char *transport_value,
                                         int64_t db_version_min, int64_t db_version_max) {
     if (!transport_key || !transport_value) return NULL;
@@ -1663,13 +1749,20 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
     NETWORK_RESULT result = network_receive_buffer(netdata, netdata->check_endpoint, netdata->authentication, true, true, json_payload, cloudsync_check_headers, ARRAY_LEN(cloudsync_check_headers));
     int rc = SQLITE_OK;
     if (result.code == CLOUDSYNC_NETWORK_BUFFER) {
-        // The /check endpoint returns one of two shapes:
-        //   HTTP 200 → {"url": "..."}                  (artifact ready for download)
-        //   HTTP 202 → SyncStatusResponse               (no artifact yet — status snapshot,
-        //                                                may include failures.check)
-        // Branch on the presence of "url" rather than HTTP status; both shapes arrive as BUFFER.
-        char *download_url = json_extract_string(result.buffer, result.blen, "url");
-        if (download_url) {
+        // The /check endpoint returns one of three shapes:
+        //   HTTP 200 → {"url": "..."}                       (artifact ready for download)
+        //   HTTP 200 → {"data":{"payload": "...", ...}}     (inline base64 payload)
+        //   HTTP 202 → SyncStatusResponse                    (no artifact yet — status snapshot,
+        //                                                     may include failures.check)
+        // Branch on the presence of transport fields rather than HTTP status; all
+        // shapes arrive as BUFFER. Newer servers wrap page metadata in "data";
+        // legacy responses put "url" at the top level.
+        char *data_json = json_extract_object_raw(result.buffer, result.blen, "data");
+        const char *check_json = data_json ? data_json : result.buffer;
+        size_t check_json_len = data_json ? strlen(data_json) : result.blen;
+        char *download_url = json_extract_string(check_json, check_json_len, "url");
+        char *inline_payload = download_url ? NULL : json_extract_string(check_json, check_json_len, "payload");
+        if (download_url || inline_payload) {
             // Receive checkpoint, mirroring the send-path watermark. The /check
             // response signals how far the durable cursor may advance:
             //   no "watermark"          -> legacy / monolithic artifact: advance
@@ -1683,23 +1776,42 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
             // The server serves successive chunks of the same stream across /check
             // calls (the durable cursor stays at "since" until "final"). The server
             // is stateless between calls, so it tells us the next spool page via
-            // "cursor" and we echo it back (netdata->check_cursor); apply is
+            // "nextCursor" and we echo it back (netdata->check_cursor); apply is
             // idempotent, so a stop before "final" simply re-delivers from "since".
-            int64_t watermark = json_extract_int(result.buffer, result.blen, "watermark", -1);
+            int64_t watermark = json_extract_int(check_json, check_json_len, "watermark", -1);
             int64_t checkpoint_db_version;
             int64_t checkpoint_seq = 0;
             bool final_chunk = true;
             if (watermark < 0) {
                 checkpoint_db_version = CLOUDSYNC_CHECKPOINT_LAST_APPLIED;
             } else {
-                final_chunk = json_extract_bool(result.buffer, result.blen, "final", true);
+                final_chunk = json_extract_bool(check_json, check_json_len, "final", true);
                 checkpoint_db_version = final_chunk ? watermark : CLOUDSYNC_CHECKPOINT_NONE;
             }
-            // Optional next-page cursor. Absent on legacy/old servers (-1 sentinel)
-            // -> the client does not self-page.
-            int64_t next_cursor = json_extract_int(result.buffer, result.blen, "cursor", -1);
-            rc = network_download_changes(context, download_url, pnrows, err_out, checkpoint_db_version, checkpoint_seq);
-            cloudsync_memory_free(download_url);
+            // Optional next-page cursor. Request uses "cursor"; response uses
+            // "nextCursor" to name the page to request next.
+            int64_t next_cursor = json_extract_int(check_json, check_json_len, "nextCursor", -1);
+
+            if (download_url) {
+                rc = network_download_changes(context, download_url, pnrows, err_out, checkpoint_db_version, checkpoint_seq);
+            } else {
+                size_t decoded_size = 0;
+                unsigned char *decoded = network_base64_decode(inline_payload, strlen(inline_payload), &decoded_size);
+                if (!decoded || decoded_size > INT_MAX) {
+                    if (decoded) cloudsync_memory_free(decoded);
+                    sqlite3_result_error(context, "cloudsync_network_check_changes: invalid inline payload in check response.", -1);
+                    rc = SQLITE_ERROR;
+                    if (pnrows) *pnrows = 0;
+                } else {
+                    rc = network_apply_payload_buffer(context, (const char *)decoded, (int)decoded_size, pnrows, err_out,
+                                                      checkpoint_db_version, checkpoint_seq,
+                                                      "cloudsync_network_check_changes: inline payload apply failed");
+                    cloudsync_memory_free(decoded);
+                }
+            }
+
+            if (download_url) cloudsync_memory_free(download_url);
+            if (inline_payload) cloudsync_memory_free(inline_payload);
             if (rc == SQLITE_OK) {
                 // Advance only after the page is applied/staged, mirroring the durable
                 // cursor: a non-final chunk that carried a cursor pages forward;
@@ -1711,7 +1823,9 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
         } else {
             // 202 / "up to date": no artifact in flight -> reset paging.
             netdata->check_cursor = 0;
+            if (pnrows) *pnrows = 0;
         }
+        if (data_json) cloudsync_memory_free(data_json);
         // failures.check may appear in either shape; extract opportunistically.
         if (out) {
             char *check_failure = json_extract_failure_stage(result.buffer, result.blen, "check");
