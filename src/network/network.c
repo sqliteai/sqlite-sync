@@ -1742,7 +1742,7 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
     // "cursor" is the spool page to serve. Old/legacy servers ignore the unknown
     // request field and omit it from the response; the client then never self-pages
     // (check_cursor stays 0), preserving current behavior.
-    char json_payload[2024];
+    char json_payload[2048];
     snprintf(json_payload, sizeof(json_payload), "{\"dbVersion\":%lld, \"seq\":%d, \"cursor\":%lld}",
              (long long)db_version, seq, (long long)netdata->check_cursor);
 
