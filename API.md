@@ -38,7 +38,8 @@ This document provides a reference for the SQL functions provided by the `sqlite
   - [`cloudsync_network_set_token()`](#cloudsync_network_set_tokentoken)
   - [`cloudsync_network_set_apikey()`](#cloudsync_network_set_apikeyapikey)
   - [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes)
-  - [`cloudsync_network_check_changes()`](#cloudsync_network_check_changes)
+  - [`cloudsync_network_receive_changes()`](#cloudsync_network_receive_changesmax_chunks)
+  - [`cloudsync_network_check_changes()`](#cloudsync_network_check_changesmax_chunks) (deprecated)
   - [`cloudsync_network_sync()`](#cloudsync_network_syncwait_ms-max_retries)
   - [`cloudsync_network_reset_sync_version()`](#cloudsync_network_reset_sync_version)
   - [`cloudsync_network_has_unsent_changes()`](#cloudsync_network_has_unsent_changes)
@@ -766,64 +767,84 @@ Chunk transport is transparent to the CloudSync backend. Each chunk is sent as a
 **Returns:** A JSON string with the send result:
 
 ```json
-{"send": {"status": "synced|syncing|out-of-sync|error", "localVersion": N, "serverVersion": N, "lastFailure": {...}}}
+{"send": {"status": "synced|syncing|out-of-sync|error", "localVersion": N, "serverVersion": N, "chunks": C, "bytes": B, "lastFailure": {...}}}
 ```
 
 - `send.status`: The current sync state — `"synced"` (all changes confirmed), `"syncing"` (changes sent but not yet confirmed), `"out-of-sync"` (local changes pending or gaps detected), or `"error"`.
 - `send.localVersion`: The latest local database version.
 - `send.serverVersion`: The latest version confirmed by the server.
-- `send.lastFailure` (optional): Present only when the server reports a failed apply job. Forwarded verbatim from the server's `failures.apply` and typically includes `jobId`, `code`, `stage`, `message`, `retryable`, and `failedAt`. It is emitted regardless of `status` so callers can detect server-side failures during `"syncing"` or even after the state has nominally recovered. This function is **send/apply-scoped**: server-reported check-job failures (`failures.check`) are not surfaced here — see [`cloudsync_network_check_changes()`](#cloudsync_network_check_changes) and [`cloudsync_network_sync()`](#cloudsync_network_sync).
+- `send.chunks`: The number of payload chunks sent this call (a large push is split into multiple transport chunks bounded by `payload_max_chunk_size`). `0` when there were no local changes to send.
+- `send.bytes`: The total serialized payload bytes sent this call (uncompressed cloudsync payload size, summed across chunks; not the compressed wire size).
+- `send.lastFailure` (optional): Present only when the server reports a failed apply job. Forwarded verbatim from the server's `failures.apply` and typically includes `jobId`, `code`, `stage`, `message`, `retryable`, and `failedAt`. It is emitted regardless of `status` so callers can detect server-side failures during `"syncing"` or even after the state has nominally recovered. This function is **send/apply-scoped**: server-reported check-job failures (`failures.check`) are not surfaced here — see [`cloudsync_network_receive_changes()`](#cloudsync_network_receive_changesmax_chunks) and [`cloudsync_network_sync()`](#cloudsync_network_syncwait_ms-max_retries).
 
 **Example:**
 
 ```sql
 SELECT cloudsync_network_send_changes();
--- '{"send":{"status":"synced","localVersion":5,"serverVersion":5}}'
+-- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":2048}}'
 
 -- With a server-reported failure (e.g. unknown schema hash on the server side):
--- '{"send":{"status":"out-of-sync","localVersion":1,"serverVersion":0,"lastFailure":{"jobId":44961,"code":"internal_error","stage":"apply_payload","message":"cloudsync operation failed: Cannot apply the received payload because the schema hash is unknown 4288148391734624266.","retryable":true,"failedAt":"2026-04-15T22:21:09.018606Z"}}}'
+-- '{"send":{"status":"out-of-sync","localVersion":1,"serverVersion":0,"chunks":1,"bytes":512,"lastFailure":{"jobId":44961,"code":"internal_error","stage":"apply_payload","message":"cloudsync operation failed: Cannot apply the received payload because the schema hash is unknown 4288148391734624266.","retryable":true,"failedAt":"2026-04-15T22:21:09.018606Z"}}}'
 ```
 
 ---
 
-### `cloudsync_network_check_changes()`
+### `cloudsync_network_receive_changes([max_chunks])`
 
-**Description:** Checks the remote server for new changes and applies them to the local database.
+**Description:** Receives new changes from the remote server and applies them to the local database. (Formerly `cloudsync_network_check_changes()`, which remains available as a deprecated alias — see below.)
 
-If a package of new changes is already available for the local site, the server returns it immediately, and the changes are applied. If no package is ready, the server returns an empty response and starts an asynchronous process to prepare a new package. This new package can be retrieved with a subsequent call to this function.
+If changes are already prepared for the local site, they are downloaded and applied. If nothing is ready yet, the server starts preparing a package asynchronously and this call returns having applied nothing; a later call retrieves it. This function does **not** wait/poll for preparation to finish — it applies what is available now. To force an update and wait for not-yet-ready changes, use [`cloudsync_network_sync(wait_ms, max_retries)`](#cloudsync_network_syncwait_ms-max_retries).
 
-This function is designed to be called periodically to keep the local database in sync.
-To force an update and wait for changes (with a timeout), use [`cloudsync_network_sync(wait_ms, max_retries)`].
+By default this function **drains all currently-available chunks** in one call. Pass `max_chunks` to cap how many chunks are applied per call, for caller-driven progress or traffic control:
 
-When the server delivers a download as a stream of chunks, the local receive checkpoint is advanced only after the **whole stream** has been applied — never in the middle of a source `db_version`. Mirroring the send path, the server tags the stream with its watermark and marks the final chunk; the checkpoint jumps straight to that watermark on completion. A stop between chunks therefore re-delivers the stream from the unchanged checkpoint on the next call (apply is idempotent, so re-delivered rows are harmless), so no changes can be skipped. A non-chunked (monolithic) download advances the checkpoint to the artifact's last applied position, as before.
+```sql
+-- Drain at most 5 chunks, loop until the stream is complete
+SELECT cloudsync_network_receive_changes(5) ->> '$.receive.complete';
+```
+
+The drain position (the per-stream page cursor) is held **in memory** on the network context, so a capped drain resumes where it left off on the next call — the caller does not manage any cursor; it just loops while `receive.complete` is `false`. If the connection is closed or the process restarts mid-drain, the cursor is lost and the next call safely restarts the drain from the beginning of the stream: already-applied chunks are re-downloaded and re-applied idempotently, so **no rows are skipped** — only redundant download is incurred. This is safe because the durable receive checkpoint (`check_dbversion`/`check_seq`) only advances after a stream has been **fully** applied, never in the middle of a source `db_version`.
 
 If the network is misconfigured or the remote server is unreachable, the function raises a SQL error. If the received payload cannot be applied locally (for example because of an unknown schema hash), the error is returned as a `receive.error` field in the JSON response. If the server reports an unresolved failed check job (e.g. an `encode_changes` failure), that failure is forwarded as a `receive.lastFailure` object.
 
-**Parameters:** None.
+**Parameters:**
+
+- `max_chunks` (INTEGER, optional): Maximum number of chunks to apply this call. Omit or pass `0` (or negative) to drain everything available. A positive value caps the drain; `receive.complete` will be `false` when the cap stops a drain that still has pending chunks.
 
 **Returns:** A JSON string with the receive result:
 
 ```json
-{"receive": {"rows": N, "tables": ["table1", "table2"], "error": "...", "lastFailure": {...}}}
+{"receive": {"rows": N, "tables": ["table1", "table2"], "chunks": C, "bytes": B, "complete": true, "error": "...", "lastFailure": {...}}}
 ```
 
-- `receive.rows`: The number of rows received and applied to the local database. `0` when the receive phase failed.
-- `receive.tables`: An array of table names that received changes. Empty (`[]`) if no changes were applied or the receive phase failed.
+- `receive.rows`: The total number of rows received and applied to the local database, summed across all chunks drained this call. `0` when the receive phase failed, when nothing was available, or when only intermediate fragments were staged without completing a value.
+- `receive.tables`: An array of table names that received changes (the union across all drained chunks). Empty (`[]`) if no changes were applied or the receive phase failed.
+- `receive.chunks`: The number of payload chunks applied by this call. `0` when nothing was ready, `1` for a single monolithic/inline page, and `N` for a drained `N`-chunk stream (bounded by `max_chunks` if given).
+- `receive.bytes`: The total serialized payload bytes received this call (uncompressed cloudsync payload size, summed across chunks; transport-independent, not the compressed wire size). Useful for byte-budgeted draining together with `max_chunks`.
+- `receive.complete` (boolean): `true` when the receive stream is fully drained (nothing pending), `false` when more chunks remain — because `max_chunks` capped the drain, or it stopped early. When `false`, call this function again to continue.
 - `receive.error` (optional, string): Present when client-side `cloudsync_payload_apply` failed. Contains a human-readable error message describing why the received payload could not be applied.
-- `receive.lastFailure` (optional, object): Present only when the server reports a failed check job. Forwarded verbatim from the server's `failures.check` and typically includes `jobId`, `dbVersion`, `seq`, `code`, `stage`, `message`, `retryable`, and `failedAt`. Distinct from `receive.error`: `receive.error` describes a client-side apply failure (string), while `receive.lastFailure` describes a server-side check-job failure (object). Both can coexist in the same response. This function is **check-scoped**: server-reported apply-job failures (`failures.apply`) are not surfaced here — see [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes) and [`cloudsync_network_sync()`](#cloudsync_network_sync).
+- `receive.lastFailure` (optional, object): Present only when the server reports a failed check job. Forwarded verbatim from the server's `failures.check` and typically includes `jobId`, `dbVersion`, `seq`, `code`, `stage`, `message`, `retryable`, and `failedAt`. Distinct from `receive.error`: `receive.error` describes a client-side apply failure (string), while `receive.lastFailure` describes a server-side check-job failure (object). Both can coexist in the same response. This function is **check-scoped**: server-reported apply-job failures (`failures.apply`) are not surfaced here — see [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes) and [`cloudsync_network_sync()`](#cloudsync_network_syncwait_ms-max_retries).
 
 **Example:**
 
 ```sql
-SELECT cloudsync_network_check_changes();
--- '{"receive":{"rows":3,"tables":["tasks"]}}'
+SELECT cloudsync_network_receive_changes();
+-- '{"receive":{"rows":3,"tables":["tasks"],"chunks":1,"bytes":820,"complete":true}}'
+
+-- Capped drain with more pending (call again to continue):
+-- '{"receive":{"rows":40,"tables":["docs"],"chunks":5,"bytes":1310720,"complete":false}}'
 
 -- With a client-side apply error:
--- '{"receive":{"rows":0,"tables":[],"error":"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."}}'
+-- '{"receive":{"rows":0,"tables":[],"chunks":0,"bytes":0,"complete":true,"error":"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."}}'
 
 -- With a server-reported check-job failure:
--- '{"receive":{"rows":0,"tables":[],"lastFailure":{"jobId":456,"dbVersion":15,"seq":1,"code":"tenant_unreachable","stage":"encode_changes","message":"tenant check failed","retryable":true,"failedAt":"2026-04-24T10:22:00Z"}}}'
+-- '{"receive":{"rows":0,"tables":[],"chunks":0,"bytes":0,"complete":true,"lastFailure":{"jobId":456,"dbVersion":15,"seq":1,"code":"tenant_unreachable","stage":"encode_changes","message":"tenant check failed","retryable":true,"failedAt":"2026-04-24T10:22:00Z"}}}'
 ```
+
+---
+
+### `cloudsync_network_check_changes([max_chunks])`
+
+> **Deprecated:** use [`cloudsync_network_receive_changes()`](#cloudsync_network_receive_changesmax_chunks). This name is retained as a thin alias for backward compatibility and will be removed in a future major version. It behaves identically, including the optional `max_chunks` argument and all returned fields.
 
 ---
 
@@ -832,43 +853,51 @@ SELECT cloudsync_network_check_changes();
 **Description:** Performs a full synchronization cycle. This function has two overloads:
 
 - `cloudsync_network_sync()`: Performs one send operation and one check operation.
-- `cloudsync_network_sync(wait_ms, max_retries)`: Performs one send operation and then repeatedly tries to download remote changes until at least one change is downloaded or `max_retries` times has been reached, waiting `wait_ms` between retries.
+- `cloudsync_network_sync(wait_ms, max_retries)`: Performs one send operation and then downloads remote changes.
+
+When the server delivers changes as a stream of chunks, this function drains the **whole stream in a single call**: as long as the next chunk is already available it is fetched back-to-back with no delay. `wait_ms` and `max_retries` are spent only while the server payload is **not yet ready** (the server is still preparing a package): in that case the function waits `wait_ms` and retries up to `max_retries` times. They are not consumed while paging through chunks that are already available.
 
 **Parameters:**
 
-- `wait_ms` (INTEGER, optional): The time to wait in milliseconds between retries. Defaults to 100.
-- `max_retries` (INTEGER, optional): The maximum number of times to retry the synchronization. Defaults to 1.
+- `wait_ms` (INTEGER, optional): The time to wait in milliseconds between retries while the server payload is not yet ready. Defaults to 100.
+- `max_retries` (INTEGER, optional): The maximum number of poll attempts while the server payload is not yet ready. Defaults to 1.
 
 **Returns:** A JSON string with the full sync result, combining send and receive:
 
 ```json
 {
-  "send": {"status": "synced|syncing|out-of-sync|error", "localVersion": N, "serverVersion": N, "lastFailure": {...}},
-  "receive": {"rows": N, "tables": ["table1", "table2"], "error": "...", "lastFailure": {...}}
+  "send": {"status": "synced|syncing|out-of-sync|error", "localVersion": N, "serverVersion": N, "chunks": C, "bytes": B, "lastFailure": {...}},
+  "receive": {"rows": N, "tables": ["table1", "table2"], "chunks": C, "bytes": B, "complete": true, "error": "...", "lastFailure": {...}}
 }
 ```
 
 - `send.status`: The current sync state — `"synced"`, `"syncing"`, `"out-of-sync"`, or `"error"`.
 - `send.localVersion`: The latest local database version.
 - `send.serverVersion`: The latest version confirmed by the server.
+- `send.chunks` / `send.bytes`: Number of payload chunks sent and total serialized payload bytes sent during the send phase. Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes).
 - `send.lastFailure` (optional): Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes) — forwarded verbatim from the server's `failures.apply` whenever a failed apply job is reported, regardless of `status`.
-- `receive.rows`: The number of rows received and applied during the check phase. `0` when the receive phase failed.
-- `receive.tables`: An array of table names that received changes. Empty (`[]`) if no changes were applied or the receive phase failed.
-- `receive.error` (optional, string): Present when client-side `cloudsync_payload_apply` failed (for example `"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."`). The send result is always preserved so the caller can tell that local changes reached the server even when applying incoming changes failed. The retry loop breaks immediately on apply errors, since failures like schema-hash mismatches do not heal across retries. Endpoint/network errors during the receive phase raise a SQL error instead.
-- `receive.lastFailure` (optional, object): Same semantics as in [`cloudsync_network_check_changes()`](#cloudsync_network_check_changes) — forwarded verbatim from the server's `failures.check` whenever a failed check job is reported. Distinct from `receive.error`. `cloudsync_network_sync()` reports both `send.lastFailure` and `receive.lastFailure` when present.
+- `receive.rows`: The **total** number of rows received and applied during the receive phase, summed across **all** chunks drained in this call. `0` when the receive phase failed.
+- `receive.tables`: An array of table names that received changes (the union across all drained chunks). Empty (`[]`) if no changes were applied or the receive phase failed.
+- `receive.chunks`: The number of payload chunks applied in this call. `0` when nothing was ready, `1` for a single monolithic/inline page, and `N` for a fully drained `N`-chunk stream. `cloudsync_network_sync()` always drains the whole stream (it does not cap chunks).
+- `receive.bytes`: The total serialized payload bytes received this call (uncompressed cloudsync payload size, summed across chunks; not the compressed wire size). Same semantics as in [`cloudsync_network_receive_changes()`](#cloudsync_network_receive_changesmax_chunks).
+- `receive.complete` (boolean): `true` when the server stream was fully drained, `false` when the download stopped before the final chunk (an error occurred, or an internal safety bound was reached). When `false`, call `cloudsync_network_sync()` again to resume; re-delivered rows are idempotent.
+- `receive.error` (optional, string): Present when client-side `cloudsync_payload_apply` failed (for example `"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."`). The send result is always preserved so the caller can tell that local changes reached the server even when applying incoming changes failed. The receive drain stops immediately on apply errors, since failures like schema-hash mismatches do not heal across retries. Endpoint/network errors during the receive phase raise a SQL error instead.
+- `receive.lastFailure` (optional, object): Same semantics as in [`cloudsync_network_receive_changes()`](#cloudsync_network_receive_changesmax_chunks) — forwarded verbatim from the server's `failures.check` whenever a failed check job is reported. Distinct from `receive.error`. `cloudsync_network_sync()` reports both `send.lastFailure` and `receive.lastFailure` when present.
 
 **Example:**
 
 ```sql
 -- Perform a single synchronization cycle
 SELECT cloudsync_network_sync();
--- '{"send":{"status":"synced","localVersion":5,"serverVersion":5},"receive":{"rows":3,"tables":["tasks"]}}'
+-- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":2048},"receive":{"rows":3,"tables":["tasks"],"chunks":1,"bytes":820,"complete":true}}'
 
 -- Perform a synchronization cycle with custom retry settings
 SELECT cloudsync_network_sync(500, 3);
+-- A large download drained as a multi-chunk stream in a single call:
+-- '{"send":{"status":"synced","localVersion":42,"serverVersion":42,"chunks":0,"bytes":0},"receive":{"rows":1200,"tables":["docs"],"chunks":7,"bytes":1835008,"complete":true}}'
 
 -- Receive phase failed but send phase completed — the error is surfaced in JSON, not as a SQL error:
--- '{"send":{"status":"synced","localVersion":5,"serverVersion":5},"receive":{"rows":0,"tables":[],"error":"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."}}'
+-- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":512},"receive":{"rows":0,"tables":[],"chunks":0,"bytes":0,"complete":false,"error":"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."}}'
 ```
 
 ---

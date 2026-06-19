@@ -584,8 +584,8 @@ int main(void) {
             poll_sleep_ms += sleep_elapsed_ms;
             bench_trace("step=poll-sleep attempt=%d end elapsed_ms=%.2f", i + 1, sleep_elapsed_ms);
         }
-        bench_trace("step=check db=db_b attempt=%d row_id=%s begin sql=cloudsync_network_check_changes", i + 1, row_id);
-        rc = timed_request(db_b, &requests[request_count++], "check", i + 1, "SELECT cloudsync_network_check_changes();");
+        bench_trace("step=check db=db_b attempt=%d row_id=%s begin sql=cloudsync_network_receive_changes", i + 1, row_id);
+        rc = timed_request(db_b, &requests[request_count++], "check", i + 1, "SELECT cloudsync_network_receive_changes();");
         polls = i + 1;
         bench_trace("step=check db=db_b attempt=%d row_id=%s end rc=%d rows=%d elapsed_ms=%.2f", i + 1, row_id, rc, requests[request_count - 1].rows_received, requests[request_count - 1].elapsed_ms);
         if (rc != SQLITE_OK) goto cleanup;

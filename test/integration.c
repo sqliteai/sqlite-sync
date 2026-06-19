@@ -563,6 +563,9 @@ int test_chunked_payload_paths(void) {
     for (int attempt = 0; attempt < 30; ++attempt) {
         int matches = 0;
 
+        // Exercises the deprecated cloudsync_network_check_changes() alias on purpose
+        // (backward-compatibility coverage); cloudsync_network_receive_changes() is the
+        // canonical name and is covered by the rowset and capped-drain tests.
         rc = db_exec(receiver, "SELECT cloudsync_network_check_changes();");
         if (rc != SQLITE_OK) goto cleanup;
 
@@ -633,7 +636,7 @@ int test_chunked_payload_rowset_path(void) {
     for (int attempt = 0; attempt < 30; ++attempt) {
         int matches = 0;
 
-        rc = db_exec(receiver, "SELECT cloudsync_network_check_changes();");
+        rc = db_exec(receiver, "SELECT cloudsync_network_receive_changes();");
         if (rc != SQLITE_OK) goto cleanup;
 
         snprintf(sql, sizeof(sql),
@@ -659,6 +662,176 @@ int test_chunked_payload_rowset_path(void) {
     }
 
 cleanup:
+    if (cleanup_remote_rows && sender) {
+        snprintf(sql, sizeof(sql), "DELETE FROM chunked_payload_items WHERE id LIKE '%s-%%';", batch_id);
+        if (db_exec(sender, sql) == SQLITE_OK) {
+            db_exec(sender, "SELECT cloudsync_network_send_changes();");
+        }
+    }
+    test_chunked_pair_close(sender, receiver);
+    return rc;
+}
+
+// Verifies that a single cloudsync_network_sync() call drains an entire multi-chunk
+// download (no per-chunk extra sync() calls), and that the new receive.chunks /
+// receive.complete fields report the drain. A multi-row batch is sent with a small
+// chunk size so the server returns several spool pages; one sync() on the receiver
+// must pull them all and report chunks>1 with complete=true.
+int test_chunked_payload_single_sync_drain(void) {
+    int rc = SQLITE_OK;
+    sqlite3 *sender = NULL;
+    sqlite3 *receiver = NULL;
+    char network_init[1024];
+    char batch_id[UUID_STR_MAXLEN];
+    char sql[1024];
+    bool found = false;
+    bool observed_multi_chunk = false;   // saw chunks>1 && complete=1 in a SINGLE sync() call
+    bool cleanup_remote_rows = false;
+    const int row_count = 500;
+    const int body_bytes = 1600;
+
+    rc = test_chunked_pair_open(&sender, &receiver, network_init, sizeof(network_init));
+    if (rc == TEST_SKIPPED) return SQLITE_OK;
+    if (rc != SQLITE_OK) goto cleanup;
+
+    cloudsync_uuid_v7_string(batch_id, true);
+    rc = db_exec(sender, "SELECT cloudsync_set('payload_max_chunk_size', '262144');"); if (rc != SQLITE_OK) goto cleanup;
+    snprintf(sql, sizeof(sql),
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < %d) "
+        "INSERT INTO chunked_payload_items (id, body) "
+        "SELECT '%s-' || printf('%%03d', i), lower(hex(zeroblob(%d))) FROM c;",
+        row_count, batch_id, body_bytes);
+    rc = db_exec(sender, sql); if (rc != SQLITE_OK) goto cleanup;
+
+    // Sender splits into multiple non-fragment chunks.
+    rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks();", 2); if (rc != SQLITE_OK) goto cleanup;
+
+    rc = db_exec(sender, "SELECT cloudsync_network_send_changes();"); if (rc != SQLITE_OK) goto cleanup;
+    cleanup_remote_rows = true;
+
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        int chunks = 0, complete = 0, matches = 0;
+
+        // Run exactly one sync() and capture its JSON once (materialized into a temp
+        // table) so both receive fields are read from the same call, not two calls.
+        rc = db_exec(receiver, "DROP TABLE IF EXISTS _sync_probe;"); if (rc != SQLITE_OK) goto cleanup;
+        rc = db_exec(receiver, "CREATE TEMP TABLE _sync_probe AS SELECT cloudsync_network_sync(250, 30) AS j;");
+        if (rc != SQLITE_OK) goto cleanup;
+        rc = db_select_int(receiver, "SELECT j ->> '$.receive.chunks' FROM _sync_probe;", &chunks); if (rc != SQLITE_OK) goto cleanup;
+        rc = db_select_int(receiver, "SELECT j ->> '$.receive.complete' FROM _sync_probe;", &complete); if (rc != SQLITE_OK) goto cleanup;
+        if (chunks > 1 && complete == 1) observed_multi_chunk = true;
+
+        snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM chunked_payload_items "
+            "WHERE id LIKE '%s-%%' "
+            "AND length(body)=%d "
+            "AND body=lower(hex(zeroblob(%d)));",
+            batch_id, body_bytes * 2, body_bytes);
+        rc = db_select_int(receiver, sql, &matches); if (rc != SQLITE_OK) goto cleanup;
+        if (matches == row_count) { found = true; break; }
+
+        sqlite3_sleep(500);
+    }
+
+    if (!found) {
+        printf("Error: chunked single-sync drain batch %s was not received.\n", batch_id);
+        rc = SQLITE_ERROR;
+        goto cleanup;
+    }
+    if (!observed_multi_chunk) {
+        printf("Error: a single cloudsync_network_sync() did not drain a multi-chunk stream (chunks>1, complete=1) for batch %s.\n", batch_id);
+        rc = SQLITE_ERROR;
+        goto cleanup;
+    }
+
+cleanup:
+    if (receiver) db_exec(receiver, "DROP TABLE IF EXISTS _sync_probe;");
+    if (cleanup_remote_rows && sender) {
+        snprintf(sql, sizeof(sql), "DELETE FROM chunked_payload_items WHERE id LIKE '%s-%%';", batch_id);
+        if (db_exec(sender, sql) == SQLITE_OK) {
+            db_exec(sender, "SELECT cloudsync_network_send_changes();");
+        }
+    }
+    test_chunked_pair_close(sender, receiver);
+    return rc;
+}
+
+// Verifies the opt-in max_chunks cap on cloudsync_network_receive_changes(): each call
+// applies at most one chunk, reports complete=false while more is pending, and resumes
+// across calls (the in-memory page cursor persists) until the whole batch is received.
+int test_chunked_payload_capped_receive(void) {
+    int rc = SQLITE_OK;
+    sqlite3 *sender = NULL;
+    sqlite3 *receiver = NULL;
+    char network_init[1024];
+    char batch_id[UUID_STR_MAXLEN];
+    char sql[1024];
+    bool found = false;
+    bool observed_capped_partial = false;  // saw chunks==1 && complete=0 from a receive(1) call
+    bool cleanup_remote_rows = false;
+    const int row_count = 500;
+    const int body_bytes = 1600;
+
+    rc = test_chunked_pair_open(&sender, &receiver, network_init, sizeof(network_init));
+    if (rc == TEST_SKIPPED) return SQLITE_OK;
+    if (rc != SQLITE_OK) goto cleanup;
+
+    cloudsync_uuid_v7_string(batch_id, true);
+    rc = db_exec(sender, "SELECT cloudsync_set('payload_max_chunk_size', '262144');"); if (rc != SQLITE_OK) goto cleanup;
+    snprintf(sql, sizeof(sql),
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < %d) "
+        "INSERT INTO chunked_payload_items (id, body) "
+        "SELECT '%s-' || printf('%%03d', i), lower(hex(zeroblob(%d))) FROM c;",
+        row_count, batch_id, body_bytes);
+    rc = db_exec(sender, sql); if (rc != SQLITE_OK) goto cleanup;
+
+    rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks();", 2); if (rc != SQLITE_OK) goto cleanup;
+
+    rc = db_exec(sender, "SELECT cloudsync_network_send_changes();"); if (rc != SQLITE_OK) goto cleanup;
+    cleanup_remote_rows = true;
+
+    for (int attempt = 0; attempt < 80; ++attempt) {
+        int chunks = 0, complete = 0, matches = 0;
+
+        // Cap each call to a single chunk; capture both fields from one call.
+        rc = db_exec(receiver, "DROP TABLE IF EXISTS _sync_probe;"); if (rc != SQLITE_OK) goto cleanup;
+        rc = db_exec(receiver, "CREATE TEMP TABLE _sync_probe AS SELECT cloudsync_network_receive_changes(1) AS j;");
+        if (rc != SQLITE_OK) goto cleanup;
+        rc = db_select_int(receiver, "SELECT j ->> '$.receive.chunks' FROM _sync_probe;", &chunks); if (rc != SQLITE_OK) goto cleanup;
+        rc = db_select_int(receiver, "SELECT j ->> '$.receive.complete' FROM _sync_probe;", &complete); if (rc != SQLITE_OK) goto cleanup;
+        // The cap must never apply more than one chunk per call.
+        if (chunks > 1) {
+            printf("Error: cloudsync_network_receive_changes(1) applied %d chunks (cap violated) for batch %s.\n", chunks, batch_id);
+            rc = SQLITE_ERROR;
+            goto cleanup;
+        }
+        if (chunks == 1 && complete == 0) observed_capped_partial = true;
+
+        snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM chunked_payload_items "
+            "WHERE id LIKE '%s-%%' "
+            "AND length(body)=%d "
+            "AND body=lower(hex(zeroblob(%d)));",
+            batch_id, body_bytes * 2, body_bytes);
+        rc = db_select_int(receiver, sql, &matches); if (rc != SQLITE_OK) goto cleanup;
+        if (matches == row_count) { found = true; break; }
+
+        sqlite3_sleep(300);
+    }
+
+    if (!found) {
+        printf("Error: capped-receive batch %s was not fully received.\n", batch_id);
+        rc = SQLITE_ERROR;
+        goto cleanup;
+    }
+    if (!observed_capped_partial) {
+        printf("Error: cloudsync_network_receive_changes(1) never reported a capped partial drain (chunks=1, complete=0) for batch %s.\n", batch_id);
+        rc = SQLITE_ERROR;
+        goto cleanup;
+    }
+
+cleanup:
+    if (receiver) db_exec(receiver, "DROP TABLE IF EXISTS _sync_probe;");
     if (cleanup_remote_rows && sender) {
         snprintf(sql, sizeof(sql), "DELETE FROM chunked_payload_items WHERE id LIKE '%s-%%';", batch_id);
         if (db_exec(sender, sql) == SQLITE_OK) {
@@ -855,7 +1028,7 @@ ABORT_TEST
 // configured server-side to fail apply and check jobs. Verifies that the
 // new failures.{apply,check} response shape is correctly parsed and emitted as
 // send.lastFailure (cloudsync_network_send_changes) and receive.lastFailure
-// (cloudsync_network_check_changes), and that cloudsync_network_sync surfaces
+// (cloudsync_network_receive_changes), and that cloudsync_network_sync surfaces
 // at least one of them.
 //
 // First invocation primes the server (sends data, queues a check) — server-side
@@ -905,7 +1078,7 @@ int test_failure_path (const char *db_path) {
 
     // First invocation — primes the server. Failures may not yet be reported.
     rc = db_exec(db, "SELECT cloudsync_network_send_changes();"); RCHECK
-    rc = db_exec(db, "SELECT cloudsync_network_check_changes();"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_network_receive_changes();"); RCHECK
     rc = db_exec(db, "SELECT cloudsync_network_sync(250, 1);"); RCHECK
 
     // Give the server time to process and fail the queued apply/check jobs.
@@ -917,7 +1090,7 @@ int test_failure_path (const char *db_path) {
     rc = db_expect_gt0(db,
         "SELECT cloudsync_network_send_changes() ->> '$.send.lastFailure.jobId';"); RCHECK
     rc = db_expect_gt0(db,
-        "SELECT cloudsync_network_check_changes() ->> '$.receive.lastFailure.jobId';"); RCHECK
+        "SELECT cloudsync_network_receive_changes() ->> '$.receive.lastFailure.jobId';"); RCHECK
     // sync must surface at least one of the two; instr() catches either path.
     rc = db_expect_gt0(db,
         "SELECT instr(cloudsync_network_sync(250, 1), '\"lastFailure\":');"); RCHECK
@@ -996,6 +1169,8 @@ int main (void) {
     rc += test_report("Enable Disable Test:", test_enable_disable(DB_PATH));
     rc += test_report("Chunked Paths Test:", test_chunked_payload_paths());
     rc += test_report("Chunked Rowset Test:", test_chunked_payload_rowset_path());
+    rc += test_report("Chunked Single-Sync Drain Test:", test_chunked_payload_single_sync_drain());
+    rc += test_report("Chunked Capped Receive Test:", test_chunked_payload_capped_receive());
     rc += test_report("Chunked Failure Test:", test_chunked_send_failure_preserves_checkpoint());
     rc += test_report("Offline Error Test:", test_offline_error(":memory:"));
     rc += test_report("Double Empty Init Test:", test_double_empty_network_init(":memory:"));

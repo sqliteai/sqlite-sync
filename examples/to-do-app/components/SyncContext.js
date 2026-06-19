@@ -51,14 +51,14 @@ export const SyncProvider = ({ children }) => {
         
         try {
           // Use a timeout for the database query to prevent hanging
-          const queryPromise = db.execute('SELECT cloudsync_network_check_changes();');
+          const queryPromise = db.execute('SELECT cloudsync_network_receive_changes();');
           const timeoutPromise = new Promise((_, reject) => 
             setTimeout(() => reject(new Error('Query timeout')), 5000)
           );
           
           const result = await Promise.race([queryPromise, timeoutPromise]);
           
-          const raw = result.rows?.[0]?.['cloudsync_network_check_changes()'];
+          const raw = result.rows?.[0]?.['cloudsync_network_receive_changes()'];
           if (raw) {
             const { receive } = JSON.parse(raw);
             if (receive.rows > 0) {
