@@ -289,7 +289,7 @@ int test_chunked_failure_schema_init(sqlite3 *db) {
 
 int test_chunked_sender_open(sqlite3 **sender, char *network_init, size_t network_init_len) {
     const char* test_db_id = getenv("INTEGRATION_TEST_CHUNKED_DATABASE_ID");
-    if (!test_db_id) {
+    if (!test_db_id || !*test_db_id) {
         printf("(INTEGRATION_TEST_CHUNKED_DATABASE_ID not set, skipping) ");
         return TEST_SKIPPED;
     }
@@ -304,7 +304,7 @@ int test_chunked_sender_open(sqlite3 **sender, char *network_init, size_t networ
 
 int test_chunked_pair_open(sqlite3 **sender, sqlite3 **receiver, char *network_init, size_t network_init_len) {
     const char* test_db_id = getenv("INTEGRATION_TEST_CHUNKED_DATABASE_ID");
-    if (!test_db_id) {
+    if (!test_db_id || !*test_db_id) {
         printf("(INTEGRATION_TEST_CHUNKED_DATABASE_ID not set, skipping) ");
         return TEST_SKIPPED;
     }

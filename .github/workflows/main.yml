@@ -12,6 +12,13 @@ permissions:
   pages: write
   id-token: write
 
+# Cancel an in-progress run when the same branch is pushed again. This also keeps two
+# runs of the same branch from hitting the shared integration tenants concurrently
+# (the chunked negative-cache test needs an idle tenant — see the chunked env below).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     if: ${{ !contains(github.event.head_commit.message, '[auto-update]') }}
@@ -89,7 +96,12 @@ jobs:
       INTEGRATION_TEST_CLOUDSYNC_ADDRESS: ${{ secrets.INTEGRATION_TEST_CLOUDSYNC_ADDRESS }}
       INTEGRATION_TEST_OFFLINE_DATABASE_ID: ${{ secrets.INTEGRATION_TEST_OFFLINE_DATABASE_ID }}
       INTEGRATION_TEST_FAILURE_DATABASE_ID: ${{ secrets.INTEGRATION_TEST_FAILURE_DATABASE_ID }}
-      INTEGRATION_TEST_CHUNKED_DATABASE_ID: ${{ secrets.INTEGRATION_TEST_CHUNKED_DATABASE_ID }}
+      # Chunked tests need an EXCLUSIVE tenant (the negative-cache test's Phase 2 asserts
+      # an idle tenant, so concurrent writers from other matrix legs cause false failures).
+      # Run them on a single leg only; every other leg gets '' and skips them (treated as
+      # unset by test_chunked_pair_open). The chunked network path is platform-agnostic C,
+      # so per-OS coverage adds little here.
+      INTEGRATION_TEST_CHUNKED_DATABASE_ID: ${{ (matrix.name == 'linux' && matrix.arch == 'x86_64') && secrets.INTEGRATION_TEST_CHUNKED_DATABASE_ID || '' }}
 
     steps:
 
