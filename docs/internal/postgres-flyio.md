@@ -836,6 +836,108 @@ docker compose pull db
 docker compose up -d db
 ```
 
+### Update CloudSync from a GitHub Actions PostgreSQL artifact
+
+If you already run the Dockerized PostgreSQL setup from this guide and want to test a newer CloudSync PostgreSQL build without rebuilding and pushing a custom image, you can copy the packaged extension files into the running `db` container.
+
+1. Confirm the running PostgreSQL major version and current CloudSync version:
+
+```bash
+cd /data/cloudsync-postgres
+docker compose exec db pg_config --version
+docker compose exec db psql -U postgres -d postgres -c "SELECT cloudsync_version();"
+docker compose exec db psql -U postgres -d postgres -c "SELECT name, default_version, installed_version FROM pg_available_extensions WHERE name = 'cloudsync';"
+uname -m
+```
+
+For a standard Fly Ubuntu VM running PostgreSQL 17 on x86_64, download the artifact named:
+
+```text
+cloudsync-postgresql17-linux-x86_64
+```
+
+2. Download the artifact from the GitHub Actions run on your local machine while signed into GitHub, then upload the zip to the VM:
+
+```bash
+fly ssh sftp shell --app <your-app-name>
+```
+
+At the SFTP prompt:
+
+```text
+cd /data
+put /absolute/path/to/cloudsync-postgresql17-linux-x86_64.zip cloudsync-postgresql17-linux-x86_64.zip
+```
+
+3. SSH back into the VM, extract the package, and verify the files:
+
+```bash
+fly ssh console --app <your-app-name>
+
+apt-get update
+apt-get install -y unzip
+
+cd /data
+mkdir -p cloudsync-package
+cd cloudsync-package
+cp ../cloudsync-postgresql17-linux-x86_64.zip .
+unzip -o cloudsync-postgresql17-linux-x86_64.zip
+ls -1
+```
+
+The extracted package should contain:
+
+- `cloudsync.so`
+- `cloudsync.control`
+- `cloudsync--<version>.sql`
+- any `cloudsync--<from>--<to>.sql` upgrade scripts
+
+4. Copy those files into the running PostgreSQL container:
+
+```bash
+docker cp cloudsync.so cloudsync-postgres:/tmp/
+docker cp cloudsync.control cloudsync-postgres:/tmp/
+for f in cloudsync--*.sql; do
+  docker cp "$f" cloudsync-postgres:/tmp/
+done
+```
+
+5. Install the files into PostgreSQL's extension directories inside the container and restart it:
+
+```bash
+docker exec cloudsync-postgres sh -lc 'cp /tmp/cloudsync.so "$(pg_config --pkglibdir)/"'
+docker exec cloudsync-postgres sh -lc 'cp /tmp/cloudsync.control /tmp/cloudsync--*.sql "$(pg_config --sharedir)/extension/"'
+docker restart cloudsync-postgres
+```
+
+6. Verify the new binary version:
+
+```bash
+docker exec cloudsync-postgres psql -U postgres -d postgres -c "SELECT cloudsync_version();"
+docker exec cloudsync-postgres psql -U postgres -d postgres -c "SELECT name, default_version, installed_version FROM pg_available_extensions WHERE name = 'cloudsync';"
+```
+
+If `installed_version` is behind `default_version`, apply the PostgreSQL extension upgrade:
+
+```bash
+docker exec cloudsync-postgres psql -U postgres -d postgres -c "ALTER EXTENSION cloudsync UPDATE;"
+```
+
+Then verify again:
+
+```bash
+docker exec cloudsync-postgres psql -U postgres -d postgres -c "SELECT cloudsync_version();"
+docker exec cloudsync-postgres psql -U postgres -d postgres -c "SELECT name, default_version, installed_version FROM pg_available_extensions WHERE name = 'cloudsync';"
+```
+
+For example, after a successful `1.0.16 -> 1.1.0` upgrade you should see:
+
+- `cloudsync_version()` returns `1.1.0`
+- `default_version = 1.1`
+- `installed_version = 1.1`
+
+> **Important:** this is an in-place container modification. It survives a container restart, but it does **not** survive recreating the container from the original image. If you later run `docker compose pull`, change the image tag, or recreate `db`, you will lose the manually copied files unless the image itself already includes that newer CloudSync build.
+
 ### View logs
 
 ```bash
@@ -852,10 +954,12 @@ docker compose logs -f auth   # Auth server only
 |---------|----------|
 | `fractional_indexing.h: No such file or directory` | Run `git submodule update --init --recursive` before building |
 | `cloudsync_version()` not found | Init scripts only run on first start. Run `CREATE EXTENSION IF NOT EXISTS cloudsync;` manually |
+| `unzip: command not found` | Install it on the Fly VM first: `apt-get update && apt-get install -y unzip` |
 | Auth server won't start | Check `docker compose logs auth`. Ensure `npm install` was run in `auth-server/` |
 | Token verification fails (HS256) | Ensure `JWT_SECRET` matches exactly — CloudSync uses the raw string, not base64-decoded |
 | Token verification fails (JWKS) | Ensure CloudSync can reach the JWKS endpoint and `JWT_ISSUER` matches the `ISSUER` env var |
 | JWKS keys lost after restart | The JWKS server generates new keys on each start. For production, persist keys to a volume |
 | Docker commands not found after VM restart | Run `/data/startup.sh` — Fly VM root filesystem resets on stop/start |
 | `fuse-overlayfs` not working | Install it: `apt-get install -y fuse-overlayfs` |
+| Manual artifact upgrade disappears after `docker compose up` recreation | This method only patches the running container. Rebuild or switch to an image that already contains the new CloudSync build for a durable upgrade. |
 | Can't connect to Postgres from outside Fly | Use `fly proxy 5432:5432 -a <your-app-name>` |
