@@ -290,7 +290,6 @@ int test_chunked_failure_schema_init(sqlite3 *db) {
 int test_chunked_sender_open(sqlite3 **sender, char *network_init, size_t network_init_len) {
     const char* test_db_id = getenv("INTEGRATION_TEST_CHUNKED_DATABASE_ID");
     if (!test_db_id || !*test_db_id) {
-        printf("(INTEGRATION_TEST_CHUNKED_DATABASE_ID not set, skipping) ");
         return TEST_SKIPPED;
     }
 
@@ -305,7 +304,6 @@ int test_chunked_sender_open(sqlite3 **sender, char *network_init, size_t networ
 int test_chunked_pair_open(sqlite3 **sender, sqlite3 **receiver, char *network_init, size_t network_init_len) {
     const char* test_db_id = getenv("INTEGRATION_TEST_CHUNKED_DATABASE_ID");
     if (!test_db_id || !*test_db_id) {
-        printf("(INTEGRATION_TEST_CHUNKED_DATABASE_ID not set, skipping) ");
         return TEST_SKIPPED;
     }
 
@@ -582,7 +580,7 @@ int test_chunked_payload_paths(void) {
     bool cleanup_remote_row = false;
 
     rc = test_chunked_pair_open(&sender, &receiver, network_init, sizeof(network_init));
-    if (rc == TEST_SKIPPED) return SQLITE_OK;
+    if (rc == TEST_SKIPPED) return TEST_SKIPPED;
     if (rc != SQLITE_OK) goto cleanup;
 
     cloudsync_uuid_v7_string(row_id, true);
@@ -654,7 +652,7 @@ int test_chunked_payload_rowset_path(void) {
     const int body_bytes = 1600;
 
     rc = test_chunked_pair_open(&sender, &receiver, network_init, sizeof(network_init));
-    if (rc == TEST_SKIPPED) return SQLITE_OK;
+    if (rc == TEST_SKIPPED) return TEST_SKIPPED;
     if (rc != SQLITE_OK) goto cleanup;
 
     cloudsync_uuid_v7_string(batch_id, true);
@@ -738,7 +736,7 @@ int test_chunked_payload_single_sync_drain(void) {
     const int body_rand_bytes = 2048;    // 4096-char bodies; ~1 MB random / ~2 MB serialized
 
     rc = test_chunked_pair_open(&sender, &receiver, network_init, sizeof(network_init));
-    if (rc == TEST_SKIPPED) return SQLITE_OK;
+    if (rc == TEST_SKIPPED) return TEST_SKIPPED;
     if (rc != SQLITE_OK) goto cleanup;
 
     cloudsync_uuid_v7_string(batch_id, true);
@@ -838,7 +836,7 @@ int test_chunked_payload_capped_receive(void) {
     const int body_rand_bytes = 2048;    // 4096-char bodies; ~1 MB random / ~2 MB serialized
 
     rc = test_chunked_pair_open(&sender, &receiver, network_init, sizeof(network_init));
-    if (rc == TEST_SKIPPED) return SQLITE_OK;
+    if (rc == TEST_SKIPPED) return TEST_SKIPPED;
     if (rc != SQLITE_OK) goto cleanup;
 
     cloudsync_uuid_v7_string(batch_id, true);
@@ -930,7 +928,7 @@ int test_chunked_send_failure_preserves_checkpoint(void) {
     const int body_bytes = 1600;
 
     rc = test_chunked_sender_open(&sender, network_init, sizeof(network_init));
-    if (rc == TEST_SKIPPED) return SQLITE_OK;
+    if (rc == TEST_SKIPPED) return TEST_SKIPPED;
     if (rc != SQLITE_OK) goto cleanup;
 
     rc = test_chunked_failure_schema_init(sender); if (rc != SQLITE_OK) goto cleanup;
@@ -1022,7 +1020,7 @@ int test_chunked_negative_cache_invalidation(void) {
     bool cleanup_remote_row = false;
 
     rc = test_chunked_pair_open(&sender, &receiver, network_init, sizeof(network_init));
-    if (rc == TEST_SKIPPED) return SQLITE_OK;
+    if (rc == TEST_SKIPPED) return TEST_SKIPPED;
     if (rc != SQLITE_OK) goto cleanup;
 
     // Commit a sentinel row that sorts after any pre-existing tenant backlog, so
@@ -1179,10 +1177,11 @@ int test_offline_error(const char *db_path) {
 
     // Initialize network with offline database ID
     const char* offline_db_id = getenv("INTEGRATION_TEST_OFFLINE_DATABASE_ID");
-    if (!offline_db_id) {
-        printf("Skipping offline error test: INTEGRATION_TEST_OFFLINE_DATABASE_ID not set.\n");
-        rc = SQLITE_OK;
-        goto abort_test;
+    if (!offline_db_id || !*offline_db_id) {
+        // Clean up the db opened above and return TEST_SKIPPED directly (going through
+        // abort_test would trip ERROR_MSG on the non-zero rc and print a spurious error).
+        if (db) { db_exec(db, "SELECT cloudsync_terminate();"); sqlite3_close(db); }
+        return TEST_SKIPPED;
     }
 
     char network_init[512];
@@ -1294,14 +1293,12 @@ int test_failure_path (const char *db_path) {
     sqlite3 *db = NULL;
 
     const char *test_db_id = getenv("INTEGRATION_TEST_FAILURE_DATABASE_ID");
-    if (!test_db_id) {
-        printf("(INTEGRATION_TEST_FAILURE_DATABASE_ID not set, skipping) ");
-        return SQLITE_OK;
+    if (!test_db_id || !*test_db_id) {
+        return TEST_SKIPPED;
     }
     const char *custom_address = getenv("INTEGRATION_TEST_CLOUDSYNC_ADDRESS");
-    if (!custom_address) {
-        printf("(INTEGRATION_TEST_CLOUDSYNC_ADDRESS not set, skipping) ");
-        return SQLITE_OK;
+    if (!custom_address || !*custom_address) {
+        return TEST_SKIPPED;
     }
 
     rc = open_load_ext(db_path, &db); RCHECK
@@ -1368,8 +1365,9 @@ ABORT_TEST
 // MARK: -
 
 int test_report(const char *description, int rc){
-    printf("%-24s %s\n", description, rc ? "FAILED" : "OK");
-    return rc;
+    const char *result = (rc == TEST_SKIPPED) ? "SKIPPED" : (rc ? "FAILED" : "OK");
+    printf("%-32s %s\n", description, result);
+    return (rc == TEST_SKIPPED) ? 0 : rc;   // a skipped test is not a failure
 }
 
 #ifdef PEERS
@@ -1422,12 +1420,20 @@ int main (void) {
     rc += test_report("Is Enabled Test:", test_is_enabled(DB_PATH));
     rc += test_report("DB Version Test:", test_db_version(DB_PATH));
     rc += test_report("Enable Disable Test:", test_enable_disable(DB_PATH));
+
+    // Chunked payload tests run only when INTEGRATION_TEST_CHUNKED_DATABASE_ID points at a
+    // tenant with a small payload_max_chunk_size; state the skip reason once for the group.
+    const char *chunked_id = getenv("INTEGRATION_TEST_CHUNKED_DATABASE_ID");
+    printf("\n-- Chunked Payload Tests%s --\n",
+           (chunked_id && *chunked_id) ? "" : " (INTEGRATION_TEST_CHUNKED_DATABASE_ID not set, skipping)");
     rc += test_report("Chunked Paths Test:", test_chunked_payload_paths());
     rc += test_report("Chunked Rowset Test:", test_chunked_payload_rowset_path());
     rc += test_report("Chunked Single-Sync Drain Test:", test_chunked_payload_single_sync_drain());
     rc += test_report("Chunked Capped Receive Test:", test_chunked_payload_capped_receive());
     rc += test_report("Chunked Failure Test:", test_chunked_send_failure_preserves_checkpoint());
     rc += test_report("Chunked Negative Cache Test:", test_chunked_negative_cache_invalidation());
+    printf("\n");
+
     rc += test_report("Offline Error Test:", test_offline_error(":memory:"));
     rc += test_report("Double Empty Init Test:", test_double_empty_network_init(":memory:"));
     rc += test_report("Failure Path Test:", test_failure_path(":memory:"));
