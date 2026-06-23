@@ -713,8 +713,8 @@ cleanup:
 
 // Verifies that a single cloudsync_network_sync() call drains an entire multi-chunk
 // download (no per-chunk extra sync() calls), and that the new receive.chunks /
-// receive.complete fields report the drain. A multi-row batch is sent with a small
-// chunk size so the server returns several spool pages; one sync() on the receiver
+// receive.complete fields report the drain. A large batch of incompressible rows is
+// sent so the server's check response spans several pages; one sync() on the receiver
 // must pull them all and report chunks>1 with complete=true.
 int test_chunked_payload_single_sync_drain(void) {
     int rc = SQLITE_OK;
@@ -726,8 +726,16 @@ int test_chunked_payload_single_sync_drain(void) {
     bool found = false;
     bool observed_multi_chunk = false;   // saw chunks>1 && complete=1 in a SINGLE sync() call
     bool cleanup_remote_rows = false;
+    // INCOMPRESSIBLE random bodies (distinct per row) so the payload can't compress
+    // below the server's page size. Multi-page splitting is driven by the TENANT's
+    // payload_max_chunk_size (the server-side check-response page size, distinct from
+    // the client upload chunk size set below), which must be small on
+    // INTEGRATION_TEST_CHUNKED_DATABASE_ID — set it to 262144 to match the client.
+    // ~1 MB of incompressible data over a 256 KB page cap yields several pages
+    // regardless of tenant backlog, so one sync() must drain chunks>1. (zeroblob bodies
+    // would compress to ~nothing and collapse back to a single page.)
     const int row_count = 500;
-    const int body_bytes = 1600;
+    const int body_rand_bytes = 2048;    // 4096-char bodies; ~1 MB random / ~2 MB serialized
 
     rc = test_chunked_pair_open(&sender, &receiver, network_init, sizeof(network_init));
     if (rc == TEST_SKIPPED) return SQLITE_OK;
@@ -738,8 +746,8 @@ int test_chunked_payload_single_sync_drain(void) {
     snprintf(sql, sizeof(sql),
         "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < %d) "
         "INSERT INTO chunked_payload_items (id, body) "
-        "SELECT '%s-' || printf('%%03d', i), lower(hex(zeroblob(%d))) FROM c;",
-        row_count, batch_id, body_bytes);
+        "SELECT '%s-' || printf('%%03d', i), lower(hex(randomblob(%d))) FROM c;",
+        row_count, batch_id, body_rand_bytes);
     rc = db_exec(sender, sql); if (rc != SQLITE_OK) goto cleanup;
 
     // Sender splits into multiple non-fragment chunks.
@@ -771,12 +779,13 @@ int test_chunked_payload_single_sync_drain(void) {
         }
         if (chunks > 1 && complete == 1) observed_multi_chunk = true;
 
+        // Random bodies can't be matched by value; assert the full set arrived with
+        // each row at its expected length (content correctness is covered elsewhere).
         snprintf(sql, sizeof(sql),
             "SELECT COUNT(*) FROM chunked_payload_items "
             "WHERE id LIKE '%s-%%' "
-            "AND length(body)=%d "
-            "AND body=lower(hex(zeroblob(%d)));",
-            batch_id, body_bytes * 2, body_bytes);
+            "AND length(body)=%d;",
+            batch_id, body_rand_bytes * 2);
         rc = db_select_int(receiver, sql, &matches); if (rc != SQLITE_OK) goto cleanup;
         if (matches == row_count) { found = true; break; }
 
@@ -818,8 +827,15 @@ int test_chunked_payload_capped_receive(void) {
     bool found = false;
     bool observed_capped_partial = false;  // saw chunks==1 && complete=0 from a receive(1) call
     bool cleanup_remote_rows = false;
+    // INCOMPRESSIBLE random bodies (distinct per row) so the payload can't compress
+    // below the server's page size. Multi-page splitting is driven by the TENANT's
+    // payload_max_chunk_size (the server-side check-response page size, distinct from
+    // the client upload chunk size set below), which must be small on
+    // INTEGRATION_TEST_CHUNKED_DATABASE_ID — set it to 262144 to match the client — so
+    // the batch spans several pages and receive_changes(1) leaves a partial. (zeroblob
+    // bodies would compress away and collapse to one page.)
     const int row_count = 500;
-    const int body_bytes = 1600;
+    const int body_rand_bytes = 2048;    // 4096-char bodies; ~1 MB random / ~2 MB serialized
 
     rc = test_chunked_pair_open(&sender, &receiver, network_init, sizeof(network_init));
     if (rc == TEST_SKIPPED) return SQLITE_OK;
@@ -830,8 +846,8 @@ int test_chunked_payload_capped_receive(void) {
     snprintf(sql, sizeof(sql),
         "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < %d) "
         "INSERT INTO chunked_payload_items (id, body) "
-        "SELECT '%s-' || printf('%%03d', i), lower(hex(zeroblob(%d))) FROM c;",
-        row_count, batch_id, body_bytes);
+        "SELECT '%s-' || printf('%%03d', i), lower(hex(randomblob(%d))) FROM c;",
+        row_count, batch_id, body_rand_bytes);
     rc = db_exec(sender, sql); if (rc != SQLITE_OK) goto cleanup;
 
     rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks();", 2); if (rc != SQLITE_OK) goto cleanup;
@@ -866,12 +882,13 @@ int test_chunked_payload_capped_receive(void) {
         }
         if (chunks == 1 && complete == 0) observed_capped_partial = true;
 
+        // Random bodies can't be matched by value; assert the full set arrived with
+        // each row at its expected length (content correctness is covered elsewhere).
         snprintf(sql, sizeof(sql),
             "SELECT COUNT(*) FROM chunked_payload_items "
             "WHERE id LIKE '%s-%%' "
-            "AND length(body)=%d "
-            "AND body=lower(hex(zeroblob(%d)));",
-            batch_id, body_bytes * 2, body_bytes);
+            "AND length(body)=%d;",
+            batch_id, body_rand_bytes * 2);
         rc = db_select_int(receiver, sql, &matches); if (rc != SQLITE_OK) goto cleanup;
         if (matches == row_count) { found = true; break; }
 
@@ -963,6 +980,186 @@ int test_chunked_send_failure_preserves_checkpoint(void) {
 cleanup:
     if (errmsg) sqlite3_free(errmsg);
     test_chunked_sender_close(sender);
+    return rc;
+}
+
+// Regression test for the chunked-check stale negative-cache bug
+// (see cloudsync/docs/chunked-check-negative-cache.md). A receiver that drains
+// the tenant to empty must not be permanently pinned to "up to date": an empty
+// /check result advances no cursor, so the receiver keeps polling the same
+// (dbVersion, seq) key. A server that *caches* that empty chunk at the key would
+// keep answering "no changes" even after another client commits changes at the
+// same key, hiding them until the artifact TTL (up to 24h) expires.
+//
+// This drives the exact sequence that exposes the bug end-to-end:
+//   1. the receiver drains the whole tenant until it is provably caught up;
+//   2. it keeps polling for a few more seconds and asserts it stays at 0 rows
+//      (steady empty state — this is where the stale empty chunk would be cached);
+//   3. a second client (the sender) inserts a row and sends it at that same key;
+//   4. the receiver must observe that row on a subsequent receive. Against a
+//      server that caches the negative result this never arrives and the test
+//      fails; against the fixed server it is delivered.
+//
+// "Caught up" cannot be detected from row counts alone: a server that is still
+// preparing a page replies 202, which the client surfaces as receive.rows=0,
+// complete=1 — indistinguishable from a genuinely empty result. (An earlier
+// version of this test mistook three preparation 202s for "drained" and then
+// had ~71k backlog rows land during phase 2.) So we anchor on a sentinel: the
+// sender commits a marker row *after* any pre-existing backlog, and phase 1 is
+// only considered drained once the receiver has both applied that sentinel
+// (the whole backlog is therefore behind it) and then seen a 0-row poll.
+int test_chunked_negative_cache_invalidation(void) {
+    int rc = SQLITE_OK;
+    sqlite3 *sender = NULL;
+    sqlite3 *receiver = NULL;
+    char network_init[1024];
+    char sentinel_id[UUID_STR_MAXLEN];
+    char row_id[UUID_STR_MAXLEN];
+    char sql[1024];
+    bool drained = false;
+    bool found = false;
+    bool cleanup_sentinel = false;
+    bool cleanup_remote_row = false;
+
+    rc = test_chunked_pair_open(&sender, &receiver, network_init, sizeof(network_init));
+    if (rc == TEST_SKIPPED) return SQLITE_OK;
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // Commit a sentinel row that sorts after any pre-existing tenant backlog, so
+    // observing it on the receiver proves the entire backlog has been drained.
+    cloudsync_uuid_v7_string(sentinel_id, true);
+    snprintf(sql, sizeof(sql),
+        "INSERT INTO chunked_payload_items (id, body) VALUES ('%s', 'negative-cache-sentinel');",
+        sentinel_id);
+    rc = db_exec(sender, sql); if (rc != SQLITE_OK) goto cleanup;
+    rc = db_exec(sender, "SELECT cloudsync_network_send_changes();"); if (rc != SQLITE_OK) goto cleanup;
+    cleanup_sentinel = true;
+
+    // Phase 1: drain the receiver until it is provably caught up. Each bare
+    // receive_changes() applies everything currently ready and returns at the first
+    // 202, so a large backlog is pulled across several iterations. Termination
+    // requires the sentinel to be present (backlog fully drained) AND a subsequent
+    // 0-row poll, so a mid-preparation 202 can never be mistaken for "caught up".
+    bool sentinel_seen = false;
+    for (int attempt = 0; attempt < 200 && !drained; ++attempt) {
+        int rows = 0, complete = 0;
+        char recv_err[512];
+
+        rc = db_select_receive(receiver,
+            "SELECT j ->> '$.receive.rows', j ->> '$.receive.complete', j ->> '$.receive.error' "
+            "FROM (SELECT cloudsync_network_receive_changes() AS j);",
+            &rows, &complete, recv_err, sizeof(recv_err));
+        if (rc != SQLITE_OK) goto cleanup;
+        if (recv_err[0]) {
+            printf("Error: negative-cache drain reported receive.error: %s\n", recv_err);
+            rc = SQLITE_ERROR;
+            goto cleanup;
+        }
+
+        if (!sentinel_seen) {
+            int matches = 0;
+            snprintf(sql, sizeof(sql),
+                "SELECT COUNT(*) FROM chunked_payload_items WHERE id='%s';", sentinel_id);
+            rc = db_select_int(receiver, sql, &matches); if (rc != SQLITE_OK) goto cleanup;
+            if (matches == 1) sentinel_seen = true;
+        }
+
+        // Caught up only once the backlog (including the sentinel) is fully applied
+        // and a further poll delivers nothing.
+        if (sentinel_seen && rows == 0) drained = true;
+
+        sqlite3_sleep(300);
+    }
+
+    if (!drained) {
+        printf("Error: negative-cache receiver never caught up to the sentinel row.\n");
+        rc = SQLITE_ERROR;
+        goto cleanup;
+    }
+
+    // Phase 2: keep polling for a few seconds with the tenant idle. The receiver is
+    // caught up, so every poll must continue to report 0 rows. (This is the window
+    // where a buggy server caches the empty chunk at the receiver's key.)
+    for (int i = 0; i < 6; ++i) {
+        int rows = 0, complete = 0;
+        char recv_err[512];
+
+        rc = db_select_receive(receiver,
+            "SELECT j ->> '$.receive.rows', j ->> '$.receive.complete', j ->> '$.receive.error' "
+            "FROM (SELECT cloudsync_network_receive_changes() AS j);",
+            &rows, &complete, recv_err, sizeof(recv_err));
+        if (rc != SQLITE_OK) goto cleanup;
+        if (recv_err[0]) {
+            printf("Error: negative-cache idle poll reported receive.error: %s\n", recv_err);
+            rc = SQLITE_ERROR;
+            goto cleanup;
+        }
+        if (rows != 0) {
+            printf("Error: negative-cache receiver applied %d unexpected rows while the tenant was idle.\n", rows);
+            rc = SQLITE_ERROR;
+            goto cleanup;
+        }
+
+        sqlite3_sleep(500);
+    }
+
+    // Phase 3: a second client commits a change at the same (dbVersion, seq) key
+    // the receiver has been polling against.
+    cloudsync_uuid_v7_string(row_id, true);
+    snprintf(sql, sizeof(sql),
+        "INSERT INTO chunked_payload_items (id, body) VALUES ('%s', 'negative-cache');",
+        row_id);
+    rc = db_exec(sender, sql); if (rc != SQLITE_OK) goto cleanup;
+    rc = db_exec(sender, "SELECT cloudsync_network_send_changes();"); if (rc != SQLITE_OK) goto cleanup;
+    cleanup_remote_row = true;
+
+    // Phase 4: the receiver must now pick up the change on a subsequent receive.
+    // A stale negative cache would keep answering "no changes" at the unchanged key
+    // and this row would never arrive.
+    for (int attempt = 0; attempt < 60; ++attempt) {
+        int matches = 0;
+        char recv_err[512];
+        int rows = 0, complete = 0;
+
+        rc = db_select_receive(receiver,
+            "SELECT j ->> '$.receive.rows', j ->> '$.receive.complete', j ->> '$.receive.error' "
+            "FROM (SELECT cloudsync_network_receive_changes() AS j);",
+            &rows, &complete, recv_err, sizeof(recv_err));
+        if (rc != SQLITE_OK) goto cleanup;
+        if (recv_err[0]) {
+            printf("Error: negative-cache post-send poll reported receive.error: %s\n", recv_err);
+            rc = SQLITE_ERROR;
+            goto cleanup;
+        }
+
+        snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM chunked_payload_items WHERE id='%s' AND body='negative-cache';",
+            row_id);
+        rc = db_select_int(receiver, sql, &matches); if (rc != SQLITE_OK) goto cleanup;
+        if (matches == 1) { found = true; break; }
+
+        sqlite3_sleep(500);
+    }
+
+    if (!found) {
+        printf("Error: stale negative cache — receiver never received row %s after the sender committed it.\n", row_id);
+        rc = SQLITE_ERROR;
+        goto cleanup;
+    }
+
+cleanup:
+    if ((cleanup_sentinel || cleanup_remote_row) && sender) {
+        if (cleanup_remote_row) {
+            snprintf(sql, sizeof(sql), "DELETE FROM chunked_payload_items WHERE id='%s';", row_id);
+            db_exec(sender, sql);
+        }
+        if (cleanup_sentinel) {
+            snprintf(sql, sizeof(sql), "DELETE FROM chunked_payload_items WHERE id='%s';", sentinel_id);
+            db_exec(sender, sql);
+        }
+        db_exec(sender, "SELECT cloudsync_network_send_changes();");
+    }
+    test_chunked_pair_close(sender, receiver);
     return rc;
 }
 
@@ -1230,6 +1427,7 @@ int main (void) {
     rc += test_report("Chunked Single-Sync Drain Test:", test_chunked_payload_single_sync_drain());
     rc += test_report("Chunked Capped Receive Test:", test_chunked_payload_capped_receive());
     rc += test_report("Chunked Failure Test:", test_chunked_send_failure_preserves_checkpoint());
+    rc += test_report("Chunked Negative Cache Test:", test_chunked_negative_cache_invalidation());
     rc += test_report("Offline Error Test:", test_offline_error(":memory:"));
     rc += test_report("Double Empty Init Test:", test_double_empty_network_init(":memory:"));
     rc += test_report("Failure Path Test:", test_failure_path(":memory:"));
