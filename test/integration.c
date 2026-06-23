@@ -186,6 +186,45 @@ int db_select_int (sqlite3 *db, const char *sql, int *out) {
     return sqlite3_finalize(stmt);
 }
 
+// Reads the receive probe — chunks (int), complete (int), error (text) — from a
+// single row of one network call. error_out is set to "" when receive.error is
+// absent (the common success case) and to the message otherwise, so a swallowed
+// client-side apply failure surfaces instead of timing out as "not received".
+// The call must be a bare/read-only SELECT (e.g. a subquery), never
+// CREATE TABLE ... AS SELECT, or the apply path cannot open its savepoint
+// ("SQL statements in progress") and the download is silently dropped.
+int db_select_receive (sqlite3 *db, const char *sql, int *chunks, int *complete, char *error_out, int error_len) {
+    if (error_len > 0) error_out[0] = '\0';
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        printf("Error while preparing %s: %s\n", sql, sqlite3_errmsg(db));
+        return rc;
+    }
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        printf("Error while executing %s: expected one row, got rc=%d\n", sql, rc);
+        sqlite3_finalize(stmt);
+        return SQLITE_ERROR;
+    }
+
+    *chunks = sqlite3_column_int(stmt, 0);
+    *complete = sqlite3_column_int(stmt, 1);
+    const unsigned char *err = sqlite3_column_text(stmt, 2);
+    if (err && error_len > 0) snprintf(error_out, error_len, "%s", (const char *)err);
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE) {
+        printf("Error while executing %s: expected one row only, got rc=%d\n", sql, rc);
+        sqlite3_finalize(stmt);
+        return SQLITE_ERROR;
+    }
+
+    return sqlite3_finalize(stmt);
+}
+
 int db_expect_min (sqlite3 *db, const char *sql, int expect_min) {
     int value = 0;
     int rc = db_select_int(db, sql, &value);
@@ -711,14 +750,25 @@ int test_chunked_payload_single_sync_drain(void) {
 
     for (int attempt = 0; attempt < 40; ++attempt) {
         int chunks = 0, complete = 0, matches = 0;
+        char recv_err[512];
 
-        // Run exactly one sync() and capture its JSON once (materialized into a temp
-        // table) so both receive fields are read from the same call, not two calls.
-        rc = db_exec(receiver, "DROP TABLE IF EXISTS _sync_probe;"); if (rc != SQLITE_OK) goto cleanup;
-        rc = db_exec(receiver, "CREATE TEMP TABLE _sync_probe AS SELECT cloudsync_network_sync(250, 30) AS j;");
+        // Run exactly one sync() and read both receive fields from that single call.
+        // The call must stay a read-only SELECT (here a subquery): wrapping it in
+        // CREATE TABLE ... AS SELECT would keep the outer statement stepping while the
+        // apply path tries to open its savepoint, which SQLite rejects ("SQL statements
+        // in progress") — silently leaving the download unapplied.
+        rc = db_select_receive(receiver,
+            "SELECT j ->> '$.receive.chunks', j ->> '$.receive.complete', j ->> '$.receive.error' "
+            "FROM (SELECT cloudsync_network_sync(250, 30) AS j);",
+            &chunks, &complete, recv_err, sizeof(recv_err));
         if (rc != SQLITE_OK) goto cleanup;
-        rc = db_select_int(receiver, "SELECT j ->> '$.receive.chunks' FROM _sync_probe;", &chunks); if (rc != SQLITE_OK) goto cleanup;
-        rc = db_select_int(receiver, "SELECT j ->> '$.receive.complete' FROM _sync_probe;", &complete); if (rc != SQLITE_OK) goto cleanup;
+        // A client-side apply error is swallowed into receive.error; fail loudly
+        // instead of looping until the "not received" timeout.
+        if (recv_err[0]) {
+            printf("Error: chunked single-sync drain batch %s reported receive.error: %s\n", batch_id, recv_err);
+            rc = SQLITE_ERROR;
+            goto cleanup;
+        }
         if (chunks > 1 && complete == 1) observed_multi_chunk = true;
 
         snprintf(sql, sizeof(sql),
@@ -745,7 +795,6 @@ int test_chunked_payload_single_sync_drain(void) {
     }
 
 cleanup:
-    if (receiver) db_exec(receiver, "DROP TABLE IF EXISTS _sync_probe;");
     if (cleanup_remote_rows && sender) {
         snprintf(sql, sizeof(sql), "DELETE FROM chunked_payload_items WHERE id LIKE '%s-%%';", batch_id);
         if (db_exec(sender, sql) == SQLITE_OK) {
@@ -792,13 +841,23 @@ int test_chunked_payload_capped_receive(void) {
 
     for (int attempt = 0; attempt < 80; ++attempt) {
         int chunks = 0, complete = 0, matches = 0;
+        char recv_err[512];
 
-        // Cap each call to a single chunk; capture both fields from one call.
-        rc = db_exec(receiver, "DROP TABLE IF EXISTS _sync_probe;"); if (rc != SQLITE_OK) goto cleanup;
-        rc = db_exec(receiver, "CREATE TEMP TABLE _sync_probe AS SELECT cloudsync_network_receive_changes(1) AS j;");
+        // Cap each call to a single chunk; read both fields from that one call. Must
+        // stay a read-only SELECT (subquery): CREATE TABLE ... AS SELECT would block
+        // the apply savepoint ("SQL statements in progress") and silently drop the
+        // downloaded chunk.
+        rc = db_select_receive(receiver,
+            "SELECT j ->> '$.receive.chunks', j ->> '$.receive.complete', j ->> '$.receive.error' "
+            "FROM (SELECT cloudsync_network_receive_changes(1) AS j);",
+            &chunks, &complete, recv_err, sizeof(recv_err));
         if (rc != SQLITE_OK) goto cleanup;
-        rc = db_select_int(receiver, "SELECT j ->> '$.receive.chunks' FROM _sync_probe;", &chunks); if (rc != SQLITE_OK) goto cleanup;
-        rc = db_select_int(receiver, "SELECT j ->> '$.receive.complete' FROM _sync_probe;", &complete); if (rc != SQLITE_OK) goto cleanup;
+        // Surface a swallowed client-side apply error instead of looping to timeout.
+        if (recv_err[0]) {
+            printf("Error: capped-receive batch %s reported receive.error: %s\n", batch_id, recv_err);
+            rc = SQLITE_ERROR;
+            goto cleanup;
+        }
         // The cap must never apply more than one chunk per call.
         if (chunks > 1) {
             printf("Error: cloudsync_network_receive_changes(1) applied %d chunks (cap violated) for batch %s.\n", chunks, batch_id);
@@ -831,7 +890,6 @@ int test_chunked_payload_capped_receive(void) {
     }
 
 cleanup:
-    if (receiver) db_exec(receiver, "DROP TABLE IF EXISTS _sync_probe;");
     if (cleanup_remote_rows && sender) {
         snprintf(sql, sizeof(sql), "DELETE FROM chunked_payload_items WHERE id LIKE '%s-%%';", batch_id);
         if (db_exec(sender, sql) == SQLITE_OK) {
