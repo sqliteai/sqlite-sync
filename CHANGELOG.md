@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [1.1.0] - Unreleased
 
 ### Added
 
@@ -31,6 +31,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `cloudsync_network_send_changes()` now streams outgoing changes through `cloudsync_payload_chunks()` instead of first building one monolithic payload. This bounds transport payload size for the built-in network path and lets large rowsets or oversized BLOB/TEXT values flow through the same `/apply` endpoint as regular payloads.
 - The built-in `/check` receive path now advertises `X-CloudSync-Capabilities: check-status-response, check-spool-cursor` and can apply cursor-mode pages returned inline as `data.payload` base64 bytes, in addition to larger pages returned as `data.url` download artifacts. Requests send `cursor`; responses provide `nextCursor` when another page is available.
 - The chunked-download receive path advances the local receive checkpoint (`check_dbversion` / `check_seq`) **only after a chunk stream has been fully applied**, jumping straight to the stream watermark — never into the middle of a source `db_version`. This mirrors the send path and ensures a stop between chunks cannot skip the un-applied rows of a `db_version` split across chunks on the next `/check` (the server resumes on `db_version > since`, with no intra-version cursor). `cloudsync_payload_apply()` no longer advances the receive checkpoint per applied chunk; the built-in network `/check` path drives it from the server's watermark and final-chunk signal, and falls back to the previous monolithic behavior when the server sends no watermark. Re-delivered rows remain idempotent.
+
+### Fixed
+
+- **PostgreSQL backend crash (segfault) on an error raised after `cloudsync_changes_select()`.** The set-returning function returned via `SRF_RETURN_NEXT` / `SRF_RETURN_DONE` from inside its `PG_TRY` block, which skips `PG_END_TRY()` and leaves `PG_exception_stack` pointing at the function's already-returned stack frame. A later `ereport(ERROR)` in the same query — such as the `cloudsync_payload_blob_checked()` size-limit check — then `siglongjmp()`d into freed stack and crashed the backend. The `SRF_RETURN_*` calls now run after `PG_END_TRY()` so the exception stack is always restored. This is a pre-existing bug, not specific to the chunked-payload work.
 
 ## [1.0.20] - 2026-05-26
 

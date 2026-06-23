@@ -96,7 +96,7 @@ SELECT (:excl_local_chunks::int = 0 AND :incl_local_chunks::int > 0) AS exclude_
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
-SELECT (:excl_local_blob_is_null AND :incl_local_blob_size::bigint > 0) AS blob_checked_exclude_flag_ok \gset
+SELECT (:'excl_local_blob_is_null'::bool AND :incl_local_blob_size::bigint > 0) AS blob_checked_exclude_flag_ok \gset
 \if :blob_checked_exclude_flag_ok
 \echo [PASS] (:testid) cloudsync_payload_blob_checked honors include/exclude site filters
 \else
@@ -288,7 +288,7 @@ SELECT (:legacy_payload_len::int > 262144) AS legacy_payload_large_ok \gset
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
-SELECT (:checked_payload_len::bigint = :legacy_payload_len::bigint AND :checked_empty_is_null) AS blob_checked_ok \gset
+SELECT (:checked_payload_len::bigint = :legacy_payload_len::bigint AND :'checked_empty_is_null'::bool) AS blob_checked_ok \gset
 \if :blob_checked_ok
 \echo [PASS] (:testid) cloudsync_payload_blob_checked returns the legacy payload and empty windows return NULL
 \else
@@ -296,6 +296,11 @@ SELECT (:checked_payload_len::bigint = :legacy_payload_len::bigint AND :checked_
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
+-- This step also guards a backend crash regression: the size-limit ereport()
+-- fires right after the internal cloudsync_changes_select() cursor has run and
+-- unwound. If that SRF ever again returns from inside its PG_TRY (leaving
+-- PG_exception_stack dangling), this ereport longjmps into freed stack and
+-- segfaults instead of raising -- which drops the connection and fails the suite.
 CREATE TEMP TABLE _blob_checked_limit_err(ok bool);
 DO $$
 BEGIN

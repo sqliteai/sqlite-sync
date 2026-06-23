@@ -3269,10 +3269,17 @@ static char * build_union_sql (void) {
 
 PG_FUNCTION_INFO_V1(cloudsync_changes_select);
 Datum cloudsync_changes_select(PG_FUNCTION_ARGS) {
-    FuncCallContext *funcctx;
+    FuncCallContext *funcctx = NULL;
     SRFState *st_local = NULL;
     bool spi_connected_local = false;
-    
+    bool srf_done = false;
+    Datum srf_result = (Datum) 0;
+
+    // NOTE: the SRF_RETURN_* macros expand to `return`, so they must run AFTER
+    // PG_END_TRY(). Returning from inside the PG_TRY block skips PG_END_TRY and
+    // leaves PG_exception_stack pointing at this (now-dead) frame; a later
+    // ereport(ERROR) in the same query then siglongjmp()s into freed stack and
+    // segfaults. Compute the result inside the guarded block, return outside it.
     PG_TRY();
     {
         if (SRF_IS_FIRSTCALL()) {
@@ -3353,26 +3360,26 @@ Datum cloudsync_changes_select(PG_FUNCTION_ARGS) {
             // Must switch to a safe context before SRF_RETURN_DONE deletes it
             MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
 
-            SRF_RETURN_DONE(funcctx);
-        }
-        
-        HeapTuple tup = SPI_tuptable->vals[0];
-        TupleDesc td = SPI_tuptable->tupdesc;
-        
-        Datum outvals[9];
-        bool outnulls[9];
-        for (int i = 0; i < 9; i++) {
-            outvals[i] = SPI_getbinval(tup, td, i+1, &outnulls[i]);
-            if (!outnulls[i]) {
-                Form_pg_attribute att = TupleDescAttr(td, i);
-                outvals[i] = datumCopy(outvals[i], att->attbyval, att->attlen);
+            srf_done = true;
+        } else {
+            HeapTuple tup = SPI_tuptable->vals[0];
+            TupleDesc td = SPI_tuptable->tupdesc;
+
+            Datum outvals[9];
+            bool outnulls[9];
+            for (int i = 0; i < 9; i++) {
+                outvals[i] = SPI_getbinval(tup, td, i+1, &outnulls[i]);
+                if (!outnulls[i]) {
+                    Form_pg_attribute att = TupleDescAttr(td, i);
+                    outvals[i] = datumCopy(outvals[i], att->attbyval, att->attlen);
+                }
             }
+
+            HeapTuple outtup = heap_form_tuple(st->outdesc, outvals, outnulls);
+            SPI_freetuptable(SPI_tuptable);
+            SPI_tuptable = NULL;
+            srf_result = HeapTupleGetDatum(outtup);
         }
-        
-        HeapTuple outtup = heap_form_tuple(st->outdesc, outvals, outnulls);
-        SPI_freetuptable(SPI_tuptable);
-        SPI_tuptable = NULL;
-        SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(outtup));
     }
     PG_CATCH();
     {
@@ -3397,7 +3404,10 @@ Datum cloudsync_changes_select(PG_FUNCTION_ARGS) {
         PG_RE_THROW();
     }
     PG_END_TRY();
-    PG_RETURN_NULL();
+
+    // Return outside the PG_TRY so PG_END_TRY() always restores PG_exception_stack.
+    if (srf_done) SRF_RETURN_DONE(funcctx);
+    SRF_RETURN_NEXT(funcctx, srf_result);
 }
 
 // Trigger INSERT
