@@ -2,9 +2,9 @@
 
 Download the appropriate pre-built binary for your platform from the official [Releases](https://github.com/sqliteai/sqlite-sync/releases) page:
 
-- Linux: x86 and ARM
-- macOS: x86 and ARM
-- Windows: x86
+- Linux: x86_64 and arm64 (glibc and musl)
+- macOS: x86_64 and arm64
+- Windows: x86_64
 - Android
 - iOS
 
@@ -34,7 +34,7 @@ var stmt: OpaquePointer?
 sqlite3_prepare_v2(db, "SELECT cloudsync_version()", -1, &stmt, nil)
 defer { sqlite3_finalize(stmt) }
 sqlite3_step(stmt)
-log("cloudsync_version(): \(String(cString: sqlite3_column_text(stmt, 0)))")
+print("cloudsync_version(): \(String(cString: sqlite3_column_text(stmt, 0)))")
 sqlite3_close(db)
 ```
 
@@ -43,7 +43,7 @@ sqlite3_close(db)
 Add the [following](https://central.sonatype.com/artifact/ai.sqlite/sync) to your Gradle dependencies:
 
 ```gradle
-implementation 'ai.sqlite:sync:1.0.0'
+implementation 'ai.sqlite:sync:<latest-version>'
 ```
 
 ```java
@@ -120,6 +120,8 @@ Add the [sqlite_sync](https://pub.dev/packages/sqlite_sync) package to your proj
 flutter pub add sqlite_sync  # Flutter projects
 dart pub add sqlite_sync     # Dart projects
 ```
+
+Requires Dart 3.10+ / Flutter 3.38+.
 
 ```dart
 import 'package:sqlite3/sqlite3.dart';
