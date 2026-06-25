@@ -190,7 +190,7 @@ SELECT cloudsync_terminate();
 
 Back on Device A, calling `cloudsync_network_sync()` will pull Device B's changes. The CRDT engine ensures all devices converge to the same data, automatically, with no conflicts.
 
-> **Note:** every device participating in the same sync must create **the same set of tables with the same structure** and initialize each one with `cloudsync_init()`. sqlite-sync derives a schema hash from the synced tables, and the server rejects payloads whose hash it does not recognize. For multi-tenant setups where each client should see only a subset of rows, use a shared schema with a tenant/scope column and enforce isolation with [Row-Level Security](./docs/row-level-security.md) — do not give each client a different table.
+> **Note:** every device participating in the same sync must create **the same set of tables with the same structure** and initialize each one with `cloudsync_init()`. sqlite-sync derives a schema hash from the synced tables, and the server rejects payloads whose hash it does not recognize. For multi-tenant setups where each client should see only a subset of rows, use a shared schema with a tenant/scope column and enforce isolation with [RLS Overview](./docs/rls-overview.md) — do not give each client a different table.
 
 ## Block-Level LWW
 
@@ -216,14 +216,14 @@ With SQLite Cloud's RLS, a single shared cloud database serves all users while e
 - One database, multiple tenants, no per-user database provisioning.
 - Each client syncs only authorized rows, minimal bandwidth and storage.
 
-See the full guide: **[Row-Level Security Documentation](./docs/row-level-security.md)**.
+See the full guide: **[RLS Overview](./docs/rls-overview.md)**.
 
 ## Documentation
 
 - **[API Reference](./API.md)**: all functions, parameters, and examples
 - **[Installation Guide](./docs/installation.md)**: platform-specific setup (Swift, Android, Expo, React Native, Flutter, WASM)
 - **[Block-Level LWW Guide](./docs/block-lww.md)**: line-level text merge for markdown and documents
-- **[Row-Level Security Guide](./docs/row-level-security.md)**: multi-tenant access control with server-enforced policies
+- **[RLS Overview](./docs/rls-overview.md)**: conceptual guide to multi-tenant access control with server-enforced policies
 - **[Self-Hosted PostgreSQL Quick Start](./docs/postgresql/quickstarts/postgres.md)**: run CloudSync against your own PostgreSQL instance
 - **[Self-Hosted Supabase Quick Start](./docs/postgresql/quickstarts/supabase-self-hosted.md)**: run CloudSync against your own Supabase deployment
 - **[Database Schema Recommendations](./docs/schema.md)**: primary keys, constraints, foreign keys, triggers
