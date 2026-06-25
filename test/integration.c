@@ -915,6 +915,94 @@ cleanup:
     return rc;
 }
 
+// Verifies the batched cursor-spool response shape with an explicit maxChunks cap
+// greater than one. The old single-page client parser ignores data.chunks[] and
+// would report chunks=0 forever against the batched server response.
+int test_chunked_payload_batched_receive(void) {
+    int rc = SQLITE_OK;
+    sqlite3 *sender = NULL;
+    sqlite3 *receiver = NULL;
+    char network_init[1024];
+    char batch_id[UUID_STR_MAXLEN];
+    char sql[1024];
+    bool found = false;
+    bool observed_batched_partial = false;  // saw chunks==2 && complete=0 from receive(2)
+    bool cleanup_remote_rows = false;
+    const int row_count = 500;
+    const int body_rand_bytes = 2048;
+
+    rc = test_chunked_pair_open(&sender, &receiver, network_init, sizeof(network_init));
+    if (rc == TEST_SKIPPED) return TEST_SKIPPED;
+    if (rc != SQLITE_OK) goto cleanup;
+
+    cloudsync_uuid_v7_string(batch_id, true);
+    rc = db_exec(sender, "SELECT cloudsync_set('payload_max_chunk_size', '262144');"); if (rc != SQLITE_OK) goto cleanup;
+    snprintf(sql, sizeof(sql),
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < %d) "
+        "INSERT INTO chunked_payload_items (id, body) "
+        "SELECT '%s-' || printf('%%03d', i), lower(hex(randomblob(%d))) FROM c;",
+        row_count, batch_id, body_rand_bytes);
+    rc = db_exec(sender, sql); if (rc != SQLITE_OK) goto cleanup;
+
+    rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks();", 3); if (rc != SQLITE_OK) goto cleanup;
+
+    rc = db_exec(sender, "SELECT cloudsync_network_send_changes();"); if (rc != SQLITE_OK) goto cleanup;
+    cleanup_remote_rows = true;
+
+    for (int attempt = 0; attempt < 80; ++attempt) {
+        int chunks = 0, complete = 0, matches = 0;
+        char recv_err[512];
+
+        rc = db_select_receive(receiver,
+            "SELECT j ->> '$.receive.chunks', j ->> '$.receive.complete', j ->> '$.receive.error' "
+            "FROM (SELECT cloudsync_network_receive_changes(2) AS j);",
+            &chunks, &complete, recv_err, sizeof(recv_err));
+        if (rc != SQLITE_OK) goto cleanup;
+        if (recv_err[0]) {
+            printf("Error: batched-receive batch %s reported receive.error: %s\n", batch_id, recv_err);
+            rc = SQLITE_ERROR;
+            goto cleanup;
+        }
+        if (chunks > 2) {
+            printf("Error: cloudsync_network_receive_changes(2) applied %d chunks (cap violated) for batch %s.\n", chunks, batch_id);
+            rc = SQLITE_ERROR;
+            goto cleanup;
+        }
+        if (chunks == 2 && complete == 0) observed_batched_partial = true;
+
+        snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM chunked_payload_items "
+            "WHERE id LIKE '%s-%%' "
+            "AND length(body)=%d;",
+            batch_id, body_rand_bytes * 2);
+        rc = db_select_int(receiver, sql, &matches); if (rc != SQLITE_OK) goto cleanup;
+        if (matches == row_count) { found = true; break; }
+
+        sqlite3_sleep(300);
+    }
+
+    if (!found) {
+        printf("Error: batched-receive batch %s was not fully received.\n", batch_id);
+        rc = SQLITE_ERROR;
+        goto cleanup;
+    }
+    if (!observed_batched_partial) {
+        printf("Error: cloudsync_network_receive_changes(2) never reported a batched partial drain (chunks=2, complete=0) for batch %s.\n", batch_id);
+        rc = SQLITE_ERROR;
+        goto cleanup;
+    }
+
+cleanup:
+    if (cleanup_remote_rows && sender) {
+        snprintf(sql, sizeof(sql), "DELETE FROM chunked_payload_items WHERE id LIKE '%s-%%';", batch_id);
+        if (db_exec(sender, sql) == SQLITE_OK) {
+            db_exec(sender, "SELECT cloudsync_network_send_changes();");
+        }
+    }
+    test_chunked_pair_close(sender, receiver);
+    return rc;
+}
+
 int test_chunked_send_failure_preserves_checkpoint(void) {
     int rc = SQLITE_OK;
     sqlite3 *sender = NULL;
@@ -1430,6 +1518,7 @@ int main (void) {
     rc += test_report("Chunked Rowset Test:", test_chunked_payload_rowset_path());
     rc += test_report("Chunked Single-Sync Drain Test:", test_chunked_payload_single_sync_drain());
     rc += test_report("Chunked Capped Receive Test:", test_chunked_payload_capped_receive());
+    rc += test_report("Chunked Batched Receive Test:", test_chunked_payload_batched_receive());
     rc += test_report("Chunked Failure Test:", test_chunked_send_failure_preserves_checkpoint());
     rc += test_report("Chunked Negative Cache Test:", test_chunked_negative_cache_invalidation());
     printf("\n");
