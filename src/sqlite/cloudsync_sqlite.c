@@ -1623,7 +1623,7 @@ void dbsync_payload_blob_checked(sqlite3_context *context, int argc, sqlite3_val
     }
     if (estimated > max_estimated_size) {
         dbsync_set_error(context,
-            "cloudsync_payload_blob_checked: estimated payload size %" PRId64 " exceeds max_estimated_payload_size %" PRId64,
+            CLOUDSYNC_ERRCODE_PAYLOAD_TOO_LARGE "cloudsync_payload_blob_checked: estimated payload size %" PRId64 " exceeds max_estimated_payload_size %" PRId64,
             (int64_t)estimated, (int64_t)max_estimated_size);
         return;
     }
@@ -1674,7 +1674,7 @@ error:
     if (stmt) sqlite3_finalize(stmt);
     if (payload) cloudsync_payload_context_free(payload);
     if (rc == SQLITE_NOMEM) sqlite3_result_error_nomem(context);
-    else if (rc == SQLITE_TOOBIG) sqlite3_result_error(context, "cloudsync_payload_blob_checked: payload estimate is too large", -1);
+    else if (rc == SQLITE_TOOBIG) sqlite3_result_error(context, CLOUDSYNC_ERRCODE_PAYLOAD_TOO_LARGE "cloudsync_payload_blob_checked: payload estimate is too large", -1);
     else sqlite3_result_error(context, sqlite3_errmsg(db), -1);
 }
 

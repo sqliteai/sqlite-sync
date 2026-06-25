@@ -34,6 +34,17 @@ extern "C" {
 // is ample while still preventing an accidental unbounded planning loop.
 #define CLOUDSYNC_PAYLOAD_FRAGMENT_SIZE_FIXPOINT_ITERATIONS 8
 
+// Machine-parseable error-code tokens. These prefix the human-readable text of
+// permanent (non-retryable) failures so the CloudSync server can classify them
+// from the error message alone — the only signal common to both the Postgres
+// (pgconn.PgError.Message) and SQLite (result error text) backends. The server
+// parses the bracketed code with /cloudsync_error\[([a-z0-9_]+)\]/ and decides
+// retry policy; keep these strings stable and identical across backends. They
+// carry a trailing ": " so they concatenate directly onto a message literal.
+#define CLOUDSYNC_ERRCODE_PAYLOAD_TOO_LARGE     "cloudsync_error[payload_too_large]: "
+#define CLOUDSYNC_ERRCODE_ROW_TOO_LARGE         "cloudsync_error[row_too_large]: "
+#define CLOUDSYNC_ERRCODE_CHUNK_TOO_LARGE       "cloudsync_error[chunk_too_large]: "
+
 #define CLOUDSYNC_CHANGES_NCOLS                 9
 
 typedef enum {

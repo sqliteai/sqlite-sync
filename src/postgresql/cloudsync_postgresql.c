@@ -1212,7 +1212,7 @@ static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_con
             row_size = pk_encode_size((dbvalue_t **)vals, 9, 0, 3);
             payload_chunks_free_pgvalues(vals, owned_texts);
         }
-        if (row_size == SIZE_MAX) ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("payload row too large")));
+        if (row_size == SIZE_MAX) ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg(CLOUDSYNC_ERRCODE_ROW_TOO_LARGE "payload row too large")));
 
         if ((int64)row_size + (int64)header_size + CLOUDSYNC_PAYLOAD_CHUNK_SAFETY_MARGIN > st->max_size) {
             if (cloudsync_payload_context_nrows(payload) > 0) break;
@@ -1227,10 +1227,10 @@ static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_con
                 VARDATA_ANY(st->site_id), VARSIZE_ANY_EXHDR(st->site_id),
                 st->cl, st->seq,
                 st->frag_total, 0, 1);
-            if (st->frag_target <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg("payload fragment metadata exceeds max chunk size")));
+            if (st->frag_target <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg(CLOUDSYNC_ERRCODE_CHUNK_TOO_LARGE "payload fragment metadata exceeds max chunk size")));
             for (int i = 0; i < CLOUDSYNC_PAYLOAD_FRAGMENT_SIZE_FIXPOINT_ITERATIONS; ++i) {
                 int count = cloudsync_payload_fragment_count(st->frag_total, st->frag_target);
-                if (count <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg("payload requires too many fragments")));
+                if (count <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg(CLOUDSYNC_ERRCODE_CHUNK_TOO_LARGE "payload requires too many fragments")));
                 int planned = cloudsync_payload_fragment_data_size(data,
                     st->tbl, -1,
                     VARDATA_ANY(st->pk), VARSIZE_ANY_EXHDR(st->pk),
@@ -1239,7 +1239,7 @@ static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_con
                     VARDATA_ANY(st->site_id), VARSIZE_ANY_EXHDR(st->site_id),
                     st->cl, st->seq,
                     st->frag_total, count - 1, count);
-                if (planned <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg("payload fragment metadata exceeds max chunk size")));
+                if (planned <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg(CLOUDSYNC_ERRCODE_CHUNK_TOO_LARGE "payload fragment metadata exceeds max chunk size")));
                 if (planned == st->frag_target) break;
                 st->frag_target = planned;
             }
@@ -1392,7 +1392,7 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
 static void payload_blob_checked_pg_add(int64 *acc, int64 value) {
     if (value < 0 || *acc > PG_INT64_MAX - value) {
         ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-            errmsg("cloudsync_payload_blob_checked: payload estimate is too large")));
+            errmsg(CLOUDSYNC_ERRCODE_PAYLOAD_TOO_LARGE "cloudsync_payload_blob_checked: payload estimate is too large")));
     }
     *acc += value;
 }
@@ -1449,7 +1449,7 @@ static int64 payload_blob_checked_pg_estimate(cloudsync_context *data, int64 sin
         cloudsync_payload_context_size(&header_size);
         if (header_size > (size_t)PG_INT64_MAX) {
             ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                errmsg("cloudsync_payload_blob_checked: payload estimate is too large")));
+                errmsg(CLOUDSYNC_ERRCODE_PAYLOAD_TOO_LARGE "cloudsync_payload_blob_checked: payload estimate is too large")));
         }
 
         while (payload_chunks_fetch_current(&st)) {
@@ -1460,7 +1460,7 @@ static int64 payload_blob_checked_pg_estimate(cloudsync_context *data, int64 sin
             payload_chunks_free_pgvalues(vals, owned_texts);
             if (row_size == SIZE_MAX || row_size > (size_t)PG_INT64_MAX) {
                 ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                    errmsg("cloudsync_payload_blob_checked: payload row is too large")));
+                    errmsg(CLOUDSYNC_ERRCODE_ROW_TOO_LARGE "cloudsync_payload_blob_checked: payload row is too large")));
             }
             if (!has_rows) {
                 payload_blob_checked_pg_add(&estimated, (int64)header_size);
@@ -1519,7 +1519,7 @@ Datum cloudsync_payload_blob_checked(PG_FUNCTION_ARGS) {
     if (estimated > max_estimated_size) {
         if (spi_connected) SPI_finish();
         ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-            errmsg("cloudsync_payload_blob_checked: estimated payload size %lld exceeds max_estimated_payload_size %lld",
+            errmsg(CLOUDSYNC_ERRCODE_PAYLOAD_TOO_LARGE "cloudsync_payload_blob_checked: estimated payload size %lld exceeds max_estimated_payload_size %lld",
                    (long long)estimated, (long long)max_estimated_size)));
     }
 

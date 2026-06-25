@@ -3107,7 +3107,7 @@ static bool cloudsync_payload_append_raw (cloudsync_payload_context *payload, cl
     size_t needed = 0;
     for (int i = 0; i < nfields; ++i) {
         if (field_sizes[i] > SIZE_MAX - needed) {
-            cloudsync_set_error(data, "cloudsync payload raw row too large", DBRES_NOMEM);
+            cloudsync_set_error(data, CLOUDSYNC_ERRCODE_ROW_TOO_LARGE "cloudsync payload raw row too large", DBRES_NOMEM);
             return false;
         }
         needed += field_sizes[i];
@@ -3449,7 +3449,7 @@ int cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsyn
         if (payload->buffer) cloudsync_memory_free(payload->buffer);
         payload->buffer = NULL;
         payload->bsize = 0;
-        cloudsync_set_error(data, "cloudsync_encode: payload too large to compress (INT_MAX limit)", DBRES_ERROR);
+        cloudsync_set_error(data, CLOUDSYNC_ERRCODE_PAYLOAD_TOO_LARGE "cloudsync_encode: payload too large to compress (INT_MAX limit)", DBRES_ERROR);
         return DBRES_ERROR;
     }
     // try to allocate buffer used for compressed data
