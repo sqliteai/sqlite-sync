@@ -32,7 +32,7 @@
 
 <br>
 
-> **Need a sync backend?** Plug into any [PostgreSQL](./docs/postgresql/quickstarts/postgres.md) or [self-hosted Supabase](./docs/postgresql/quickstarts/supabase-self-hosted.md) instance, or use **[SQLite Cloud CloudSync](https://www.sqlite.ai/pricing)** — managed device sync with auth, ACL, and a free tier for up to 3 devices.
+> **Need a sync backend?** Plug into any [PostgreSQL](./docs/postgresql/quickstarts/postgres.md) or [self-hosted Supabase](./docs/postgresql/quickstarts/supabase-self-hosted.md) instance, or use **[SQLite Cloud CloudSync](https://www.sqlite.ai/pricing)**
 
 ---
 
