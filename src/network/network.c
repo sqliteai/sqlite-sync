@@ -807,8 +807,6 @@ char *network_authentication_token (const char *key, const char *value) {
 
 // MARK: - JSON helpers (jsmn) -
 
-#define JSMN_MAX_TOKENS 64
-
 static bool jsmn_token_eq(const char *json, const jsmntok_t *tok, const char *s) {
     return (tok->type == JSMN_STRING &&
             (int)strlen(s) == tok->end - tok->start &&
@@ -912,77 +910,75 @@ static char *json_unescape_string(const char *src, int len) {
 static char *json_extract_string(const char *json, size_t json_len, const char *key) {
     if (!json || json_len == 0 || !key) return NULL;
 
-    jsmn_parser parser;
-    jsmntok_t tokens[JSMN_MAX_TOKENS];
-    jsmn_init(&parser);
-    int ntokens = jsmn_parse(&parser, json, json_len, tokens, JSMN_MAX_TOKENS);
-    if (ntokens < 1) return NULL;
+    int ntokens = 0;
+    jsmntok_t *tokens = json_parse_tokens_alloc(json, json_len, &ntokens);
+    if (!tokens) return NULL;
 
+    char *result = NULL;
     int i = jsmn_find_key(json, tokens, ntokens, key);
-    if (i < 0 || i + 1 >= ntokens) return NULL;
-
-    jsmntok_t *val = &tokens[i + 1];
-    if (val->type != JSMN_STRING) return NULL;
-
-    return json_unescape_string(json + val->start, val->end - val->start);
+    if (i >= 0 && i + 1 < ntokens) {
+        jsmntok_t *val = &tokens[i + 1];
+        if (val->type == JSMN_STRING)
+            result = json_unescape_string(json + val->start, val->end - val->start);
+    }
+    cloudsync_memory_free(tokens);
+    return result;
 }
 
 static int64_t json_extract_int(const char *json, size_t json_len, const char *key, int64_t default_value) {
     if (!json || json_len == 0 || !key) return default_value;
 
-    jsmn_parser parser;
-    jsmntok_t tokens[JSMN_MAX_TOKENS];
-    jsmn_init(&parser);
-    int ntokens = jsmn_parse(&parser, json, json_len, tokens, JSMN_MAX_TOKENS);
-    if (ntokens < 1 || tokens[0].type != JSMN_OBJECT) return default_value;
+    int ntokens = 0;
+    jsmntok_t *tokens = json_parse_tokens_alloc(json, json_len, &ntokens);
+    if (!tokens) return default_value;
 
-    int i = jsmn_find_key(json, tokens, ntokens, key);
-    if (i < 0 || i + 1 >= ntokens) return default_value;
-
-    jsmntok_t *val = &tokens[i + 1];
-    if (val->type != JSMN_PRIMITIVE) return default_value;
-
-    return strtoll(json + val->start, NULL, 10);
+    int64_t result = default_value;
+    if (tokens[0].type == JSMN_OBJECT) {
+        int i = jsmn_find_key(json, tokens, ntokens, key);
+        if (i >= 0 && i + 1 < ntokens && tokens[i + 1].type == JSMN_PRIMITIVE)
+            result = strtoll(json + tokens[i + 1].start, NULL, 10);
+    }
+    cloudsync_memory_free(tokens);
+    return result;
 }
 
 static bool json_extract_bool(const char *json, size_t json_len, const char *key, bool default_value) {
     if (!json || json_len == 0 || !key) return default_value;
 
-    jsmn_parser parser;
-    jsmntok_t tokens[JSMN_MAX_TOKENS];
-    jsmn_init(&parser);
-    int ntokens = jsmn_parse(&parser, json, json_len, tokens, JSMN_MAX_TOKENS);
-    if (ntokens < 1 || tokens[0].type != JSMN_OBJECT) return default_value;
+    int ntokens = 0;
+    jsmntok_t *tokens = json_parse_tokens_alloc(json, json_len, &ntokens);
+    if (!tokens) return default_value;
 
-    int i = jsmn_find_key(json, tokens, ntokens, key);
-    if (i < 0 || i + 1 >= ntokens) return default_value;
-
-    jsmntok_t *val = &tokens[i + 1];
-    if (val->type != JSMN_PRIMITIVE) return default_value;
-
-    // JSON booleans (true/false) and numeric flags (1/0) are both accepted.
-    char c = json[val->start];
-    if (c == 't' || c == 'T') return true;
-    if (c == 'f' || c == 'F' || c == 'n' || c == 'N') return false;
-    return strtoll(json + val->start, NULL, 10) != 0;
+    bool result = default_value;
+    if (tokens[0].type == JSMN_OBJECT) {
+        int i = jsmn_find_key(json, tokens, ntokens, key);
+        if (i >= 0 && i + 1 < ntokens && tokens[i + 1].type == JSMN_PRIMITIVE) {
+            // JSON booleans (true/false) and numeric flags (1/0) are both accepted.
+            char c = json[tokens[i + 1].start];
+            if (c == 't' || c == 'T') result = true;
+            else if (c == 'f' || c == 'F' || c == 'n' || c == 'N') result = false;
+            else result = strtoll(json + tokens[i + 1].start, NULL, 10) != 0;
+        }
+    }
+    cloudsync_memory_free(tokens);
+    return result;
 }
 
 static int json_extract_array_size(const char *json, size_t json_len, const char *key) {
     if (!json || json_len == 0 || !key) return -1;
 
-    jsmn_parser parser;
-    jsmntok_t tokens[JSMN_MAX_TOKENS];
-    jsmn_init(&parser);
-    int ntokens = jsmn_parse(&parser, json, json_len, tokens, JSMN_MAX_TOKENS);
-    if (ntokens < 1 || tokens[0].type != JSMN_OBJECT) return -1;
+    int ntokens = 0;
+    jsmntok_t *tokens = json_parse_tokens_alloc(json, json_len, &ntokens);
+    if (!tokens) return -1;
 
-    int i = jsmn_find_key(json, tokens, ntokens, key);
-    if (i < 0 || i + 1 >= ntokens) return -1;
-
-    jsmntok_t *val = &tokens[i + 1];
-    if (val->type != JSMN_ARRAY) return -1;
-
-    return val->size;
+    int result = -1;
+    if (tokens[0].type == JSMN_OBJECT) {
+        int i = jsmn_find_key(json, tokens, ntokens, key);
+        if (i >= 0 && i + 1 < ntokens && tokens[i + 1].type == JSMN_ARRAY)
+            result = tokens[i + 1].size;
+    }
+    cloudsync_memory_free(tokens);
+    return result;
 }
 
 // Escape a string for safe embedding as a JSON string value (without surrounding quotes).
@@ -1025,25 +1021,24 @@ static char *json_escape_string(const char *src) {
 static char *json_extract_object_raw(const char *json, size_t json_len, const char *key) {
     if (!json || json_len == 0 || !key) return NULL;
 
-    jsmn_parser parser;
-    jsmntok_t tokens[JSMN_MAX_TOKENS];
-    jsmn_init(&parser);
-    int ntokens = jsmn_parse(&parser, json, json_len, tokens, JSMN_MAX_TOKENS);
-    if (ntokens < 1) return NULL;
+    int ntokens = 0;
+    jsmntok_t *tokens = json_parse_tokens_alloc(json, json_len, &ntokens);
+    if (!tokens) return NULL;
 
+    char *out = NULL;
     int i = jsmn_find_key(json, tokens, ntokens, key);
-    if (i < 0 || i + 1 >= ntokens) return NULL;
-
-    jsmntok_t *val = &tokens[i + 1];
-    if (val->type != JSMN_OBJECT) return NULL;
-
-    int len = val->end - val->start;
-    if (len <= 0) return NULL;
-
-    char *out = cloudsync_memory_zeroalloc(len + 1);
-    if (!out) return NULL;
-    memcpy(out, json + val->start, len);
-    out[len] = '\0';
+    if (i >= 0 && i + 1 < ntokens) {
+        jsmntok_t *val = &tokens[i + 1];
+        int len = val->end - val->start;
+        if (val->type == JSMN_OBJECT && len > 0) {
+            out = cloudsync_memory_zeroalloc(len + 1);
+            if (out) {
+                memcpy(out, json + val->start, len);
+                out[len] = '\0';
+            }
+        }
+    }
+    cloudsync_memory_free(tokens);
     return out;
 }
 
