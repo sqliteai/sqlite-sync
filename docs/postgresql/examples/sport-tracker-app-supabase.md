@@ -4,7 +4,7 @@ A Vite/React demonstration app showcasing [**SQLite Sync**](https://github.com/s
 
 > This app uses the packed WASM version of SQLite with the [SQLite Sync extension enabled](https://www.npmjs.com/package/@sqliteai/sqlite-wasm).
 
-**The source code is located in [examples/sport-tracker-app](../../examples/sport-tracker-app/)**
+**The source code is located in [examples/sport-tracker-app](../../../examples/sport-tracker-app/)**
 
 ## Setup Instructions
 
@@ -13,7 +13,7 @@ A Vite/React demonstration app showcasing [**SQLite Sync**](https://github.com/s
 
 ### 2. Database Setup
 1. Create database
-2. Execute the schema with [sport-tracker-schema-postgres.sql](../../examples/sport-tracker-app/sport-tracker-schema-postgres.sql).  
+2. Execute the schema with [sport-tracker-schema-postgres.sql](../../../examples/sport-tracker-app/sport-tracker-schema-postgres.sql).  
 3. Enable CloudSync for all tables on the remote database with:
     ```sql
     CREATE EXTENSION IF NOT EXISTS cloudsync;

@@ -5,7 +5,7 @@
 
   <h1>SQLite-Sync</h1>
   <p><strong>Offline-first sync for SQLite, powered by CRDTs.</strong><br>
-  Local writes, conflict-free merges, real-time collaboration across devices. Sync to SQLite Cloud, PostgreSQL, or Supabase — no central coordinator required.</p>
+  Local writes, conflict-free merges, real-time collaboration across devices. Sync to SQLite Cloud, <a href="./docs/postgresql/quickstarts/postgres.md">PostgreSQL</a>, or <a href="./docs/postgresql/quickstarts/supabase-self-hosted.md">Supabase</a> — no central coordinator required.</p>
 
   <p>
     <a href="https://dashboard.sqlitecloud.io/auth/sign-in"><strong>Free managed instance →</strong></a> ·
@@ -32,7 +32,7 @@
 
 <br>
 
-> **Need a sync backend?** Plug into any PostgreSQL or Supabase instance, or use **[SQLite Cloud CloudSync](https://www.sqlite.ai/pricing)** — managed device sync with auth, ACL, and a free tier for up to 3 devices.
+> **Need a sync backend?** Plug into any [PostgreSQL](./docs/postgresql/quickstarts/postgres.md) or [self-hosted Supabase](./docs/postgresql/quickstarts/supabase-self-hosted.md) instance, or use **[SQLite Cloud CloudSync](https://www.sqlite.ai/pricing)** — managed device sync with auth, ACL, and a free tier for up to 3 devices.
 
 ---
 
@@ -40,7 +40,7 @@
 
 [![sqlite-sync coverage](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fsqliteai.github.io%2Fsqlite-sync%2F&search=Functions%3A%3C%5C%2Ftd%3E%5Cs*%3Ctd%20class%3D%22headerCovTableEntry(?:Hi|Med|Lo)%22%3E(%5B%5Cd.%5D%2B)%26nbsp%3B%25&replace=%241%25&label=coverage&labelColor=rgb(85%2C%2085%2C%2085)%3B&color=rgb(167%2C%20252%2C%20157)%3B&link=https%3A%2F%2Fsqliteai.github.io%2Fsqlite-sync%2F)](https://sqliteai.github.io/sqlite-sync/)
 
-**SQLite Sync** is a multi-platform extension that turns any SQLite database into a **conflict-free, offline-first replica** that syncs automatically with **[SQLite Cloud](https://sqlitecloud.io/)** nodes, **PostgreSQL** servers, and **Supabase** instances. One function call is all it takes: no backend to build, no sync protocol to implement.
+**SQLite Sync** is a multi-platform extension that turns any SQLite database into a **conflict-free, offline-first replica** that syncs automatically with **[SQLite Cloud](https://sqlitecloud.io/)** nodes, **[PostgreSQL](./docs/postgresql/quickstarts/postgres.md)** servers, and **[Supabase](./docs/postgresql/quickstarts/supabase-self-hosted.md)** instances. One function call is all it takes: no backend to build, no sync protocol to implement.
 
 Built on **CRDT** (Conflict-free Replicated Data Types), it guarantees:
 
@@ -91,7 +91,7 @@ Built on **CRDT** (Conflict-free Replicated Data Types), it guarantees:
 
 ### 1. Install
 
-Download a pre-built binary from the [Releases](https://github.com/sqliteai/sqlite-sync/releases) page, or install a platform package (see [full installation guide](./docs/INSTALLATION.md) for platform-specific code examples):
+Download a pre-built binary from the [Releases](https://github.com/sqliteai/sqlite-sync/releases) page, or install a platform package (see [full installation guide](./docs/installation.md) for platform-specific code examples):
 
 | Platform | Install |
 |----------|---------|
@@ -130,6 +130,8 @@ SELECT * FROM tasks;
 ```
 
 ### 4. Sync with the cloud
+
+The example below uses SQLite Cloud CloudSync. If you are wiring up a self-hosted backend instead, use the [PostgreSQL quick start](./docs/postgresql/quickstarts/postgres.md) or the [self-hosted Supabase quick start](./docs/postgresql/quickstarts/supabase-self-hosted.md).
 
 ```sql
 -- Connect to your SQLite Cloud managed database
@@ -222,11 +224,15 @@ See the full guide: **[Row-Level Security Documentation](./docs/row-level-securi
 - **[Installation Guide](./docs/installation.md)**: platform-specific setup (Swift, Android, Expo, React Native, Flutter, WASM)
 - **[Block-Level LWW Guide](./docs/block-lww.md)**: line-level text merge for markdown and documents
 - **[Row-Level Security Guide](./docs/row-level-security.md)**: multi-tenant access control with server-enforced policies
+- **[Self-Hosted PostgreSQL Quick Start](./docs/postgresql/quickstarts/postgres.md)**: run CloudSync against your own PostgreSQL instance
+- **[Self-Hosted Supabase Quick Start](./docs/postgresql/quickstarts/supabase-self-hosted.md)**: run CloudSync against your own Supabase deployment
 - **[Database Schema Recommendations](./docs/schema.md)**: primary keys, constraints, foreign keys, triggers
 - **[Custom Network Layer](./docs/internal/network.md)**: replace the built-in libcurl networking
 - **[Examples](./examples/)**: complete walkthroughs (todo app, sport tracker, Swift multiplatform)
 
 ## SQLite Cloud Setup
+
+If you are not using SQLite Cloud as the sync backend, see the [self-hosted PostgreSQL quick start](./docs/postgresql/quickstarts/postgres.md) or the [self-hosted Supabase quick start](./docs/postgresql/quickstarts/supabase-self-hosted.md).
 
 1. Sign up at [SQLite Cloud](https://sqlitecloud.io/) and create a project.
 2. Create a database and your tables in the [dashboard](https://dashboard.sqlitecloud.io/).

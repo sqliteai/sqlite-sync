@@ -98,5 +98,6 @@ The PostgreSQL integration is actively evolving. Current limitations include:
 
 # Next
 * [CLIENT](client.md) installation and setup
-* [SUPABASE](integrations/supabase.md) configuration and setup
-* [SPORT-TRACKER APP](examples/sport-app-supabase.md) demo web app based on SQLite Sync WASM
+* [POSTGRES QUICK START](quickstarts/postgres.md) configuration and setup
+* [SUPABASE QUICK START](quickstarts/supabase-self-hosted.md) configuration and setup
+* [SPORT-TRACKER APP](examples/sport-tracker-app-supabase.md) demo web app based on SQLite Sync WASM
