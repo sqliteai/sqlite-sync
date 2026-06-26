@@ -1483,6 +1483,7 @@ Datum cloudsync_payload_blob_checked(PG_FUNCTION_ARGS) {
     Portal portal = NULL;
     PayloadChunksState encode_st = {0};
     cloudsync_payload_context *payload = NULL;
+    bytea *result = NULL;
     bytea *site_id = PG_ARGISNULL(2) ? NULL : PG_GETARG_BYTEA_PP(2);
     bool exclude = PG_ARGISNULL(3) ? false : PG_GETARG_BOOL(3);
 
@@ -1574,18 +1575,19 @@ Datum cloudsync_payload_blob_checked(PG_FUNCTION_ARGS) {
             SPI_finish();
             spi_connected = false;
         }
-        if (!blob) {
-            cloudsync_payload_context_free(payload);
-            payload = NULL;
-            PG_RETURN_NULL();
+        // NOTE: PG_RETURN_* expands to `return`, so returning from inside the
+        // PG_TRY block would skip PG_END_TRY() and leave PG_exception_stack
+        // pointing at this (now-dead) frame; a later ereport(ERROR) in the same
+        // query then siglongjmp()s into freed stack and segfaults. Compute the
+        // result here, return it after PG_END_TRY(). result == NULL means the
+        // empty-blob path (return SQL NULL).
+        if (blob) {
+            result = (bytea *)palloc(VARHDRSZ + blob_size);
+            SET_VARSIZE(result, VARHDRSZ + blob_size);
+            memcpy(VARDATA(result), blob, blob_size);
         }
-
-        bytea *result = (bytea *)palloc(VARHDRSZ + blob_size);
-        SET_VARSIZE(result, VARHDRSZ + blob_size);
-        memcpy(VARDATA(result), blob, blob_size);
         cloudsync_payload_context_free(payload);
         payload = NULL;
-        PG_RETURN_BYTEA_P(result);
     }
     PG_CATCH();
     {
@@ -1596,6 +1598,10 @@ Datum cloudsync_payload_blob_checked(PG_FUNCTION_ARGS) {
         PG_RE_THROW();
     }
     PG_END_TRY();
+
+    // Return outside the PG_TRY so PG_END_TRY() always restores PG_exception_stack.
+    if (!result) PG_RETURN_NULL();
+    PG_RETURN_BYTEA_P(result);
 }
 
 // Payload decode - Apply changes from payload

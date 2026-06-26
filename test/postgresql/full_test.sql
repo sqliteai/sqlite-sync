@@ -60,6 +60,7 @@
 \ir 50_block_lww_existing_data.sql
 \ir 51_stale_table_settings_dropped_meta.sql
 \ir 52_payload_chunks.sql
+\ir 53_payload_blob_checked_pg_try.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'
