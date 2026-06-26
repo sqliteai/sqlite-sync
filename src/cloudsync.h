@@ -28,6 +28,15 @@ extern "C" {
 #define CLOUDSYNC_DEFAULT_ALGO                  "cls"
 #define CLOUDSYNC_PAYLOAD_CHUNK_DEFAULT_SIZE    (5 * 1024 * 1024)
 #define CLOUDSYNC_PAYLOAD_CHUNK_MIN_SIZE        (256 * 1024)
+// Hard ceiling on the effective chunk size, regardless of the per-database
+// payload_max_chunk_size setting. Protects the server (one chunk is built in
+// memory and stored as a single artifact) and the tenant from a misconfigured
+// value. Large TEXT/BLOB values still sync above this size: they are split
+// across chunks by the fragment path. Only a row whose non-fragmentable
+// scaffolding (primary key + column name + metadata, replicated into every
+// fragment) exceeds the chunk size hits row_too_large, which is practically
+// unreachable.
+#define CLOUDSYNC_PAYLOAD_CHUNK_MAX_SIZE        (32 * 1024 * 1024)
 #define CLOUDSYNC_PAYLOAD_CHUNK_SAFETY_MARGIN   (16 * 1024)
 // Fragment sizing is a small fixpoint: after the first target estimate, only
 // decimal metadata widths for part_index/part_count can change, so eight passes

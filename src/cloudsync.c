@@ -3134,7 +3134,7 @@ int cloudsync_payload_max_chunk_size (cloudsync_context *data) {
     int64_t value = dbutils_settings_get_int64_value(data, CLOUDSYNC_KEY_PAYLOAD_MAX_CHUNK_SIZE);
     if (value <= 0) value = CLOUDSYNC_PAYLOAD_CHUNK_DEFAULT_SIZE;
     if (value < CLOUDSYNC_PAYLOAD_CHUNK_MIN_SIZE) value = CLOUDSYNC_PAYLOAD_CHUNK_MIN_SIZE;
-    if (value > INT_MAX) value = INT_MAX;
+    if (value > CLOUDSYNC_PAYLOAD_CHUNK_MAX_SIZE) value = CLOUDSYNC_PAYLOAD_CHUNK_MAX_SIZE;
     return (int)value;
 }
 
