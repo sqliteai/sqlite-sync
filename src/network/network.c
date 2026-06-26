@@ -1295,6 +1295,11 @@ static char *network_get_affected_tables(sqlite3 *db, int64_t since_db_version) 
 //    forwarded as send.lastFailure (failures.apply) and receive.lastFailure
 //    (failures.check). Per-function scoping: send_changes emits send.lastFailure
 //    only; receive_changes emits receive.lastFailure only; sync emits both.
+//  - A non-retryable failures.check (retryable:false) is a permanent
+//    configuration/authorization problem: the receive drain stops polling
+//    immediately rather than waiting it out. receive_changes raises it as a SQL
+//    error (fail fast — no send block to preserve); sync still emits structured
+//    JSON with receive.lastFailure so its send block survives.
 //
 // Callers that receive JSON can trust that the server was reachable.
 // A SQL error means connectivity or configuration is broken.
@@ -2037,6 +2042,7 @@ typedef struct {
     int     chunks;        // payload chunks applied this drain
     int64_t bytes;         // serialized payload bytes received this drain
     bool    complete;      // true iff the receive stream is fully drained (nothing pending)
+    bool    check_permanent_failure; // server reported a non-retryable failures.check: polling stopped early
     char   *receive_err;   // owned by the caller; client-side apply error, or NULL
 } drain_result;
 
@@ -2062,6 +2068,7 @@ static int network_drain_changes (sqlite3_context *context, sync_result *sr,
     int nchunks = 0;         // payload chunks applied this call
     int64_t bytes_total = 0; // serialized payload bytes received this call
     bool complete = true;    // false iff the stream is known to have more pending
+    bool check_permanent_failure = false; // server reported a non-retryable failures.check
     char *receive_err = NULL;
     int rc = SQLITE_OK;
     for (;;) {
@@ -2097,6 +2104,17 @@ static int network_drain_changes (sqlite3_context *context, sync_result *sr,
             continue;                                                     // keep draining immediately
         }
 
+        // A non-retryable server-side check failure (e.g. a permission/authorization
+        // error) won't clear by waiting: stop draining now instead of polling out the
+        // remaining retries. The failure object stays in sr->check_failure_json so the
+        // caller can surface it (receive.lastFailure / a raised error).
+        if (sr->check_failure_json &&
+            !json_extract_bool(sr->check_failure_json, strlen(sr->check_failure_json), "retryable", true)) {
+            check_permanent_failure = true;
+            complete = false;
+            break;
+        }
+
         // nothing delivered (202 / up to date): preserve the polling-for-changes semantics.
         // complete is left as-is (true if no page was ever delivered; false if the last
         // delivered page was non-final), so a 202 after partial pages reports incomplete.
@@ -2114,6 +2132,7 @@ static int network_drain_changes (sqlite3_context *context, sync_result *sr,
     dr->chunks = nchunks;
     dr->bytes = bytes_total;
     dr->complete = complete;
+    dr->check_permanent_failure = check_permanent_failure;
     dr->receive_err = receive_err;
     return rc;
 }
@@ -2224,6 +2243,28 @@ static void network_receive_changes_impl (sqlite3_context *context, int max_chun
 
     // Endpoint/network errors already raised a SQL error on the context
     if (rc != SQLITE_OK && !receive_err) {
+        if (sr.tables_json) cloudsync_memory_free(sr.tables_json);
+        if (sr.check_failure_json) cloudsync_memory_free(sr.check_failure_json);
+        return;
+    }
+
+    // A non-retryable server-side check failure is a permanent configuration/
+    // authorization problem, not a transient "nothing ready yet": raise a SQL error so
+    // a polling caller fails fast instead of looping until it times out. (receive is a
+    // pure receive op with no send block to preserve, so a raised error is unambiguous.)
+    if (dr.check_permanent_failure && sr.check_failure_json) {
+        char *code = json_extract_string(sr.check_failure_json, strlen(sr.check_failure_json), "code");
+        char *message = json_extract_string(sr.check_failure_json, strlen(sr.check_failure_json), "message");
+        char *err = cloudsync_memory_mprintf(
+            "cloudsync_network_receive_changes: server rejected check (non-retryable): %s%s%s",
+            code ? code : "check failed",
+            message ? " - " : "",
+            message ? message : "");
+        sqlite3_result_error(context, err ? err : "cloudsync_network_receive_changes: server rejected check (non-retryable).", -1);
+        if (err) cloudsync_memory_free(err);
+        if (code) cloudsync_memory_free(code);
+        if (message) cloudsync_memory_free(message);
+        if (receive_err) cloudsync_memory_free(receive_err);
         if (sr.tables_json) cloudsync_memory_free(sr.tables_json);
         if (sr.check_failure_json) cloudsync_memory_free(sr.check_failure_json);
         return;
