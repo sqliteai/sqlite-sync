@@ -1120,6 +1120,10 @@ static bool payload_chunks_fetch_current(PayloadChunksState *st) {
         size_t n = VARSIZE_ANY(b);
         st->pk = (bytea *)palloc(n);
         memcpy(st->pk, b, n);
+        // DatumGetByteaPP returns a fresh copy when the datum was toasted; free
+        // it after the memcpy so a scan with toasted pks does not retain one
+        // detoast temp per row in value_ctx until the SRF ends.
+        if ((Pointer) b != DatumGetPointer(d)) pfree(b);
     }
     d = SPI_getbinval(tup, td, 3, &isnull);
     st->col_name = isnull ? pstrdup("") : text_to_cstring(DatumGetTextPP(d));
@@ -1137,6 +1141,7 @@ static bool payload_chunks_fetch_current(PayloadChunksState *st) {
         size_t n = VARSIZE_ANY(b);
         st->site_id = (bytea *)palloc(n);
         memcpy(st->site_id, b, n);
+        if ((Pointer) b != DatumGetPointer(d)) pfree(b);
     }
     d = SPI_getbinval(tup, td, 8, &isnull); st->cl = isnull ? 0 : DatumGetInt64(d);
     d = SPI_getbinval(tup, td, 9, &isnull); st->seq = isnull ? 0 : DatumGetInt64(d);
