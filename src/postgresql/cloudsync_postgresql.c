@@ -1037,6 +1037,13 @@ typedef struct {
     Portal portal;
     TupleDesc outdesc;
     SPITupleTable *current_tuptable;
+    // Context for the per-row fields below that must outlive a single SRF call:
+    // a single oversized value emits its fragments over multiple SRF_PERCALL
+    // invocations and re-reads tbl/pk/col_name/col_value/site_id on each. The
+    // SRF sets this to funcctx->multi_call_memory_ctx (the only context the SRF
+    // protocol guarantees survives between calls). Non-SRF callers leave it NULL
+    // and allocate in the current context, freeing each row as they iterate.
+    MemoryContext value_ctx;
     bool spi_connected;
     bool has_current;
     bool eof;
@@ -1098,6 +1105,13 @@ static bool payload_chunks_fetch_current(PayloadChunksState *st) {
     bool isnull = false;
     Datum d;
 
+    // These fields are re-read on later SRF calls while emitting fragments of a
+    // single oversized value, so they must be allocated in a context that
+    // survives between calls (value_ctx == multi_call_memory_ctx for the SRF).
+    // Includes any bytea detoasted by DatumGetByteaPP below. Non-SRF callers
+    // (value_ctx == NULL) keep the prior per-call allocation behavior.
+    MemoryContext old_value_ctx = st->value_ctx ? MemoryContextSwitchTo(st->value_ctx) : NULL;
+
     d = SPI_getbinval(tup, td, 1, &isnull);
     st->tbl = isnull ? pstrdup("") : text_to_cstring(DatumGetTextPP(d));
     d = SPI_getbinval(tup, td, 2, &isnull);
@@ -1126,6 +1140,8 @@ static bool payload_chunks_fetch_current(PayloadChunksState *st) {
     }
     d = SPI_getbinval(tup, td, 8, &isnull); st->cl = isnull ? 0 : DatumGetInt64(d);
     d = SPI_getbinval(tup, td, 9, &isnull); st->seq = isnull ? 0 : DatumGetInt64(d);
+
+    if (old_value_ctx) MemoryContextSwitchTo(old_value_ctx);
 
     SPI_tuptable = NULL;
     st->has_current = true;
@@ -1291,6 +1307,9 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
         MemoryContext oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
         PayloadChunksState *st = palloc0(sizeof(*st));
         st->chunk_index = 0;
+        // Per-row fields that span multiple SRF_PERCALL calls (fragment emission)
+        // must be allocated here, not in the transient per-call context.
+        st->value_ctx = funcctx->multi_call_memory_ctx;
 
         if (SPI_connect() != SPI_OK_CONNECT) ereport(ERROR, (errmsg("SPI_connect failed")));
         st->spi_connected = true;
