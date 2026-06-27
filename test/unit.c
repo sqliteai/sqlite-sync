@@ -12556,6 +12556,153 @@ finalize:
     return result;
 }
 
+// Proves the positional-cursor resume of cloudsync_payload_chunks: paging the
+// window one chunk per call with an O(1) (db_version, seq, frag_offset) seek
+// yields byte-identical chunks to a single full-window scan. The dataset mixes a
+// db_version split across chunks (row-boundary resumes, incl. resumes landing
+// INSIDE a single committed version that the old since>db_version cursor could not
+// express) with a value larger than the chunk budget (mid-fragment resumes).
+bool do_test_payload_chunks_positional_resume (bool print_result, bool cleanup_databases) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    test_payload_chunk *base = NULL; int base_count = 0, base_cap = 0;
+    test_payload_chunk *pos = NULL;  int pos_count = 0, pos_cap = 0;
+    int64_t watermark = -1;
+    bool result = false;
+    int rc = SQLITE_OK;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter++;
+
+    db = do_create_database_file(0, timestamp, saved_counter);
+    if (!db) goto finalize;
+    rc = sqlite3_exec(db,
+        "CREATE TABLE split_test (id TEXT PRIMARY KEY, body TEXT DEFAULT '');"
+        "SELECT cloudsync_init('split_test');"
+        "SELECT cloudsync_set('payload_max_chunk_size', '262144');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // tx1: ~500 medium rows in one transaction -> one db_version split across
+    // several v2 chunks (row-boundary resumes within a single version).
+    rc = sqlite3_exec(db,
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 500) "
+        "INSERT INTO split_test(id, body) SELECT printf('row-%04d', i), hex(randomblob(700)) FROM c;",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // tx2: one value far larger than the chunk budget -> v3 fragments across
+    // several chunks (mid-fragment resumes inside a single value).
+    rc = sqlite3_exec(db,
+        "INSERT INTO split_test(id, body) VALUES ('big', hex(randomblob(900000)));",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Baseline: every chunk of the whole window, in order, via the legacy scan.
+    rc = sqlite3_prepare_v2(db,
+        "SELECT payload, watermark_db_version FROM cloudsync_payload_chunks "
+        "WHERE since_db_version=0 ORDER BY chunk_index;", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        int len = sqlite3_column_bytes(stmt, 0);
+        const void *payload = sqlite3_column_blob(stmt, 0);
+        if (!payload || len <= 0) goto finalize;
+        watermark = sqlite3_column_int64(stmt, 1);
+        if (base_count == base_cap) {
+            int nc = base_cap ? base_cap * 2 : 8;
+            test_payload_chunk *t = realloc(base, sizeof(*t) * nc);
+            if (!t) goto finalize;
+            memset(t + base_cap, 0, sizeof(*t) * (nc - base_cap));
+            base = t; base_cap = nc;
+        }
+        base[base_count].data = malloc(len);
+        if (!base[base_count].data) goto finalize;
+        memcpy(base[base_count].data, payload, len);
+        base[base_count].len = len;
+        ++base_count;
+    }
+    if (rc != SQLITE_DONE) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+
+    // Scenario must actually exercise multiple chunks (and thus resumes).
+    if (base_count < 4 || watermark <= 0) goto finalize;
+
+    // Positional drain: one chunk per call, seeking to the cursor the previous
+    // chunk reported. until is the frozen watermark from the baseline.
+    rc = sqlite3_prepare_v2(db,
+        "SELECT payload, next_db_version, next_seq, next_frag_offset, is_final "
+        "FROM cloudsync_payload_chunks "
+        "WHERE until_db_version=?1 AND resume_db_version=?2 AND resume_seq=?3 AND resume_frag_offset=?4 "
+        "LIMIT 1;", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    int64_t rdbv = 0, rseq = 0, rfrag = 0;
+    bool done = false;
+    bool saw_frag_resume = false; // a follow-up call actually resumed mid-value
+    // Hard cap guards against a resume bug looping forever.
+    for (int guard = 0; !done && guard <= base_count + 2; ++guard) {
+        if (rfrag > 0) saw_frag_resume = true;
+        sqlite3_reset(stmt);
+        sqlite3_bind_int64(stmt, 1, watermark);
+        sqlite3_bind_int64(stmt, 2, rdbv);
+        sqlite3_bind_int64(stmt, 3, rseq);
+        sqlite3_bind_int64(stmt, 4, rfrag);
+        rc = sqlite3_step(stmt);
+        if (rc != SQLITE_ROW) goto finalize; // every step before is_final must yield a chunk
+        int len = sqlite3_column_bytes(stmt, 0);
+        const void *payload = sqlite3_column_blob(stmt, 0);
+        if (!payload || len <= 0) goto finalize;
+        rdbv = sqlite3_column_int64(stmt, 1);
+        rseq = sqlite3_column_int64(stmt, 2);
+        rfrag = sqlite3_column_int64(stmt, 3);
+        done = sqlite3_column_int(stmt, 4) != 0;
+        if (pos_count == pos_cap) {
+            int nc = pos_cap ? pos_cap * 2 : 8;
+            test_payload_chunk *t = realloc(pos, sizeof(*t) * nc);
+            if (!t) goto finalize;
+            memset(t + pos_cap, 0, sizeof(*t) * (nc - pos_cap));
+            pos = t; pos_cap = nc;
+        }
+        pos[pos_count].data = malloc(len);
+        if (!pos[pos_count].data) goto finalize;
+        memcpy(pos[pos_count].data, payload, len);
+        pos[pos_count].len = len;
+        ++pos_count;
+    }
+    sqlite3_finalize(stmt); stmt = NULL;
+
+    // The positional drain must terminate exactly on is_final, reproduce the
+    // baseline chunk sequence byte-for-byte, and have actually exercised a
+    // mid-value (fragment) resume — not only row-boundary resumes.
+    if (!done || pos_count != base_count || !saw_frag_resume) goto finalize;
+    for (int i = 0; i < base_count; ++i) {
+        if (pos[i].len != base[i].len) goto finalize;
+        if (memcmp(pos[i].data, base[i].data, base[i].len) != 0) goto finalize;
+    }
+
+    result = true;
+
+finalize:
+    if (!result && print_result) {
+        printf("do_test_payload_chunks_positional_resume error: %s (base=%d, pos=%d, watermark=%lld)\n",
+               db ? sqlite3_errmsg(db) : "no db", base_count, pos_count, (long long)watermark);
+    }
+    if (stmt) sqlite3_finalize(stmt);
+    test_payload_chunks_free(base, base_count);
+    test_payload_chunks_free(pos, pos_count);
+    if (db) close_db(db);
+    if (cleanup_databases) {
+        char path[256], walpath[300], shmpath[300];
+        do_build_database_path(path, 0, timestamp, saved_counter);
+        snprintf(walpath, sizeof(walpath), "%s-wal", path);
+        snprintf(shmpath, sizeof(shmpath), "%s-shm", path);
+        file_delete_internal(path);
+        file_delete_internal(walpath);
+        file_delete_internal(shmpath);
+    }
+    return result;
+}
+
 // Exercises the server-side download spool: cloudsync_payload_spool_fill stages a
 // window's whole chunk stream once, and the /check path pages it out one chunk per
 // call. Verifies byte-identity with direct cloudsync_payload_chunks generation,
@@ -13196,6 +13343,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Payload Chunks Large Values:", do_test_payload_chunks_large_values(print_result, cleanup_databases));
     result += test_report("Payload Chunks Site Exclusion:", do_test_payload_chunks_site_exclusion(print_result, cleanup_databases));
     result += test_report("Payload Chunks Split db_version:", do_test_payload_chunks_split_dbversion(print_result, cleanup_databases));
+    result += test_report("Payload Chunks Positional Resume:", do_test_payload_chunks_positional_resume(print_result, cleanup_databases));
     result += test_report("Payload Download Spool:", do_test_payload_spool(print_result, cleanup_databases));
 
     // close local database
