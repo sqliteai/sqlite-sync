@@ -1213,6 +1213,46 @@ static bytea *payload_chunks_emit_pg_fragment(PayloadChunksState *st, cloudsync_
     return result;
 }
 
+// Set up fragment state for the currently-fetched oversized value so
+// emit_pg_fragment can stream it. start_offset is the byte offset within the value
+// to resume from (0 when first reaching it; >0 when a positional cursor resumes
+// mid-value). frag_part is derived from the offset so a streamed and a resumed
+// fragment carry the same part index. The plan (frag_target/frag_count) is a
+// deterministic function of the row, so a resumed fragment tiles identically.
+static void payload_chunks_pg_begin_fragment(PayloadChunksState *st, cloudsync_context *data, int64 start_offset) {
+    st->frag_total = VARSIZE_ANY_EXHDR(st->col_value);
+    st->frag_offset = start_offset;
+    st->frag_target = cloudsync_payload_fragment_data_size(data,
+        st->tbl, -1,
+        VARDATA_ANY(st->pk), VARSIZE_ANY_EXHDR(st->pk),
+        st->col_name, -1,
+        st->col_version, st->db_version,
+        VARDATA_ANY(st->site_id), VARSIZE_ANY_EXHDR(st->site_id),
+        st->cl, st->seq,
+        st->frag_total, 0, 1);
+    if (st->frag_target <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg(CLOUDSYNC_ERRCODE_CHUNK_TOO_LARGE "payload fragment metadata exceeds max chunk size")));
+    for (int i = 0; i < CLOUDSYNC_PAYLOAD_FRAGMENT_SIZE_FIXPOINT_ITERATIONS; ++i) {
+        int count = cloudsync_payload_fragment_count(st->frag_total, st->frag_target);
+        if (count <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg(CLOUDSYNC_ERRCODE_CHUNK_TOO_LARGE "payload requires too many fragments")));
+        int planned = cloudsync_payload_fragment_data_size(data,
+            st->tbl, -1,
+            VARDATA_ANY(st->pk), VARSIZE_ANY_EXHDR(st->pk),
+            st->col_name, -1,
+            st->col_version, st->db_version,
+            VARDATA_ANY(st->site_id), VARSIZE_ANY_EXHDR(st->site_id),
+            st->cl, st->seq,
+            st->frag_total, count - 1, count);
+        if (planned <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg(CLOUDSYNC_ERRCODE_CHUNK_TOO_LARGE "payload fragment metadata exceeds max chunk size")));
+        if (planned == st->frag_target) break;
+        st->frag_target = planned;
+    }
+    st->frag_count = cloudsync_payload_fragment_count(st->frag_total, st->frag_target);
+    if (st->frag_count <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg("payload requires too many fragments")));
+    st->frag_part = (st->frag_target > 0) ? (int)(start_offset / st->frag_target) : 0;
+    st->frag_checksum = pk_checksum(VARDATA_ANY(st->col_value), (size_t)st->frag_total);
+    st->frag_active = true;
+}
+
 static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_context *data,
                                            int64 *rows, int64 *dbv_min, int64 *dbv_max) {
     *rows = *dbv_min = *dbv_max = 0;
@@ -1237,37 +1277,7 @@ static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_con
 
         if ((int64)row_size + (int64)header_size + CLOUDSYNC_PAYLOAD_CHUNK_SAFETY_MARGIN > st->max_size) {
             if (cloudsync_payload_context_nrows(payload) > 0) break;
-            st->frag_total = VARSIZE_ANY_EXHDR(st->col_value);
-            st->frag_offset = 0;
-            st->frag_part = 0;
-            st->frag_target = cloudsync_payload_fragment_data_size(data,
-                st->tbl, -1,
-                VARDATA_ANY(st->pk), VARSIZE_ANY_EXHDR(st->pk),
-                st->col_name, -1,
-                st->col_version, st->db_version,
-                VARDATA_ANY(st->site_id), VARSIZE_ANY_EXHDR(st->site_id),
-                st->cl, st->seq,
-                st->frag_total, 0, 1);
-            if (st->frag_target <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg(CLOUDSYNC_ERRCODE_CHUNK_TOO_LARGE "payload fragment metadata exceeds max chunk size")));
-            for (int i = 0; i < CLOUDSYNC_PAYLOAD_FRAGMENT_SIZE_FIXPOINT_ITERATIONS; ++i) {
-                int count = cloudsync_payload_fragment_count(st->frag_total, st->frag_target);
-                if (count <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg(CLOUDSYNC_ERRCODE_CHUNK_TOO_LARGE "payload requires too many fragments")));
-                int planned = cloudsync_payload_fragment_data_size(data,
-                    st->tbl, -1,
-                    VARDATA_ANY(st->pk), VARSIZE_ANY_EXHDR(st->pk),
-                    st->col_name, -1,
-                    st->col_version, st->db_version,
-                    VARDATA_ANY(st->site_id), VARSIZE_ANY_EXHDR(st->site_id),
-                    st->cl, st->seq,
-                    st->frag_total, count - 1, count);
-                if (planned <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg(CLOUDSYNC_ERRCODE_CHUNK_TOO_LARGE "payload fragment metadata exceeds max chunk size")));
-                if (planned == st->frag_target) break;
-                st->frag_target = planned;
-            }
-            st->frag_count = cloudsync_payload_fragment_count(st->frag_total, st->frag_target);
-            if (st->frag_count <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg("payload requires too many fragments")));
-            st->frag_checksum = pk_checksum(VARDATA_ANY(st->col_value), (size_t)st->frag_total);
-            st->frag_active = true;
+            payload_chunks_pg_begin_fragment(st, data, 0);
             cloudsync_memory_free(payload);
             return payload_chunks_emit_pg_fragment(st, data, rows, dbv_min, dbv_max);
         }
@@ -1327,6 +1337,15 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
         int64 since = PG_ARGISNULL(0) ? dbutils_settings_get_int64_value(data, CLOUDSYNC_KEY_SEND_DBVERSION) : PG_GETARG_INT64(0);
         bytea *site_id = PG_ARGISNULL(1) ? NULL : PG_GETARG_BYTEA_PP(1);
         bool exclude = PG_ARGISNULL(3) ? false : PG_GETARG_BOOL(3);
+        // Positional resume cursor: when resume_db_version is given the scan starts
+        // at (resume_db_version, resume_seq) inclusive and the first chunk resumes a
+        // mid-value fragment at resume_frag_offset, instead of replaying from `since`.
+        // Lets the /check job page one chunk per round-trip with an O(1) seek and no
+        // spool table.
+        bool positional = !PG_ARGISNULL(4);
+        int64 resume_dbv = PG_ARGISNULL(4) ? 0 : PG_GETARG_INT64(4);
+        int64 resume_seq = PG_ARGISNULL(5) ? 0 : PG_GETARG_INT64(5);
+        int64 resume_frag = PG_ARGISNULL(6) ? 0 : PG_GETARG_INT64(6);
         // Site filter resolution:
         //   exclude=true  -> all sites except filter_site_id (CHECK path); site required
         //   filter given  -> only that site
@@ -1361,22 +1380,52 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
 
         StringInfoData q;
         initStringInfo(&q);
-        if (exclude) {
-            // $1=since (into changes_select), $2=site to exclude, $3=until watermark
-            appendStringInfoString(&q,
-                "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
-                "FROM cloudsync_changes_select($1,NULL) WHERE site_id <> $2 AND db_version <= $3 ORDER BY db_version, seq ASC");
+        if (positional) {
+            // Inclusive positional lower bound (db_version, seq) >= (resume_dbv,
+            // resume_seq) within db_version <= until. $1=site, $2=until, $3=resume_dbv,
+            // $4=resume_seq. (seq >= matches the SQLite vtab's exact tiling; contrast
+            // with payload_blob_checked's exclusive seq > for its last-applied cursor.)
+            if (exclude) {
+                appendStringInfoString(&q,
+                    "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                    "FROM cloudsync_changes_select(0,NULL) "
+                    "WHERE site_id <> $1 AND db_version <= $2 AND (db_version > $3 OR (db_version = $3 AND seq >= $4)) "
+                    "ORDER BY db_version, seq ASC");
+            } else {
+                appendStringInfoString(&q,
+                    "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                    "FROM cloudsync_changes_select(0,$1) "
+                    "WHERE db_version <= $2 AND (db_version > $3 OR (db_version = $3 AND seq >= $4)) "
+                    "ORDER BY db_version, seq ASC");
+            }
+            Oid argtypes[4] = {BYTEAOID, INT8OID, INT8OID, INT8OID};
+            Datum values[4] = {PointerGetDatum(site_id), Int64GetDatum(until), Int64GetDatum(resume_dbv), Int64GetDatum(resume_seq)};
+            char nulls[4] = {' ', ' ', ' ', ' '};
+            st->portal = SPI_cursor_open_with_args(NULL, q.data, 4, argtypes, values, nulls, true, 0);
         } else {
-            appendStringInfoString(&q,
-                "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
-                "FROM cloudsync_changes_select($1,$2) WHERE db_version <= $3 ORDER BY db_version, seq ASC");
+            if (exclude) {
+                // $1=since (into changes_select), $2=site to exclude, $3=until watermark
+                appendStringInfoString(&q,
+                    "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                    "FROM cloudsync_changes_select($1,NULL) WHERE site_id <> $2 AND db_version <= $3 ORDER BY db_version, seq ASC");
+            } else {
+                appendStringInfoString(&q,
+                    "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                    "FROM cloudsync_changes_select($1,$2) WHERE db_version <= $3 ORDER BY db_version, seq ASC");
+            }
+            Oid argtypes[3] = {INT8OID, BYTEAOID, INT8OID};
+            Datum values[3] = {Int64GetDatum(since), PointerGetDatum(site_id), Int64GetDatum(until)};
+            char nulls[3] = {' ', ' ', ' '};
+            st->portal = SPI_cursor_open_with_args(NULL, q.data, 3, argtypes, values, nulls, true, 0);
         }
-        Oid argtypes[3] = {INT8OID, BYTEAOID, INT8OID};
-        Datum values[3] = {Int64GetDatum(since), PointerGetDatum(site_id), Int64GetDatum(until)};
-        char nulls[3] = {' ', ' ', ' '};
-        st->portal = SPI_cursor_open_with_args(NULL, q.data, 3, argtypes, values, nulls, true, 0);
         pfree(q.data);
         if (!st->portal) ereport(ERROR, (errmsg("SPI_cursor_open failed")));
+
+        // Resuming inside a value that was fragmented across chunks: the first row is
+        // that value; re-establish the fragment plan and skip to resume_frag.
+        if (positional && resume_frag > 0 && payload_chunks_fetch_current(st)) {
+            payload_chunks_pg_begin_fragment(st, data, resume_frag);
+        }
 
         TupleDesc outdesc;
         if (get_call_result_type(fcinfo, NULL, &outdesc) != TYPEFUNC_COMPOSITE) ereport(ERROR, (errmsg("return type must be composite")));
@@ -1400,8 +1449,22 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
         SRF_RETURN_DONE(funcctx);
     }
 
-    Datum outvals[7];
-    bool outnulls[7] = {false,false,false,false,false,false,false};
+    // Resume point a stateless caller passes back to continue after this chunk.
+    // frag_active -> same value, next byte offset; otherwise peek the next row
+    // (buffered for the following build call): a row -> its (db_version, seq);
+    // end of stream -> this was the final chunk.
+    int64 next_dbv, next_seq, next_frag;
+    bool is_final;
+    if (st->frag_active) {
+        next_dbv = st->db_version; next_seq = st->seq; next_frag = st->frag_offset; is_final = false;
+    } else if (payload_chunks_fetch_current(st)) {
+        next_dbv = st->db_version; next_seq = st->seq; next_frag = 0; is_final = false;
+    } else {
+        next_dbv = st->watermark; next_seq = 0; next_frag = 0; is_final = true;
+    }
+
+    Datum outvals[11];
+    bool outnulls[11] = {false,false,false,false,false,false,false,false,false,false,false};
     outvals[0] = PointerGetDatum(payload);
     outvals[1] = Int64GetDatum(st->chunk_index++);
     outvals[2] = Int64GetDatum(VARSIZE_ANY_EXHDR(payload));
@@ -1409,6 +1472,10 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
     outvals[4] = Int64GetDatum(dbv_min);
     outvals[5] = Int64GetDatum(dbv_max);
     outvals[6] = Int64GetDatum(st->watermark);
+    outvals[7] = Int64GetDatum(next_dbv);
+    outvals[8] = Int64GetDatum(next_seq);
+    outvals[9] = Int64GetDatum(next_frag);
+    outvals[10] = BoolGetDatum(is_final);
     HeapTuple outtup = heap_form_tuple(st->outdesc, outvals, outnulls);
     SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(outtup));
 }
