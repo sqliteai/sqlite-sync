@@ -1988,7 +1988,13 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
                 int64_t chunk_bytes = 0;
                 rc = network_apply_check_chunk(context, check_json, check_json_len, final_chunk,
                                                &chunk_rows, err_out, &chunk_bytes);
-                if (rc == SQLITE_OK) {
+                if (rc == SQLITE_OK && !final_chunk && next_cursor < 0) {
+                    // Symmetric with the chunks-array path: a non-final response
+                    // with no resumable cursor would otherwise silently drop the
+                    // rest of the stream and report a false "complete". Fail loudly.
+                    sqlite3_result_error(context, "cloudsync_network_receive_changes: non-final check response missing next cursor.", -1);
+                    rc = SQLITE_ERROR;
+                } else if (rc == SQLITE_OK) {
                     rows_total = chunk_rows;
                     bytes_total = chunk_bytes;
                     chunks_total = 1;
