@@ -1037,6 +1037,13 @@ typedef struct {
     Portal portal;
     TupleDesc outdesc;
     SPITupleTable *current_tuptable;
+    // Context for the per-row fields below that must outlive a single SRF call:
+    // a single oversized value emits its fragments over multiple SRF_PERCALL
+    // invocations and re-reads tbl/pk/col_name/col_value/site_id on each. The
+    // SRF sets this to funcctx->multi_call_memory_ctx (the only context the SRF
+    // protocol guarantees survives between calls). Non-SRF callers leave it NULL
+    // and allocate in the current context, freeing each row as they iterate.
+    MemoryContext value_ctx;
     bool spi_connected;
     bool has_current;
     bool eof;
@@ -1098,6 +1105,13 @@ static bool payload_chunks_fetch_current(PayloadChunksState *st) {
     bool isnull = false;
     Datum d;
 
+    // These fields are re-read on later SRF calls while emitting fragments of a
+    // single oversized value, so they must be allocated in a context that
+    // survives between calls (value_ctx == multi_call_memory_ctx for the SRF).
+    // Includes any bytea detoasted by DatumGetByteaPP below. Non-SRF callers
+    // (value_ctx == NULL) keep the prior per-call allocation behavior.
+    MemoryContext old_value_ctx = st->value_ctx ? MemoryContextSwitchTo(st->value_ctx) : NULL;
+
     d = SPI_getbinval(tup, td, 1, &isnull);
     st->tbl = isnull ? pstrdup("") : text_to_cstring(DatumGetTextPP(d));
     d = SPI_getbinval(tup, td, 2, &isnull);
@@ -1106,6 +1120,10 @@ static bool payload_chunks_fetch_current(PayloadChunksState *st) {
         size_t n = VARSIZE_ANY(b);
         st->pk = (bytea *)palloc(n);
         memcpy(st->pk, b, n);
+        // DatumGetByteaPP returns a fresh copy when the datum was toasted; free
+        // it after the memcpy so a scan with toasted pks does not retain one
+        // detoast temp per row in value_ctx until the SRF ends.
+        if ((Pointer) b != DatumGetPointer(d)) pfree(b);
     }
     d = SPI_getbinval(tup, td, 3, &isnull);
     st->col_name = isnull ? pstrdup("") : text_to_cstring(DatumGetTextPP(d));
@@ -1123,9 +1141,12 @@ static bool payload_chunks_fetch_current(PayloadChunksState *st) {
         size_t n = VARSIZE_ANY(b);
         st->site_id = (bytea *)palloc(n);
         memcpy(st->site_id, b, n);
+        if ((Pointer) b != DatumGetPointer(d)) pfree(b);
     }
     d = SPI_getbinval(tup, td, 8, &isnull); st->cl = isnull ? 0 : DatumGetInt64(d);
     d = SPI_getbinval(tup, td, 9, &isnull); st->seq = isnull ? 0 : DatumGetInt64(d);
+
+    if (old_value_ctx) MemoryContextSwitchTo(old_value_ctx);
 
     SPI_tuptable = NULL;
     st->has_current = true;
@@ -1291,6 +1312,9 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
         MemoryContext oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
         PayloadChunksState *st = palloc0(sizeof(*st));
         st->chunk_index = 0;
+        // Per-row fields that span multiple SRF_PERCALL calls (fragment emission)
+        // must be allocated here, not in the transient per-call context.
+        st->value_ctx = funcctx->multi_call_memory_ctx;
 
         if (SPI_connect() != SPI_OK_CONNECT) ereport(ERROR, (errmsg("SPI_connect failed")));
         st->spi_connected = true;
@@ -1483,6 +1507,7 @@ Datum cloudsync_payload_blob_checked(PG_FUNCTION_ARGS) {
     Portal portal = NULL;
     PayloadChunksState encode_st = {0};
     cloudsync_payload_context *payload = NULL;
+    bytea *result = NULL;
     bytea *site_id = PG_ARGISNULL(2) ? NULL : PG_GETARG_BYTEA_PP(2);
     bool exclude = PG_ARGISNULL(3) ? false : PG_GETARG_BOOL(3);
 
@@ -1574,18 +1599,19 @@ Datum cloudsync_payload_blob_checked(PG_FUNCTION_ARGS) {
             SPI_finish();
             spi_connected = false;
         }
-        if (!blob) {
-            cloudsync_payload_context_free(payload);
-            payload = NULL;
-            PG_RETURN_NULL();
+        // NOTE: PG_RETURN_* expands to `return`, so returning from inside the
+        // PG_TRY block would skip PG_END_TRY() and leave PG_exception_stack
+        // pointing at this (now-dead) frame; a later ereport(ERROR) in the same
+        // query then siglongjmp()s into freed stack and segfaults. Compute the
+        // result here, return it after PG_END_TRY(). result == NULL means the
+        // empty-blob path (return SQL NULL).
+        if (blob) {
+            result = (bytea *)palloc(VARHDRSZ + blob_size);
+            SET_VARSIZE(result, VARHDRSZ + blob_size);
+            memcpy(VARDATA(result), blob, blob_size);
         }
-
-        bytea *result = (bytea *)palloc(VARHDRSZ + blob_size);
-        SET_VARSIZE(result, VARHDRSZ + blob_size);
-        memcpy(VARDATA(result), blob, blob_size);
         cloudsync_payload_context_free(payload);
         payload = NULL;
-        PG_RETURN_BYTEA_P(result);
     }
     PG_CATCH();
     {
@@ -1596,6 +1622,10 @@ Datum cloudsync_payload_blob_checked(PG_FUNCTION_ARGS) {
         PG_RE_THROW();
     }
     PG_END_TRY();
+
+    // Return outside the PG_TRY so PG_END_TRY() always restores PG_exception_stack.
+    if (!result) PG_RETURN_NULL();
+    PG_RETURN_BYTEA_P(result);
 }
 
 // Payload decode - Apply changes from payload

@@ -1454,10 +1454,17 @@ static int network_apply_check_chunk(sqlite3_context *context, const char *chunk
         return SQLITE_ERROR;
     }
 
+    // A non-final chunk must never advance the receive cursor (see cloudsync.h):
+    // landing mid-db_version would let the next /check skip the unapplied
+    // remainder. Only the final chunk advances -- to the explicit watermark, or
+    // the legacy last-applied fallback when it is absent.
     int64_t watermark = json_extract_int(chunk_json, chunk_json_len, "watermark", -1);
-    int64_t checkpoint_db_version = watermark < 0
-        ? CLOUDSYNC_CHECKPOINT_LAST_APPLIED
-        : (final_chunk ? watermark : CLOUDSYNC_CHECKPOINT_NONE);
+    int64_t checkpoint_db_version;
+    if (!final_chunk) {
+        checkpoint_db_version = CLOUDSYNC_CHECKPOINT_NONE;
+    } else {
+        checkpoint_db_version = (watermark < 0) ? CLOUDSYNC_CHECKPOINT_LAST_APPLIED : watermark;
+    }
     int64_t checkpoint_seq = 0;
 
     int rc = SQLITE_OK;
@@ -1913,7 +1920,15 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
                           chunks_index >= 0 && chunks_index < ntokens &&
                           tokens[chunks_index].type == JSMN_ARRAY;
 
-        if (has_chunks && request_max_chunks > 0 && tokens[chunks_index].size > request_max_chunks) {
+        if (!tokens) {
+            // The body is BUFFER (non-empty) but unparseable (malformed, truncated,
+            // or token allocation failed). Without this, a chunks batch we failed to
+            // tokenize would fall through to the single-payload branch, find no
+            // url/payload, and be misreported as an empty "up to date" response,
+            // silently dropping the pending batch.
+            sqlite3_result_error(context, "cloudsync_network_receive_changes: unable to parse check response.", -1);
+            rc = SQLITE_ERROR;
+        } else if (has_chunks && request_max_chunks > 0 && tokens[chunks_index].size > request_max_chunks) {
             sqlite3_result_error(context, "cloudsync_network_receive_changes: check response exceeded requested maxChunks.", -1);
             rc = SQLITE_ERROR;
         } else if (has_chunks && tokens[chunks_index].size > 0) {
@@ -1972,7 +1987,13 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
                 int64_t chunk_bytes = 0;
                 rc = network_apply_check_chunk(context, check_json, check_json_len, final_chunk,
                                                &chunk_rows, err_out, &chunk_bytes);
-                if (rc == SQLITE_OK) {
+                if (rc == SQLITE_OK && !final_chunk && next_cursor < 0) {
+                    // Symmetric with the chunks-array path: a non-final response
+                    // with no resumable cursor would otherwise silently drop the
+                    // rest of the stream and report a false "complete". Fail loudly.
+                    sqlite3_result_error(context, "cloudsync_network_receive_changes: non-final check response missing next cursor.", -1);
+                    rc = SQLITE_ERROR;
+                } else if (rc == SQLITE_OK) {
                     rows_total = chunk_rows;
                     bytes_total = chunk_bytes;
                     chunks_total = 1;
