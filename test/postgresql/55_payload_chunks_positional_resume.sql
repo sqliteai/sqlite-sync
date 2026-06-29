@@ -5,6 +5,10 @@
 -- the following chunk byte-for-byte, including boundaries that fall inside a single
 -- committed db_version and inside a value larger than the chunk budget. No spool
 -- table, no idempotent overlap.
+--
+-- Part 2 is end-to-end: drain the whole window the way the /check job will (one
+-- chunk per call via the positional cursor), apply that stream to a fresh database,
+-- and assert the receiver's table content hashes identically to the source.
 
 \set testid '55-positional'
 \ir helper_test_init.sql
@@ -12,7 +16,9 @@
 \connect postgres
 \ir helper_psql_conn_setup.sql
 DROP DATABASE IF EXISTS cloudsync_test_55_positional;
+DROP DATABASE IF EXISTS cloudsync_test_55_positional_dst;
 CREATE DATABASE cloudsync_test_55_positional;
+CREATE DATABASE cloudsync_test_55_positional_dst;
 
 \connect cloudsync_test_55_positional
 \ir helper_psql_conn_setup.sql
@@ -81,8 +87,78 @@ SELECT (:fail::int + 1) AS fail \gset
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
+-- Part 2: end-to-end drain + apply round-trip.
+--
+-- Drain the window exactly as the /check job will: start with the legacy
+-- exclusive cursor (since=0), then step the positional cursor one chunk per call,
+-- collecting payloads in drain order. ORDER BY chunk_index LIMIT 1 forces each
+-- value-per-call SRF to run to completion (no early-terminated cursor). The drained
+-- chunks are returned hex-joined so they can cross \connect into the receiver DB.
+CREATE OR REPLACE FUNCTION _positional_drain_hex() RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+  rdbv bigint; rseq bigint; rfrag bigint; wm bigint := 0;
+  rec record; parts text[] := '{}'; guard int := 0;
+BEGIN
+  LOOP
+    guard := guard + 1;
+    IF guard > 100000 THEN RAISE EXCEPTION 'positional drain did not terminate'; END IF;
+    IF wm = 0 THEN
+      SELECT * INTO rec FROM cloudsync_payload_chunks(0, cloudsync_siteid(), NULL, false)
+      ORDER BY chunk_index LIMIT 1;
+      IF NOT FOUND THEN EXIT; END IF;
+      wm := rec.watermark_db_version;
+    ELSE
+      SELECT * INTO rec FROM cloudsync_payload_chunks(NULL, cloudsync_siteid(), wm, false, rdbv, rseq, rfrag)
+      ORDER BY chunk_index LIMIT 1;
+      IF NOT FOUND THEN EXIT; END IF;
+    END IF;
+    parts := array_append(parts, encode(rec.payload, 'hex'));
+    rdbv := rec.next_db_version; rseq := rec.next_seq; rfrag := rec.next_frag_offset;
+    EXIT WHEN rec.is_final;
+  END LOOP;
+  RETURN array_to_string(parts, ',');
+END $$;
+
+SELECT _positional_drain_hex() AS chunks_hex \gset
+SELECT
+  md5(string_agg(id || ':' || encode(body, 'hex'), '|' ORDER BY id)) AS src_hash,
+  count(*) AS src_count
+FROM split_test \gset
+
+\connect cloudsync_test_55_positional_dst
+\ir helper_psql_conn_setup.sql
+CREATE EXTENSION IF NOT EXISTS cloudsync;
+CREATE TABLE split_test (id TEXT PRIMARY KEY, body BYTEA DEFAULT '\x'::bytea);
+SELECT cloudsync_init('split_test', 'CLS', 1) AS _init_dst \gset
+SELECT cloudsync_set('payload_max_chunk_size', '262144');
+
+-- Reconstitute the drained chunks and apply them (reverse order on purpose: apply
+-- must be order-independent and reassemble fragments regardless).
+CREATE TEMP TABLE chunk_transport(ord int, payload bytea);
+INSERT INTO chunk_transport(ord, payload)
+SELECT ord::int, decode(chunk_hex, 'hex')
+FROM unnest(string_to_array(:'chunks_hex', ',')) WITH ORDINALITY AS t(chunk_hex, ord);
+
+SELECT coalesce(sum(cloudsync_payload_apply(payload)), 0) AS applied_rows
+FROM (SELECT payload FROM chunk_transport ORDER BY ord DESC) AS ordered \gset
+
+SELECT
+  md5(string_agg(id || ':' || encode(body, 'hex'), '|' ORDER BY id)) AS dst_hash,
+  count(*) AS dst_count
+FROM split_test \gset
+
+SELECT (:'dst_hash' = :'src_hash' AND :dst_count::int = :src_count::int
+        AND :dst_count::int > 0) AS roundtrip_ok \gset
+\if :roundtrip_ok
+\echo [PASS] (:testid) positional drain applied to a fresh database reproduces the source (:dst_count rows)
+\else
+\echo [FAIL] (:testid) drain/apply mismatch (src_count=:src_count dst_count=:dst_count hashes :'src_hash' vs :'dst_hash')
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
 \ir helper_test_cleanup.sql
 \if :should_cleanup
 \connect postgres
 DROP DATABASE IF EXISTS cloudsync_test_55_positional;
+DROP DATABASE IF EXISTS cloudsync_test_55_positional_dst;
 \endif
