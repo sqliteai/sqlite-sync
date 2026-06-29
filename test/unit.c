@@ -12562,9 +12562,14 @@ finalize:
 // db_version split across chunks (row-boundary resumes, incl. resumes landing
 // INSIDE a single committed version that the old since>db_version cursor could not
 // express) with a value larger than the chunk budget (mid-fragment resumes).
+// Part 2 is end-to-end: the positionally-drained stream is applied to a fresh
+// receiver and its table content is compared to the source (drain -> apply ->
+// faithful replica), the real path the /check job will use.
 bool do_test_payload_chunks_positional_resume (bool print_result, bool cleanup_databases) {
     sqlite3 *db = NULL;
+    sqlite3 *db2 = NULL;
     sqlite3_stmt *stmt = NULL;
+    sqlite3_stmt *apply = NULL;
     test_payload_chunk *base = NULL; int base_count = 0, base_cap = 0;
     test_payload_chunk *pos = NULL;  int pos_count = 0, pos_cap = 0;
     int64_t watermark = -1;
@@ -12680,6 +12685,33 @@ bool do_test_payload_chunks_positional_resume (bool print_result, bool cleanup_d
         if (memcmp(pos[i].data, base[i].data, base[i].len) != 0) goto finalize;
     }
 
+    // End-to-end: apply the positionally-drained stream to a fresh receiver and
+    // assert its table content matches the source. This exercises the real /check
+    // path (positional drain -> apply -> faithful replica), not just byte-identity.
+    db2 = do_create_database_file(1, timestamp, saved_counter);
+    if (!db2) goto finalize;
+    rc = sqlite3_exec(db2,
+        "CREATE TABLE split_test (id TEXT PRIMARY KEY, body TEXT DEFAULT '');"
+        "SELECT cloudsync_init('split_test');",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    rc = sqlite3_prepare_v2(db2, "SELECT cloudsync_payload_apply(?);", -1, &apply, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    // Apply in reverse drain order: apply must reassemble v3 fragments and merge
+    // rows independent of transport order.
+    for (int i = pos_count - 1; i >= 0; --i) {
+        rc = sqlite3_bind_blob(apply, 1, pos[i].data, pos[i].len, SQLITE_STATIC);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_step(apply);
+        if (rc != SQLITE_ROW) goto finalize;
+        sqlite3_reset(apply);
+        sqlite3_clear_bindings(apply);
+    }
+    sqlite3_finalize(apply); apply = NULL;
+
+    if (!test_split_tables_equal(db, db2)) goto finalize;
+
     result = true;
 
 finalize:
@@ -12688,17 +12720,21 @@ finalize:
                db ? sqlite3_errmsg(db) : "no db", base_count, pos_count, (long long)watermark);
     }
     if (stmt) sqlite3_finalize(stmt);
+    if (apply) sqlite3_finalize(apply);
     test_payload_chunks_free(base, base_count);
     test_payload_chunks_free(pos, pos_count);
     if (db) close_db(db);
+    if (db2) close_db(db2);
     if (cleanup_databases) {
-        char path[256], walpath[300], shmpath[300];
-        do_build_database_path(path, 0, timestamp, saved_counter);
-        snprintf(walpath, sizeof(walpath), "%s-wal", path);
-        snprintf(shmpath, sizeof(shmpath), "%s-shm", path);
-        file_delete_internal(path);
-        file_delete_internal(walpath);
-        file_delete_internal(shmpath);
+        for (int i = 0; i < 2; ++i) {
+            char path[256], walpath[300], shmpath[300];
+            do_build_database_path(path, i, timestamp, saved_counter);
+            snprintf(walpath, sizeof(walpath), "%s-wal", path);
+            snprintf(shmpath, sizeof(shmpath), "%s-shm", path);
+            file_delete_internal(path);
+            file_delete_internal(walpath);
+            file_delete_internal(shmpath);
+        }
     }
     return result;
 }
