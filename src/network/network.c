@@ -1609,16 +1609,20 @@ static void network_sync_state_update_from_response(NETWORK_RESULT *res,
     int parsed_gaps_size = json_extract_array_size(res->buffer, res->blen, "gaps");
     if (parsed_gaps_size >= 0) *gaps_size = parsed_gaps_size;
 
+    // Keep the FIRST failure observed across the chunk stream, not the last: an
+    // earlier chunk's failure is the more likely root cause, and a later chunk's
+    // response must not silently mask it (each chunk's response can carry a
+    // failures.{apply,check} object).
     char *apply_failure = json_extract_failure_stage(res->buffer, res->blen, "apply");
     if (apply_failure) {
-        if (*apply_failure_json) cloudsync_memory_free(*apply_failure_json);
-        *apply_failure_json = apply_failure;
+        if (*apply_failure_json) cloudsync_memory_free(apply_failure);
+        else *apply_failure_json = apply_failure;
     }
 
     char *check_failure = json_extract_failure_stage(res->buffer, res->blen, "check");
     if (check_failure) {
-        if (*check_failure_json) cloudsync_memory_free(*check_failure_json);
-        *check_failure_json = check_failure;
+        if (*check_failure_json) cloudsync_memory_free(check_failure);
+        else *check_failure_json = check_failure;
     }
 }
 
@@ -1779,14 +1783,19 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     }
     if (gaps_size < 0) gaps_size = 0;
 
-    // update db_version in settings
+    // Advance the send checkpoint FORWARD ONLY. The server's lastOptimisticVersion
+    // can momentarily report a value below our current checkpoint (a stale or
+    // out-of-order status response, or a server that is behind this site); writing
+    // it back verbatim (the old "!= db_version" guard) would rewind the cursor and
+    // re-stream already-sent data, or worse, interact with a later advance to skip
+    // a range. Only move the cursor when the target is strictly ahead. When the
+    // server returns no optimistic version, fall back to the max watermark we
+    // streamed (new_db_version, always >= db_version).
     char buf[256];
-    if (last_optimistic_version >= 0) {
-        if (last_optimistic_version != db_version) {
-            snprintf(buf, sizeof(buf), "%" PRId64, last_optimistic_version);
-            dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
-        }
-    } else if (new_db_version != db_version) {
+    if (last_optimistic_version > db_version) {
+        snprintf(buf, sizeof(buf), "%" PRId64, last_optimistic_version);
+        dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
+    } else if (last_optimistic_version < 0 && new_db_version > db_version) {
         snprintf(buf, sizeof(buf), "%" PRId64, new_db_version);
         dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
     }
