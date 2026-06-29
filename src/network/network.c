@@ -1929,7 +1929,15 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
                           chunks_index >= 0 && chunks_index < ntokens &&
                           tokens[chunks_index].type == JSMN_ARRAY;
 
-        if (has_chunks && request_max_chunks > 0 && tokens[chunks_index].size > request_max_chunks) {
+        if (!tokens) {
+            // The body is BUFFER (non-empty) but unparseable (malformed, truncated,
+            // or token allocation failed). Without this, a chunks batch we failed to
+            // tokenize would fall through to the single-payload branch, find no
+            // url/payload, and be misreported as an empty "up to date" response,
+            // silently dropping the pending batch.
+            sqlite3_result_error(context, "cloudsync_network_receive_changes: unable to parse check response.", -1);
+            rc = SQLITE_ERROR;
+        } else if (has_chunks && request_max_chunks > 0 && tokens[chunks_index].size > request_max_chunks) {
             sqlite3_result_error(context, "cloudsync_network_receive_changes: check response exceeded requested maxChunks.", -1);
             rc = SQLITE_ERROR;
         } else if (has_chunks && tokens[chunks_index].size > 0) {
