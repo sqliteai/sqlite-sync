@@ -78,13 +78,27 @@ FI_SRC = $(FI_DIR)/fractional_indexing.c
 # Combined for SQLite extension build
 SRC_FILES = $(CORE_SRC) $(SQLITE_SRC) $(FI_SRC)
 
-TEST_SRC = $(wildcard $(TEST_DIR)/*.c)
+# network_unit.c is built separately with networking ENABLED (see network-unittest),
+# so keep it out of the default OMIT_NETWORK test build.
+TEST_SRC = $(filter-out $(TEST_DIR)/network_unit.c,$(wildcard $(TEST_DIR)/*.c))
 TEST_FILES = $(SRC_FILES) $(TEST_SRC) $(wildcard $(SQLITE_DIR)/*.c)
 RELEASE_OBJ = $(patsubst %.c, $(BUILD_RELEASE)/%.o, $(notdir $(SRC_FILES)))
 TEST_OBJ = $(patsubst %.c, $(BUILD_TEST)/%.o, $(notdir $(TEST_FILES)))
 COV_FILES = $(filter-out $(SRC_DIR)/lz4.c $(NETWORK_DIR)/network.c $(SQLITE_IMPL_DIR)/sql_sqlite.c $(POSTGRES_IMPL_DIR)/database_postgresql.c $(FI_SRC), $(SRC_FILES))
 CURL_LIB = $(CURL_DIR)/$(PLATFORM)/libcurl.a
 TEST_TARGET = $(patsubst %.c,$(DIST_DIR)/%$(EXE), $(notdir $(TEST_SRC)))
+
+# Network-enabled unit tests: rebuild the codebase with networking ON (T_CFLAGS
+# minus OMIT_NETWORK) and link curl, so network.c's internal functions can be
+# tested directly on in-memory buffers. NT_LDFLAGS reuses the platform LDFLAGS
+# (which carries -lcurl) minus the shared-library-only flags, plus the test link
+# libs. -undefined dynamic_lookup is kept: the test never opens a connection, so
+# curl's transport symbols are linked but never invoked.
+BUILD_NETTEST = build/nettest
+NT_CFLAGS = $(filter-out -DCLOUDSYNC_OMIT_NETWORK,$(T_CFLAGS))
+NT_LDFLAGS = $(filter-out -dynamiclib -headerpad_max_install_names,$(LDFLAGS)) $(T_LDFLAGS)
+NT_SRC = $(SRC_FILES) $(SQLITE_DIR)/sqlite3.c $(TEST_DIR)/network_unit.c
+NT_OBJ = $(patsubst %.c,$(BUILD_NETTEST)/%.o,$(notdir $(NT_SRC)))
 
 # Build curl hermetically: neutralize the developer's ambient build env so
 # curl's ./configure compile tests aren't broken by overrides leaking in
@@ -261,8 +275,16 @@ $(BUILD_TEST)/sqlite3.o: $(SQLITE_DIR)/sqlite3.c
 $(BUILD_TEST)/%.o: %.c
 	$(CC) $(T_CFLAGS) -c $< -o $@
 
+# Network-enabled object files (networking ON, for network-unittest)
+$(BUILD_NETTEST):
+	mkdir -p $(BUILD_NETTEST)
+$(BUILD_NETTEST)/sqlite3.o: $(SQLITE_DIR)/sqlite3.c | $(BUILD_NETTEST)
+	$(CC) $(CFLAGS) -DSQLITE_DQS=0 -DSQLITE_CORE -c $< -o $@
+$(BUILD_NETTEST)/%.o: %.c | $(BUILD_NETTEST)
+	$(CC) $(NT_CFLAGS) -c $< -o $@
+
 # Run code coverage (--css-file $(CUSTOM_CSS))
-test: $(TARGET) $(TEST_TARGET) unittest e2e
+test: $(TARGET) $(TEST_TARGET) unittest network-unittest e2e
 	set -e; $(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();"
 ifneq ($(COVERAGE),false)
 	mkdir -p $(COV_DIR)
@@ -273,6 +295,11 @@ endif
 # Run only unit tests
 unittest: $(TARGET) $(DIST_DIR)/unit$(EXE)
 	@./$(DIST_DIR)/unit$(EXE)
+
+# Run the network-layer unit tests (networking compiled in, no server)
+network-unittest: $(CURL_LIB) $(NT_OBJ)
+	$(CC) $(NT_OBJ) -o $(DIST_DIR)/network_unit$(EXE) $(NT_LDFLAGS)
+	@./$(DIST_DIR)/network_unit$(EXE)
 
 # Run end-to-end integration tests
 e2e: $(TARGET) $(DIST_DIR)/integration$(EXE)

@@ -1601,18 +1601,22 @@ static int network_send_payload_to_apply(sqlite3_context *context, network_data 
     return SQLITE_OK;
 }
 
-static void network_sync_state_update_from_response(NETWORK_RESULT *res,
-                                                    int64_t *last_optimistic_version,
-                                                    int64_t *last_confirmed_version,
-                                                    int *gaps_size,
-                                                    char **apply_failure_json,
-                                                    char **check_failure_json) {
+void network_sync_state_update_from_response(NETWORK_RESULT *res,
+                                             int64_t *last_optimistic_version,
+                                             int64_t *last_confirmed_version,
+                                             int *gaps_size,
+                                             char **apply_failure_json,
+                                             char **check_failure_json) {
     if (!res || res->code != CLOUDSYNC_NETWORK_BUFFER || !res->buffer) return;
 
-    int64_t parsed_version = json_extract_int(res->buffer, res->blen, "lastOptimisticVersion", -1);
-    if (parsed_version > *last_optimistic_version) *last_optimistic_version = parsed_version;
-    parsed_version = json_extract_int(res->buffer, res->blen, "lastConfirmedVersion", -1);
-    if (parsed_version > *last_confirmed_version) *last_confirmed_version = parsed_version;
+    // Take the latest valid (>= 0) value, not the max: the server can move these
+    // BACKWARD on a rollback when a later send chunk fails, and lastOptimisticVersion
+    // becomes the durable send checkpoint — masking a decrease would advance the
+    // checkpoint past the rolled-back changes and silently drop them.
+    int64_t parsed_optimistic = json_extract_int(res->buffer, res->blen, "lastOptimisticVersion", -1);
+    if (parsed_optimistic >= 0) *last_optimistic_version = parsed_optimistic;
+    int64_t parsed_confirmed = json_extract_int(res->buffer, res->blen, "lastConfirmedVersion", -1);
+    if (parsed_confirmed >= 0) *last_confirmed_version = parsed_confirmed;
     int parsed_gaps_size = json_extract_array_size(res->buffer, res->blen, "gaps");
     if (parsed_gaps_size >= 0) *gaps_size = parsed_gaps_size;
 
@@ -1627,10 +1631,16 @@ static void network_sync_state_update_from_response(NETWORK_RESULT *res,
         if (*check_failure_json) cloudsync_memory_free(*check_failure_json);
         *check_failure_json = check_failure;
     }
+
+    #ifdef CLOUDSYNC_NETWORK_TRACE
+    // Full endpoint response body that the sync-state fields above were parsed from.
+    // The buffer is not guaranteed NUL-terminated, so bound the print with its length.
+    fprintf(stderr, "[cloudsync-network] sync_state response=%.*s\n", (int)res->blen, res->buffer);
+    #endif
 }
 
-static const char *network_compute_status(int64_t last_optimistic, int64_t last_confirmed,
-                                           int gaps_size, int64_t local_version) {
+const char *network_compute_status(int64_t last_optimistic, int64_t last_confirmed,
+                                   int gaps_size, int64_t local_version) {
     if (last_optimistic < 0 || last_confirmed < 0) return "error";
     if (gaps_size > 0 || last_optimistic < local_version) return "out-of-sync";
     if (last_optimistic == last_confirmed) return "synced";
