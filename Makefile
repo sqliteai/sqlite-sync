@@ -285,7 +285,11 @@ $(BUILD_NETTEST)/%.o: %.c | $(BUILD_NETTEST)
 	$(CC) $(NT_CFLAGS) -c $< -o $@
 
 # Run code coverage (--css-file $(CUSTOM_CSS))
-test: $(TARGET) $(TEST_TARGET) unittest network-unittest e2e
+# dist/network_unit is listed before `unittest` so it is built during the file-build
+# phase: on Android the host `make test` aborts when `unittest` runs the cross-built
+# dist/unit, and network_unit (not in TEST_TARGET) would otherwise never be built
+# before `make test -n` captures the on-emulator command script.
+test: $(TARGET) $(TEST_TARGET) $(DIST_DIR)/network_unit$(EXE) unittest network-unittest e2e
 	set -e; $(SQLITE3) ":memory:" -cmd ".bail on" ".load ./$<" "SELECT cloudsync_version();"
 ifneq ($(COVERAGE),false)
 	mkdir -p $(COV_DIR)
