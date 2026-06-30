@@ -311,52 +311,6 @@ const char * const SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE =
     "SELECT value_id FROM cloudsync_payload_fragments GROUP BY value_id "
     "HAVING COUNT(*) < MAX(part_count));";
 
-// MARK: Payload download spool (server-side /check chunk staging)
-
-// One row per transport chunk of a download stream. Keyed by (stream_id,
-// chunk_index); the server fills a whole window once and pages it out one chunk
-// per /check call so the network driver never re-materializes the whole stream.
-const char * const SQL_PAYLOAD_SPOOL_CREATE_TABLE =
-    "CREATE TABLE IF NOT EXISTS cloudsync_payload_spool ("
-    "stream_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, "
-    "payload BLOB NOT NULL, payload_size INTEGER NOT NULL, "
-    "db_version_min INTEGER NOT NULL, db_version_max INTEGER NOT NULL, "
-    "watermark INTEGER NOT NULL, is_final INTEGER NOT NULL DEFAULT 0, "
-    "created_at INTEGER NOT NULL DEFAULT (unixepoch()), "
-    "PRIMARY KEY(stream_id, chunk_index)) WITHOUT ROWID;";
-
-const char * const SQL_PAYLOAD_SPOOL_COUNT =
-    "SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id=?;";
-
-// Generate the window's chunk stream once (the vtab streams row-by-row under
-// INSERT...SELECT, so peak memory stays at one chunk). until_db_version is left
-// unconstrained so the vtab pins the watermark to the current max db_version.
-const char * const SQL_PAYLOAD_SPOOL_FILL_INSERT =
-    "INSERT INTO cloudsync_payload_spool "
-    "(stream_id, chunk_index, payload, payload_size, db_version_min, db_version_max, watermark, is_final) "
-    "SELECT ?1, chunk_index, payload, payload_size, db_version_min, db_version_max, watermark_db_version, 0 "
-    "FROM cloudsync_payload_chunks "
-    "WHERE since_db_version=?2 AND site_id=?3 AND exclude_filter_site_id=?4;";
-
-const char * const SQL_PAYLOAD_SPOOL_MARK_FINAL =
-    "UPDATE cloudsync_payload_spool SET is_final=1 "
-    "WHERE stream_id=?1 AND chunk_index=("
-    "SELECT MAX(chunk_index) FROM cloudsync_payload_spool WHERE stream_id=?1);";
-
-const char * const SQL_PAYLOAD_SPOOL_DELETE =
-    "DELETE FROM cloudsync_payload_spool WHERE stream_id=?;";
-
-const char * const SQL_PAYLOAD_SPOOL_DELETE_CHUNK =
-    "DELETE FROM cloudsync_payload_spool WHERE stream_id=? AND chunk_index=?;";
-
-// Drop whole abandoned streams (every chunk older than the cutoff). fill is
-// coarse-grained (once per stream), so unlike per-fragment cleanup there is no
-// O(n^2) risk and no throttle is needed.
-const char * const SQL_PAYLOAD_SPOOL_CLEANUP_STALE =
-    "DELETE FROM cloudsync_payload_spool WHERE stream_id IN ("
-    "SELECT stream_id FROM cloudsync_payload_spool GROUP BY stream_id "
-    "HAVING MAX(created_at) < ?);";
-
 // MARK: Blocks (block-level LWW)
 
 const char * const SQL_BLOCKS_CREATE_TABLE =
