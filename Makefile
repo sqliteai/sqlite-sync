@@ -91,12 +91,13 @@ TEST_TARGET = $(patsubst %.c,$(DIST_DIR)/%$(EXE), $(notdir $(TEST_SRC)))
 # Network-enabled unit tests: rebuild the codebase with networking ON (T_CFLAGS
 # minus OMIT_NETWORK) and link curl, so network.c's internal functions can be
 # tested directly on in-memory buffers. NT_LDFLAGS reuses the platform LDFLAGS
-# (which carries -lcurl) minus the shared-library-only flags, plus the test link
-# libs. -undefined dynamic_lookup is kept: the test never opens a connection, so
-# curl's transport symbols are linked but never invoked.
+# (which carries -lcurl) minus the shared-library-only flags (-shared on Linux,
+# -dynamiclib on macOS) so it links as an executable, plus the test link libs.
+# -undefined dynamic_lookup is kept: the test never opens a connection, so curl's
+# transport symbols are linked but never invoked.
 BUILD_NETTEST = build/nettest
 NT_CFLAGS = $(filter-out -DCLOUDSYNC_OMIT_NETWORK,$(T_CFLAGS))
-NT_LDFLAGS = $(filter-out -dynamiclib -headerpad_max_install_names,$(LDFLAGS)) $(T_LDFLAGS)
+NT_LDFLAGS = $(filter-out -shared -dynamiclib -headerpad_max_install_names,$(LDFLAGS)) $(T_LDFLAGS)
 NT_SRC = $(SRC_FILES) $(SQLITE_DIR)/sqlite3.c $(TEST_DIR)/network_unit.c
 NT_OBJ = $(patsubst %.c,$(BUILD_NETTEST)/%.o,$(notdir $(NT_SRC)))
 
