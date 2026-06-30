@@ -134,6 +134,21 @@ static int timed_query_text(sqlite3 *db, const char *sql, char **out, double *st
     return rc;
 }
 
+// Runs a cloudsync_network_* scalar function. In trace mode it captures and prints
+// the JSON the function returns; otherwise it executes without keeping the result.
+static int db_exec_network(sqlite3 *db, const char *operation, const char *sql) {
+#ifdef CLOUDSYNC_NETWORK_TRACE
+    char *result = NULL;
+    int rc = query_text(db, sql, &result);
+    bench_trace("response op=%s json=%s", operation, result ? result : "(null)");
+    free(result);
+    return rc;
+#else
+    (void)operation;
+    return db_exec(db, sql);
+#endif
+}
+
 static int open_load_ext(const char *db_path, sqlite3 **out_db) {
     bench_trace("step=open-load-extension db_path=%s begin", db_path);
     sqlite3 *db = NULL;
@@ -205,8 +220,10 @@ static int init_network(sqlite3 *db, const char *label, const char *database_id,
         if (rc != SQLITE_OK) return rc;
     }
 
+    // Drain any pre-existing backlog so the measured send->apply later starts from a
+    // clean baseline. This is untimed warm-up, not part of the latency measurement.
     bench_trace("step=pre-measure-sync db=%s begin sql=cloudsync_network_sync(500,4)", label);
-    rc = db_exec(db, "SELECT cloudsync_network_sync(500, 4);");
+    rc = db_exec_network(db, "pre-measure-sync", "SELECT cloudsync_network_sync(500, 4);");
     bench_trace("step=pre-measure-sync db=%s end rc=%d", label, rc);
     return rc;
 }
@@ -383,6 +400,9 @@ static int timed_request(sqlite3 *db, sync_bench_request *request, const char *o
     if (strcmp(operation, "check") == 0 && request->result_json) {
         request->rows_received = json_int_at_path(db, request->result_json, "$.receive.rows", -1);
     }
+    // Surface the raw JSON returned by the network function (send/check) under trace.
+    bench_trace("response op=%s attempt=%d json=%s", operation, attempt,
+                request->result_json ? request->result_json : "(null)");
     return request->sqlite_rc;
 }
 
@@ -522,6 +542,8 @@ int main(void) {
     remove(DB_B_PATH);
     cloudsync_memory_init(1);
 
+    // Step 1 - setup: open both local databases (sender A, receiver B), load the
+    // extension, create the schema, attach to the network, and drain to a clean baseline.
     bench_trace("step=benchmark-setup begin database_id=%s poll_delay_ms=%d max_polls=%d", database_id, poll_delay_ms, max_polls);
     rc = setup_database("db_a", DB_A_PATH, database_id, address, apikey, &db_a);
     if (rc != SQLITE_OK) goto cleanup;
@@ -529,15 +551,19 @@ int main(void) {
     if (rc != SQLITE_OK) goto cleanup;
     bench_trace("step=benchmark-setup end rc=%d", rc);
 
+    // Prune stale rows from prior runs and push those deletions so they don't pollute
+    // the receiver's backlog during the measured round-trip.
     rc = cleanup_old_benchmark_rows(db_a, cleanup_older_than_seconds, &cleanup_deleted_rows);
     if (rc != SQLITE_OK) goto cleanup;
     if (cleanup_deleted_rows > 0) {
         bench_trace("step=cleanup-send db=db_a deleted=%d begin sql=cloudsync_network_send_changes", cleanup_deleted_rows);
-        rc = db_exec(db_a, "SELECT cloudsync_network_send_changes();");
+        rc = db_exec_network(db_a, "cleanup-send", "SELECT cloudsync_network_send_changes();");
         bench_trace("step=cleanup-send db=db_a deleted=%d end rc=%d", cleanup_deleted_rows, rc);
         if (rc != SQLITE_OK) goto cleanup;
     }
 
+    // Step 3 - build the unique benchmark row: a UUIDv7 id plus an incompressible
+    // random blob, so the payload survives compression and exercises a realistic size.
     cloudsync_uuid_v7_string(row_id, true);
     snprintf(marker, sizeof(marker), "sync-bench-%s", row_id);
     snprintf(payload, sizeof(payload), "payload-%s", row_id);
@@ -553,9 +579,12 @@ int main(void) {
         random_blob = &empty_blob;
     }
 
+    // Insert the row on the sender. This is the change whose propagation we time.
     rc = insert_benchmark_row(db_a, row_id, payload, marker, random_blob, random_blob_size);
     if (rc != SQLITE_OK) goto cleanup;
 
+    // Step 4 - precondition: the row must not already exist on the receiver, or the
+    // measurement would be meaningless.
     bench_trace("step=verify-before-send db=db_b row_id=%s begin", row_id);
     rc = verify_row(db_b, row_id, payload, marker, random_blob, random_blob_size, &applied);
     bench_trace("step=verify-before-send db=db_b row_id=%s end rc=%d applied=%s", row_id, rc, applied ? "true" : "false");
@@ -566,6 +595,8 @@ int main(void) {
         goto cleanup;
     }
 
+    // Step 5 - measured send: push the row from A and capture the send summary
+    // (status / localVersion / serverVersion). total_start_ms anchors the latency clock.
     bench_trace("step=send db=db_a row_id=%s begin sql=cloudsync_network_send_changes", row_id);
     rc = timed_request(db_a, &requests[request_count++], "send", 1, "SELECT cloudsync_network_send_changes();");
     bench_trace("step=send db=db_a row_id=%s end rc=%d elapsed_ms=%.2f", row_id, rc, requests[request_count - 1].elapsed_ms);
@@ -575,6 +606,8 @@ int main(void) {
     send_summary.server_version = json_int_at_path(db_a, requests[0].result_json, "$.send.serverVersion", -1);
     double total_start_ms = requests[0].started_ms;
 
+    // Step 6 - poll loop: receive on B (sleep between attempts) until the row is
+    // applied and verified, or max_polls is exhausted.
     for (int i = 0; i < max_polls; i++) {
         if (i > 0 && poll_delay_ms > 0) {
             bench_trace("step=poll-sleep attempt=%d delay_ms=%d begin", i + 1, poll_delay_ms);
@@ -609,6 +642,8 @@ int main(void) {
         rc = SQLITE_BUSY;
     }
 
+    // Step 7 - aggregate timings: split the end-to-end latency into time spent in
+    // network requests, in poll sleeps, and the remaining local overhead.
     for (int i = 0; i < request_count; i++) request_ms += requests[i].elapsed_ms;
     measured_overhead_ms = total_ms - request_ms - poll_sleep_ms;
     if (measured_overhead_ms < 0.0 && measured_overhead_ms > -0.01) measured_overhead_ms = 0.0;
