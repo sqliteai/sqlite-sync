@@ -563,8 +563,79 @@ int test_enable_disable(const char *db_path) {
     rc = db_expect_int(db2, sql, 1); RCHECK
 
     rc = db_exec(db2, "SELECT cloudsync_terminate();"); RCHECK
-    
+
     sqlite3_close(db2);
+
+ABORT_TEST
+}
+
+// Reproduces the spurious-gap bug in the send path: when the local db_version clock
+// has been advanced past the site's own changes — as happens when applied remote
+// changes bump the clock — the send announces only the change's own db_version range,
+// so the skipped versions stay a gap in the server's per-site coverage and
+// lastOptimisticVersion can never reach localVersion. cloudsync_db_version_next()
+// forces the jump deterministically, no second database required. Expected to FAIL
+// until the send announces the covered window [last_sent+1 .. watermark].
+int test_send_gap_from_clock_hole(const char *db_path) {
+    sqlite3 *db = NULL;
+    int rc = open_load_ext(db_path, &db); RCHECK
+    rc = db_init(db); RCHECK   // create users/activities/workouts (this db is fresh)
+
+    char value[UUID_STR_MAXLEN];
+    cloudsync_uuid_v7_string(value, true);
+    char sql[256];
+
+    rc = db_exec(db, "SELECT cloudsync_init('users');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_init('activities');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_init('workouts');"); RCHECK
+
+    // Force the next local change to land at db_version 10, leaving 1..9 with no
+    // local-site change (the "hole" that merging applied remote changes would create).
+    rc = db_exec(db, "SELECT cloudsync_db_version_next(10);"); RCHECK
+
+    snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s', '%s');", value, value);
+    rc = db_exec(db, sql); RCHECK
+
+    // sanity: the change really landed at db_version 10, so there is a leading hole
+    rc = db_expect_int(db, "SELECT cloudsync_db_version();", 10); RCHECK
+
+    // init network
+    char network_init[1024];
+    const char* test_db_id = getenv("INTEGRATION_TEST_DATABASE_ID");
+    if (!test_db_id) {
+        fprintf(stderr, "Error: INTEGRATION_TEST_DATABASE_ID not set.\n");
+        exit(1);
+    }
+    const char* custom_address = getenv("INTEGRATION_TEST_CLOUDSYNC_ADDRESS");
+    if (custom_address) {
+        snprintf(network_init, sizeof(network_init),
+            "SELECT cloudsync_network_init_custom('%s', '%s');", custom_address, test_db_id);
+    } else {
+        snprintf(network_init, sizeof(network_init),
+            "SELECT cloudsync_network_init('%s');", test_db_id);
+    }
+    rc = db_exec(db, network_init); RCHECK
+
+    const char* apikey = getenv("INTEGRATION_TEST_APIKEY");
+    if (apikey) {
+        char set_apikey[512];
+        snprintf(set_apikey, sizeof(set_apikey),
+            "SELECT cloudsync_network_set_apikey('%s');", apikey);
+        rc = db_exec(db, set_apikey); RCHECK
+    }
+
+    // Send once. The server applies the change and computes lastOptimisticVersion
+    // (serverVersion) synchronously from its per-site applied ranges. With contiguous
+    // coverage it reaches localVersion (10); with the gap bug it stays at 0 because
+    // db_versions 1..9 are reported missing.
+    rc = db_expect_int(db,
+        "SELECT (j ->> '$.send.serverVersion') = (j ->> '$.send.localVersion') "
+        "       AND (j ->> '$.send.localVersion') = 10 "
+        "FROM (SELECT cloudsync_network_send_changes() AS j);", 1); RCHECK
+
+    rc = db_exec(db, "SELECT cloudsync_cleanup('users');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_cleanup('activities');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_cleanup('workouts');"); RCHECK
 
 ABORT_TEST
 }
@@ -1508,6 +1579,7 @@ int main (void) {
     rc += test_report("Is Enabled Test:", test_is_enabled(DB_PATH));
     rc += test_report("DB Version Test:", test_db_version(DB_PATH));
     rc += test_report("Enable Disable Test:", test_enable_disable(DB_PATH));
+    rc += test_report("Send Gap From Clock Hole Test:", test_send_gap_from_clock_hole(":memory:"));
 
     // Chunked payload tests run only when INTEGRATION_TEST_CHUNKED_DATABASE_ID points at a
     // tenant with a small payload_max_chunk_size; state the skip reason once for the group.

@@ -78,6 +78,32 @@ static bool test_non_buffer_is_noop(void) {
     return optimistic == 7 && confirmed == 3 && gaps == 0;
 }
 
+// The send announces a contiguous coverage window, not the raw chunk ranges, so
+// skipped db_versions don't look like gaps. Walk the tiling exactly as the send loop
+// does: announce [network_announce_min(lo, chunk_min) .. chunk_max], then lo = max+1.
+static bool test_announce_window_tiling(void) {
+    bool ok = true;
+    int64_t lo = 0 + 1;   // send checkpoint (since) = 0
+
+    // leading hole: a single change at db_version 7 must announce from 1, not 7.
+    ok = ok && network_announce_min(lo, 7) == 1;
+    lo = 7 + 1;
+
+    // inter-chunk hole: next change at 20 (8..19 empty) announces from 8 → no gap.
+    ok = ok && network_announce_min(lo, 20) == 8;
+    lo = 20 + 1;
+
+    // same-db_version fragments (a value split across two chunks): first fragment
+    // announces from the running lo, second must clamp to the shared version (30),
+    // never lo (31) — that would make min > max.
+    ok = ok && network_announce_min(lo, 30) == 21;   // first fragment of v30
+    lo = 30 + 1;
+    ok = ok && network_announce_min(lo, 30) == 30;   // second fragment of v30: 30, not 31
+    lo = 30 + 1;
+
+    return ok;
+}
+
 static bool test_compute_status(void) {
     bool ok = true;
     ok = ok && strcmp(network_compute_status(100, 100, 0, 100), "synced") == 0;
@@ -92,6 +118,7 @@ int main(void) {
     printf("\nNetwork unit tests\n");
     check("optimistic/confirmed version folds latest-valid (allows rollback):", test_optimistic_version_rollback());
     check("non-buffer response is a no-op:", test_non_buffer_is_noop());
+    check("send announce-window tiling (hole / inter-chunk / fragment):", test_announce_window_tiling());
     check("network_compute_status:", test_compute_status());
     if (failures) { printf("\n%d test(s) FAILED\n", failures); return 1; }
     printf("\nAll network unit tests passed\n");

@@ -53,6 +53,14 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
 void network_sync_state_update_from_response(NETWORK_RESULT *res, int64_t *last_optimistic_version, int64_t *last_confirmed_version, int *gaps_size, char **apply_failure_json, char **check_failure_json);
 const char *network_compute_status(int64_t last_optimistic, int64_t last_confirmed, int gaps_size, int64_t local_version);
 
+// Lower bound of the coverage window a send chunk announces to /apply: the running
+// window start, but never above the chunk's own min (so consecutive chunks sharing a
+// db_version — a value fragmented across chunks — keep min<=max). The caller advances
+// window_lo to chunk_db_version_max+1 after each chunk so the ranges tile contiguously.
+static inline int64_t network_announce_min(int64_t window_lo, int64_t chunk_db_version_min) {
+    return window_lo < chunk_db_version_min ? window_lo : chunk_db_version_min;
+}
+
 #ifdef CLOUDSYNC_NETWORK_TRACE
 const char *network_trace_endpoint_name(network_data *data, const char *endpoint);
 const char *network_trace_result_name(int code);

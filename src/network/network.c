@@ -1725,6 +1725,11 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     bool sent_any = false;
     int sent_chunks = 0;       // payload chunks sent this call
     int64_t sent_bytes = 0;    // serialized payload bytes sent this call
+    // Lower bound of the coverage window announced to /apply. The server tracks
+    // per-site applied ranges from version 1, so the announced ranges must tile
+    // [send_checkpoint+1 .. watermark] contiguously; otherwise db_versions consumed
+    // without a local-site change (e.g. merged remote changes) read back as gaps.
+    int64_t announce_lo = db_version + 1;
 
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         const void *blob = sqlite3_column_blob(stmt, 0);
@@ -1741,8 +1746,12 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
             goto cleanup;
         }
 
+        // Announce the covered window, not just where the data sits, so db_versions
+        // skipped by non-local-change transactions don't read back as server-side gaps.
+        int64_t announce_min = network_announce_min(announce_lo, db_version_min);
+
         NETWORK_RESULT res = {0};
-        rc = network_send_payload_to_apply(context, netdata, blob, blob_size, db_version_min, db_version_max, &res);
+        rc = network_send_payload_to_apply(context, netdata, blob, blob_size, announce_min, db_version_max, &res);
         if (rc != SQLITE_OK) goto cleanup;
 
         if (res.code == CLOUDSYNC_NETWORK_BUFFER && res.buffer) {
@@ -1760,6 +1769,7 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
         sent_chunks++;
         sent_bytes += payload_size;
         if (watermark > new_db_version) new_db_version = watermark;
+        announce_lo = db_version_max + 1;   // next chunk continues the window here
     }
     if (rc != SQLITE_DONE) {
         sqlite3_result_error(context, sqlite3_errmsg(db), -1);
