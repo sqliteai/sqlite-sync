@@ -12260,6 +12260,201 @@ static bool test_chunks_ids_equal (sqlite3 *db, const char *expected_csv) {
     return ok;
 }
 
+// Materialize all payload chunks returned by `sql` (column 0 = payload blob) on `db`.
+static bool test_crdt_extract (sqlite3 *db, const char *sql, test_payload_chunk **out, int *count) {
+    *out = NULL; *count = 0;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    test_payload_chunk *chunks = NULL;
+    int n = 0, cap = 0, rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        int len = sqlite3_column_bytes(stmt, 0);
+        const void *p = sqlite3_column_blob(stmt, 0);
+        if (!p || len <= 0) { rc = SQLITE_ERROR; break; }
+        if (n == cap) {
+            int ncap = cap ? cap * 2 : 8;
+            test_payload_chunk *nc = realloc(chunks, sizeof(*chunks) * ncap);
+            if (!nc) { rc = SQLITE_ERROR; break; }
+            chunks = nc; cap = ncap;
+        }
+        chunks[n].data = malloc(len);
+        if (!chunks[n].data) { rc = SQLITE_ERROR; break; }
+        memcpy(chunks[n].data, p, len);
+        chunks[n].len = len;
+        ++n;
+    }
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) { test_payload_chunks_free(chunks, n); return false; }
+    *out = chunks; *count = n;
+    return true;
+}
+
+// Apply one already-materialized chunk to `db`.
+static bool test_crdt_apply (sqlite3 *db, const test_payload_chunk *c) {
+    sqlite3_stmt *apply = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT cloudsync_payload_apply(?);", -1, &apply, NULL) != SQLITE_OK) return false;
+    bool ok = (sqlite3_bind_blob(apply, 1, c->data, c->len, SQLITE_STATIC) == SQLITE_OK &&
+               sqlite3_step(apply) == SQLITE_ROW);
+    sqlite3_finalize(apply);
+    return ok;
+}
+
+// Compare the single crdt_test row (a, b, c) between two databases.
+static bool test_crdt_row_equal (sqlite3 *db1, sqlite3 *db2) {
+    sqlite3_stmt *s1 = NULL, *s2 = NULL;
+    const char *sql = "SELECT a, b, c FROM crdt_test WHERE id='r1';";
+    bool result = false;
+    if (sqlite3_prepare_v2(db1, sql, -1, &s1, NULL) != SQLITE_OK) goto done;
+    if (sqlite3_prepare_v2(db2, sql, -1, &s2, NULL) != SQLITE_OK) goto done;
+    if (sqlite3_step(s1) != SQLITE_ROW || sqlite3_step(s2) != SQLITE_ROW) goto done;
+    for (int i = 0; i < 3; ++i) {
+        int n1 = sqlite3_column_bytes(s1, i), n2 = sqlite3_column_bytes(s2, i);
+        if (n1 != n2) goto done;
+        if (n1 > 0 && memcmp(sqlite3_column_blob(s1, i), sqlite3_column_blob(s2, i), n1) != 0) goto done;
+    }
+    result = true;
+done:
+    if (s1) sqlite3_finalize(s1);
+    if (s2) sqlite3_finalize(s2);
+    return result;
+}
+
+// Read the single-row crdt_test.c blob into a malloc'd buffer.
+static bool test_crdt_get_c (sqlite3 *db, void **out, int *outlen) {
+    *out = NULL; *outlen = 0;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT c FROM crdt_test WHERE id='r1';", -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = false;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        int n = sqlite3_column_bytes(s, 0);
+        const void *p = sqlite3_column_blob(s, 0);
+        if (n > 0 && p) { void *buf = malloc(n); if (buf) { memcpy(buf, p, n); *out = buf; *outlen = n; ok = true; } }
+    }
+    sqlite3_finalize(s);
+    return ok;
+}
+
+// Evaluate a scalar-int SQL query on db, true iff the single result is 1.
+static bool test_crdt_scalar_true (sqlite3 *db, const char *sql) {
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = (sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 1);
+    sqlite3_finalize(s);
+    return ok;
+}
+
+// CRDT convergence under chunked / fragmented, non-atomic, interleaved apply.
+// Two sites concurrently change a small column and a big (fragmented) column of the
+// same row, each in ONE transaction (one db_version, several seq). Both sites' chunks
+// are applied to three targets in different orders (A-then-B, B-then-A, interleaved).
+// Column-level LWW must make all three converge to the identical row: the mix
+// a=from-A / b=from-B, with the big value being one site's value intact — fragment
+// value_ids are per (site_id, col_version, checksum), so fragments never cross-mix.
+bool do_test_payload_chunks_crdt_convergence (bool print_result, bool cleanup_databases) {
+    enum { SRC = 0, SITEA = 1, SITEB = 2, TGT1 = 3, TGT2 = 4, TGT3 = 5, NDB = 6 };
+    sqlite3 *db[6] = {0};
+    test_payload_chunk *base = NULL, *ca = NULL, *cb = NULL;
+    int nbase = 0, na = 0, nb = 0;
+    void *cA = NULL, *cB = NULL, *cT = NULL; int lA = 0, lB = 0, lT = 0;
+    bool result = false;
+    int rc = SQLITE_OK;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter++;
+
+    for (int i = 0; i < NDB; ++i) {
+        db[i] = do_create_database_file(i, timestamp, saved_counter);
+        if (!db[i]) goto finalize;
+        rc = sqlite3_exec(db[i],
+            "CREATE TABLE crdt_test (id TEXT PRIMARY KEY, a TEXT DEFAULT '', b TEXT DEFAULT '', c BLOB DEFAULT x'');"
+            "SELECT cloudsync_init('crdt_test');"
+            "SELECT cloudsync_set('payload_max_chunk_size', '262144');",
+            NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // Baseline row on SRC, propagated to every other db so they share col_version 1.
+    rc = sqlite3_exec(db[SRC],
+        "INSERT INTO crdt_test(id, a, b, c) VALUES ('r1', 'base_a', 'base_b', zeroblob(8));",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    if (!test_crdt_extract(db[SRC],
+            "SELECT payload FROM cloudsync_payload_chunks WHERE since_db_version=0 ORDER BY chunk_index;",
+            &base, &nbase) || nbase <= 0) goto finalize;
+    for (int i = SITEA; i < NDB; ++i)
+        for (int k = 0; k < nbase; ++k)
+            if (!test_crdt_apply(db[i], &base[k])) goto finalize;
+
+    // Two sites change a small col + the big (fragmented) col, each in ONE transaction.
+    rc = sqlite3_exec(db[SITEA], "UPDATE crdt_test SET a='AAA_from_A', c=randomblob(720000) WHERE id='r1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[SITEB], "UPDATE crdt_test SET b='BBB_from_B', c=randomblob(720000) WHERE id='r1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    if (!test_crdt_extract(db[SITEA],
+            "SELECT payload FROM cloudsync_payload_chunks WHERE since_db_version=1 ORDER BY chunk_index;", &ca, &na)) goto finalize;
+    if (!test_crdt_extract(db[SITEB],
+            "SELECT payload FROM cloudsync_payload_chunks WHERE since_db_version=1 ORDER BY chunk_index;", &cb, &nb)) goto finalize;
+    // The big value must actually fragment across chunks, else this test proves nothing.
+    if (na < 2 || nb < 2) goto finalize;
+
+    // TGT1: all A then all B.
+    for (int k = 0; k < na; ++k) if (!test_crdt_apply(db[TGT1], &ca[k])) goto finalize;
+    for (int k = 0; k < nb; ++k) if (!test_crdt_apply(db[TGT1], &cb[k])) goto finalize;
+    // TGT2: all B then all A (opposite order).
+    for (int k = 0; k < nb; ++k) if (!test_crdt_apply(db[TGT2], &cb[k])) goto finalize;
+    for (int k = 0; k < na; ++k) if (!test_crdt_apply(db[TGT2], &ca[k])) goto finalize;
+    // TGT3: apply the combined A+B chunk list in a scrambled order (odd combined
+    // indices, then even) — an arbitrary cross-site interleave that also delivers
+    // each site's value fragments out of order. Any permutation must converge: the
+    // merge is commutative and fragments stage by (value_id, part_index), completing
+    // regardless of arrival order.
+    for (int pass = 1; pass >= 0; --pass)
+        for (int j = 0, total = na + nb; j < total; ++j) {
+            if ((j & 1) != pass) continue;
+            const test_payload_chunk *c = (j < na) ? &ca[j] : &cb[j - na];
+            if (!test_crdt_apply(db[TGT3], c)) goto finalize;
+        }
+
+    // (1) Convergence: all three targets hold the identical row regardless of order.
+    if (!test_crdt_row_equal(db[TGT1], db[TGT2])) goto finalize;
+    if (!test_crdt_row_equal(db[TGT1], db[TGT3])) goto finalize;
+
+    // (2) The row is the column-level LWW mix: a from A, b from B.
+    if (!test_crdt_scalar_true(db[TGT1], "SELECT a='AAA_from_A' AND b='BBB_from_B' FROM crdt_test WHERE id='r1';")) goto finalize;
+
+    // (3) The big value is ONE site's value, fully reassembled and intact — fragments
+    // from the two sites never cross-contaminate (distinct value_ids).
+    if (!test_crdt_get_c(db[SITEA], &cA, &lA)) goto finalize;
+    if (!test_crdt_get_c(db[SITEB], &cB, &lB)) goto finalize;
+    if (!test_crdt_get_c(db[TGT1], &cT, &lT)) goto finalize;
+    if (lT != 720000) goto finalize;
+    if ((lT == lA && memcmp(cT, cA, lT) == 0) == (lT == lB && memcmp(cT, cB, lT) == 0)) goto finalize; // exactly one
+
+    result = true;
+
+finalize:
+    if (!result && print_result)
+        printf("do_test_payload_chunks_crdt_convergence error: %s\n", db[SRC] ? sqlite3_errmsg(db[SRC]) : "no db");
+    free(cA); free(cB); free(cT);
+    test_payload_chunks_free(base, nbase);
+    test_payload_chunks_free(ca, na);
+    test_payload_chunks_free(cb, nb);
+    for (int i = 0; i < NDB; ++i) if (db[i]) close_db(db[i]);
+    if (cleanup_databases) {
+        for (int i = 0; i < NDB; ++i) {
+            char path[256], walpath[300], shmpath[300];
+            do_build_database_path(path, i, timestamp, saved_counter);
+            snprintf(walpath, sizeof(walpath), "%s-wal", path);
+            snprintf(shmpath, sizeof(shmpath), "%s-shm", path);
+            file_delete_internal(path);
+            file_delete_internal(walpath);
+            file_delete_internal(shmpath);
+        }
+    }
+    return result;
+}
+
 bool do_test_payload_chunks_site_exclusion (bool print_result, bool cleanup_databases) {
     sqlite3 *db[4] = {NULL, NULL, NULL, NULL};
     sqlite3_stmt *stmt = NULL;
@@ -13187,6 +13382,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Payload Buffer Test (1MB):", do_test_payload_buffer(1024 * 1024));
     result += test_report("Payload Buffer Test (10MB):", do_test_payload_buffer(10 * 1024 * 1024));
     result += test_report("Payload Chunks Large Values:", do_test_payload_chunks_large_values(print_result, cleanup_databases));
+    result += test_report("Payload Chunks CRDT Convergence:", do_test_payload_chunks_crdt_convergence(print_result, cleanup_databases));
     result += test_report("Payload Chunks Site Exclusion:", do_test_payload_chunks_site_exclusion(print_result, cleanup_databases));
     result += test_report("Payload Chunks Split db_version:", do_test_payload_chunks_split_dbversion(print_result, cleanup_databases));
     result += test_report("Payload Chunks Positional Resume:", do_test_payload_chunks_positional_resume(print_result, cleanup_databases));
