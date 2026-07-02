@@ -12260,6 +12260,201 @@ static bool test_chunks_ids_equal (sqlite3 *db, const char *expected_csv) {
     return ok;
 }
 
+// Materialize all payload chunks returned by `sql` (column 0 = payload blob) on `db`.
+static bool test_crdt_extract (sqlite3 *db, const char *sql, test_payload_chunk **out, int *count) {
+    *out = NULL; *count = 0;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    test_payload_chunk *chunks = NULL;
+    int n = 0, cap = 0, rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        int len = sqlite3_column_bytes(stmt, 0);
+        const void *p = sqlite3_column_blob(stmt, 0);
+        if (!p || len <= 0) { rc = SQLITE_ERROR; break; }
+        if (n == cap) {
+            int ncap = cap ? cap * 2 : 8;
+            test_payload_chunk *nc = realloc(chunks, sizeof(*chunks) * ncap);
+            if (!nc) { rc = SQLITE_ERROR; break; }
+            chunks = nc; cap = ncap;
+        }
+        chunks[n].data = malloc(len);
+        if (!chunks[n].data) { rc = SQLITE_ERROR; break; }
+        memcpy(chunks[n].data, p, len);
+        chunks[n].len = len;
+        ++n;
+    }
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) { test_payload_chunks_free(chunks, n); return false; }
+    *out = chunks; *count = n;
+    return true;
+}
+
+// Apply one already-materialized chunk to `db`.
+static bool test_crdt_apply (sqlite3 *db, const test_payload_chunk *c) {
+    sqlite3_stmt *apply = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT cloudsync_payload_apply(?);", -1, &apply, NULL) != SQLITE_OK) return false;
+    bool ok = (sqlite3_bind_blob(apply, 1, c->data, c->len, SQLITE_STATIC) == SQLITE_OK &&
+               sqlite3_step(apply) == SQLITE_ROW);
+    sqlite3_finalize(apply);
+    return ok;
+}
+
+// Compare the single crdt_test row (a, b, c) between two databases.
+static bool test_crdt_row_equal (sqlite3 *db1, sqlite3 *db2) {
+    sqlite3_stmt *s1 = NULL, *s2 = NULL;
+    const char *sql = "SELECT a, b, c FROM crdt_test WHERE id='r1';";
+    bool result = false;
+    if (sqlite3_prepare_v2(db1, sql, -1, &s1, NULL) != SQLITE_OK) goto done;
+    if (sqlite3_prepare_v2(db2, sql, -1, &s2, NULL) != SQLITE_OK) goto done;
+    if (sqlite3_step(s1) != SQLITE_ROW || sqlite3_step(s2) != SQLITE_ROW) goto done;
+    for (int i = 0; i < 3; ++i) {
+        int n1 = sqlite3_column_bytes(s1, i), n2 = sqlite3_column_bytes(s2, i);
+        if (n1 != n2) goto done;
+        if (n1 > 0 && memcmp(sqlite3_column_blob(s1, i), sqlite3_column_blob(s2, i), n1) != 0) goto done;
+    }
+    result = true;
+done:
+    if (s1) sqlite3_finalize(s1);
+    if (s2) sqlite3_finalize(s2);
+    return result;
+}
+
+// Read the single-row crdt_test.c blob into a malloc'd buffer.
+static bool test_crdt_get_c (sqlite3 *db, void **out, int *outlen) {
+    *out = NULL; *outlen = 0;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT c FROM crdt_test WHERE id='r1';", -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = false;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        int n = sqlite3_column_bytes(s, 0);
+        const void *p = sqlite3_column_blob(s, 0);
+        if (n > 0 && p) { void *buf = malloc(n); if (buf) { memcpy(buf, p, n); *out = buf; *outlen = n; ok = true; } }
+    }
+    sqlite3_finalize(s);
+    return ok;
+}
+
+// Evaluate a scalar-int SQL query on db, true iff the single result is 1.
+static bool test_crdt_scalar_true (sqlite3 *db, const char *sql) {
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = (sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 1);
+    sqlite3_finalize(s);
+    return ok;
+}
+
+// CRDT convergence under chunked / fragmented, non-atomic, interleaved apply.
+// Two sites concurrently change a small column and a big (fragmented) column of the
+// same row, each in ONE transaction (one db_version, several seq). Both sites' chunks
+// are applied to three targets in different orders (A-then-B, B-then-A, interleaved).
+// Column-level LWW must make all three converge to the identical row: the mix
+// a=from-A / b=from-B, with the big value being one site's value intact — fragment
+// value_ids are per (site_id, col_version, checksum), so fragments never cross-mix.
+bool do_test_payload_chunks_crdt_convergence (bool print_result, bool cleanup_databases) {
+    enum { SRC = 0, SITEA = 1, SITEB = 2, TGT1 = 3, TGT2 = 4, TGT3 = 5, NDB = 6 };
+    sqlite3 *db[6] = {0};
+    test_payload_chunk *base = NULL, *ca = NULL, *cb = NULL;
+    int nbase = 0, na = 0, nb = 0;
+    void *cA = NULL, *cB = NULL, *cT = NULL; int lA = 0, lB = 0, lT = 0;
+    bool result = false;
+    int rc = SQLITE_OK;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter++;
+
+    for (int i = 0; i < NDB; ++i) {
+        db[i] = do_create_database_file(i, timestamp, saved_counter);
+        if (!db[i]) goto finalize;
+        rc = sqlite3_exec(db[i],
+            "CREATE TABLE crdt_test (id TEXT PRIMARY KEY, a TEXT DEFAULT '', b TEXT DEFAULT '', c BLOB DEFAULT x'');"
+            "SELECT cloudsync_init('crdt_test');"
+            "SELECT cloudsync_set('payload_max_chunk_size', '262144');",
+            NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // Baseline row on SRC, propagated to every other db so they share col_version 1.
+    rc = sqlite3_exec(db[SRC],
+        "INSERT INTO crdt_test(id, a, b, c) VALUES ('r1', 'base_a', 'base_b', zeroblob(8));",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    if (!test_crdt_extract(db[SRC],
+            "SELECT payload FROM cloudsync_payload_chunks WHERE since_db_version=0 ORDER BY chunk_index;",
+            &base, &nbase) || nbase <= 0) goto finalize;
+    for (int i = SITEA; i < NDB; ++i)
+        for (int k = 0; k < nbase; ++k)
+            if (!test_crdt_apply(db[i], &base[k])) goto finalize;
+
+    // Two sites change a small col + the big (fragmented) col, each in ONE transaction.
+    rc = sqlite3_exec(db[SITEA], "UPDATE crdt_test SET a='AAA_from_A', c=randomblob(720000) WHERE id='r1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db[SITEB], "UPDATE crdt_test SET b='BBB_from_B', c=randomblob(720000) WHERE id='r1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    if (!test_crdt_extract(db[SITEA],
+            "SELECT payload FROM cloudsync_payload_chunks WHERE since_db_version=1 ORDER BY chunk_index;", &ca, &na)) goto finalize;
+    if (!test_crdt_extract(db[SITEB],
+            "SELECT payload FROM cloudsync_payload_chunks WHERE since_db_version=1 ORDER BY chunk_index;", &cb, &nb)) goto finalize;
+    // The big value must actually fragment across chunks, else this test proves nothing.
+    if (na < 2 || nb < 2) goto finalize;
+
+    // TGT1: all A then all B.
+    for (int k = 0; k < na; ++k) if (!test_crdt_apply(db[TGT1], &ca[k])) goto finalize;
+    for (int k = 0; k < nb; ++k) if (!test_crdt_apply(db[TGT1], &cb[k])) goto finalize;
+    // TGT2: all B then all A (opposite order).
+    for (int k = 0; k < nb; ++k) if (!test_crdt_apply(db[TGT2], &cb[k])) goto finalize;
+    for (int k = 0; k < na; ++k) if (!test_crdt_apply(db[TGT2], &ca[k])) goto finalize;
+    // TGT3: apply the combined A+B chunk list in a scrambled order (odd combined
+    // indices, then even) — an arbitrary cross-site interleave that also delivers
+    // each site's value fragments out of order. Any permutation must converge: the
+    // merge is commutative and fragments stage by (value_id, part_index), completing
+    // regardless of arrival order.
+    for (int pass = 1; pass >= 0; --pass)
+        for (int j = 0, total = na + nb; j < total; ++j) {
+            if ((j & 1) != pass) continue;
+            const test_payload_chunk *c = (j < na) ? &ca[j] : &cb[j - na];
+            if (!test_crdt_apply(db[TGT3], c)) goto finalize;
+        }
+
+    // (1) Convergence: all three targets hold the identical row regardless of order.
+    if (!test_crdt_row_equal(db[TGT1], db[TGT2])) goto finalize;
+    if (!test_crdt_row_equal(db[TGT1], db[TGT3])) goto finalize;
+
+    // (2) The row is the column-level LWW mix: a from A, b from B.
+    if (!test_crdt_scalar_true(db[TGT1], "SELECT a='AAA_from_A' AND b='BBB_from_B' FROM crdt_test WHERE id='r1';")) goto finalize;
+
+    // (3) The big value is ONE site's value, fully reassembled and intact — fragments
+    // from the two sites never cross-contaminate (distinct value_ids).
+    if (!test_crdt_get_c(db[SITEA], &cA, &lA)) goto finalize;
+    if (!test_crdt_get_c(db[SITEB], &cB, &lB)) goto finalize;
+    if (!test_crdt_get_c(db[TGT1], &cT, &lT)) goto finalize;
+    if (lT != 720000) goto finalize;
+    if ((lT == lA && memcmp(cT, cA, lT) == 0) == (lT == lB && memcmp(cT, cB, lT) == 0)) goto finalize; // exactly one
+
+    result = true;
+
+finalize:
+    if (!result && print_result)
+        printf("do_test_payload_chunks_crdt_convergence error: %s\n", db[SRC] ? sqlite3_errmsg(db[SRC]) : "no db");
+    free(cA); free(cB); free(cT);
+    test_payload_chunks_free(base, nbase);
+    test_payload_chunks_free(ca, na);
+    test_payload_chunks_free(cb, nb);
+    for (int i = 0; i < NDB; ++i) if (db[i]) close_db(db[i]);
+    if (cleanup_databases) {
+        for (int i = 0; i < NDB; ++i) {
+            char path[256], walpath[300], shmpath[300];
+            do_build_database_path(path, i, timestamp, saved_counter);
+            snprintf(walpath, sizeof(walpath), "%s-wal", path);
+            snprintf(shmpath, sizeof(shmpath), "%s-shm", path);
+            file_delete_internal(path);
+            file_delete_internal(walpath);
+            file_delete_internal(shmpath);
+        }
+    }
+    return result;
+}
+
 bool do_test_payload_chunks_site_exclusion (bool print_result, bool cleanup_databases) {
     sqlite3 *db[4] = {NULL, NULL, NULL, NULL};
     sqlite3_stmt *stmt = NULL;
@@ -12556,15 +12751,23 @@ finalize:
     return result;
 }
 
-// Exercises the server-side download spool: cloudsync_payload_spool_fill stages a
-// window's whole chunk stream once, and the /check path pages it out one chunk per
-// call. Verifies byte-identity with direct cloudsync_payload_chunks generation,
-// is_final marking, idempotent re-fill, drop, empty window, and stale-GC.
-bool do_test_payload_spool (bool print_result, bool cleanup_databases) {
+// Proves the positional-cursor resume of cloudsync_payload_chunks: paging the
+// window one chunk per call with an O(1) (db_version, seq, frag_offset) seek
+// yields byte-identical chunks to a single full-window scan. The dataset mixes a
+// db_version split across chunks (row-boundary resumes, incl. resumes landing
+// INSIDE a single committed version that the old since>db_version cursor could not
+// express) with a value larger than the chunk budget (mid-fragment resumes).
+// Part 2 is end-to-end: the positionally-drained stream is applied to a fresh
+// receiver and its table content is compared to the source (drain -> apply ->
+// faithful replica), the real path the /check job will use.
+bool do_test_payload_chunks_positional_resume (bool print_result, bool cleanup_databases) {
     sqlite3 *db = NULL;
+    sqlite3 *db2 = NULL;
     sqlite3_stmt *stmt = NULL;
-    test_payload_chunk *chunks = NULL;
-    int chunk_count = 0, chunk_cap = 0, v3_count = 0;
+    sqlite3_stmt *apply = NULL;
+    test_payload_chunk *base = NULL; int base_count = 0, base_cap = 0;
+    test_payload_chunk *pos = NULL;  int pos_count = 0, pos_cap = 0;
+    int64_t watermark = -1;
     bool result = false;
     int rc = SQLITE_OK;
 
@@ -12574,174 +12777,159 @@ bool do_test_payload_spool (bool print_result, bool cleanup_databases) {
     db = do_create_database_file(0, timestamp, saved_counter);
     if (!db) goto finalize;
     rc = sqlite3_exec(db,
-        "CREATE TABLE payload_chunk_test ("
-        "id TEXT PRIMARY KEY, note TEXT DEFAULT '', data BLOB DEFAULT x'');"
-        "SELECT cloudsync_init('payload_chunk_test');",
+        "CREATE TABLE split_test (id TEXT PRIMARY KEY, body TEXT DEFAULT '');"
+        "SELECT cloudsync_init('split_test');"
+        "SELECT cloudsync_set('payload_max_chunk_size', '262144');",
         NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
 
-    // One oversized value (-> v3 fragment chunks) plus many small rows (-> several
-    // v2 chunks) under a tiny budget, so the window is a multi-chunk stream.
+    // tx1: ~500 medium rows in one transaction -> one db_version split across
+    // several v2 chunks (row-boundary resumes within a single version).
     rc = sqlite3_exec(db,
-        "SELECT cloudsync_set('payload_max_chunk_size', '262144');"
-        "INSERT INTO payload_chunk_test(id, note, data) "
-        "VALUES ('big', lower(hex(randomblob(360000))), randomblob(720000));"
-        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 260) "
-        "INSERT INTO payload_chunk_test(id, note, data) "
-        "SELECT printf('row-%03d', i), printf('small-%03d-%s', i, hex(randomblob(850))), randomblob(512) FROM c;",
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 500) "
+        "INSERT INTO split_test(id, body) SELECT printf('row-%04d', i), hex(randomblob(700)) FROM c;",
         NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
 
-    // Reference stream: collect the chunks the vtab generates directly for the
-    // whole window (since_db_version=0), in order.
+    // tx2: one value far larger than the chunk budget -> v3 fragments across
+    // several chunks (mid-fragment resumes inside a single value).
+    rc = sqlite3_exec(db,
+        "INSERT INTO split_test(id, body) VALUES ('big', hex(randomblob(900000)));",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // Baseline: every chunk of the whole window, in order, via the legacy scan.
     rc = sqlite3_prepare_v2(db,
-        "SELECT payload FROM cloudsync_payload_chunks WHERE since_db_version=0 ORDER BY chunk_index;",
-        -1, &stmt, NULL);
+        "SELECT payload, watermark_db_version FROM cloudsync_payload_chunks "
+        "WHERE since_db_version=0 ORDER BY chunk_index;", -1, &stmt, NULL);
     if (rc != SQLITE_OK) goto finalize;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         int len = sqlite3_column_bytes(stmt, 0);
         const void *payload = sqlite3_column_blob(stmt, 0);
         if (!payload || len <= 0) goto finalize;
-        if (len > 4 && ((const unsigned char *)payload)[4] == 3) ++v3_count;
-        if (chunk_count == chunk_cap) {
-            int new_cap = chunk_cap ? chunk_cap * 2 : 16;
-            test_payload_chunk *nc = realloc(chunks, sizeof(*chunks) * new_cap);
-            if (!nc) goto finalize;
-            memset(nc + chunk_cap, 0, sizeof(*chunks) * (new_cap - chunk_cap));
-            chunks = nc; chunk_cap = new_cap;
+        watermark = sqlite3_column_int64(stmt, 1);
+        if (base_count == base_cap) {
+            int nc = base_cap ? base_cap * 2 : 8;
+            test_payload_chunk *t = realloc(base, sizeof(*t) * nc);
+            if (!t) goto finalize;
+            memset(t + base_cap, 0, sizeof(*t) * (nc - base_cap));
+            base = t; base_cap = nc;
         }
-        chunks[chunk_count].data = malloc(len);
-        if (!chunks[chunk_count].data) goto finalize;
-        memcpy(chunks[chunk_count].data, payload, len);
-        chunks[chunk_count].len = len;
-        ++chunk_count;
+        base[base_count].data = malloc(len);
+        if (!base[base_count].data) goto finalize;
+        memcpy(base[base_count].data, payload, len);
+        base[base_count].len = len;
+        ++base_count;
     }
     if (rc != SQLITE_DONE) goto finalize;
     sqlite3_finalize(stmt); stmt = NULL;
-    // Scenario needs a genuine multi-chunk stream including >= 2 v3 fragments.
-    if (chunk_count < 5 || v3_count < 2) goto finalize;
 
-    // --- fill stages the whole stream; the return value is the chunk count ---
-    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_payload_spool_fill('stream-A', 0, NULL, 0);", -1, &stmt, NULL);
-    if (rc != SQLITE_OK) goto finalize;
-    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != chunk_count) goto finalize;
-    sqlite3_finalize(stmt); stmt = NULL;
+    // Scenario must actually exercise multiple chunks (and thus resumes).
+    if (base_count < 4 || watermark <= 0) goto finalize;
 
-    // --- page through the spool: byte-identity, watermark stable, is_final last ---
+    // Positional drain: one chunk per call, seeking to the cursor the previous
+    // chunk reported. until is the frozen watermark from the baseline.
     rc = sqlite3_prepare_v2(db,
-        "SELECT payload, watermark, is_final FROM cloudsync_payload_spool "
-        "WHERE stream_id='stream-A' ORDER BY chunk_index;",
-        -1, &stmt, NULL);
+        "SELECT payload, next_db_version, next_seq, next_frag_offset, is_final "
+        "FROM cloudsync_payload_chunks "
+        "WHERE until_db_version=?1 AND resume_db_version=?2 AND resume_seq=?3 AND resume_frag_offset=?4 "
+        "LIMIT 1;", -1, &stmt, NULL);
     if (rc != SQLITE_OK) goto finalize;
-    int idx = 0;
-    int64_t watermark = -1;
-    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-        if (idx >= chunk_count) goto finalize;
+
+    int64_t rdbv = 0, rseq = 0, rfrag = 0;
+    bool done = false;
+    bool saw_frag_resume = false; // a follow-up call actually resumed mid-value
+    // Hard cap guards against a resume bug looping forever.
+    for (int guard = 0; !done && guard <= base_count + 2; ++guard) {
+        if (rfrag > 0) saw_frag_resume = true;
+        sqlite3_reset(stmt);
+        sqlite3_bind_int64(stmt, 1, watermark);
+        sqlite3_bind_int64(stmt, 2, rdbv);
+        sqlite3_bind_int64(stmt, 3, rseq);
+        sqlite3_bind_int64(stmt, 4, rfrag);
+        rc = sqlite3_step(stmt);
+        if (rc != SQLITE_ROW) goto finalize; // every step before is_final must yield a chunk
         int len = sqlite3_column_bytes(stmt, 0);
         const void *payload = sqlite3_column_blob(stmt, 0);
-        int64_t wm = sqlite3_column_int64(stmt, 1);
-        int is_final = sqlite3_column_int(stmt, 2);
-        if (len != chunks[idx].len || memcmp(payload, chunks[idx].data, len) != 0) goto finalize;
-        if (watermark < 0) watermark = wm; else if (wm != watermark) goto finalize;
-        if (is_final != (idx == chunk_count - 1)) goto finalize;
-        ++idx;
+        if (!payload || len <= 0) goto finalize;
+        rdbv = sqlite3_column_int64(stmt, 1);
+        rseq = sqlite3_column_int64(stmt, 2);
+        rfrag = sqlite3_column_int64(stmt, 3);
+        done = sqlite3_column_int(stmt, 4) != 0;
+        if (pos_count == pos_cap) {
+            int nc = pos_cap ? pos_cap * 2 : 8;
+            test_payload_chunk *t = realloc(pos, sizeof(*t) * nc);
+            if (!t) goto finalize;
+            memset(t + pos_cap, 0, sizeof(*t) * (nc - pos_cap));
+            pos = t; pos_cap = nc;
+        }
+        pos[pos_count].data = malloc(len);
+        if (!pos[pos_count].data) goto finalize;
+        memcpy(pos[pos_count].data, payload, len);
+        pos[pos_count].len = len;
+        ++pos_count;
     }
-    if (rc != SQLITE_DONE || idx != chunk_count || watermark <= 0) goto finalize;
     sqlite3_finalize(stmt); stmt = NULL;
 
-    // --- idempotent re-fill: same count, no duplicate rows ---
-    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_payload_spool_fill('stream-A', 0, NULL, 0);", -1, &stmt, NULL);
-    if (rc != SQLITE_OK) goto finalize;
-    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != chunk_count) goto finalize;
-    sqlite3_finalize(stmt); stmt = NULL;
-    rc = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-A';", -1, &stmt, NULL);
-    if (rc != SQLITE_OK) goto finalize;
-    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != chunk_count) goto finalize;
-    sqlite3_finalize(stmt); stmt = NULL;
+    // The positional drain must terminate exactly on is_final, reproduce the
+    // baseline chunk sequence byte-for-byte, and have actually exercised a
+    // mid-value (fragment) resume — not only row-boundary resumes.
+    if (!done || pos_count != base_count || !saw_frag_resume) goto finalize;
+    for (int i = 0; i < base_count; ++i) {
+        if (pos[i].len != base[i].len) goto finalize;
+        if (memcmp(pos[i].data, base[i].data, base[i].len) != 0) goto finalize;
+    }
 
-    // --- empty window: since past the watermark yields zero chunks ---
-    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_payload_spool_fill('stream-empty', 999999, NULL, 0);", -1, &stmt, NULL);
-    if (rc != SQLITE_OK) goto finalize;
-    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 0) goto finalize;
-    sqlite3_finalize(stmt); stmt = NULL;
-
-    // --- stale-GC: an abandoned >24h stream is reaped on the next fill ---
-    rc = sqlite3_exec(db,
-        "INSERT INTO cloudsync_payload_spool "
-        "(stream_id, chunk_index, payload, payload_size, db_version_min, db_version_max, watermark, is_final, created_at) "
-        "VALUES ('stale', 0, x'00', 1, 1, 1, 1, 1, unixepoch()-90000);",
+    // End-to-end: apply the positionally-drained stream to a fresh receiver and
+    // assert its table content matches the source. This exercises the real /check
+    // path (positional drain -> apply -> faithful replica), not just byte-identity.
+    db2 = do_create_database_file(1, timestamp, saved_counter);
+    if (!db2) goto finalize;
+    rc = sqlite3_exec(db2,
+        "CREATE TABLE split_test (id TEXT PRIMARY KEY, body TEXT DEFAULT '');"
+        "SELECT cloudsync_init('split_test');",
         NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
-    rc = sqlite3_exec(db, "SELECT cloudsync_payload_spool_fill('stream-B', 0, NULL, 0);", NULL, NULL, NULL);
-    if (rc != SQLITE_OK) goto finalize;
-    rc = sqlite3_prepare_v2(db,
-        "SELECT (SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stale'), "
-        "(SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-B');", -1, &stmt, NULL);
-    if (rc != SQLITE_OK) goto finalize;
-    if (sqlite3_step(stmt) != SQLITE_ROW) goto finalize;
-    if (sqlite3_column_int(stmt, 0) != 0 || sqlite3_column_int(stmt, 1) != chunk_count) goto finalize;
-    sqlite3_finalize(stmt); stmt = NULL;
 
-    // --- chunk drop removes only one matching chunk and reports the count ---
-    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_payload_spool_drop_chunk('stream-A', 1);", -1, &stmt, NULL);
+    rc = sqlite3_prepare_v2(db2, "SELECT cloudsync_payload_apply(?);", -1, &apply, NULL);
     if (rc != SQLITE_OK) goto finalize;
-    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 1) goto finalize;
-    sqlite3_finalize(stmt); stmt = NULL;
-    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_payload_spool_drop_chunk('stream-A', 1);", -1, &stmt, NULL);
-    if (rc != SQLITE_OK) goto finalize;
-    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 0) goto finalize;
-    sqlite3_finalize(stmt); stmt = NULL;
-    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_payload_spool_drop_chunk('stream-A', 999999);", -1, &stmt, NULL);
-    if (rc != SQLITE_OK) goto finalize;
-    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 0) goto finalize;
-    sqlite3_finalize(stmt); stmt = NULL;
-    rc = sqlite3_prepare_v2(db,
-        "SELECT "
-        "(SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-A'), "
-        "(SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-A' AND chunk_index=0), "
-        "(SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-A' AND chunk_index=1), "
-        "(SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-A' AND chunk_index=2), "
-        "(SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-B'), "
-        "(SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-B' AND chunk_index=1);",
-        -1, &stmt, NULL);
-    if (rc != SQLITE_OK) goto finalize;
-    if (sqlite3_step(stmt) != SQLITE_ROW) goto finalize;
-    if (sqlite3_column_int(stmt, 0) != chunk_count - 1 ||
-        sqlite3_column_int(stmt, 1) != 1 ||
-        sqlite3_column_int(stmt, 2) != 0 ||
-        sqlite3_column_int(stmt, 3) != 1 ||
-        sqlite3_column_int(stmt, 4) != chunk_count ||
-        sqlite3_column_int(stmt, 5) != 1) goto finalize;
-    sqlite3_finalize(stmt); stmt = NULL;
+    // Apply in reverse drain order: apply must reassemble v3 fragments and merge
+    // rows independent of transport order.
+    for (int i = pos_count - 1; i >= 0; --i) {
+        rc = sqlite3_bind_blob(apply, 1, pos[i].data, pos[i].len, SQLITE_STATIC);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_step(apply);
+        if (rc != SQLITE_ROW) goto finalize;
+        sqlite3_reset(apply);
+        sqlite3_clear_bindings(apply);
+    }
+    sqlite3_finalize(apply); apply = NULL;
 
-    // --- drop removes the stream and reports the number of chunks removed ---
-    rc = sqlite3_prepare_v2(db, "SELECT cloudsync_payload_spool_drop('stream-A');", -1, &stmt, NULL);
-    if (rc != SQLITE_OK) goto finalize;
-    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != chunk_count - 1) goto finalize;
-    sqlite3_finalize(stmt); stmt = NULL;
-    rc = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM cloudsync_payload_spool WHERE stream_id='stream-A';", -1, &stmt, NULL);
-    if (rc != SQLITE_OK) goto finalize;
-    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 0) goto finalize;
-    sqlite3_finalize(stmt); stmt = NULL;
+    if (!test_split_tables_equal(db, db2)) goto finalize;
 
     result = true;
 
 finalize:
     if (!result && print_result) {
-        printf("do_test_payload_spool error: %s (chunks=%d, v3=%d)\n",
-               db ? sqlite3_errmsg(db) : "no db", chunk_count, v3_count);
+        printf("do_test_payload_chunks_positional_resume error: %s (base=%d, pos=%d, watermark=%lld)\n",
+               db ? sqlite3_errmsg(db) : "no db", base_count, pos_count, (long long)watermark);
     }
     if (stmt) sqlite3_finalize(stmt);
-    test_payload_chunks_free(chunks, chunk_count);
+    if (apply) sqlite3_finalize(apply);
+    test_payload_chunks_free(base, base_count);
+    test_payload_chunks_free(pos, pos_count);
     if (db) close_db(db);
+    if (db2) close_db(db2);
     if (cleanup_databases) {
-        char path[256], walpath[300], shmpath[300];
-        do_build_database_path(path, 0, timestamp, saved_counter);
-        snprintf(walpath, sizeof(walpath), "%s-wal", path);
-        snprintf(shmpath, sizeof(shmpath), "%s-shm", path);
-        file_delete_internal(path);
-        file_delete_internal(walpath);
-        file_delete_internal(shmpath);
+        for (int i = 0; i < 2; ++i) {
+            char path[256], walpath[300], shmpath[300];
+            do_build_database_path(path, i, timestamp, saved_counter);
+            snprintf(walpath, sizeof(walpath), "%s-wal", path);
+            snprintf(shmpath, sizeof(shmpath), "%s-shm", path);
+            file_delete_internal(path);
+            file_delete_internal(walpath);
+            file_delete_internal(shmpath);
+        }
     }
     return result;
 }
@@ -13194,9 +13382,10 @@ int main (int argc, const char * argv[]) {
     result += test_report("Payload Buffer Test (1MB):", do_test_payload_buffer(1024 * 1024));
     result += test_report("Payload Buffer Test (10MB):", do_test_payload_buffer(10 * 1024 * 1024));
     result += test_report("Payload Chunks Large Values:", do_test_payload_chunks_large_values(print_result, cleanup_databases));
+    result += test_report("Payload Chunks CRDT Convergence:", do_test_payload_chunks_crdt_convergence(print_result, cleanup_databases));
     result += test_report("Payload Chunks Site Exclusion:", do_test_payload_chunks_site_exclusion(print_result, cleanup_databases));
     result += test_report("Payload Chunks Split db_version:", do_test_payload_chunks_split_dbversion(print_result, cleanup_databases));
-    result += test_report("Payload Download Spool:", do_test_payload_spool(print_result, cleanup_databases));
+    result += test_report("Payload Chunks Positional Resume:", do_test_payload_chunks_positional_resume(print_result, cleanup_databases));
 
     // close local database
     close_db(db);

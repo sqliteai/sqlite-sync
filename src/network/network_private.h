@@ -8,6 +8,9 @@
 #ifndef __CLOUDSYNC_NETWORK_PRIVATE__
 #define __CLOUDSYNC_NETWORK_PRIVATE__
 
+#include <stdint.h>
+#include <stddef.h>
+
 #define CLOUDSYNC_DEFAULT_ADDRESS           "https://cloudsync.sqlite.ai"
 #define CLOUDSYNC_ENDPOINT_PREFIX           "v2/cloudsync/databases"
 #define CLOUDSYNC_ENDPOINT_UPLOAD           "upload"
@@ -45,6 +48,18 @@ bool network_data_set_endpoints (network_data *data, char *auth, char *check, ch
 
 bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size);
 NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char **extra_headers, int nextra_headers);
+
+// Exposed (non-static) for the network unit test; otherwise internal to network.c.
+void network_sync_state_update_from_response(NETWORK_RESULT *res, int64_t *last_optimistic_version, int64_t *last_confirmed_version, int *gaps_size, char **apply_failure_json, char **check_failure_json);
+const char *network_compute_status(int64_t last_optimistic, int64_t last_confirmed, int gaps_size, int64_t local_version);
+
+// Lower bound of the coverage window a send chunk announces to /apply: the running
+// window start, but never above the chunk's own min (so consecutive chunks sharing a
+// db_version — a value fragmented across chunks — keep min<=max). The caller advances
+// window_lo to chunk_db_version_max+1 after each chunk so the ranges tile contiguously.
+static inline int64_t network_announce_min(int64_t window_lo, int64_t chunk_db_version_min) {
+    return window_lo < chunk_db_version_min ? window_lo : chunk_db_version_min;
+}
 
 #ifdef CLOUDSYNC_NETWORK_TRACE
 const char *network_trace_endpoint_name(network_data *data, const char *endpoint);

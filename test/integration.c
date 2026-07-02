@@ -236,6 +236,35 @@ int db_expect_min (sqlite3 *db, const char *sql, int expect_min) {
     return SQLITE_OK;
 }
 
+// Run a send that is expected to succeed and assert it didn't fail at the protocol
+// level: status is not "error" and the server reported no per-chunk failure
+// (send.lastFailure is omitted on success). Catches a server-reported apply/check
+// failure that doesn't raise a SQL error — invisible to a plain db_exec of the send.
+int db_send_ok (sqlite3 *db) {
+    return db_expect_int(db,
+        "SELECT (j ->> '$.send.status') <> 'error' AND (j ->> '$.send.lastFailure') IS NULL "
+        "FROM (SELECT cloudsync_network_send_changes() AS j);", 1);
+}
+
+// Send, then poll until the server's optimistic version (send.serverVersion) catches
+// up to send.localVersion — the change is durably covered with no gap. Robust to the
+// server's asynchronous apply: the first call sends, later calls are no-ops that
+// re-read status. Fails if it has not converged within max_attempts.
+int db_send_await_converge (sqlite3 *db, int max_attempts, int delay_ms) {
+    const char *sql =
+        "SELECT (j ->> '$.send.serverVersion') >= (j ->> '$.send.localVersion') "
+        "FROM (SELECT cloudsync_network_send_changes() AS j);";
+    for (int i = 0; i < max_attempts; i++) {
+        int converged = 0;
+        int rc = db_select_int(db, sql, &converged);
+        if (rc != SQLITE_OK) return rc;
+        if (converged) return SQLITE_OK;
+        if (i + 1 < max_attempts) sqlite3_sleep(delay_ms);
+    }
+    printf("Error: send did not converge (serverVersion < localVersion) after %d attempts\n", max_attempts);
+    return SQLITE_ERROR;
+}
+
 int integration_network_init(sqlite3 *db, const char *database_id, char *network_init, size_t network_init_len) {
     if (!database_id) {
         fprintf(stderr, "Error: integration database ID not set.\n");
@@ -528,7 +557,7 @@ int test_enable_disable(const char *db_path) {
         rc = db_exec(db, set_apikey); RCHECK
     }
 
-    rc = db_exec(db, "SELECT cloudsync_network_send_changes();"); RCHECK
+    rc = db_send_ok(db); RCHECK
     rc = db_exec(db, "SELECT cloudsync_cleanup('users');"); RCHECK
     rc = db_exec(db, "SELECT cloudsync_cleanup('activities');"); RCHECK
     rc = db_exec(db, "SELECT cloudsync_cleanup('workouts');"); RCHECK
@@ -563,8 +592,76 @@ int test_enable_disable(const char *db_path) {
     rc = db_expect_int(db2, sql, 1); RCHECK
 
     rc = db_exec(db2, "SELECT cloudsync_terminate();"); RCHECK
-    
+
     sqlite3_close(db2);
+
+ABORT_TEST
+}
+
+// Reproduces the spurious-gap bug in the send path: when the local db_version clock
+// has been advanced past the site's own changes — as happens when applied remote
+// changes bump the clock — the send announces only the change's own db_version range,
+// so the skipped versions stay a gap in the server's per-site coverage and
+// lastOptimisticVersion can never reach localVersion. cloudsync_db_version_next()
+// forces the jump deterministically, no second database required. Expected to FAIL
+// until the send announces the covered window [last_sent+1 .. watermark].
+int test_send_gap_from_clock_hole(const char *db_path) {
+    sqlite3 *db = NULL;
+    int rc = open_load_ext(db_path, &db); RCHECK
+    rc = db_init(db); RCHECK   // create users/activities/workouts (this db is fresh)
+
+    char value[UUID_STR_MAXLEN];
+    cloudsync_uuid_v7_string(value, true);
+    char sql[256];
+
+    rc = db_exec(db, "SELECT cloudsync_init('users');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_init('activities');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_init('workouts');"); RCHECK
+
+    // Force the next local change to land at db_version 10, leaving 1..9 with no
+    // local-site change (the "hole" that merging applied remote changes would create).
+    rc = db_exec(db, "SELECT cloudsync_db_version_next(10);"); RCHECK
+
+    snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s', '%s');", value, value);
+    rc = db_exec(db, sql); RCHECK
+
+    // sanity: the change really landed at db_version 10, so there is a leading hole
+    rc = db_expect_int(db, "SELECT cloudsync_db_version();", 10); RCHECK
+
+    // init network
+    char network_init[1024];
+    const char* test_db_id = getenv("INTEGRATION_TEST_DATABASE_ID");
+    if (!test_db_id) {
+        fprintf(stderr, "Error: INTEGRATION_TEST_DATABASE_ID not set.\n");
+        exit(1);
+    }
+    const char* custom_address = getenv("INTEGRATION_TEST_CLOUDSYNC_ADDRESS");
+    if (custom_address) {
+        snprintf(network_init, sizeof(network_init),
+            "SELECT cloudsync_network_init_custom('%s', '%s');", custom_address, test_db_id);
+    } else {
+        snprintf(network_init, sizeof(network_init),
+            "SELECT cloudsync_network_init('%s');", test_db_id);
+    }
+    rc = db_exec(db, network_init); RCHECK
+
+    const char* apikey = getenv("INTEGRATION_TEST_APIKEY");
+    if (apikey) {
+        char set_apikey[512];
+        snprintf(set_apikey, sizeof(set_apikey),
+            "SELECT cloudsync_network_set_apikey('%s');", apikey);
+        rc = db_exec(db, set_apikey); RCHECK
+    }
+
+    // Send, then poll until the server's optimistic version (serverVersion) reaches
+    // localVersion (10). With contiguous coverage it converges; with the gap bug it
+    // never does — serverVersion stays at 0 because db_versions 1..9 are reported
+    // missing. Polling absorbs the server's asynchronous apply.
+    rc = db_send_await_converge(db, 8, 1000); RCHECK
+
+    rc = db_exec(db, "SELECT cloudsync_cleanup('users');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_cleanup('activities');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_cleanup('workouts');"); RCHECK
 
 ABORT_TEST
 }
@@ -594,7 +691,7 @@ int test_chunked_payload_paths(void) {
     rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks();", 2); if (rc != SQLITE_OK) goto cleanup;
     rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks() WHERE hex(substr(payload,5,1))='03';", 2); if (rc != SQLITE_OK) goto cleanup;
 
-    rc = db_exec(sender, "SELECT cloudsync_network_send_changes();"); if (rc != SQLITE_OK) goto cleanup;
+    rc = db_send_ok(sender); if (rc != SQLITE_OK) goto cleanup;
     cleanup_remote_row = true;
 
     for (int attempt = 0; attempt < 30; ++attempt) {
@@ -667,7 +764,7 @@ int test_chunked_payload_rowset_path(void) {
     rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks();", 2); if (rc != SQLITE_OK) goto cleanup;
     rc = db_expect_int(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks() WHERE hex(substr(payload,5,1))='03';", 0); if (rc != SQLITE_OK) goto cleanup;
 
-    rc = db_exec(sender, "SELECT cloudsync_network_send_changes();"); if (rc != SQLITE_OK) goto cleanup;
+    rc = db_send_ok(sender); if (rc != SQLITE_OK) goto cleanup;
     cleanup_remote_rows = true;
 
     for (int attempt = 0; attempt < 30; ++attempt) {
@@ -751,7 +848,7 @@ int test_chunked_payload_single_sync_drain(void) {
     // Sender splits into multiple non-fragment chunks.
     rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks();", 2); if (rc != SQLITE_OK) goto cleanup;
 
-    rc = db_exec(sender, "SELECT cloudsync_network_send_changes();"); if (rc != SQLITE_OK) goto cleanup;
+    rc = db_send_ok(sender); if (rc != SQLITE_OK) goto cleanup;
     cleanup_remote_rows = true;
 
     for (int attempt = 0; attempt < 40; ++attempt) {
@@ -850,7 +947,7 @@ int test_chunked_payload_capped_receive(void) {
 
     rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks();", 2); if (rc != SQLITE_OK) goto cleanup;
 
-    rc = db_exec(sender, "SELECT cloudsync_network_send_changes();"); if (rc != SQLITE_OK) goto cleanup;
+    rc = db_send_ok(sender); if (rc != SQLITE_OK) goto cleanup;
     cleanup_remote_rows = true;
 
     for (int attempt = 0; attempt < 80; ++attempt) {
@@ -946,7 +1043,7 @@ int test_chunked_payload_batched_receive(void) {
 
     rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks();", 3); if (rc != SQLITE_OK) goto cleanup;
 
-    rc = db_exec(sender, "SELECT cloudsync_network_send_changes();"); if (rc != SQLITE_OK) goto cleanup;
+    rc = db_send_ok(sender); if (rc != SQLITE_OK) goto cleanup;
     cleanup_remote_rows = true;
 
     for (int attempt = 0; attempt < 80; ++attempt) {
@@ -1118,7 +1215,7 @@ int test_chunked_negative_cache_invalidation(void) {
         "INSERT INTO chunked_payload_items (id, body) VALUES ('%s', 'negative-cache-sentinel');",
         sentinel_id);
     rc = db_exec(sender, sql); if (rc != SQLITE_OK) goto cleanup;
-    rc = db_exec(sender, "SELECT cloudsync_network_send_changes();"); if (rc != SQLITE_OK) goto cleanup;
+    rc = db_send_ok(sender); if (rc != SQLITE_OK) goto cleanup;
     cleanup_sentinel = true;
 
     // Phase 1: drain the receiver until it is provably caught up. Each bare
@@ -1196,7 +1293,7 @@ int test_chunked_negative_cache_invalidation(void) {
         "INSERT INTO chunked_payload_items (id, body) VALUES ('%s', 'negative-cache');",
         row_id);
     rc = db_exec(sender, sql); if (rc != SQLITE_OK) goto cleanup;
-    rc = db_exec(sender, "SELECT cloudsync_network_send_changes();"); if (rc != SQLITE_OK) goto cleanup;
+    rc = db_send_ok(sender); if (rc != SQLITE_OK) goto cleanup;
     cleanup_remote_row = true;
 
     // Phase 4: the receiver must now pick up the change on a subsequent receive.
@@ -1508,6 +1605,7 @@ int main (void) {
     rc += test_report("Is Enabled Test:", test_is_enabled(DB_PATH));
     rc += test_report("DB Version Test:", test_db_version(DB_PATH));
     rc += test_report("Enable Disable Test:", test_enable_disable(DB_PATH));
+    rc += test_report("Send Gap From Clock Hole Test:", test_send_gap_from_clock_hole(":memory:"));
 
     // Chunked payload tests run only when INTEGRATION_TEST_CHUNKED_DATABASE_ID points at a
     // tenant with a small payload_max_chunk_size; state the skip reason once for the group.
