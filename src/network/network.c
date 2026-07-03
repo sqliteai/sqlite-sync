@@ -1499,14 +1499,15 @@ static int network_apply_check_chunk(sqlite3_context *context, const char *chunk
     return rc;
 }
 
-static char *network_apply_json_payload(const char *transport_key, const char *transport_value,
-                                        int64_t db_version_min, int64_t db_version_max) {
-    if (!transport_key || !transport_value) return NULL;
+char *network_apply_json_payload(const char *transport_key, const char *transport_value,
+                                 int64_t db_version_min, int64_t db_version_max,
+                                 const char *batch_id, int chunk_index, bool is_final) {
+    if (!transport_key || !transport_value || !batch_id) return NULL;
 
     char *escaped_value = json_escape_string(transport_value);
     if (!escaped_value) return NULL;
 
-    size_t requested = strlen(transport_key) + strlen(escaped_value) + 128;
+    size_t requested = strlen(transport_key) + strlen(escaped_value) + strlen(batch_id) + 192;
     char *json_payload = cloudsync_memory_alloc((uint64_t)requested);
     if (!json_payload) {
         cloudsync_memory_free(escaped_value);
@@ -1514,8 +1515,10 @@ static char *network_apply_json_payload(const char *transport_key, const char *t
     }
 
     snprintf(json_payload, requested,
-             "{\"%s\":\"%s\", \"dbVersionMin\":%" PRId64 ", \"dbVersionMax\":%" PRId64 "}",
-             transport_key, escaped_value, db_version_min, db_version_max);
+             "{\"%s\":\"%s\", \"dbVersionMin\":%" PRId64 ", \"dbVersionMax\":%" PRId64
+             ", \"batchId\":\"%s\", \"chunkIndex\":%d, \"isFinal\":%s}",
+             transport_key, escaped_value, db_version_min, db_version_max,
+             batch_id, chunk_index, is_final ? "true" : "false");
 
     cloudsync_memory_free(escaped_value);
     return json_payload;
@@ -1524,6 +1527,7 @@ static char *network_apply_json_payload(const char *transport_key, const char *t
 static int network_send_payload_to_apply(sqlite3_context *context, network_data *netdata,
                                          const void *blob, int blob_size,
                                          int64_t db_version_min, int64_t db_version_max,
+                                         const char *batch_id, int chunk_index, bool is_final,
                                          NETWORK_RESULT *res_out) {
     memset(res_out, 0, sizeof(*res_out));
     if (!blob || blob_size <= 0) {
@@ -1533,11 +1537,15 @@ static int network_send_payload_to_apply(sqlite3_context *context, network_data 
 
     #ifdef CLOUDSYNC_NETWORK_TRACE
     fprintf(stderr,
-        "[cloudsync-network] send_changes chunk_size=%d fast-lane:%s db_version_min=%" PRId64 " db_version_max=%" PRId64 "\n",
+        "[cloudsync-network] send_changes chunk_size=%d fast-lane:%s db_version_min=%" PRId64 " db_version_max=%" PRId64
+        " batch_id=%s chunk_index=%d is_final=%d\n",
         blob_size,
         blob_size <= CLOUDSYNC_NETWORK_FAST_LANE_MAX_BLOB_SIZE ? "true" : "false",
         db_version_min,
-        db_version_max);
+        db_version_max,
+        batch_id,
+        chunk_index,
+        is_final ? 1 : 0);
     #endif
 
     if (blob_size <= CLOUDSYNC_NETWORK_FAST_LANE_MAX_BLOB_SIZE) {
@@ -1548,7 +1556,8 @@ static int network_send_payload_to_apply(sqlite3_context *context, network_data 
             return SQLITE_NOMEM;
         }
 
-        char *json_payload = network_apply_json_payload("blob", blob_base64, db_version_min, db_version_max);
+        char *json_payload = network_apply_json_payload("blob", blob_base64, db_version_min, db_version_max,
+                                                        batch_id, chunk_index, is_final);
         cloudsync_memory_free(blob_base64);
         if (!json_payload) {
             sqlite3_result_error(context, "cloudsync_network_send_changes: unable to allocate apply request payload.", -1);
@@ -1585,7 +1594,8 @@ static int network_send_payload_to_apply(sqlite3_context *context, network_data 
         return SQLITE_ERROR;
     }
 
-    char *json_payload = network_apply_json_payload("url", s3_url, db_version_min, db_version_max);
+    char *json_payload = network_apply_json_payload("url", s3_url, db_version_min, db_version_max,
+                                                    batch_id, chunk_index, is_final);
     cloudsync_memory_free(s3_url);
     if (!json_payload) {
         sqlite3_result_error(context, "cloudsync_network_send_changes: unable to allocate apply request payload.", -1);
@@ -1706,7 +1716,7 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     sqlite3 *db = sqlite3_context_db_handle(context);
     sqlite3_stmt *stmt = NULL;
     const char *chunk_sql =
-        "SELECT payload, payload_size, db_version_min, db_version_max, watermark_db_version "
+        "SELECT payload, payload_size, watermark_db_version, is_final "
         "FROM cloudsync_payload_chunks WHERE since_db_version = ?";
     int rc = sqlite3_prepare_v2(db, chunk_sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
@@ -1725,33 +1735,31 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     bool sent_any = false;
     int sent_chunks = 0;       // payload chunks sent this call
     int64_t sent_bytes = 0;    // serialized payload bytes sent this call
-    // Lower bound of the coverage window announced to /apply. The server tracks
-    // per-site applied ranges from version 1, so the announced ranges must tile
-    // [send_checkpoint+1 .. watermark] contiguously; otherwise db_versions consumed
-    // without a local-site change (e.g. merged remote changes) read back as gaps.
-    int64_t announce_lo = db_version + 1;
+    // One send call = one all-or-nothing batch: every chunk announces the same
+    // global window [send_checkpoint+1 .. watermark] (holes from non-local-change
+    // db_versions included) plus batchId/chunkIndex/isFinal. The server advances
+    // optimistic on the final chunk and confirms the whole window only when every
+    // chunk of the batch applied; a failed batch is re-sent whole under a new id.
+    char batch_id[UUID_STR_MAXLEN];
+    cloudsync_uuid_v7_string(batch_id, true);
 
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         const void *blob = sqlite3_column_blob(stmt, 0);
         int blob_size = sqlite3_column_bytes(stmt, 0);
         int64_t payload_size = sqlite3_column_int64(stmt, 1);
-        int64_t db_version_min = sqlite3_column_int64(stmt, 2);
-        int64_t db_version_max = sqlite3_column_int64(stmt, 3);
-        int64_t watermark = sqlite3_column_int64(stmt, 4);
+        int64_t watermark = sqlite3_column_int64(stmt, 2);
+        bool is_final = sqlite3_column_int(stmt, 3) != 0;
 
         if (!blob || blob_size <= 0 || payload_size != blob_size || payload_size > INT_MAX ||
-            db_version_min <= 0 || db_version_max <= 0 || db_version_min > db_version_max) {
+            watermark <= db_version) {
             sqlite3_result_error(context, "cloudsync_network_send_changes: invalid payload chunk generated.", -1);
             rc = SQLITE_ERROR;
             goto cleanup;
         }
 
-        // Announce the covered window, not just where the data sits, so db_versions
-        // skipped by non-local-change transactions don't read back as server-side gaps.
-        int64_t announce_min = network_announce_min(announce_lo, db_version_min);
-
         NETWORK_RESULT res = {0};
-        rc = network_send_payload_to_apply(context, netdata, blob, blob_size, announce_min, db_version_max, &res);
+        rc = network_send_payload_to_apply(context, netdata, blob, blob_size, db_version + 1, watermark,
+                                           batch_id, sent_chunks, is_final, &res);
         if (rc != SQLITE_OK) goto cleanup;
 
         if (res.code == CLOUDSYNC_NETWORK_BUFFER && res.buffer) {
@@ -1769,7 +1777,6 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
         sent_chunks++;
         sent_bytes += payload_size;
         if (watermark > new_db_version) new_db_version = watermark;
-        announce_lo = db_version_max + 1;   // next chunk continues the window here
     }
     if (rc != SQLITE_DONE) {
         sqlite3_result_error(context, sqlite3_errmsg(db), -1);

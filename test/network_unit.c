@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include "utils.h"
 #include "network_private.h"
 
 static int failures = 0;
@@ -78,28 +79,40 @@ static bool test_non_buffer_is_noop(void) {
     return optimistic == 7 && confirmed == 3 && gaps == 0;
 }
 
-// The send announces a contiguous coverage window, not the raw chunk ranges, so
-// skipped db_versions don't look like gaps. Walk the tiling exactly as the send loop
-// does: announce [network_announce_min(lo, chunk_min) .. chunk_max], then lo = max+1.
-static bool test_announce_window_tiling(void) {
+// One send call = one all-or-nothing batch: every chunk of it announces the same
+// global window [checkpoint+1 .. watermark] plus batchId/chunkIndex/isFinal, so the
+// server confirms the whole window only when every chunk of the batch applied and a
+// failed batch is re-sent whole under a new id.
+static bool test_apply_json_payload_batch(void) {
     bool ok = true;
-    int64_t lo = 0 + 1;   // send checkpoint (since) = 0
 
-    // leading hole: a single change at db_version 7 must announce from 1, not 7.
-    ok = ok && network_announce_min(lo, 7) == 1;
-    lo = 7 + 1;
+    char *j0 = network_apply_json_payload("blob", "QUJD", 1, 10, "batch-uuid-1", 0, false);
+    ok = ok && j0 != NULL;
+    if (j0) {
+        ok = ok && strstr(j0, "\"blob\":\"QUJD\"") != NULL;
+        ok = ok && strstr(j0, "\"dbVersionMin\":1") != NULL;
+        ok = ok && strstr(j0, "\"dbVersionMax\":10") != NULL;
+        ok = ok && strstr(j0, "\"batchId\":\"batch-uuid-1\"") != NULL;
+        ok = ok && strstr(j0, "\"chunkIndex\":0") != NULL;
+        ok = ok && strstr(j0, "\"isFinal\":false") != NULL;
+        cloudsync_memory_free(j0);
+    }
 
-    // inter-chunk hole: next change at 20 (8..19 empty) announces from 8 → no gap.
-    ok = ok && network_announce_min(lo, 20) == 8;
-    lo = 20 + 1;
+    // last chunk, url transport: same window, higher index, isFinal true
+    char *j1 = network_apply_json_payload("url", "https://s3/part", 1, 10, "batch-uuid-1", 3, true);
+    ok = ok && j1 != NULL;
+    if (j1) {
+        ok = ok && strstr(j1, "\"url\":\"https://s3/part\"") != NULL;
+        ok = ok && strstr(j1, "\"dbVersionMin\":1") != NULL;
+        ok = ok && strstr(j1, "\"dbVersionMax\":10") != NULL;
+        ok = ok && strstr(j1, "\"batchId\":\"batch-uuid-1\"") != NULL;
+        ok = ok && strstr(j1, "\"chunkIndex\":3") != NULL;
+        ok = ok && strstr(j1, "\"isFinal\":true") != NULL;
+        cloudsync_memory_free(j1);
+    }
 
-    // same-db_version fragments (a value split across two chunks): first fragment
-    // announces from the running lo, second must clamp to the shared version (30),
-    // never lo (31) — that would make min > max.
-    ok = ok && network_announce_min(lo, 30) == 21;   // first fragment of v30
-    lo = 30 + 1;
-    ok = ok && network_announce_min(lo, 30) == 30;   // second fragment of v30: 30, not 31
-    lo = 30 + 1;
+    // a batch id is mandatory for the chunked send path
+    ok = ok && network_apply_json_payload("blob", "QUJD", 1, 10, NULL, 0, false) == NULL;
 
     return ok;
 }
@@ -118,7 +131,7 @@ int main(void) {
     printf("\nNetwork unit tests\n");
     check("optimistic/confirmed version folds latest-valid (allows rollback):", test_optimistic_version_rollback());
     check("non-buffer response is a no-op:", test_non_buffer_is_noop());
-    check("send announce-window tiling (hole / inter-chunk / fragment):", test_announce_window_tiling());
+    check("send batch /apply payload (window / batchId / chunkIndex / isFinal):", test_apply_json_payload_batch());
     check("network_compute_status:", test_compute_status());
     if (failures) { printf("\n%d test(s) FAILED\n", failures); return 1; }
     printf("\nAll network unit tests passed\n");
