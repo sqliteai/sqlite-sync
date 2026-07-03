@@ -15,6 +15,7 @@
 #define CLOUDSYNC_SITEID_NAME               "cloudsync_site_id"
 #define CLOUDSYNC_TABLE_SETTINGS_NAME       "cloudsync_table_settings"
 #define CLOUDSYNC_SCHEMA_VERSIONS_NAME      "cloudsync_schema_versions"
+#define CLOUDSYNC_PAYLOAD_FRAGMENTS_NAME    "cloudsync_payload_fragments"
 
 #define CLOUDSYNC_KEY_LIBVERSION            "version"
 #define CLOUDSYNC_KEY_SCHEMAVERSION         "schemaversion"

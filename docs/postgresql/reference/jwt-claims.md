@@ -133,6 +133,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
     cloudsync_table_settings,
     cloudsync_site_id,
     cloudsync_schema_versions,
+    cloudsync_payload_fragments,
     app_schema_version
 TO rls_role;
 

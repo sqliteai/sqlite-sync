@@ -65,7 +65,8 @@ const char * const SQL_SETTINGS_CLEANUP_DROP_ALL =
     "DROP TABLE IF EXISTS cloudsync_settings; "
     "DROP TABLE IF EXISTS cloudsync_site_id; "
     "DROP TABLE IF EXISTS cloudsync_table_settings; "
-    "DROP TABLE IF EXISTS cloudsync_schema_versions; ";
+    "DROP TABLE IF EXISTS cloudsync_schema_versions; "
+    "DROP TABLE IF EXISTS cloudsync_payload_fragments; ";
 
 // MARK: CloudSync
 

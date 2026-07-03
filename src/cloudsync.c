@@ -3965,9 +3965,9 @@ static int cloudsync_payload_apply_fragment_row (cloudsync_context *data, clouds
         return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid v3 fragment identity", DBRES_MISUSE);
     }
 
-    int rc = database_exec(data, SQL_PAYLOAD_FRAGMENTS_CREATE_TABLE);
-    if (rc != DBRES_OK) return rc;
-    rc = cloudsync_payload_fragments_cleanup_stale(data);
+    // the fragments table is guaranteed by dbutils_settings_init; no DDL here
+    // because the apply path runs under sync-only credentials on server nodes
+    int rc = cloudsync_payload_fragments_cleanup_stale(data);
     if (rc != DBRES_OK) return rc;
 
     dbvm_t *vm = NULL;
