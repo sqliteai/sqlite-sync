@@ -1,6 +1,8 @@
-# Row-Level Security
+# RLS Overview
 
 SQLite Sync supports **Row-Level Security (RLS)** through the underlying [SQLite Cloud](https://sqlitecloud.io/) infrastructure. RLS allows you to use a **single shared cloud database** while each client only sees and modifies its own data. Policies are enforced on the server, so the security boundary is at the database level, not in application code.
+
+> **Using self-hosted PostgreSQL or Supabase?** Start with the backend-specific [RLS Reference](./postgresql/reference/rls.md) for CloudSync apply behavior, PostgreSQL roles and grants, Supabase notes, and troubleshooting.
 
 ## How It Works
 
@@ -44,6 +46,6 @@ CREATE TABLE users (
 );
 ```
 
-For more schema guidelines, see [Database Schema Recommendations](./schema.md).
+For more schema guidelines, see [Database Schema Recommendations](./schema.md). If you are running a self-hosted backend, also see the PostgreSQL/Supabase [RLS Reference](./postgresql/reference/rls.md).
 
 For full RLS documentation, see the [SQLite Cloud RLS documentation](https://docs.sqlitecloud.io/docs/rls).

@@ -67,4 +67,4 @@ See the full [sqlite-sync API documentation](https://github.com/sqliteai/sqlite-
 
 ## License
 
-See [LICENSE](LICENSE).
+See [LICENSE](../../LICENSE.md).

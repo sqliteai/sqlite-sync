@@ -16,7 +16,7 @@ sqlite-sync computes a **schema hash** from the synced tables and includes it in
 cloudsync operation failed: Cannot apply the received payload because the schema hash is unknown <hash>
 ```
 
-If you need different clients to see different subsets of data (for example, per-tenant or per-workspace isolation), do **not** give each client a different table. Instead, use a single shared schema and scope the data with a column such as `tenant_id` or `workspace_id`, then enforce isolation server-side with [Row-Level Security](./row-level-security.md).
+If you need different clients to see different subsets of data (for example, per-tenant or per-workspace isolation), do **not** give each client a different table. Instead, use a single shared schema and scope the data with a column such as `tenant_id` or `workspace_id`, then enforce isolation server-side with [RLS Overview](./rls-overview.md).
 
 ## Primary Key Requirements
 

@@ -16,7 +16,7 @@ cd MyApp
 
 ### 2. Setup
 
-1. Execute the exact schema from [`to-do-app.sql`](../../examples/to-do-app/to-do-app.sql).
+1. Execute the exact schema from [`to-do-app.sql`](../../../examples/to-do-app/to-do-app.sql).
 2. Enable CloudSync for all tables on the remote database with:
     ```sql
     CREATE EXTENSION IF NOT EXISTS cloudsync;
@@ -61,4 +61,3 @@ npm run ios # or android
 - **Dropdown Menu** - Select categories for tasks from a predefined list.
 - **Cross-Platform** - Works on iOS and Android
 - **Offline Support** - Works offline, syncs when connection returns
-
