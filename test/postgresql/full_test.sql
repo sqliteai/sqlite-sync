@@ -59,6 +59,10 @@
 \ir 49_row_filter_prefill.sql
 \ir 50_block_lww_existing_data.sql
 \ir 51_stale_table_settings_dropped_meta.sql
+\ir 52_payload_chunks.sql
+\ir 53_payload_blob_checked_pg_try.sql
+\ir 54_payload_chunks_fragment_state.sql
+\ir 55_payload_chunks_positional_resume.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

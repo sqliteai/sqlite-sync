@@ -8,6 +8,9 @@
 #ifndef __CLOUDSYNC_NETWORK_PRIVATE__
 #define __CLOUDSYNC_NETWORK_PRIVATE__
 
+#include <stdint.h>
+#include <stddef.h>
+
 #define CLOUDSYNC_DEFAULT_ADDRESS           "https://cloudsync.sqlite.ai"
 #define CLOUDSYNC_ENDPOINT_PREFIX           "v2/cloudsync/databases"
 #define CLOUDSYNC_ENDPOINT_UPLOAD           "upload"
@@ -20,7 +23,7 @@
 #define CLOUDSYNC_HEADER_TICKET_EXPIRES_AT  "X-CloudSync-Ticket-Expires-At"
 // CLOUDSYNC_VERSION is defined in cloudsync.h — include it before this header at use sites.
 #define CLOUDSYNC_HEADER_VERSION_LINE       CLOUDSYNC_HEADER_VERSION ": " CLOUDSYNC_VERSION
-#define CLOUDSYNC_HEADER_CHECK_CAPABILITIES "X-CloudSync-Capabilities: check-status-response"
+#define CLOUDSYNC_HEADER_CHECK_CAPABILITIES "X-CloudSync-Capabilities: check-status-response, check-chunks"
 
 #define CLOUDSYNC_NETWORK_OK                1
 #define CLOUDSYNC_NETWORK_ERROR             2
@@ -45,6 +48,11 @@ bool network_data_set_endpoints (network_data *data, char *auth, char *check, ch
 
 bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size);
 NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char **extra_headers, int nextra_headers);
+
+// Exposed (non-static) for the network unit test; otherwise internal to network.c.
+void network_sync_state_update_from_response(NETWORK_RESULT *res, int64_t *last_optimistic_version, int64_t *last_confirmed_version, int *gaps_size, char **apply_failure_json, char **check_failure_json);
+const char *network_compute_status(int64_t last_optimistic, int64_t last_confirmed, int gaps_size, int64_t local_version);
+char *network_apply_json_payload(const char *transport_key, const char *transport_value, int64_t db_version_min, int64_t db_version_max, const char *batch_id, int chunk_index, bool is_final);
 
 #ifdef CLOUDSYNC_NETWORK_TRACE
 const char *network_trace_endpoint_name(network_data *data, const char *endpoint);

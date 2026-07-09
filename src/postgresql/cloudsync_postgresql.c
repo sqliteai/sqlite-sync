@@ -194,8 +194,39 @@ Datum cloudsync_uuid (PG_FUNCTION_ARGS) {
 
     // Parse into PostgreSQL UUID type
     Datum uuid_datum = DirectFunctionCall1(uuid_in, CStringGetDatum(uuid_str));
-    
+
     PG_RETURN_DATUM(uuid_datum);
+}
+
+// cloudsync_uuid_text(bytea, [dash_format]) - 16-byte UUID -> canonical string
+PG_FUNCTION_INFO_V1(cloudsync_uuid_text);
+Datum cloudsync_uuid_text (PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0)) PG_RETURN_NULL();
+    bytea *b = PG_GETARG_BYTEA_PP(0);
+    if (VARSIZE_ANY_EXHDR(b) != UUID_LEN) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+            errmsg("cloudsync_uuid_text: expected a 16-byte value")));
+    }
+    bool dash_format = PG_ARGISNULL(1) ? true : PG_GETARG_BOOL(1);
+    char uuid_str[UUID_STR_MAXLEN];
+    cloudsync_uuid_v7_stringify((uint8_t *)VARDATA_ANY(b), uuid_str, dash_format);
+    PG_RETURN_TEXT_P(cstring_to_text(uuid_str));
+}
+
+// cloudsync_uuid_blob(text) - UUID string -> 16-byte value (dashed/undashed)
+PG_FUNCTION_INFO_V1(cloudsync_uuid_blob);
+Datum cloudsync_uuid_blob (PG_FUNCTION_ARGS) {
+    if (PG_ARGISNULL(0)) PG_RETURN_NULL();
+    text *t = PG_GETARG_TEXT_PP(0);
+    uint8_t uuid[UUID_LEN];
+    if (cloudsync_uuid_v7_parse(VARDATA_ANY(t), (int)VARSIZE_ANY_EXHDR(t), uuid) != 0) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+            errmsg("cloudsync_uuid_blob: malformed UUID string")));
+    }
+    bytea *result = (bytea *)palloc(VARHDRSZ + UUID_LEN);
+    SET_VARSIZE(result, VARHDRSZ + UUID_LEN);
+    memcpy(VARDATA(result), uuid, UUID_LEN);
+    PG_RETURN_BYTEA_P(result);
 }
 
 // cloudsync_db_version() - Get current database version
@@ -1002,6 +1033,668 @@ Datum cloudsync_payload_encode_finalfn (PG_FUNCTION_ARGS) {
     PG_RETURN_BYTEA_P(result);
 }
 
+typedef struct {
+    Portal portal;
+    TupleDesc outdesc;
+    SPITupleTable *current_tuptable;
+    // Context for the per-row fields below that must outlive a single SRF call:
+    // a single oversized value emits its fragments over multiple SRF_PERCALL
+    // invocations and re-reads tbl/pk/col_name/col_value/site_id on each. The
+    // SRF sets this to funcctx->multi_call_memory_ctx (the only context the SRF
+    // protocol guarantees survives between calls). Non-SRF callers leave it NULL
+    // and allocate in the current context, freeing each row as they iterate.
+    MemoryContext value_ctx;
+    bool spi_connected;
+    bool has_current;
+    bool eof;
+    int64 chunk_index;
+    int64 watermark;
+    int max_size;
+    int frag_target;
+
+    char *tbl;
+    bytea *pk;
+    char *col_name;
+    bytea *col_value;
+    bool col_value_owned;
+    int64 col_version;
+    int64 db_version;
+    bytea *site_id;
+    int64 cl;
+    int64 seq;
+
+    bool frag_active;
+    int frag_part;
+    int frag_count;
+    int64 frag_offset;
+    int64 frag_total;
+    uint64 frag_checksum;
+} PayloadChunksState;
+
+static void payload_chunks_free_current(PayloadChunksState *st) {
+    if (!st) return;
+    if (st->tbl) pfree(st->tbl);
+    if (st->pk) pfree(st->pk);
+    if (st->col_name) pfree(st->col_name);
+    if (st->col_value && st->col_value_owned) pfree(st->col_value);
+    if (st->site_id) pfree(st->site_id);
+    if (st->current_tuptable) SPI_freetuptable(st->current_tuptable);
+    st->tbl = NULL;
+    st->pk = NULL;
+    st->col_name = NULL;
+    st->col_value = NULL;
+    st->col_value_owned = false;
+    st->site_id = NULL;
+    st->current_tuptable = NULL;
+    st->has_current = false;
+}
+
+static bool payload_chunks_fetch_current(PayloadChunksState *st) {
+    if (st->has_current) return true;
+    if (st->eof) return false;
+    SPI_cursor_fetch(st->portal, true, 1);
+    if (SPI_processed == 0) {
+        if (SPI_tuptable) { SPI_freetuptable(SPI_tuptable); SPI_tuptable = NULL; }
+        st->eof = true;
+        return false;
+    }
+
+    st->current_tuptable = SPI_tuptable;
+    HeapTuple tup = SPI_tuptable->vals[0];
+    TupleDesc td = SPI_tuptable->tupdesc;
+    bool isnull = false;
+    Datum d;
+
+    // These fields are re-read on later SRF calls while emitting fragments of a
+    // single oversized value, so they must be allocated in a context that
+    // survives between calls (value_ctx == multi_call_memory_ctx for the SRF).
+    // Includes any bytea detoasted by DatumGetByteaPP below. Non-SRF callers
+    // (value_ctx == NULL) keep the prior per-call allocation behavior.
+    MemoryContext old_value_ctx = st->value_ctx ? MemoryContextSwitchTo(st->value_ctx) : NULL;
+
+    d = SPI_getbinval(tup, td, 1, &isnull);
+    st->tbl = isnull ? pstrdup("") : text_to_cstring(DatumGetTextPP(d));
+    d = SPI_getbinval(tup, td, 2, &isnull);
+    if (!isnull) {
+        bytea *b = DatumGetByteaPP(d);
+        size_t n = VARSIZE_ANY(b);
+        st->pk = (bytea *)palloc(n);
+        memcpy(st->pk, b, n);
+        // DatumGetByteaPP returns a fresh copy when the datum was toasted; free
+        // it after the memcpy so a scan with toasted pks does not retain one
+        // detoast temp per row in value_ctx until the SRF ends.
+        if ((Pointer) b != DatumGetPointer(d)) pfree(b);
+    }
+    d = SPI_getbinval(tup, td, 3, &isnull);
+    st->col_name = isnull ? pstrdup("") : text_to_cstring(DatumGetTextPP(d));
+    d = SPI_getbinval(tup, td, 4, &isnull);
+    if (!isnull) {
+        bytea *b = DatumGetByteaPP(d);
+        st->col_value = b;
+        st->col_value_owned = ((Pointer) b != DatumGetPointer(d));
+    }
+    d = SPI_getbinval(tup, td, 5, &isnull); st->col_version = isnull ? 0 : DatumGetInt64(d);
+    d = SPI_getbinval(tup, td, 6, &isnull); st->db_version = isnull ? 0 : DatumGetInt64(d);
+    d = SPI_getbinval(tup, td, 7, &isnull);
+    if (!isnull) {
+        bytea *b = DatumGetByteaPP(d);
+        size_t n = VARSIZE_ANY(b);
+        st->site_id = (bytea *)palloc(n);
+        memcpy(st->site_id, b, n);
+        if ((Pointer) b != DatumGetPointer(d)) pfree(b);
+    }
+    d = SPI_getbinval(tup, td, 8, &isnull); st->cl = isnull ? 0 : DatumGetInt64(d);
+    d = SPI_getbinval(tup, td, 9, &isnull); st->seq = isnull ? 0 : DatumGetInt64(d);
+
+    if (old_value_ctx) MemoryContextSwitchTo(old_value_ctx);
+
+    SPI_tuptable = NULL;
+    st->has_current = true;
+    return true;
+}
+
+static void payload_chunks_make_pgvalues(PayloadChunksState *st, pgvalue_t **vals, text **owned_texts) {
+    owned_texts[0] = cstring_to_text(st->tbl);
+    owned_texts[1] = cstring_to_text(st->col_name);
+    vals[0] = pgvalue_create(PointerGetDatum(owned_texts[0]), TEXTOID, -1, InvalidOid, false);
+    vals[1] = pgvalue_create(PointerGetDatum(st->pk), BYTEAOID, -1, InvalidOid, false);
+    vals[2] = pgvalue_create(PointerGetDatum(owned_texts[1]), TEXTOID, -1, InvalidOid, false);
+    vals[3] = pgvalue_create(PointerGetDatum(st->col_value), BYTEAOID, -1, InvalidOid, false);
+    vals[4] = pgvalue_create(Int64GetDatum(st->col_version), INT8OID, -1, InvalidOid, false);
+    vals[5] = pgvalue_create(Int64GetDatum(st->db_version), INT8OID, -1, InvalidOid, false);
+    vals[6] = pgvalue_create(PointerGetDatum(st->site_id), BYTEAOID, -1, InvalidOid, false);
+    vals[7] = pgvalue_create(Int64GetDatum(st->cl), INT8OID, -1, InvalidOid, false);
+    vals[8] = pgvalue_create(Int64GetDatum(st->seq), INT8OID, -1, InvalidOid, false);
+}
+
+static void payload_chunks_free_pgvalues(pgvalue_t **vals, text **owned_texts) {
+    for (int i = 0; i < 9; ++i) if (vals[i]) pgvalue_free(vals[i]);
+    if (owned_texts[0]) pfree(owned_texts[0]);
+    if (owned_texts[1]) pfree(owned_texts[1]);
+}
+
+static bytea *payload_chunks_emit_pg_fragment(PayloadChunksState *st, cloudsync_context *data,
+                                              int64 *rows, int64 *dbv_min, int64 *dbv_max) {
+    int64 remaining = st->frag_total - st->frag_offset;
+    int frag_len = remaining > st->frag_target ? st->frag_target : (int)remaining;
+    if (frag_len <= 0) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("invalid payload fragment size")));
+    const char *src = VARDATA_ANY(st->col_value) + st->frag_offset;
+
+    cloudsync_payload_context *payload = cloudsync_memory_zeroalloc((uint64_t)cloudsync_payload_context_size(NULL));
+    if (!payload) ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("out of memory")));
+    int rc = cloudsync_payload_encode_fragment_step(payload, data,
+        st->tbl, -1,
+        VARDATA_ANY(st->pk), VARSIZE_ANY_EXHDR(st->pk),
+        st->col_name, -1,
+        src, frag_len,
+        st->col_version, st->db_version,
+        VARDATA_ANY(st->site_id), VARSIZE_ANY_EXHDR(st->site_id),
+        st->cl, st->seq,
+        st->frag_checksum, st->frag_total, st->frag_part, st->frag_count);
+    if (rc != DBRES_OK) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+    rc = cloudsync_payload_encode_final(payload, data);
+    if (rc != DBRES_OK) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+    int64 blob_size = 0;
+    char *blob = cloudsync_payload_blob(payload, &blob_size, rows);
+    bytea *result = (bytea *)palloc(VARHDRSZ + blob_size);
+    SET_VARSIZE(result, VARHDRSZ + blob_size);
+    memcpy(VARDATA(result), blob, blob_size);
+    cloudsync_memory_free(blob);
+    cloudsync_memory_free(payload);
+
+    *dbv_min = st->db_version;
+    *dbv_max = st->db_version;
+    st->frag_offset += frag_len;
+    st->frag_part++;
+    if (st->frag_part >= st->frag_count) {
+        st->frag_active = false;
+        payload_chunks_free_current(st);
+    }
+    return result;
+}
+
+// Set up fragment state for the currently-fetched oversized value so
+// emit_pg_fragment can stream it. start_offset is the byte offset within the value
+// to resume from (0 when first reaching it; >0 when a positional cursor resumes
+// mid-value). frag_part is derived from the offset so a streamed and a resumed
+// fragment carry the same part index. The plan (frag_target/frag_count) is a
+// deterministic function of the row, so a resumed fragment tiles identically.
+static void payload_chunks_pg_begin_fragment(PayloadChunksState *st, cloudsync_context *data, int64 start_offset) {
+    st->frag_total = VARSIZE_ANY_EXHDR(st->col_value);
+    st->frag_offset = start_offset;
+    st->frag_target = cloudsync_payload_fragment_data_size(data,
+        st->tbl, -1,
+        VARDATA_ANY(st->pk), VARSIZE_ANY_EXHDR(st->pk),
+        st->col_name, -1,
+        st->col_version, st->db_version,
+        VARDATA_ANY(st->site_id), VARSIZE_ANY_EXHDR(st->site_id),
+        st->cl, st->seq,
+        st->frag_total, 0, 1);
+    if (st->frag_target <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg(CLOUDSYNC_ERRCODE_CHUNK_TOO_LARGE "payload fragment metadata exceeds max chunk size")));
+    for (int i = 0; i < CLOUDSYNC_PAYLOAD_FRAGMENT_SIZE_FIXPOINT_ITERATIONS; ++i) {
+        int count = cloudsync_payload_fragment_count(st->frag_total, st->frag_target);
+        if (count <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg(CLOUDSYNC_ERRCODE_CHUNK_TOO_LARGE "payload requires too many fragments")));
+        int planned = cloudsync_payload_fragment_data_size(data,
+            st->tbl, -1,
+            VARDATA_ANY(st->pk), VARSIZE_ANY_EXHDR(st->pk),
+            st->col_name, -1,
+            st->col_version, st->db_version,
+            VARDATA_ANY(st->site_id), VARSIZE_ANY_EXHDR(st->site_id),
+            st->cl, st->seq,
+            st->frag_total, count - 1, count);
+        if (planned <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg(CLOUDSYNC_ERRCODE_CHUNK_TOO_LARGE "payload fragment metadata exceeds max chunk size")));
+        if (planned == st->frag_target) break;
+        st->frag_target = planned;
+    }
+    st->frag_count = cloudsync_payload_fragment_count(st->frag_total, st->frag_target);
+    if (st->frag_count <= 0) ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg("payload requires too many fragments")));
+    st->frag_part = (st->frag_target > 0) ? (int)(start_offset / st->frag_target) : 0;
+    st->frag_checksum = pk_checksum(VARDATA_ANY(st->col_value), (size_t)st->frag_total);
+    st->frag_active = true;
+}
+
+static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_context *data,
+                                           int64 *rows, int64 *dbv_min, int64 *dbv_max) {
+    *rows = *dbv_min = *dbv_max = 0;
+    if (st->frag_active) return payload_chunks_emit_pg_fragment(st, data, rows, dbv_min, dbv_max);
+    if (!payload_chunks_fetch_current(st)) return NULL;
+
+    size_t header_size = 0;
+    cloudsync_payload_context_size(&header_size);
+    cloudsync_payload_context *payload = cloudsync_memory_zeroalloc((uint64_t)cloudsync_payload_context_size(NULL));
+    if (!payload) ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("out of memory")));
+
+    while (payload_chunks_fetch_current(st)) {
+        size_t row_size = 0;
+        {
+            pgvalue_t *vals[9] = {0};
+            text *owned_texts[2] = {0};
+            payload_chunks_make_pgvalues(st, vals, owned_texts);
+            row_size = pk_encode_size((dbvalue_t **)vals, 9, 0, 3);
+            payload_chunks_free_pgvalues(vals, owned_texts);
+        }
+        if (row_size == SIZE_MAX) ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg(CLOUDSYNC_ERRCODE_ROW_TOO_LARGE "payload row too large")));
+
+        if ((int64)row_size + (int64)header_size + CLOUDSYNC_PAYLOAD_CHUNK_SAFETY_MARGIN > st->max_size) {
+            if (cloudsync_payload_context_nrows(payload) > 0) break;
+            payload_chunks_pg_begin_fragment(st, data, 0);
+            cloudsync_memory_free(payload);
+            return payload_chunks_emit_pg_fragment(st, data, rows, dbv_min, dbv_max);
+        }
+
+        if (cloudsync_payload_context_nrows(payload) > 0 && cloudsync_payload_context_bused(payload) + row_size > (size_t)st->max_size) break;
+
+        pgvalue_t *vals[9] = {0};
+        text *owned_texts[2] = {0};
+        payload_chunks_make_pgvalues(st, vals, owned_texts);
+        int rc = cloudsync_payload_encode_step(payload, data, 9, (dbvalue_t **)vals);
+        payload_chunks_free_pgvalues(vals, owned_texts);
+        if (rc != DBRES_OK) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+
+        if (cloudsync_payload_context_nrows(payload) == 1) *dbv_min = st->db_version;
+        *dbv_max = st->db_version;
+        payload_chunks_free_current(st);
+    }
+
+    if (cloudsync_payload_context_nrows(payload) == 0) {
+        cloudsync_memory_free(payload);
+        return NULL;
+    }
+    int rc = cloudsync_payload_encode_final(payload, data);
+    if (rc != DBRES_OK) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+    int64 blob_size = 0;
+    char *blob = cloudsync_payload_blob(payload, &blob_size, rows);
+    bytea *result = (bytea *)palloc(VARHDRSZ + blob_size);
+    SET_VARSIZE(result, VARHDRSZ + blob_size);
+    memcpy(VARDATA(result), blob, blob_size);
+    cloudsync_memory_free(blob);
+    cloudsync_memory_free(payload);
+    return result;
+}
+
+PG_FUNCTION_INFO_V1(cloudsync_payload_chunks);
+Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
+    FuncCallContext *funcctx;
+    cloudsync_context *data = get_cloudsync_context();
+
+    if (SRF_IS_FIRSTCALL()) {
+        funcctx = SRF_FIRSTCALL_INIT();
+        MemoryContext oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+        PayloadChunksState *st = palloc0(sizeof(*st));
+        st->chunk_index = 0;
+        // Per-row fields that span multiple SRF_PERCALL calls (fragment emission)
+        // must be allocated here, not in the transient per-call context.
+        st->value_ctx = funcctx->multi_call_memory_ctx;
+
+        if (SPI_connect() != SPI_OK_CONNECT) ereport(ERROR, (errmsg("SPI_connect failed")));
+        st->spi_connected = true;
+        st->max_size = cloudsync_payload_max_chunk_size(data);
+        size_t header_size_tmp = 0;
+        cloudsync_payload_context_size(&header_size_tmp);
+        st->frag_target = st->max_size - (int)header_size_tmp - CLOUDSYNC_PAYLOAD_CHUNK_SAFETY_MARGIN;
+        if (st->frag_target < 1024) st->frag_target = 1024;
+
+        int64 since = PG_ARGISNULL(0) ? dbutils_settings_get_int64_value(data, CLOUDSYNC_KEY_SEND_DBVERSION) : PG_GETARG_INT64(0);
+        bytea *site_id = PG_ARGISNULL(1) ? NULL : PG_GETARG_BYTEA_PP(1);
+        bool exclude = PG_ARGISNULL(3) ? false : PG_GETARG_BOOL(3);
+        // Positional resume cursor: when resume_db_version is given the scan starts
+        // at (resume_db_version, resume_seq) inclusive and the first chunk resumes a
+        // mid-value fragment at resume_frag_offset, instead of replaying from `since`.
+        // Lets the /check job page one chunk per round-trip with an O(1) seek and no
+        // spool table.
+        bool positional = !PG_ARGISNULL(4);
+        int64 resume_dbv = PG_ARGISNULL(4) ? 0 : PG_GETARG_INT64(4);
+        int64 resume_seq = PG_ARGISNULL(5) ? 0 : PG_GETARG_INT64(5);
+        int64 resume_frag = PG_ARGISNULL(6) ? 0 : PG_GETARG_INT64(6);
+        // Site filter resolution:
+        //   exclude=true  -> all sites except filter_site_id (CHECK path); site required
+        //   filter given  -> only that site
+        //   default       -> local site (send path, unchanged)
+        if (exclude && !site_id) {
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                errmsg("cloudsync_payload_chunks: exclude_filter_site_id requires a non-NULL filter_site_id")));
+        }
+        if (!exclude && !site_id) {
+            site_id = (bytea *)palloc(VARHDRSZ + UUID_LEN);
+            SET_VARSIZE(site_id, VARHDRSZ + UUID_LEN);
+            memcpy(VARDATA(site_id), cloudsync_siteid(data), UUID_LEN);
+        }
+
+        int64 until = PG_ARGISNULL(2) ? 0 : PG_GETARG_INT64(2);
+        if (until == 0) {
+            Oid mt[1] = {BYTEAOID};
+            Datum mv[1] = {PointerGetDatum(site_id)};
+            char mn[1] = {' '};
+            const char *mxq = exclude
+                ? "SELECT COALESCE(MAX(db_version),0) FROM cloudsync_changes_select(0,NULL) WHERE site_id <> $1"
+                : "SELECT COALESCE(MAX(db_version),0) FROM cloudsync_changes_select(0,$1)";
+            int mrc = SPI_execute_with_args(mxq, 1, mt, mv, mn, true, 1);
+            if (mrc == SPI_OK_SELECT && SPI_processed > 0) {
+                bool isnull = false;
+                Datum d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
+                until = isnull ? 0 : DatumGetInt64(d);
+            }
+            if (SPI_tuptable) { SPI_freetuptable(SPI_tuptable); SPI_tuptable = NULL; }
+        }
+        st->watermark = until;
+
+        StringInfoData q;
+        initStringInfo(&q);
+        if (positional) {
+            // Inclusive positional lower bound (db_version, seq) >= (resume_dbv,
+            // resume_seq) within db_version <= until. $1=site, $2=until, $3=resume_dbv,
+            // $4=resume_seq. (seq >= matches the SQLite vtab's exact tiling; contrast
+            // with payload_blob_checked's exclusive seq > for its last-applied cursor.)
+            if (exclude) {
+                appendStringInfoString(&q,
+                    "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                    "FROM cloudsync_changes_select(0,NULL) "
+                    "WHERE site_id <> $1 AND db_version <= $2 AND (db_version > $3 OR (db_version = $3 AND seq >= $4)) "
+                    "ORDER BY db_version, seq ASC");
+            } else {
+                appendStringInfoString(&q,
+                    "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                    "FROM cloudsync_changes_select(0,$1) "
+                    "WHERE db_version <= $2 AND (db_version > $3 OR (db_version = $3 AND seq >= $4)) "
+                    "ORDER BY db_version, seq ASC");
+            }
+            Oid argtypes[4] = {BYTEAOID, INT8OID, INT8OID, INT8OID};
+            Datum values[4] = {PointerGetDatum(site_id), Int64GetDatum(until), Int64GetDatum(resume_dbv), Int64GetDatum(resume_seq)};
+            char nulls[4] = {' ', ' ', ' ', ' '};
+            st->portal = SPI_cursor_open_with_args(NULL, q.data, 4, argtypes, values, nulls, true, 0);
+        } else {
+            if (exclude) {
+                // $1=since (into changes_select), $2=site to exclude, $3=until watermark
+                appendStringInfoString(&q,
+                    "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                    "FROM cloudsync_changes_select($1,NULL) WHERE site_id <> $2 AND db_version <= $3 ORDER BY db_version, seq ASC");
+            } else {
+                appendStringInfoString(&q,
+                    "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                    "FROM cloudsync_changes_select($1,$2) WHERE db_version <= $3 ORDER BY db_version, seq ASC");
+            }
+            Oid argtypes[3] = {INT8OID, BYTEAOID, INT8OID};
+            Datum values[3] = {Int64GetDatum(since), PointerGetDatum(site_id), Int64GetDatum(until)};
+            char nulls[3] = {' ', ' ', ' '};
+            st->portal = SPI_cursor_open_with_args(NULL, q.data, 3, argtypes, values, nulls, true, 0);
+        }
+        pfree(q.data);
+        if (!st->portal) ereport(ERROR, (errmsg("SPI_cursor_open failed")));
+
+        // Resuming inside a value that was fragmented across chunks: the first row is
+        // that value; re-establish the fragment plan and skip to resume_frag.
+        if (positional && resume_frag > 0 && payload_chunks_fetch_current(st)) {
+            payload_chunks_pg_begin_fragment(st, data, resume_frag);
+        }
+
+        TupleDesc outdesc;
+        if (get_call_result_type(fcinfo, NULL, &outdesc) != TYPEFUNC_COMPOSITE) ereport(ERROR, (errmsg("return type must be composite")));
+        st->outdesc = BlessTupleDesc(outdesc);
+        funcctx->user_fctx = st;
+        MemoryContextSwitchTo(oldcontext);
+    }
+
+    funcctx = SRF_PERCALL_SETUP();
+    PayloadChunksState *st = (PayloadChunksState *)funcctx->user_fctx;
+
+    int64 rows = 0, dbv_min = 0, dbv_max = 0;
+    bytea *payload = payload_chunks_build_pg_next(st, data, &rows, &dbv_min, &dbv_max);
+    if (!payload) {
+        if (st->portal) SPI_cursor_close(st->portal);
+        st->portal = NULL;
+        if (st->spi_connected) SPI_finish();
+        st->spi_connected = false;
+        payload_chunks_free_current(st);
+        MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+        SRF_RETURN_DONE(funcctx);
+    }
+
+    // Resume point a stateless caller passes back to continue after this chunk.
+    // frag_active -> same value, next byte offset; otherwise peek the next row
+    // (buffered for the following build call): a row -> its (db_version, seq);
+    // end of stream -> this was the final chunk.
+    int64 next_dbv, next_seq, next_frag;
+    bool is_final;
+    if (st->frag_active) {
+        next_dbv = st->db_version; next_seq = st->seq; next_frag = st->frag_offset; is_final = false;
+    } else if (payload_chunks_fetch_current(st)) {
+        next_dbv = st->db_version; next_seq = st->seq; next_frag = 0; is_final = false;
+    } else {
+        next_dbv = st->watermark; next_seq = 0; next_frag = 0; is_final = true;
+    }
+
+    Datum outvals[11];
+    bool outnulls[11] = {false,false,false,false,false,false,false,false,false,false,false};
+    outvals[0] = PointerGetDatum(payload);
+    outvals[1] = Int64GetDatum(st->chunk_index++);
+    outvals[2] = Int64GetDatum(VARSIZE_ANY_EXHDR(payload));
+    outvals[3] = Int64GetDatum(rows);
+    outvals[4] = Int64GetDatum(dbv_min);
+    outvals[5] = Int64GetDatum(dbv_max);
+    outvals[6] = Int64GetDatum(st->watermark);
+    outvals[7] = Int64GetDatum(next_dbv);
+    outvals[8] = Int64GetDatum(next_seq);
+    outvals[9] = Int64GetDatum(next_frag);
+    outvals[10] = BoolGetDatum(is_final);
+    HeapTuple outtup = heap_form_tuple(st->outdesc, outvals, outnulls);
+    SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(outtup));
+}
+
+static void payload_blob_checked_pg_add(int64 *acc, int64 value) {
+    if (value < 0 || *acc > PG_INT64_MAX - value) {
+        ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            errmsg(CLOUDSYNC_ERRCODE_PAYLOAD_TOO_LARGE "cloudsync_payload_blob_checked: payload estimate is too large")));
+    }
+    *acc += value;
+}
+
+static int64 payload_blob_checked_pg_estimate(cloudsync_context *data, int64 since, int64 since_seq,
+                                              bytea *site_id, bool exclude, int64 *watermark) {
+    PayloadChunksState st = {0};
+    int64 estimated = 0;
+    bool has_rows = false;
+
+    int64 until = 0;
+    Oid mt[1] = {BYTEAOID};
+    Datum mv[1] = {PointerGetDatum(site_id)};
+    char mn[1] = {' '};
+    const char *mxq = exclude
+        ? "SELECT COALESCE(MAX(db_version),0) FROM cloudsync_changes_select(0,NULL) WHERE site_id <> $1"
+        : "SELECT COALESCE(MAX(db_version),0) FROM cloudsync_changes_select(0,$1)";
+    int mrc = SPI_execute_with_args(mxq, 1, mt, mv, mn, true, 1);
+    if (mrc == SPI_OK_SELECT && SPI_processed > 0) {
+        bool isnull = false;
+        Datum d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
+        until = isnull ? 0 : DatumGetInt64(d);
+    } else {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+            errmsg("cloudsync_payload_blob_checked: failed to capture payload watermark")));
+    }
+    if (SPI_tuptable) { SPI_freetuptable(SPI_tuptable); SPI_tuptable = NULL; }
+    if (watermark) *watermark = until;
+
+    if (until >= since) {
+        StringInfoData q;
+        initStringInfo(&q);
+        if (exclude) {
+            appendStringInfoString(&q,
+                "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                "FROM cloudsync_changes_select(0,NULL) "
+                "WHERE site_id <> $2 AND db_version <= $3 AND (db_version > $1 OR (db_version = $1 AND seq > $4)) "
+                "ORDER BY db_version, seq ASC");
+        } else {
+            appendStringInfoString(&q,
+                "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                "FROM cloudsync_changes_select(0,$2) "
+                "WHERE db_version <= $3 AND (db_version > $1 OR (db_version = $1 AND seq > $4)) "
+                "ORDER BY db_version, seq ASC");
+        }
+        Oid argtypes[4] = {INT8OID, BYTEAOID, INT8OID, INT8OID};
+        Datum values[4] = {Int64GetDatum(since), PointerGetDatum(site_id), Int64GetDatum(until), Int64GetDatum(since_seq)};
+        char nulls[4] = {' ', ' ', ' ', ' '};
+        st.portal = SPI_cursor_open_with_args(NULL, q.data, 4, argtypes, values, nulls, true, 0);
+        pfree(q.data);
+        if (!st.portal) ereport(ERROR, (errmsg("SPI_cursor_open failed")));
+
+        size_t header_size = 0;
+        cloudsync_payload_context_size(&header_size);
+        if (header_size > (size_t)PG_INT64_MAX) {
+            ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                errmsg(CLOUDSYNC_ERRCODE_PAYLOAD_TOO_LARGE "cloudsync_payload_blob_checked: payload estimate is too large")));
+        }
+
+        while (payload_chunks_fetch_current(&st)) {
+            pgvalue_t *vals[9] = {0};
+            text *owned_texts[2] = {0};
+            payload_chunks_make_pgvalues(&st, vals, owned_texts);
+            size_t row_size = pk_encode_size((dbvalue_t **)vals, 9, 0, 3);
+            payload_chunks_free_pgvalues(vals, owned_texts);
+            if (row_size == SIZE_MAX || row_size > (size_t)PG_INT64_MAX) {
+                ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                    errmsg(CLOUDSYNC_ERRCODE_ROW_TOO_LARGE "cloudsync_payload_blob_checked: payload row is too large")));
+            }
+            if (!has_rows) {
+                payload_blob_checked_pg_add(&estimated, (int64)header_size);
+                has_rows = true;
+            }
+            payload_blob_checked_pg_add(&estimated, (int64)row_size);
+            payload_chunks_free_current(&st);
+        }
+    }
+
+    if (st.portal) SPI_cursor_close(st.portal);
+    payload_chunks_free_current(&st);
+    return estimated;
+}
+
+PG_FUNCTION_INFO_V1(cloudsync_payload_blob_checked);
+Datum cloudsync_payload_blob_checked(PG_FUNCTION_ARGS) {
+    cloudsync_context *data = get_cloudsync_context();
+    bool spi_connected = false;
+    Portal portal = NULL;
+    PayloadChunksState encode_st = {0};
+    cloudsync_payload_context *payload = NULL;
+    bytea *result = NULL;
+    bytea *site_id = PG_ARGISNULL(2) ? NULL : PG_GETARG_BYTEA_PP(2);
+    bool exclude = PG_ARGISNULL(3) ? false : PG_GETARG_BOOL(3);
+
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(4)) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+            errmsg("cloudsync_payload_blob_checked: since_db_version, since_seq, and max_estimated_payload_size are required")));
+    }
+    int64 since = PG_GETARG_INT64(0);
+    int64 since_seq = PG_GETARG_INT64(1);
+    int64 max_estimated_size = PG_GETARG_INT64(4);
+    if (max_estimated_size <= 0) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+            errmsg("cloudsync_payload_blob_checked: max_estimated_payload_size must be positive")));
+    }
+    if (exclude && !site_id) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+            errmsg("cloudsync_payload_blob_checked: exclude_filter_site_id requires a non-NULL filter_site_id")));
+    }
+    if (!exclude && !site_id) {
+        site_id = (bytea *)palloc(VARHDRSZ + UUID_LEN);
+        SET_VARSIZE(site_id, VARHDRSZ + UUID_LEN);
+        memcpy(VARDATA(site_id), cloudsync_siteid(data), UUID_LEN);
+    }
+
+    if (SPI_connect() != SPI_OK_CONNECT) ereport(ERROR, (errmsg("SPI_connect failed")));
+    spi_connected = true;
+
+    int64 watermark = 0;
+    int64 estimated = payload_blob_checked_pg_estimate(data, since, since_seq, site_id, exclude, &watermark);
+    if (estimated == 0) {
+        if (spi_connected) SPI_finish();
+        PG_RETURN_NULL();
+    }
+    if (estimated > max_estimated_size) {
+        if (spi_connected) SPI_finish();
+        ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            errmsg(CLOUDSYNC_ERRCODE_PAYLOAD_TOO_LARGE "cloudsync_payload_blob_checked: estimated payload size %lld exceeds max_estimated_payload_size %lld",
+                   (long long)estimated, (long long)max_estimated_size)));
+    }
+
+    PG_TRY();
+    {
+        StringInfoData q;
+        initStringInfo(&q);
+        if (exclude) {
+            appendStringInfoString(&q,
+                "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                "FROM cloudsync_changes_select(0,NULL) "
+                "WHERE site_id <> $2 AND db_version <= $3 AND (db_version > $1 OR (db_version = $1 AND seq > $4)) "
+                "ORDER BY db_version, seq ASC");
+        } else {
+            appendStringInfoString(&q,
+                "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                "FROM cloudsync_changes_select(0,$2) "
+                "WHERE db_version <= $3 AND (db_version > $1 OR (db_version = $1 AND seq > $4)) "
+                "ORDER BY db_version, seq ASC");
+        }
+        Oid argtypes[4] = {INT8OID, BYTEAOID, INT8OID, INT8OID};
+        Datum values[4] = {Int64GetDatum(since), PointerGetDatum(site_id), Int64GetDatum(watermark), Int64GetDatum(since_seq)};
+        char nulls[4] = {' ', ' ', ' ', ' '};
+        portal = SPI_cursor_open_with_args(NULL, q.data, 4, argtypes, values, nulls, true, 0);
+        pfree(q.data);
+        if (!portal) ereport(ERROR, (errmsg("SPI_cursor_open failed")));
+        encode_st.portal = portal;
+
+        payload = cloudsync_memory_zeroalloc((uint64_t)cloudsync_payload_context_size(NULL));
+        if (!payload) ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("out of memory")));
+
+        while (payload_chunks_fetch_current(&encode_st)) {
+            pgvalue_t *vals[9] = {0};
+            text *owned_texts[2] = {0};
+            payload_chunks_make_pgvalues(&encode_st, vals, owned_texts);
+            int rc = cloudsync_payload_encode_step(payload, data, 9, (dbvalue_t **)vals);
+            payload_chunks_free_pgvalues(vals, owned_texts);
+            if (rc != DBRES_OK) {
+                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+            }
+            payload_chunks_free_current(&encode_st);
+        }
+        SPI_cursor_close(portal);
+        portal = NULL;
+        encode_st.portal = NULL;
+
+        int rc = cloudsync_payload_encode_final(payload, data);
+        if (rc != DBRES_OK) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+        int64 blob_size = 0;
+        char *blob = cloudsync_payload_blob(payload, &blob_size, NULL);
+        if (spi_connected) {
+            SPI_finish();
+            spi_connected = false;
+        }
+        // NOTE: PG_RETURN_* expands to `return`, so returning from inside the
+        // PG_TRY block would skip PG_END_TRY() and leave PG_exception_stack
+        // pointing at this (now-dead) frame; a later ereport(ERROR) in the same
+        // query then siglongjmp()s into freed stack and segfaults. Compute the
+        // result here, return it after PG_END_TRY(). result == NULL means the
+        // empty-blob path (return SQL NULL).
+        if (blob) {
+            result = (bytea *)palloc(VARHDRSZ + blob_size);
+            SET_VARSIZE(result, VARHDRSZ + blob_size);
+            memcpy(VARDATA(result), blob, blob_size);
+        }
+        cloudsync_payload_context_free(payload);
+        payload = NULL;
+    }
+    PG_CATCH();
+    {
+        if (portal) SPI_cursor_close(portal);
+        payload_chunks_free_current(&encode_st);
+        if (payload) cloudsync_payload_context_free(payload);
+        if (spi_connected) SPI_finish();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    // Return outside the PG_TRY so PG_END_TRY() always restores PG_exception_stack.
+    if (!result) PG_RETURN_NULL();
+    PG_RETURN_BYTEA_P(result);
+}
+
 // Payload decode - Apply changes from payload
 PG_FUNCTION_INFO_V1(cloudsync_payload_decode);
 Datum cloudsync_payload_decode (PG_FUNCTION_ARGS) {
@@ -1009,7 +1702,7 @@ Datum cloudsync_payload_decode (PG_FUNCTION_ARGS) {
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("payload cannot be NULL")));
     }
 
-    bytea *payload_data = PG_GETARG_BYTEA_P(0);
+    bytea *payload_data = PG_GETARG_BYTEA_P_COPY(0);
     int blen = VARSIZE(payload_data) - VARHDRSZ;
 
     // Sanity check payload size
@@ -1033,10 +1726,13 @@ Datum cloudsync_payload_decode (PG_FUNCTION_ARGS) {
 
     PG_TRY();
     {
-        rc = cloudsync_payload_apply(data, payload, blen, &nrows);
+        // PostgreSQL applies a complete monolithic payload: legacy last-applied
+        // checkpoint (ends on a db_version boundary, so it is safe).
+        rc = cloudsync_payload_apply(data, payload, blen, &nrows, CLOUDSYNC_CHECKPOINT_LAST_APPLIED, 0);
     }
     PG_CATCH();
     {
+        if (payload_data) pfree(payload_data);
         if (spi_connected) SPI_finish();
         PG_RE_THROW();
     }
@@ -1044,8 +1740,10 @@ Datum cloudsync_payload_decode (PG_FUNCTION_ARGS) {
 
     if (spi_connected) SPI_finish();
     if (rc != DBRES_OK) {
+        if (payload_data) pfree(payload_data);
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
     }
+    if (payload_data) pfree(payload_data);
     PG_RETURN_INT32(nrows);
 }
 
@@ -2668,10 +3366,17 @@ static char * build_union_sql (void) {
 
 PG_FUNCTION_INFO_V1(cloudsync_changes_select);
 Datum cloudsync_changes_select(PG_FUNCTION_ARGS) {
-    FuncCallContext *funcctx;
+    FuncCallContext *funcctx = NULL;
     SRFState *st_local = NULL;
     bool spi_connected_local = false;
-    
+    bool srf_done = false;
+    Datum srf_result = (Datum) 0;
+
+    // NOTE: the SRF_RETURN_* macros expand to `return`, so they must run AFTER
+    // PG_END_TRY(). Returning from inside the PG_TRY block skips PG_END_TRY and
+    // leaves PG_exception_stack pointing at this (now-dead) frame; a later
+    // ereport(ERROR) in the same query then siglongjmp()s into freed stack and
+    // segfaults. Compute the result inside the guarded block, return outside it.
     PG_TRY();
     {
         if (SRF_IS_FIRSTCALL()) {
@@ -2752,26 +3457,26 @@ Datum cloudsync_changes_select(PG_FUNCTION_ARGS) {
             // Must switch to a safe context before SRF_RETURN_DONE deletes it
             MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
 
-            SRF_RETURN_DONE(funcctx);
-        }
-        
-        HeapTuple tup = SPI_tuptable->vals[0];
-        TupleDesc td = SPI_tuptable->tupdesc;
-        
-        Datum outvals[9];
-        bool outnulls[9];
-        for (int i = 0; i < 9; i++) {
-            outvals[i] = SPI_getbinval(tup, td, i+1, &outnulls[i]);
-            if (!outnulls[i]) {
-                Form_pg_attribute att = TupleDescAttr(td, i);
-                outvals[i] = datumCopy(outvals[i], att->attbyval, att->attlen);
+            srf_done = true;
+        } else {
+            HeapTuple tup = SPI_tuptable->vals[0];
+            TupleDesc td = SPI_tuptable->tupdesc;
+
+            Datum outvals[9];
+            bool outnulls[9];
+            for (int i = 0; i < 9; i++) {
+                outvals[i] = SPI_getbinval(tup, td, i+1, &outnulls[i]);
+                if (!outnulls[i]) {
+                    Form_pg_attribute att = TupleDescAttr(td, i);
+                    outvals[i] = datumCopy(outvals[i], att->attbyval, att->attlen);
+                }
             }
+
+            HeapTuple outtup = heap_form_tuple(st->outdesc, outvals, outnulls);
+            SPI_freetuptable(SPI_tuptable);
+            SPI_tuptable = NULL;
+            srf_result = HeapTupleGetDatum(outtup);
         }
-        
-        HeapTuple outtup = heap_form_tuple(st->outdesc, outvals, outnulls);
-        SPI_freetuptable(SPI_tuptable);
-        SPI_tuptable = NULL;
-        SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(outtup));
     }
     PG_CATCH();
     {
@@ -2796,6 +3501,10 @@ Datum cloudsync_changes_select(PG_FUNCTION_ARGS) {
         PG_RE_THROW();
     }
     PG_END_TRY();
+
+    // Return outside the PG_TRY so PG_END_TRY() always restores PG_exception_stack.
+    if (srf_done) SRF_RETURN_DONE(funcctx);
+    SRF_RETURN_NEXT(funcctx, srf_result);
 }
 
 // Trigger INSERT

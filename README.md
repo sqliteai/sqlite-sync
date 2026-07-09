@@ -221,6 +221,7 @@ See the full guide: **[RLS Overview](./docs/rls-overview.md)**.
 ## Documentation
 
 - **[API Reference](./API.md)**: all functions, parameters, and examples
+- **[Performance & Overhead](./PERFORMANCE.md)**: sync cost model, payload chunking, and large-value memory notes
 - **[Installation Guide](./docs/installation.md)**: platform-specific setup (Swift, Android, Expo, React Native, Flutter, WASM)
 - **[Block-Level LWW Guide](./docs/block-lww.md)**: line-level text merge for markdown and documents
 - **[RLS Overview](./docs/rls-overview.md)**: conceptual guide to multi-tenant access control with server-enforced policies

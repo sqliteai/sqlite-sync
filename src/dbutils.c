@@ -144,7 +144,13 @@ int dbutils_settings_get_value (cloudsync_context *data, const char *key, char *
         
         // INT case
         if (intvalue) {
-            *intvalue = database_column_int(vm, 0);
+            int type = database_column_type(vm, 0);
+            if (type == DBTYPE_TEXT) {
+                const char *value = database_column_text(vm, 0);
+                *intvalue = value ? strtoll(value, NULL, 10) : 0;
+            } else {
+                *intvalue = database_column_int(vm, 0);
+            }
             goto finalize_get_value;
         }
         
@@ -476,12 +482,22 @@ int dbutils_settings_init (cloudsync_context *data) {
     bool schema_versions_exists = database_internal_table_exists(data, CLOUDSYNC_SCHEMA_VERSIONS_NAME);
     if (schema_versions_exists == false) {
         DEBUG_SETTINGS("cloudsync_schema_versions does not exist (creating a new one)");
-        
+
         // create table
         rc = database_exec(data, SQL_CREATE_SCHEMA_VERSIONS_TABLE);
         if (rc != DBRES_OK) return rc;
     }
-    
+
+    // check if cloudsync_payload_fragments table exists
+    // created at init time because the apply path runs under sync-only
+    // credentials that lack DDL rights on server nodes
+    if (database_internal_table_exists(data, CLOUDSYNC_PAYLOAD_FRAGMENTS_NAME) == false) {
+        DEBUG_SETTINGS("cloudsync_payload_fragments does not exist (creating a new one)");
+
+        rc = database_exec(data, SQL_PAYLOAD_FRAGMENTS_CREATE_TABLE);
+        if (rc != DBRES_OK) return rc;
+    }
+
     // cloudsync_settings table exists so load it
     dbutils_settings_load(data);
     

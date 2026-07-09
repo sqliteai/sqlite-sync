@@ -267,8 +267,8 @@ For each of the four SQLite databases, execute the sync operations:
 SELECT cloudsync_network_send_changes();
 
 -- Check for changes from server (repeat with 2-3 second delays)
-SELECT cloudsync_network_check_changes();
--- Repeat check_changes 3-5 times with delays until it returns more than 0 received rows or stabilizes
+SELECT cloudsync_network_receive_changes();
+-- Repeat receive_changes 3-5 times with delays until it returns more than 0 received rows or stabilizes
 ```
 
 **Recommended sync order:**
@@ -276,7 +276,7 @@ SELECT cloudsync_network_check_changes();
 2. Sync Database 2A (send + check)
 3. Sync Database 1B (send + check)
 4. Sync Database 2B (send + check)
-5. Re-sync all databases (check_changes) to ensure full propagation
+5. Re-sync all databases (receive_changes) to ensure full propagation
 
 ### Step 10: Verify RLS Enforcement
 
@@ -333,7 +333,7 @@ SELECT COUNT(*) FROM <table_name> WHERE id = 'malicious_1';
 **Also verify the malicious row does NOT appear in User 2's databases after syncing:**
 ```sql
 -- In Database 2A or 2B (User 2)
-SELECT cloudsync_network_check_changes();
+SELECT cloudsync_network_receive_changes();
 SELECT * FROM <table_name> WHERE id = 'malicious_1';
 -- Expected: 0 rows (the malicious row should not sync to legitimate User 2 databases)
 ```
@@ -405,7 +405,7 @@ The test FAILS if:
 - Always use the Homebrew sqlite3 binary, NOT `/usr/bin/sqlite3`
 - The cloudsync extension must be built first with `make`
 - SQLiteCloud tables need cleanup before re-running tests
-- `cloudsync_network_check_changes()` may need multiple calls with delays
+- `cloudsync_network_receive_changes()` may need multiple calls with delays
 - Run `SELECT cloudsync_terminate();` on SQLite connections before closing to properly cleanup memory
 - Ensure both test users exist in Supabase auth before running the test
 - The RLS policies must use `auth_userid()` to work with SQLiteCloud token authentication

@@ -12,6 +12,9 @@
 #include "../block.h"
 #include "../database.h"
 #include "../dbutils.h"
+#include "../sql.h"
+#include <inttypes.h>
+#include <stddef.h>
 
 #ifndef CLOUDSYNC_OMIT_NETWORK
 #include "../network/network.h"
@@ -135,10 +138,40 @@ void dbsync_seq (sqlite3_context *context, int argc, sqlite3_value **argv) {
 
 void dbsync_uuid (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_uuid");
-    
+
     char value[UUID_STR_MAXLEN];
     char *uuid = cloudsync_uuid_v7_string(value, true);
     sqlite3_result_text(context, uuid, -1, SQLITE_TRANSIENT);
+}
+
+// cloudsync_uuid_text(blob, [dash_format]) -> canonical UUID string
+void dbsync_uuid_text (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_uuid_text");
+
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL) { sqlite3_result_null(context); return; }
+    if (sqlite3_value_type(argv[0]) != SQLITE_BLOB || sqlite3_value_bytes(argv[0]) != UUID_LEN) {
+        sqlite3_result_error(context, "cloudsync_uuid_text: expected a 16-byte BLOB.", -1);
+        return;
+    }
+    bool dash_format = (argc > 1) ? (sqlite3_value_int(argv[1]) != 0) : true;
+    char value[UUID_STR_MAXLEN];
+    cloudsync_uuid_v7_stringify((uint8_t *)sqlite3_value_blob(argv[0]), value, dash_format);
+    sqlite3_result_text(context, value, -1, SQLITE_TRANSIENT);
+}
+
+// cloudsync_uuid_blob(text) -> 16-byte UUID blob (accepts dashed/undashed)
+void dbsync_uuid_blob (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_uuid_blob");
+
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL) { sqlite3_result_null(context); return; }
+    const char *str = (const char *)sqlite3_value_text(argv[0]);
+    int len = sqlite3_value_bytes(argv[0]);
+    uint8_t uuid[UUID_LEN];
+    if (!str || cloudsync_uuid_v7_parse(str, len, uuid) != 0) {
+        sqlite3_result_error(context, "cloudsync_uuid_blob: malformed UUID string.", -1);
+        return;
+    }
+    sqlite3_result_blob(context, uuid, UUID_LEN, SQLITE_TRANSIENT);
 }
 
 // MARK: -
@@ -1061,11 +1094,16 @@ void dbsync_payload_decode (sqlite3_context *context, int argc, sqlite3_value **
     
     // obtain payload
     const char *payload = (const char *)database_value_blob(argv[0]);
-    
+
     // apply changes
+    // The public SQL function applies a single complete payload: advance the
+    // receive cursor to its last applied (db_version, seq) (legacy behavior, safe
+    // for a payload that ends on a db_version boundary). The chunked-download
+    // receive path gates cursor advancement on stream completion via the C-level
+    // checkpoint argument instead (see cloudsync_payload_apply in cloudsync.h).
     int nrows = 0;
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    int rc = cloudsync_payload_apply(data, payload, blen, &nrows);
+    int rc = cloudsync_payload_apply(data, payload, blen, &nrows, CLOUDSYNC_CHECKPOINT_LAST_APPLIED, 0);
     if (rc != SQLITE_OK) {
         sqlite3_result_error(context, cloudsync_errmsg(data), -1);
         sqlite3_result_error_code(context, rc);
@@ -1074,6 +1112,673 @@ void dbsync_payload_decode (sqlite3_context *context, int argc, sqlite3_value **
     
     // returns number of applied rows
     sqlite3_result_int(context, nrows);
+}
+
+typedef struct {
+    sqlite3_vtab       base;
+    sqlite3           *db;
+    cloudsync_context *data;
+} cloudsync_payload_chunks_vtab;
+
+typedef struct {
+    sqlite3_vtab_cursor base;
+    cloudsync_payload_chunks_vtab *vtab;
+    sqlite3_stmt *src;
+    bool eof;
+    bool has_row;
+    int chunk_index;
+    char *payload;
+    int64_t payload_size;
+    int64_t rows;
+    int64_t dbv_min;
+    int64_t dbv_max;
+    int64_t watermark;
+    bool frag_active;
+    int frag_part;
+    int frag_count;
+    int frag_target;
+    int64_t frag_offset;
+    int64_t frag_total;
+    uint64_t frag_checksum;
+    char value_header[16];
+    int value_header_len;
+    const char *value_data;
+    int64_t value_data_len;
+    // Positional-cursor outputs: the resume point AFTER the chunk currently held.
+    // These live in the per-scan reset region (after eof) so xFilter's bulk memset
+    // clears them. next_* is the (db_version, seq, frag_offset) a follow-up call
+    // passes back as resume_* to continue exactly where this chunk stopped.
+    int64_t next_dbv;
+    int64_t next_seq;
+    int64_t next_frag_offset;
+    bool is_final;
+} cloudsync_payload_chunks_cursor;
+
+static int payload_chunks_connect(sqlite3 *db, void *aux, int argc, const char *const *argv, sqlite3_vtab **vtab, char **err) {
+    UNUSED_PARAMETER(argc); UNUSED_PARAMETER(argv); UNUSED_PARAMETER(err);
+    int rc = sqlite3_declare_vtab(db,
+        "CREATE TABLE x(payload BLOB, chunk_index INTEGER, payload_size INTEGER, rows INTEGER, "
+        "db_version_min INTEGER, db_version_max INTEGER, watermark_db_version INTEGER, "
+        "since_db_version HIDDEN, site_id HIDDEN, until_db_version HIDDEN, exclude_filter_site_id HIDDEN, "
+        // Positional-cursor outputs (cols 11..14): the resume point after the
+        // emitted chunk, plus a final-chunk flag. A stateless /check passes these
+        // back as the resume_* inputs (cols 15..17) to continue the drain without
+        // a spool table — O(1) seek per chunk instead of replaying from since.
+        "next_db_version INTEGER, next_seq INTEGER, next_frag_offset INTEGER, is_final INTEGER, "
+        "resume_db_version HIDDEN, resume_seq HIDDEN, resume_frag_offset HIDDEN)");
+    if (rc != SQLITE_OK) return rc;
+    cloudsync_payload_chunks_vtab *p = sqlite3_malloc64(sizeof(*p));
+    if (!p) return SQLITE_NOMEM;
+    memset(p, 0, sizeof(*p));
+    p->db = db;
+    p->data = (cloudsync_context *)aux;
+    *vtab = (sqlite3_vtab *)p;
+    return SQLITE_OK;
+}
+
+static int payload_chunks_disconnect(sqlite3_vtab *vtab) {
+    sqlite3_free(vtab);
+    return SQLITE_OK;
+}
+
+static int payload_chunks_open(sqlite3_vtab *vtab, sqlite3_vtab_cursor **cursor) {
+    cloudsync_payload_chunks_cursor *c = cloudsync_memory_zeroalloc(sizeof(*c));
+    if (!c) return SQLITE_NOMEM;
+    c->vtab = (cloudsync_payload_chunks_vtab *)vtab;
+    *cursor = (sqlite3_vtab_cursor *)c;
+    return SQLITE_OK;
+}
+
+static int payload_chunks_close(sqlite3_vtab_cursor *cursor) {
+    cloudsync_payload_chunks_cursor *c = (cloudsync_payload_chunks_cursor *)cursor;
+    if (c->src) sqlite3_finalize(c->src);
+    if (c->payload) cloudsync_memory_free(c->payload);
+    cloudsync_memory_free(c);
+    return SQLITE_OK;
+}
+
+static int payload_chunks_best_index(sqlite3_vtab *vtab, sqlite3_index_info *idxinfo) {
+    UNUSED_PARAMETER(vtab);
+    // Assign argvIndex in a canonical hidden-column order so xFilter can read argv
+    // in a fixed order regardless of how SQLite presents constraints. idxNum bit k
+    // is set when handled_cols[k] is bound; xFilter reads argv in this same order.
+    //   bit0=since_db_version(7) bit1=site_id(8) bit2=until_db_version(9)
+    //   bit3=exclude_filter_site_id(10) bit4=resume_db_version(15)
+    //   bit5=resume_seq(16) bit6=resume_frag_offset(17)
+    static const int handled_cols[] = {7, 8, 9, 10, 15, 16, 17};
+    int argv_index = 1;
+    int idxnum = 0;
+    for (size_t k = 0; k < sizeof(handled_cols) / sizeof(handled_cols[0]); ++k) {
+        int col = handled_cols[k];
+        for (int i = 0; i < idxinfo->nConstraint; ++i) {
+            struct sqlite3_index_constraint *cn = &idxinfo->aConstraint[i];
+            if (!cn->usable || cn->op != SQLITE_INDEX_CONSTRAINT_EQ || cn->iColumn != col) continue;
+            idxinfo->aConstraintUsage[i].argvIndex = argv_index++;
+            idxinfo->aConstraintUsage[i].omit = 1;
+            idxnum |= (1 << k);
+            break; // at most one constraint consumed per hidden column
+        }
+    }
+    idxinfo->idxNum = idxnum;
+    idxinfo->estimatedCost = 10.0;
+    idxinfo->estimatedRows = 10;
+    return SQLITE_OK;
+}
+
+static int payload_chunks_step_source(cloudsync_payload_chunks_cursor *c) {
+    int rc = sqlite3_step(c->src);
+    if (rc == SQLITE_ROW) { c->has_row = true; return SQLITE_OK; }
+    c->has_row = false;
+    return rc == SQLITE_DONE ? SQLITE_OK : rc;
+}
+
+static int payload_chunks_plan_fragment(cloudsync_payload_chunks_cursor *c) {
+    cloudsync_context *data = c->vtab->data;
+    int target = cloudsync_payload_fragment_data_size(data,
+        (const char *)sqlite3_column_text(c->src, 0), sqlite3_column_bytes(c->src, 0),
+        sqlite3_column_blob(c->src, 1), sqlite3_column_bytes(c->src, 1),
+        (const char *)sqlite3_column_text(c->src, 2), sqlite3_column_bytes(c->src, 2),
+        sqlite3_column_int64(c->src, 4), sqlite3_column_int64(c->src, 5),
+        sqlite3_column_blob(c->src, 6), sqlite3_column_bytes(c->src, 6),
+        sqlite3_column_int64(c->src, 7), sqlite3_column_int64(c->src, 8),
+        c->frag_total, 0, 1);
+    if (target <= 0) return SQLITE_TOOBIG;
+
+    int count = 0;
+    for (int i = 0; i < CLOUDSYNC_PAYLOAD_FRAGMENT_SIZE_FIXPOINT_ITERATIONS; ++i) {
+        count = cloudsync_payload_fragment_count(c->frag_total, target);
+        if (count <= 0) return SQLITE_TOOBIG;
+        int planned = cloudsync_payload_fragment_data_size(data,
+            (const char *)sqlite3_column_text(c->src, 0), sqlite3_column_bytes(c->src, 0),
+            sqlite3_column_blob(c->src, 1), sqlite3_column_bytes(c->src, 1),
+            (const char *)sqlite3_column_text(c->src, 2), sqlite3_column_bytes(c->src, 2),
+            sqlite3_column_int64(c->src, 4), sqlite3_column_int64(c->src, 5),
+            sqlite3_column_blob(c->src, 6), sqlite3_column_bytes(c->src, 6),
+            sqlite3_column_int64(c->src, 7), sqlite3_column_int64(c->src, 8),
+            c->frag_total, count - 1, count);
+        if (planned <= 0) return SQLITE_TOOBIG;
+        if (planned == target) break;
+        target = planned;
+    }
+
+    c->frag_target = target;
+    c->frag_count = cloudsync_payload_fragment_count(c->frag_total, target);
+    if (c->frag_count <= 0) return SQLITE_TOOBIG;
+    return SQLITE_OK;
+}
+
+// Set up fragment state for the current source row (a single value larger than
+// max_chunk_size) so emit_fragment can stream it. start_offset is the byte offset
+// within the encoded value to resume from (0 when first reaching the value;
+// >0 when a positional cursor resumes mid-value). frag_part is derived from the
+// offset so the fragment's part index is consistent whether reached by streaming
+// or by a seek. The plan (frag_target/frag_count) is a deterministic function of
+// the row, so a resumed fragment tiles identically to a streamed one.
+static int payload_chunks_begin_fragment(cloudsync_payload_chunks_cursor *c, int64_t start_offset) {
+    dbvalue_t *col_value = (dbvalue_t *)sqlite3_column_value(c->src, 3);
+    int type = database_value_type(col_value);
+    if (type != DBTYPE_TEXT && type != DBTYPE_BLOB) return SQLITE_TOOBIG;
+    int64_t raw_len = 0;
+    int header_len = cloudsync_payload_encoded_value_header(col_value, c->value_header, sizeof(c->value_header), &raw_len);
+    if (header_len <= 0) return SQLITE_ERROR;
+    c->value_header_len = header_len;
+    c->value_data = (const char *)database_value_blob(col_value);
+    c->value_data_len = raw_len;
+    c->frag_total = header_len + raw_len;
+    c->frag_offset = start_offset;
+    int rc = payload_chunks_plan_fragment(c);
+    if (rc != SQLITE_OK) return rc;
+    c->frag_part = (c->frag_target > 0) ? (int)(start_offset / c->frag_target) : 0;
+    c->frag_checksum = cloudsync_payload_encoded_value_checksum(col_value);
+    c->frag_active = true;
+    return SQLITE_OK;
+}
+
+static int payload_chunks_emit_fragment(cloudsync_payload_chunks_cursor *c) {
+    cloudsync_context *data = c->vtab->data;
+    if (c->payload) { cloudsync_memory_free(c->payload); c->payload = NULL; }
+    int64_t remaining = c->frag_total - c->frag_offset;
+    int frag_len = remaining > c->frag_target ? c->frag_target : (int)remaining;
+    if (frag_len <= 0) return SQLITE_CORRUPT;
+    char *frag = cloudsync_memory_alloc((uint64_t)frag_len);
+    if (!frag) return SQLITE_NOMEM;
+    int copied = 0;
+    int64_t off = c->frag_offset;
+    if (off < c->value_header_len) {
+        int n = c->value_header_len - (int)off;
+        if (n > frag_len) n = frag_len;
+        memcpy(frag, c->value_header + off, (size_t)n);
+        copied += n;
+        off += n;
+    }
+    if (copied < frag_len) {
+        int64_t data_off = off - c->value_header_len;
+        memcpy(frag + copied, c->value_data + data_off, (size_t)(frag_len - copied));
+    }
+
+    cloudsync_payload_context *payload = cloudsync_memory_zeroalloc((uint64_t)cloudsync_payload_context_size(NULL));
+    if (!payload) { cloudsync_memory_free(frag); return SQLITE_NOMEM; }
+    int rc = cloudsync_payload_encode_fragment_step(payload, data,
+        (const char *)sqlite3_column_text(c->src, 0), sqlite3_column_bytes(c->src, 0),
+        sqlite3_column_blob(c->src, 1), sqlite3_column_bytes(c->src, 1),
+        (const char *)sqlite3_column_text(c->src, 2), sqlite3_column_bytes(c->src, 2),
+        frag, frag_len,
+        sqlite3_column_int64(c->src, 4), sqlite3_column_int64(c->src, 5),
+        sqlite3_column_blob(c->src, 6), sqlite3_column_bytes(c->src, 6),
+        sqlite3_column_int64(c->src, 7), sqlite3_column_int64(c->src, 8),
+        c->frag_checksum, c->frag_total, c->frag_part, c->frag_count);
+    cloudsync_memory_free(frag);
+    if (rc != SQLITE_OK) { cloudsync_memory_free(payload); return rc; }
+    rc = cloudsync_payload_encode_final(payload, data);
+    if (rc != SQLITE_OK) { cloudsync_memory_free(payload); return rc; }
+    c->payload = cloudsync_payload_blob(payload, &c->payload_size, &c->rows);
+    cloudsync_memory_free(payload);
+    c->dbv_min = sqlite3_column_int64(c->src, 5);
+    c->dbv_max = c->dbv_min;
+    c->chunk_index++;
+    c->frag_offset += frag_len;
+    c->frag_part++;
+    if (c->frag_part >= c->frag_count) {
+        c->frag_active = false;
+        rc = payload_chunks_step_source(c);
+    }
+    return rc;
+}
+
+static int payload_chunks_build_next(cloudsync_payload_chunks_cursor *c) {
+    cloudsync_context *data = c->vtab->data;
+    int rc = SQLITE_OK;
+    if (c->payload) { cloudsync_memory_free(c->payload); c->payload = NULL; }
+    c->payload_size = c->rows = c->dbv_min = c->dbv_max = 0;
+    if (c->frag_active) return payload_chunks_emit_fragment(c);
+    if (!c->has_row) { c->eof = true; return SQLITE_OK; }
+
+    int max_size = cloudsync_payload_max_chunk_size(data);
+    size_t payload_header_size = 0;
+    cloudsync_payload_context_size(&payload_header_size);
+    cloudsync_payload_context *payload = cloudsync_memory_zeroalloc((uint64_t)cloudsync_payload_context_size(NULL));
+    if (!payload) return SQLITE_NOMEM;
+    while (c->has_row) {
+        sqlite3_value *rowv[9];
+        for (int i = 0; i < 9; ++i) rowv[i] = sqlite3_column_value(c->src, i);
+        size_t row_size = pk_encode_size((dbvalue_t **)rowv, 9, 0, -1);
+        if (row_size == SIZE_MAX) { cloudsync_memory_free(payload); return SQLITE_NOMEM; }
+
+        if ((int64_t)row_size + (int64_t)payload_header_size + CLOUDSYNC_PAYLOAD_CHUNK_SAFETY_MARGIN > max_size) {
+            if (cloudsync_payload_context_nrows(payload) > 0) break;
+            cloudsync_memory_free(payload);
+            rc = payload_chunks_begin_fragment(c, 0);
+            if (rc != SQLITE_OK) return rc;
+            return payload_chunks_emit_fragment(c);
+        }
+
+        if (cloudsync_payload_context_nrows(payload) > 0 && cloudsync_payload_context_bused(payload) + row_size > (size_t)max_size) break;
+        rc = cloudsync_payload_encode_step(payload, data, 9, (dbvalue_t **)rowv);
+        if (rc != SQLITE_OK) { cloudsync_memory_free(payload); return rc; }
+        int64_t dbv = sqlite3_column_int64(c->src, 5);
+        if (cloudsync_payload_context_nrows(payload) == 1) c->dbv_min = dbv;
+        c->dbv_max = dbv;
+        rc = payload_chunks_step_source(c);
+        if (rc != SQLITE_OK) { cloudsync_memory_free(payload); return rc; }
+    }
+
+    if (cloudsync_payload_context_nrows(payload) == 0) { cloudsync_memory_free(payload); c->eof = true; return SQLITE_OK; }
+    rc = cloudsync_payload_encode_final(payload, data);
+    if (rc != SQLITE_OK) { cloudsync_memory_free(payload); return rc; }
+    c->payload = cloudsync_payload_blob(payload, &c->payload_size, &c->rows);
+    cloudsync_memory_free(payload);
+    c->chunk_index++;
+    return SQLITE_OK;
+}
+
+// Record the resume point a stateless caller passes back to continue after the
+// chunk just built. Reads the source statement, which is positioned at the next
+// unconsumed row (or the same row when a value is still mid-fragment). Must be
+// called only after build_next produced a chunk (i.e. !eof).
+static void payload_chunks_set_next_cursor(cloudsync_payload_chunks_cursor *c) {
+    if (c->frag_active) {
+        // Mid-value: resume the same row at the next byte offset.
+        c->next_dbv = sqlite3_column_int64(c->src, 5);
+        c->next_seq = sqlite3_column_int64(c->src, 8);
+        c->next_frag_offset = c->frag_offset;
+        c->is_final = false;
+    } else if (c->has_row) {
+        // Row boundary: the next chunk starts at the current (unconsumed) row.
+        c->next_dbv = sqlite3_column_int64(c->src, 5);
+        c->next_seq = sqlite3_column_int64(c->src, 8);
+        c->next_frag_offset = 0;
+        c->is_final = false;
+    } else {
+        // Stream exhausted: this was the last chunk of the window.
+        c->next_dbv = c->watermark;
+        c->next_seq = 0;
+        c->next_frag_offset = 0;
+        c->is_final = true;
+    }
+}
+
+static int payload_chunks_advance(cloudsync_payload_chunks_cursor *c) {
+    int rc = payload_chunks_build_next(c);
+    if (rc == SQLITE_OK && !c->eof) payload_chunks_set_next_cursor(c);
+    return rc;
+}
+
+static int payload_chunks_filter(sqlite3_vtab_cursor *cursor, int idxnum, const char *idxstr, int argc, sqlite3_value **argv) {
+    UNUSED_PARAMETER(idxstr); UNUSED_PARAMETER(argc);
+    cloudsync_payload_chunks_cursor *c = (cloudsync_payload_chunks_cursor *)cursor;
+    cloudsync_context *data = c->vtab->data;
+    if (c->src) { sqlite3_finalize(c->src); c->src = NULL; }
+    if (c->payload) { cloudsync_memory_free(c->payload); c->payload = NULL; }
+    // Contract: all per-scan state that can be bulk-reset here must live at or
+    // after eof. Fields before eof are cursor lifetime state preserved across
+    // xFilter calls.
+    memset(&c->eof, 0, sizeof(*c) - offsetof(cloudsync_payload_chunks_cursor, eof));
+
+    int argi = 0;
+    int64_t since = dbutils_settings_get_int64_value(data, CLOUDSYNC_KEY_SEND_DBVERSION);
+    const void *site_id = NULL;
+    int site_id_len = 0;
+    bool site_id_given = false;
+    int64_t until = 0;
+    bool exclude = false;
+    // Positional resume cursor (cols 15..17): when resume_db_version is bound the
+    // scan starts at (resume_db_version, resume_seq) inclusive and the first chunk
+    // resumes a mid-value fragment at resume_frag_offset, instead of replaying the
+    // whole window from `since`. Lets a stateless /check page the stream with an
+    // O(1) seek per call and no spool table.
+    bool positional = false;
+    int64_t resume_dbv = 0, resume_seq = 0, resume_frag = 0;
+    if (idxnum & 1) since = sqlite3_value_int64(argv[argi++]);
+    if (idxnum & 2) {
+        if (sqlite3_value_type(argv[argi]) != SQLITE_NULL) {
+            site_id = sqlite3_value_blob(argv[argi]);
+            site_id_len = sqlite3_value_bytes(argv[argi]);
+            site_id_given = true;
+        }
+        argi++;
+    }
+    if (idxnum & 4) until = sqlite3_value_int64(argv[argi++]);
+    if (idxnum & 8) exclude = (sqlite3_value_int(argv[argi++]) != 0);
+    if (idxnum & 16) { resume_dbv = sqlite3_value_int64(argv[argi++]); positional = true; }
+    if (idxnum & 32) resume_seq = sqlite3_value_int64(argv[argi++]);
+    if (idxnum & 64) resume_frag = sqlite3_value_int64(argv[argi++]);
+
+    // Resolve the site filter:
+    //   exclude=true  -> all sites except filter_site_id (CHECK path); site required
+    //   filter given  -> only that site
+    //   default       -> local site (send path, unchanged)
+    const char *site_op;
+    if (exclude) {
+        if (!site_id_given) {
+            c->vtab->base.zErrMsg = sqlite3_mprintf(
+                "cloudsync_payload_chunks: exclude_filter_site_id requires a non-NULL site_id");
+            return SQLITE_ERROR;
+        }
+        site_op = "<>";
+    } else {
+        site_op = "=";
+        if (!site_id_given) { site_id = cloudsync_siteid(data); site_id_len = UUID_LEN; }
+    }
+
+    if (until == 0) {
+        char *mxsql = sqlite3_mprintf(
+            "SELECT COALESCE(MAX(db_version),0) FROM cloudsync_changes WHERE site_id%s?", site_op);
+        if (!mxsql) return SQLITE_NOMEM;
+        sqlite3_stmt *mx = NULL;
+        int rc = sqlite3_prepare_v2(c->vtab->db, mxsql, -1, &mx, NULL);
+        sqlite3_free(mxsql);
+        if (rc != SQLITE_OK) return rc;
+        sqlite3_bind_blob(mx, 1, site_id, site_id_len, SQLITE_TRANSIENT);
+        if (sqlite3_step(mx) == SQLITE_ROW) until = sqlite3_column_int64(mx, 0);
+        sqlite3_finalize(mx);
+    }
+    c->watermark = until;
+
+    // Window upper bound is always `until`. The lower bound is either the legacy
+    // exclusive `since` (db_version > since) or the inclusive positional cursor
+    // (db_version, seq) >= (resume_dbv, resume_seq).
+    char *sql;
+    if (positional) {
+        sql = sqlite3_mprintf(
+            "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+            "FROM cloudsync_changes WHERE db_version<=? AND site_id%s? AND "
+            "(db_version>? OR (db_version=? AND seq>=?)) ORDER BY db_version, seq ASC",
+            site_op);
+    } else {
+        sql = sqlite3_mprintf(
+            "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+            "FROM cloudsync_changes WHERE db_version>? AND site_id%s? AND db_version<=? ORDER BY db_version, seq ASC",
+            site_op);
+    }
+    if (!sql) return SQLITE_NOMEM;
+    int rc = sqlite3_prepare_v2(c->vtab->db, sql, -1, &c->src, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) return rc;
+    if (positional) {
+        sqlite3_bind_int64(c->src, 1, until);
+        sqlite3_bind_blob(c->src, 2, site_id, site_id_len, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(c->src, 3, resume_dbv);
+        sqlite3_bind_int64(c->src, 4, resume_dbv);
+        sqlite3_bind_int64(c->src, 5, resume_seq);
+    } else {
+        sqlite3_bind_int64(c->src, 1, since);
+        sqlite3_bind_blob(c->src, 2, site_id, site_id_len, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(c->src, 3, until);
+    }
+    rc = payload_chunks_step_source(c);
+    if (rc != SQLITE_OK) return rc;
+    // Resuming inside a value that was fragmented across chunks: the first row is
+    // that value; re-establish the fragment plan and skip to resume_frag.
+    if (positional && resume_frag > 0 && c->has_row) {
+        rc = payload_chunks_begin_fragment(c, resume_frag);
+        if (rc != SQLITE_OK) return rc;
+    }
+    return payload_chunks_advance(c);
+}
+
+static int payload_chunks_next(sqlite3_vtab_cursor *cursor) {
+    return payload_chunks_advance((cloudsync_payload_chunks_cursor *)cursor);
+}
+
+static int payload_chunks_eof(sqlite3_vtab_cursor *cursor) {
+    return ((cloudsync_payload_chunks_cursor *)cursor)->eof;
+}
+
+static int payload_chunks_column(sqlite3_vtab_cursor *cursor, sqlite3_context *ctx, int col) {
+    cloudsync_payload_chunks_cursor *c = (cloudsync_payload_chunks_cursor *)cursor;
+    switch (col) {
+        case 0: sqlite3_result_blob64(ctx, c->payload, (sqlite3_uint64)c->payload_size, SQLITE_TRANSIENT); break;
+        case 1: sqlite3_result_int(ctx, c->chunk_index - 1); break;
+        case 2: sqlite3_result_int64(ctx, c->payload_size); break;
+        case 3: sqlite3_result_int64(ctx, c->rows); break;
+        case 4: sqlite3_result_int64(ctx, c->dbv_min); break;
+        case 5: sqlite3_result_int64(ctx, c->dbv_max); break;
+        case 6: sqlite3_result_int64(ctx, c->watermark); break;
+        case 11: sqlite3_result_int64(ctx, c->next_dbv); break;
+        case 12: sqlite3_result_int64(ctx, c->next_seq); break;
+        case 13: sqlite3_result_int64(ctx, c->next_frag_offset); break;
+        case 14: sqlite3_result_int(ctx, c->is_final ? 1 : 0); break;
+        default: sqlite3_result_null(ctx); break;
+    }
+    return SQLITE_OK;
+}
+
+static int payload_chunks_rowid(sqlite3_vtab_cursor *cursor, sqlite3_int64 *rowid) {
+    *rowid = ((cloudsync_payload_chunks_cursor *)cursor)->chunk_index;
+    return SQLITE_OK;
+}
+
+static sqlite3_module cloudsync_payload_chunks_module = {
+    /* iVersion    */ 0,
+    /* xCreate     */ NULL,
+    /* xConnect    */ payload_chunks_connect,
+    /* xBestIndex  */ payload_chunks_best_index,
+    /* xDisconnect */ payload_chunks_disconnect,
+    /* xDestroy    */ NULL,
+    /* xOpen       */ payload_chunks_open,
+    /* xClose      */ payload_chunks_close,
+    /* xFilter     */ payload_chunks_filter,
+    /* xNext       */ payload_chunks_next,
+    /* xEof        */ payload_chunks_eof,
+    /* xColumn     */ payload_chunks_column,
+    /* xRowid      */ payload_chunks_rowid,
+    /* xUpdate     */ NULL,
+    /* xBegin      */ NULL,
+    /* xSync       */ NULL,
+    /* xCommit     */ NULL,
+    /* xRollback   */ NULL,
+    /* xFindMethod */ NULL,
+    /* xRename     */ NULL,
+    /* xSavepoint  */ NULL,
+    /* xRelease    */ NULL,
+    /* xRollbackTo */ NULL,
+    /* xShadowName */ NULL,
+    /* xIntegrity  */ NULL
+};
+
+static int payload_estimated_size_add(sqlite3_int64 *acc, sqlite3_int64 value) {
+    if (value < 0 || *acc > INT64_MAX - value) return SQLITE_TOOBIG;
+    *acc += value;
+    return SQLITE_OK;
+}
+
+static int payload_blob_checked_estimate(sqlite3 *db, const void *site_id, int site_id_len,
+                                         sqlite3_int64 since, sqlite3_int64 since_seq,
+                                         bool exclude, sqlite3_int64 *estimated,
+                                         sqlite3_int64 *watermark) {
+    sqlite3_stmt *stmt = NULL;
+    sqlite3_stmt *mx = NULL;
+    int rc = SQLITE_OK;
+    sqlite3_int64 until = 0;
+    size_t header_size = 0;
+    bool has_rows = false;
+    const char *site_op = exclude ? "<>" : "=";
+    *estimated = 0;
+
+    char *mxsql = sqlite3_mprintf(
+        "SELECT COALESCE(MAX(db_version),0) FROM cloudsync_changes WHERE site_id%s?", site_op);
+    if (!mxsql) return SQLITE_NOMEM;
+    rc = sqlite3_prepare_v2(db, mxsql, -1, &mx, NULL);
+    sqlite3_free(mxsql);
+    if (rc != SQLITE_OK) goto error;
+    sqlite3_bind_blob(mx, 1, site_id, site_id_len, SQLITE_TRANSIENT);
+    rc = sqlite3_step(mx);
+    if (rc == SQLITE_ROW) until = sqlite3_column_int64(mx, 0);
+    else if (rc != SQLITE_DONE) goto error;
+    sqlite3_finalize(mx);
+    mx = NULL;
+    if (watermark) *watermark = until;
+
+    if (until < since) return SQLITE_OK;
+
+    char *sql = sqlite3_mprintf(
+        "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+        "FROM cloudsync_changes WHERE (db_version>? OR (db_version=? AND seq>?)) "
+        "AND site_id%s? AND db_version<=? ORDER BY db_version, seq ASC",
+        site_op);
+    if (!sql) return SQLITE_NOMEM;
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) goto error;
+    sqlite3_bind_int64(stmt, 1, since);
+    sqlite3_bind_int64(stmt, 2, since);
+    sqlite3_bind_int64(stmt, 3, since_seq);
+    sqlite3_bind_blob(stmt, 4, site_id, site_id_len, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 5, until);
+
+    cloudsync_payload_context_size(&header_size);
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        sqlite3_value *rowv[9];
+        for (int i = 0; i < 9; ++i) rowv[i] = sqlite3_column_value(stmt, i);
+        size_t row_size = pk_encode_size((dbvalue_t **)rowv, 9, 0, -1);
+        if (row_size == SIZE_MAX || row_size > (size_t)INT64_MAX) {
+            rc = SQLITE_TOOBIG;
+            goto error;
+        }
+        if (!has_rows) {
+            if (header_size > (size_t)INT64_MAX) {
+                rc = SQLITE_TOOBIG;
+                goto error;
+            }
+            rc = payload_estimated_size_add(estimated, (sqlite3_int64)header_size);
+            if (rc != SQLITE_OK) goto error;
+            has_rows = true;
+        }
+        rc = payload_estimated_size_add(estimated, (sqlite3_int64)row_size);
+        if (rc != SQLITE_OK) goto error;
+    }
+    if (rc != SQLITE_DONE) goto error;
+    sqlite3_finalize(stmt);
+    return SQLITE_OK;
+
+error:
+    if (stmt) sqlite3_finalize(stmt);
+    if (mx) sqlite3_finalize(mx);
+    return rc;
+}
+
+void dbsync_payload_blob_checked(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    DEBUG_FUNCTION("cloudsync_payload_blob_checked");
+    UNUSED_PARAMETER(argc);
+
+    cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    sqlite3_stmt *stmt = NULL;
+    cloudsync_payload_context *payload = NULL;
+    int rc = SQLITE_OK;
+    sqlite3_int64 since = 0;
+    sqlite3_int64 since_seq = 0;
+    sqlite3_int64 max_estimated_size = 0;
+    sqlite3_int64 estimated = 0;
+    sqlite3_int64 watermark = 0;
+    const void *site_id = NULL;
+    int site_id_len = 0;
+    bool exclude = false;
+
+    if (sqlite3_value_type(argv[0]) != SQLITE_NULL) since = sqlite3_value_int64(argv[0]);
+    if (sqlite3_value_type(argv[1]) != SQLITE_NULL) since_seq = sqlite3_value_int64(argv[1]);
+    if (sqlite3_value_type(argv[2]) != SQLITE_NULL) {
+        site_id = sqlite3_value_blob(argv[2]);
+        site_id_len = sqlite3_value_bytes(argv[2]);
+    }
+    exclude = sqlite3_value_type(argv[3]) != SQLITE_NULL && sqlite3_value_int(argv[3]) != 0;
+    if (sqlite3_value_type(argv[4]) == SQLITE_NULL || sqlite3_value_int64(argv[4]) <= 0) {
+        sqlite3_result_error(context, "cloudsync_payload_blob_checked: max_estimated_payload_size must be positive", -1);
+        return;
+    }
+    max_estimated_size = sqlite3_value_int64(argv[4]);
+
+    if (exclude && !site_id) {
+        sqlite3_result_error(context,
+            "cloudsync_payload_blob_checked: exclude_filter_site_id requires a non-NULL site_id", -1);
+        return;
+    }
+    if (!exclude && !site_id) {
+        site_id = cloudsync_siteid(data);
+        site_id_len = UUID_LEN;
+    }
+
+    rc = payload_blob_checked_estimate(db, site_id, site_id_len, since, since_seq, exclude, &estimated, &watermark);
+    if (rc != SQLITE_OK) goto error;
+    if (estimated == 0) {
+        sqlite3_result_null(context);
+        return;
+    }
+    if (estimated > max_estimated_size) {
+        dbsync_set_error(context,
+            CLOUDSYNC_ERRCODE_PAYLOAD_TOO_LARGE "cloudsync_payload_blob_checked: estimated payload size %" PRId64 " exceeds max_estimated_payload_size %" PRId64,
+            (int64_t)estimated, (int64_t)max_estimated_size);
+        return;
+    }
+
+    const char *site_op = exclude ? "<>" : "=";
+    char *sql = sqlite3_mprintf(
+        "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+        "FROM cloudsync_changes WHERE (db_version>? OR (db_version=? AND seq>?)) "
+        "AND site_id%s? AND db_version<=? ORDER BY db_version, seq ASC",
+        site_op);
+    if (!sql) { rc = SQLITE_NOMEM; goto error; }
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) goto error;
+    sqlite3_bind_int64(stmt, 1, since);
+    sqlite3_bind_int64(stmt, 2, since);
+    sqlite3_bind_int64(stmt, 3, since_seq);
+    sqlite3_bind_blob(stmt, 4, site_id, site_id_len, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 5, watermark);
+
+    payload = cloudsync_memory_zeroalloc((uint64_t)cloudsync_payload_context_size(NULL));
+    if (!payload) { rc = SQLITE_NOMEM; goto error; }
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        sqlite3_value *rowv[9];
+        for (int i = 0; i < 9; ++i) rowv[i] = sqlite3_column_value(stmt, i);
+        rc = cloudsync_payload_encode_step(payload, data, 9, (dbvalue_t **)rowv);
+        if (rc != SQLITE_OK) goto error;
+    }
+    if (rc != SQLITE_DONE) goto error;
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    rc = cloudsync_payload_encode_final(payload, data);
+    if (rc != SQLITE_OK) goto error;
+    int64_t blob_size = 0;
+    char *blob = cloudsync_payload_blob(payload, &blob_size, NULL);
+    if (!blob) {
+        sqlite3_result_null(context);
+        cloudsync_payload_context_free(payload);
+    } else {
+        sqlite3_result_blob64(context, blob, (sqlite3_uint64)blob_size, cloudsync_memory_free);
+        cloudsync_memory_free(payload);
+    }
+    return;
+
+error:
+    if (stmt) sqlite3_finalize(stmt);
+    if (payload) cloudsync_payload_context_free(payload);
+    if (rc == SQLITE_NOMEM) sqlite3_result_error_nomem(context);
+    else if (rc == SQLITE_TOOBIG) sqlite3_result_error(context, CLOUDSYNC_ERRCODE_PAYLOAD_TOO_LARGE "cloudsync_payload_blob_checked: payload estimate is too large", -1);
+    else sqlite3_result_error(context, sqlite3_errmsg(db), -1);
 }
 
 #ifdef CLOUDSYNC_DESKTOP_OS
@@ -1131,7 +1836,9 @@ void dbsync_payload_load (sqlite3_context *context, int argc, sqlite3_value **ar
     
     int nrows = 0;
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
-    int rc = cloudsync_payload_apply (data, payload, (int)payload_size, &nrows);
+    // File-based load applies a complete monolithic payload: legacy last-applied
+    // checkpoint (ends on a db_version boundary, so it is safe).
+    int rc = cloudsync_payload_apply (data, payload, (int)payload_size, &nrows, CLOUDSYNC_CHECKPOINT_LAST_APPLIED, 0);
     if (payload) cloudsync_memory_free(payload);
     
     if (rc != SQLITE_OK) {
@@ -1442,7 +2149,14 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     
     rc = dbsync_register_function(db, "cloudsync_uuid", dbsync_uuid, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
-    
+
+    rc = dbsync_register_function(db, "cloudsync_uuid_text", dbsync_uuid_text, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_uuid_text", dbsync_uuid_text, 2, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = dbsync_register_function(db, "cloudsync_uuid_blob", dbsync_uuid_blob, 1, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
     // PAYLOAD
     rc = dbsync_register_aggregate(db, "cloudsync_payload_encode", dbsync_payload_encode_step, dbsync_payload_encode_final, -1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
@@ -1452,7 +2166,13 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     if (rc != SQLITE_OK) return rc;
     rc = dbsync_register_function(db, "cloudsync_payload_apply", dbsync_payload_decode, -1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
-    
+
+    rc = sqlite3_create_module(db, "cloudsync_payload_chunks", &cloudsync_payload_chunks_module, (void *)ctx);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbsync_register_function(db, "cloudsync_payload_blob_checked", dbsync_payload_blob_checked, 5, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
     #ifdef CLOUDSYNC_DESKTOP_OS
     rc = dbsync_register_function(db, "cloudsync_payload_save", dbsync_payload_save, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;

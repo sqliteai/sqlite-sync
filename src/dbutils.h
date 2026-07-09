@@ -15,6 +15,7 @@
 #define CLOUDSYNC_SITEID_NAME               "cloudsync_site_id"
 #define CLOUDSYNC_TABLE_SETTINGS_NAME       "cloudsync_table_settings"
 #define CLOUDSYNC_SCHEMA_VERSIONS_NAME      "cloudsync_schema_versions"
+#define CLOUDSYNC_PAYLOAD_FRAGMENTS_NAME    "cloudsync_payload_fragments"
 
 #define CLOUDSYNC_KEY_LIBVERSION            "version"
 #define CLOUDSYNC_KEY_SCHEMAVERSION         "schemaversion"
@@ -26,6 +27,7 @@
 #define CLOUDSYNC_KEY_DEBUG                 "debug"
 #define CLOUDSYNC_KEY_ALGO                  "algo"
 #define CLOUDSYNC_KEY_SKIP_SCHEMA_HASH_CHECK    "skip_schema_hash_check"
+#define CLOUDSYNC_KEY_PAYLOAD_MAX_CHUNK_SIZE    "payload_max_chunk_size"
 
 // settings
 int dbutils_settings_init (cloudsync_context *data);

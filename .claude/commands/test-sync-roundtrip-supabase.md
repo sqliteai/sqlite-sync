@@ -136,8 +136,8 @@ In the SQLite session:
 SELECT cloudsync_network_send_changes();
 
 -- Check for changes from server (repeat with 2-3 second delays)
-SELECT cloudsync_network_check_changes();
--- Repeat check_changes 3-5 times with delays until it returns more than 0 received rows or stabilizes
+SELECT cloudsync_network_receive_changes();
+-- Repeat receive_changes 3-5 times with delays until it returns more than 0 received rows or stabilizes
 
 -- Verify final data
 SELECT * FROM <table_name>;
@@ -164,7 +164,7 @@ Report the test results including:
 - Always use the Homebrew sqlite3 binary, NOT `/usr/bin/sqlite3`
 - The cloudsync extension must be built first with `make`
 - PostgreSQL tables need cleanup before re-running tests
-- `cloudsync_network_check_changes()` may need multiple calls with delays
+- `cloudsync_network_receive_changes()` may need multiple calls with delays
 - run `SELECT cloudsync_terminate();` on SQLite connections before closing the properly cleanup the memory
 
 ## Permissions

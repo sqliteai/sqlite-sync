@@ -51,9 +51,9 @@ export class SQLiteSync {
    *
    * Sync happens in these steps:
    * 1. Send local changes to the server (`cloudsync_network_send_changes()`).
-   * 2. Check for changes from the server (`cloudsync_network_check_changes()`).
+   * 2. Receive changes from the server (`cloudsync_network_receive_changes()`).
    * 3. Waits a moment for the server to prepare changes if any.
-   * 4. Check again for changes from the server and apply them to the local database (`cloudsync_network_check_changes()`).
+   * 4. Receive changes again from the server and apply them to the local database (`cloudsync_network_receive_changes()`).
    */
   async sync() {
     if (!this.db) {

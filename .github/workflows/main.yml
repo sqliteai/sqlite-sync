@@ -12,6 +12,13 @@ permissions:
   pages: write
   id-token: write
 
+# Cancel an in-progress run when the same branch is pushed again. This also keeps two
+# runs of the same branch from hitting the shared integration tenants concurrently
+# (the chunked negative-cache test needs an idle tenant — see the chunked env below).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     if: ${{ !contains(github.event.head_commit.message, '[auto-update]') }}
@@ -89,6 +96,12 @@ jobs:
       INTEGRATION_TEST_CLOUDSYNC_ADDRESS: ${{ secrets.INTEGRATION_TEST_CLOUDSYNC_ADDRESS }}
       INTEGRATION_TEST_OFFLINE_DATABASE_ID: ${{ secrets.INTEGRATION_TEST_OFFLINE_DATABASE_ID }}
       INTEGRATION_TEST_FAILURE_DATABASE_ID: ${{ secrets.INTEGRATION_TEST_FAILURE_DATABASE_ID }}
+      # Chunked tests need an EXCLUSIVE tenant (the negative-cache test's Phase 2 asserts
+      # an idle tenant, so concurrent writers from other matrix legs cause false failures).
+      # Run them on a single leg only; every other leg gets '' and skips them (treated as
+      # unset by test_chunked_pair_open). The chunked network path is platform-agnostic C,
+      # so per-OS coverage adds little here.
+      INTEGRATION_TEST_CHUNKED_DATABASE_ID: ${{ (matrix.name == 'linux' && matrix.arch == 'x86_64') && secrets.INTEGRATION_TEST_CHUNKED_DATABASE_ID || '' }}
 
     steps:
 
@@ -137,6 +150,7 @@ jobs:
             -e INTEGRATION_TEST_CLOUDSYNC_ADDRESS="${{ env.INTEGRATION_TEST_CLOUDSYNC_ADDRESS }}" \
             -e INTEGRATION_TEST_OFFLINE_DATABASE_ID="${{ env.INTEGRATION_TEST_OFFLINE_DATABASE_ID }}" \
             -e INTEGRATION_TEST_FAILURE_DATABASE_ID="${{ env.INTEGRATION_TEST_FAILURE_DATABASE_ID }}" \
+            -e INTEGRATION_TEST_CHUNKED_DATABASE_ID="${{ env.INTEGRATION_TEST_CHUNKED_DATABASE_ID }}" \
             alpine:latest \
             tail -f /dev/null
           docker exec alpine sh -c "apk update && apk add --no-cache gcc make curl sqlite openssl-dev musl-dev linux-headers"
@@ -212,6 +226,7 @@ jobs:
             export INTEGRATION_TEST_CLOUDSYNC_ADDRESS="$INTEGRATION_TEST_CLOUDSYNC_ADDRESS"
             export INTEGRATION_TEST_OFFLINE_DATABASE_ID="$INTEGRATION_TEST_OFFLINE_DATABASE_ID"
             export INTEGRATION_TEST_FAILURE_DATABASE_ID="$INTEGRATION_TEST_FAILURE_DATABASE_ID"
+            export INTEGRATION_TEST_CHUNKED_DATABASE_ID="$INTEGRATION_TEST_CHUNKED_DATABASE_ID"
             $(make test PLATFORM=$PLATFORM ARCH=$ARCH -n)
           EOF
           echo "::endgroup::"
@@ -613,9 +628,13 @@ jobs:
 
   docker-publish:
     runs-on: ubuntu-22.04
-    name: docker ${{ matrix.image }} pg${{ matrix.pg_major }}
-    needs: [release]
-    if: github.ref == 'refs/heads/main' && needs.release.outputs.version != ''
+    name: docker ${{ matrix.image }} pg${{ matrix.pg_major }}${{ github.ref != 'refs/heads/main' && ' beta' || '' }}
+    needs: [build, postgres-test, postgres-build, release]
+    # main: publish the versioned release tags, only when the release job cut a new
+    # release. Any other branch: release is skipped, publish/overwrite a per-branch
+    # beta tag on every green push (the beta build installs the extension from the
+    # postgres-build CI artifacts instead of the GitHub release assets).
+    if: ${{ !failure() && !cancelled() && (github.ref != 'refs/heads/main' || needs.release.outputs.version != '') }}
 
     env:
       DOCKERHUB_ORG: sqlitecloud
@@ -649,6 +668,28 @@ jobs:
         id: version
         run: echo "version=$(make version)" >> $GITHUB_OUTPUT
 
+      - name: compute beta tag from branch name
+        id: beta
+        if: github.ref != 'refs/heads/main'
+        run: echo "slug=$(echo "${GITHUB_REF_NAME}" | sed -E 's/[^A-Za-z0-9._-]+/-/g' | cut -c1-100)" >> $GITHUB_OUTPUT
+
+      - name: download postgres-build artifacts for beta build
+        if: github.ref != 'refs/heads/main'
+        uses: actions/download-artifact@v4.2.1
+        with:
+          pattern: cloudsync-postgresql${{ matrix.pg_major }}-linux-*
+          path: beta-artifacts-raw
+
+      - name: stage beta artifacts into the docker build context
+        if: github.ref != 'refs/heads/main'
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          for arch in x86_64 arm64; do
+            SRC="beta-artifacts-raw/cloudsync-postgresql${{ matrix.pg_major }}-linux-${arch}"
+            tar -czf "docker/postgresql/beta-artifacts/cloudsync-postgresql${{ matrix.pg_major }}-linux-${arch}-${VERSION}.tar.gz" -C "$SRC" .
+          done
+          ls -la docker/postgresql/beta-artifacts/
+
       - uses: docker/setup-qemu-action@v3
 
       - uses: docker/setup-buildx-action@v3
@@ -665,8 +706,13 @@ jobs:
           VERSION=${{ steps.version.outputs.version }}
           PG=${{ matrix.pg_major }}
           IMAGE=${{ env.DOCKERHUB_ORG }}/${{ matrix.image }}
+          BETA="${{ steps.beta.outputs.slug }}"
           {
-            echo "tags=${IMAGE}:${PG},${IMAGE}:${PG}-${VERSION}"
+            if [ -n "$BETA" ]; then
+              echo "tags=${IMAGE}:${PG}-beta-${BETA}"
+            else
+              echo "tags=${IMAGE}:${PG},${IMAGE}:${PG}-${VERSION}"
+            fi
             echo "build_args<<EOF"
             echo "POSTGRES_TAG=${PG}"
             echo "CLOUDSYNC_VERSION=${VERSION}"
@@ -680,8 +726,13 @@ jobs:
           VERSION=${{ steps.version.outputs.version }}
           IMAGE=${{ env.DOCKERHUB_ORG }}/${{ matrix.image }}
           SUPABASE_TAG=${{ matrix.supabase_tag }}
+          BETA="${{ steps.beta.outputs.slug }}"
           {
-            echo "tags=${IMAGE}:${{ matrix.pg_major }},${IMAGE}:${{ matrix.pg_major }}-${VERSION},${IMAGE}:${SUPABASE_TAG}"
+            if [ -n "$BETA" ]; then
+              echo "tags=${IMAGE}:${{ matrix.pg_major }}-beta-${BETA}"
+            else
+              echo "tags=${IMAGE}:${{ matrix.pg_major }},${IMAGE}:${{ matrix.pg_major }}-${VERSION},${IMAGE}:${SUPABASE_TAG}"
+            fi
             echo "build_args<<EOF"
             echo "SUPABASE_POSTGRES_TAG=${SUPABASE_TAG}"
             echo "CLOUDSYNC_VERSION=${VERSION}"

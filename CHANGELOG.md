@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.1.0] - 2026-07-09
+
+### Added
+
+- **Chunked payload generation** via `cloudsync_payload_chunks()`, available as a SQLite virtual table and as a PostgreSQL set-returning function. The API emits transport-sized payload chunks and transparently fragments oversized BLOB/TEXT values into v3 fragment payloads.
+- **`payload_max_chunk_size` global setting** for controlling generated chunk size. The default is 5 MB and values are clamped to the 256 KB technical minimum and the 32 MB technical maximum.
+- **`exclude_filter_site_id` argument** for `cloudsync_payload_chunks()`. When set, the function streams changes from every site **except** `filter_site_id`, which is what the `/check` download path needs (a peer must not receive its own changes back). The default (omitted/`false`) preserves the existing single-site behavior. Passing the flag without a `filter_site_id` is an error.
+- **`cloudsync_payload_blob_checked()`** scalar function on both SQLite and PostgreSQL. It performs an internal conservative size check before generating one monolithic legacy payload BLOB, allowing `/check` endpoints to support old clients with one SQL round trip while rejecting unsafe responses before payload materialization.
+- **`cloudsync_uuid_text()` / `cloudsync_uuid_blob()`** scalar functions on both SQLite and PostgreSQL, converting between the 16-byte binary `site_id` and its canonical UUID string. `cloudsync_uuid_text()` takes an optional `dash_format` argument (default `true`); `cloudsync_uuid_blob()` accepts dashed or undashed, case-insensitive input. These let string-based callers (e.g. the `/check` endpoint) pass a `site_id` to `cloudsync_payload_chunks()`.
+- **Payload chunking documentation** in `API.md` and `PERFORMANCE.md`, including the explicit memory note that chunking bounds transport payloads but the database must still materialize a completed single BLOB/TEXT value when it is applied.
+- **PostgreSQL `1.0 -> 1.1` upgrade script** (`migrations/cloudsync--1.0--1.1.sql`) for the new chunked-payload SQL surface, so existing deployments can `ALTER EXTENSION cloudsync UPDATE`.
+- **`cloudsync_network_receive_changes([max_chunks])`** as the canonical name for receiving changes (the old `cloudsync_network_check_changes()` is retained as a deprecated alias). It drains all currently-available chunks by default; the optional `max_chunks` argument caps how many chunks are applied per call for caller-driven progress/traffic control (the in-memory page cursor persists between calls, so a capped drain resumes where it left off).
+- **`chunks` and `bytes` fields** in the `send` and `receive` JSON of the network functions, plus **`complete`** in `receive`. `chunks` is the number of payload chunks sent/applied; `bytes` is the serialized (uncompressed) payload bytes; `complete` is `false` when a chunked download stopped before the final chunk, signalling the caller to call again.
+
+### Deprecated
+
+- **`cloudsync_network_check_changes([max_chunks])`** — use `cloudsync_network_receive_changes()` instead. The old name remains a thin, fully-functional alias and will be removed in a future major version.
+
+### Changed
+
+- `cloudsync_network_receive_changes()` (and its `cloudsync_network_check_changes()` alias) now **drains all available chunks** in one call (it does not wait for not-yet-ready server preparation). Previously each call fetched a single page.
+- `cloudsync_network_sync(wait_ms, max_retries)` now drains an entire chunked download in a **single call**, fetching already-available chunks back-to-back with no delay. `wait_ms` / `max_retries` are now spent only while the server payload is not yet ready (HTTP 202), not while paging through chunks that are already available. Previously a multi-chunk stream required several `cloudsync_network_sync()` calls and wasted a `wait_ms` delay on each staged fragment.
+- `receive.rows` is now the **cumulative** number of rows applied across all chunks drained in the call (previously only the last page was reported); `receive.tables` likewise reports the union of tables touched across the whole drain.
+- `cloudsync_payload_apply()` now accepts legacy payloads, monolithic payloads, and v3 fragment payloads without enforcing the local `payload_max_chunk_size`, preserving compatibility between peers with different settings.
+- `cloudsync_network_send_changes()` now streams outgoing changes through `cloudsync_payload_chunks()` instead of first building one monolithic payload. This bounds transport payload size for the built-in network path and lets large rowsets or oversized BLOB/TEXT values flow through the same `/apply` endpoint as regular payloads.
+- The built-in `/check` receive path now advertises `X-CloudSync-Capabilities: check-status-response, check-chunks` and can apply cursor-mode pages returned inline as `data.payload` base64 bytes, in addition to larger pages returned as `data.url` download artifacts. Requests send `cursor`; responses provide `nextCursor` when another page is available.
+- The chunked-download receive path advances the local receive checkpoint (`check_dbversion` / `check_seq`) **only after a chunk stream has been fully applied**, jumping straight to the stream watermark — never into the middle of a source `db_version`. This mirrors the send path and ensures a stop between chunks cannot skip the un-applied rows of a `db_version` split across chunks on the next `/check` (the server resumes on `db_version > since`, with no intra-version cursor). `cloudsync_payload_apply()` no longer advances the receive checkpoint per applied chunk; the built-in network `/check` path drives it from the server's watermark and final-chunk signal, and falls back to the previous monolithic behavior when the server sends no watermark. Re-delivered rows remain idempotent.
+
+### Fixed
+
+- **PostgreSQL backend crash (segfault) on an error raised after `cloudsync_changes_select()`.** The set-returning function returned via `SRF_RETURN_NEXT` / `SRF_RETURN_DONE` from inside its `PG_TRY` block, which skips `PG_END_TRY()` and leaves `PG_exception_stack` pointing at the function's already-returned stack frame. A later `ereport(ERROR)` in the same query — such as the `cloudsync_payload_blob_checked()` size-limit check — then `siglongjmp()`d into freed stack and crashed the backend. The `SRF_RETURN_*` calls now run after `PG_END_TRY()` so the exception stack is always restored. This is a pre-existing bug, not specific to the chunked-payload work.
+
 ## [1.0.20] - 2026-05-26
 
 ### Changed

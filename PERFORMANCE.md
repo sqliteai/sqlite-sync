@@ -41,7 +41,9 @@ SELECT ... FROM cloudsync_changes WHERE db_version > <last_synced_version>
 
 Each metadata table has an **index on `db_version`**, so payload generation scales primarily with the number of new changes, plus a small per-synced-table overhead to construct the `cloudsync_changes` query. It does not diff the full dataset. In SQLite, each changed column also performs a primary-key lookup in the base table to retrieve the current value.
 
-The resulting payload is LZ4-compressed before transmission.
+The legacy `cloudsync_payload_encode()` API builds one monolithic LZ4-compressed payload before transmission. For large deltas, `cloudsync_payload_chunks()` can be used instead: it streams a sequence of payload chunks bounded by the `payload_max_chunk_size` setting (default 5 MB, minimum 256 KB, maximum 32 MB). If a single encoded BLOB/TEXT value is larger than the chunk budget, the value is split into transparent v3 fragments and reassembled by `cloudsync_payload_apply()` on the receiver.
+
+For legacy `/check` callers that still need one monolithic payload, `cloudsync_payload_blob_checked()` performs an internal size estimate before encoding. Successful calls scan the selected change window twice (estimate, then encode), so they trade extra I/O for avoiding unsafe monolithic payload allocation when the estimate exceeds the configured limit.
 
 #### Pull: Payload Application
 
@@ -69,7 +71,7 @@ When the application runs sync off the main thread, perceived latency depends on
 
 - **Sync interval**: How often the app triggers a push/pull cycle. More frequent syncs mean smaller deltas (smaller D) and faster individual sync operations, at the cost of more network round-trips.
 - **Network latency**: The round-trip time to the sync server. LZ4 compression reduces payload size, but latency is dominated by the network hop itself for small deltas.
-- **Payload size**: Proportional to D x average column value size. Large BLOBs or TEXT values will increase transfer time linearly.
+- **Payload size**: Proportional to D x average column value size. Large BLOBs or TEXT values will increase transfer time linearly. Use `cloudsync_payload_chunks()` when transport payloads may be large; it limits each generated transport payload but does not change the size of the final database value.
 
 The extension does not impose a sync schedule  -- the application controls when and how often to sync. A typical pattern is to sync on a timer (e.g., every 5-30 seconds) or on specific events (app foreground, user action).
 
@@ -118,7 +120,11 @@ Normal application reads are not directly instrumented by the extension. No trig
 
 When a new device syncs for the first time (`db_version = 0`), the push payload contains the **entire dataset**: every column of every row across all synced tables. The payload size is proportional to `N * C` (total rows times columns).
 
-The payload is built entirely in memory, starting with a 512 KB buffer (`CLOUDSYNC_PAYLOAD_MINBUF_SIZE` in `src/cloudsync.c`) and growing via `realloc` as needed. Peak memory usage is at least the full uncompressed payload size and can be higher during compression. For a database with 1 million rows and 10 columns of average 50 bytes each, the uncompressed payload could reach ~500 MB before LZ4 compression.
+With the legacy `cloudsync_payload_encode()` API, the payload is built entirely in memory, starting with a 512 KB buffer (`CLOUDSYNC_PAYLOAD_MINBUF_SIZE` in `src/cloudsync.c`) and growing via `realloc` as needed. Peak memory usage is at least the full uncompressed payload size and can be higher during compression. For a database with 1 million rows and 10 columns of average 50 bytes each, the uncompressed payload could reach ~500 MB before LZ4 compression.
+
+For large initial syncs, prefer `cloudsync_payload_chunks()`. It keeps each generated transport payload bounded by `payload_max_chunk_size` and can fragment a single oversized BLOB/TEXT column across multiple v3 fragment payloads. This prevents the transport payload itself from growing without bound and avoids constructing a monolithic v2 payload during v3 apply.
+
+Important limitation: chunking does **not** make a single database cell streamable all the way into the storage engine. When the last fragment of a very large BLOB/TEXT value arrives, the receiver must still materialize the completed value once in order to bind/store it in the destination database. Size `payload_max_chunk_size` for transport safety, but size application memory limits for the largest individual value you allow.
 
 Subsequent syncs are incremental (proportional to D, changes since the last sync), so the first sync is the expensive one. Applications with large datasets should plan for this -- for example, by seeding new devices from a database snapshot rather than syncing from scratch.
 
@@ -185,6 +191,7 @@ CloudSync:        sync_time ~ O(D)           -- grows with changes since last sy
 2. **`db_version` index**: Enables efficient range scans for delta extraction.
 3. **Deferred batch merge**: Column changes for the same primary key are accumulated and flushed as a single SQL statement.
 4. **Prepared statement caching**: Merge statements are compiled once and reused across rows.
-5. **LZ4 compression**: Reduces payload size for network transfer.
-6. **Per-column tracking**: Only changed columns are included in the sync payload, not entire rows.
-7. **Early exit on stale data**: The CLS algorithm skips rows where the incoming causal length is lower than the local one, avoiding unnecessary column-level comparisons.
+5. **Chunked payload generation**: `cloudsync_payload_chunks()` bounds transport payload size and handles oversized single values with transparent v3 fragments.
+6. **LZ4 compression**: Reduces payload size for network transfer.
+7. **Per-column tracking**: Only changed columns are included in the sync payload, not entire rows.
+8. **Early exit on stale data**: The CLS algorithm skips rows where the incoming causal length is lower than the local one, avoiding unnecessary column-level comparisons.

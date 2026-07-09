@@ -84,7 +84,8 @@ const char * const SQL_SETTINGS_CLEANUP_DROP_ALL =
     "DROP TABLE IF EXISTS cloudsync_settings CASCADE; "
     "DROP TABLE IF EXISTS cloudsync_site_id CASCADE; "
     "DROP TABLE IF EXISTS cloudsync_table_settings CASCADE; "
-    "DROP TABLE IF EXISTS cloudsync_schema_versions CASCADE;";
+    "DROP TABLE IF EXISTS cloudsync_schema_versions CASCADE; "
+    "DROP TABLE IF EXISTS cloudsync_payload_fragments CASCADE;";
 
 // MARK: CloudSync
 
@@ -104,6 +105,42 @@ const char * const SQL_DBVERSION_BUILD_QUERY =
 const char * const SQL_CHANGES_INSERT_ROW =
     "INSERT INTO cloudsync_changes(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) "
     "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9);";
+
+const char * const SQL_PAYLOAD_FRAGMENTS_CREATE_TABLE =
+    "CREATE TABLE IF NOT EXISTS cloudsync_payload_fragments ("
+    "value_id TEXT NOT NULL, part_index BIGINT NOT NULL, part_count BIGINT NOT NULL, total_size BIGINT NOT NULL, "
+    "checksum TEXT NOT NULL, created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM now())::bigint), "
+    "tbl TEXT NOT NULL, pk BYTEA NOT NULL, col_name TEXT NOT NULL, col_version BIGINT NOT NULL, db_version BIGINT NOT NULL, "
+    "site_id BYTEA NOT NULL, cl BIGINT NOT NULL, seq BIGINT NOT NULL, fragment BYTEA NOT NULL, "
+    "PRIMARY KEY(value_id, part_index));";
+
+const char * const SQL_PAYLOAD_FRAGMENTS_UPSERT =
+    "INSERT INTO cloudsync_payload_fragments "
+    "(value_id, part_index, part_count, total_size, checksum, created_at, tbl, pk, col_name, col_version, db_version, site_id, cl, seq, fragment) "
+    "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) "
+    "ON CONFLICT (value_id, part_index) DO UPDATE SET "
+    "part_count=EXCLUDED.part_count,total_size=EXCLUDED.total_size,checksum=EXCLUDED.checksum,created_at=EXCLUDED.created_at,"
+    "tbl=EXCLUDED.tbl,pk=EXCLUDED.pk,"
+    "col_name=EXCLUDED.col_name,col_version=EXCLUDED.col_version,db_version=EXCLUDED.db_version,"
+    "site_id=EXCLUDED.site_id,cl=EXCLUDED.cl,seq=EXCLUDED.seq,fragment=EXCLUDED.fragment;";
+
+const char * const SQL_PAYLOAD_FRAGMENTS_COUNT =
+    "SELECT COUNT(*), MIN(part_count), MAX(part_count), MIN(total_size), MAX(total_size), "
+    "MIN(checksum), MAX(checksum), MIN(part_index), MAX(part_index) "
+    "FROM cloudsync_payload_fragments WHERE value_id=$1;";
+
+const char * const SQL_PAYLOAD_FRAGMENTS_SELECT =
+    "SELECT fragment, tbl, pk, col_name, col_version, db_version, site_id, cl, seq, checksum "
+    "FROM cloudsync_payload_fragments WHERE value_id=$1 ORDER BY part_index ASC;";
+
+const char * const SQL_PAYLOAD_FRAGMENTS_DELETE =
+    "DELETE FROM cloudsync_payload_fragments WHERE value_id=$1;";
+
+const char * const SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE =
+    "DELETE FROM cloudsync_payload_fragments "
+    "WHERE created_at < $1 AND value_id IN ("
+    "SELECT value_id FROM cloudsync_payload_fragments GROUP BY value_id "
+    "HAVING COUNT(*) < MAX(part_count));";
 
 // MARK: Additional SQL constants for PostgreSQL
 

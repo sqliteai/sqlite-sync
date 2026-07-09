@@ -26,5 +26,9 @@ int    pk_decode_bind_callback (void *xdata, int index, int type, int64_t ival, 
 int    pk_decode_print_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval);
 size_t pk_encode_size (dbvalue_t **argv, int argc, int reserved, int skip_idx);
 uint64_t pk_checksum (const char *buffer, size_t blen);
+size_t pk_encode_raw_size (int type, int64_t len_or_value);
+size_t pk_encode_raw_int (char *buffer, int64_t value);
+size_t pk_encode_raw_text (char *buffer, const char *value, size_t len);
+size_t pk_encode_raw_blob (char *buffer, const void *value, size_t len);
 
 #endif

@@ -12,6 +12,9 @@ openssl/
 /docker/postgresql/cloudsync.control
 /src/postgresql/cloudsync--*.sql
 
+# Pre-built extension tarballs staged by CI for beta docker images
+/docker/postgresql/beta-artifacts/*.tar.gz
+
 # Test artifacts
 /coverage
 unittest
