@@ -17,6 +17,10 @@ FROM postgres:${POSTGRES_TAG}
 ARG CLOUDSYNC_VERSION
 ARG TARGETARCH
 
+# CI beta builds stage pre-built artifacts here; when the tarball for this arch
+# is present it is used instead of the GitHub release download
+COPY docker/postgresql/beta-artifacts/ /tmp/beta-artifacts/
+
 # Map Docker platform arch to artifact arch
 RUN case "${TARGETARCH}" in \
       amd64) ARCH="x86_64" ;; \
@@ -25,15 +29,20 @@ RUN case "${TARGETARCH}" in \
     esac && \
     apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
     ASSET="cloudsync-postgresql${PG_MAJOR}-linux-${ARCH}-${CLOUDSYNC_VERSION}.tar.gz" && \
-    URL="https://github.com/sqliteai/sqlite-sync/releases/download/${CLOUDSYNC_VERSION}/${ASSET}" && \
-    echo "Downloading ${URL}" && \
-    curl -fSL "${URL}" -o /tmp/cloudsync.tar.gz && \
+    if [ -f "/tmp/beta-artifacts/${ASSET}" ]; then \
+      echo "Using local artifact ${ASSET}" && \
+      cp "/tmp/beta-artifacts/${ASSET}" /tmp/cloudsync.tar.gz; \
+    else \
+      URL="https://github.com/sqliteai/sqlite-sync/releases/download/${CLOUDSYNC_VERSION}/${ASSET}" && \
+      echo "Downloading ${URL}" && \
+      curl -fSL "${URL}" -o /tmp/cloudsync.tar.gz; \
+    fi && \
     mkdir -p /tmp/cloudsync && \
     tar -xzf /tmp/cloudsync.tar.gz -C /tmp/cloudsync && \
     install -m 755 /tmp/cloudsync/cloudsync.so "$(pg_config --pkglibdir)/" && \
     install -m 644 /tmp/cloudsync/cloudsync--*.sql "$(pg_config --sharedir)/extension/" && \
     install -m 644 /tmp/cloudsync/cloudsync.control "$(pg_config --sharedir)/extension/" && \
-    rm -rf /tmp/cloudsync /tmp/cloudsync.tar.gz && \
+    rm -rf /tmp/cloudsync /tmp/cloudsync.tar.gz /tmp/beta-artifacts && \
     apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 # Verify installation
