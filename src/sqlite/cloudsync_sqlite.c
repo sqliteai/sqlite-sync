@@ -1229,7 +1229,12 @@ static int payload_chunks_step_source(cloudsync_payload_chunks_cursor *c) {
     int rc = sqlite3_step(c->src);
     if (rc == SQLITE_ROW) { c->has_row = true; return SQLITE_OK; }
     c->has_row = false;
-    return rc == SQLITE_DONE ? SQLITE_OK : rc;
+    if (rc == SQLITE_DONE) return SQLITE_OK;
+    // copy the inner statement's message onto this vtab or SQLite surfaces the
+    // error as a bare "SQL logic error"
+    if (c->vtab->base.zErrMsg) sqlite3_free(c->vtab->base.zErrMsg);
+    c->vtab->base.zErrMsg = sqlite3_mprintf("%s", sqlite3_errmsg(c->vtab->db));
+    return rc;
 }
 
 static int payload_chunks_plan_fragment(cloudsync_payload_chunks_cursor *c) {
@@ -1427,6 +1432,12 @@ static int payload_chunks_filter(sqlite3_vtab_cursor *cursor, int idxnum, const 
     UNUSED_PARAMETER(idxstr); UNUSED_PARAMETER(argc);
     cloudsync_payload_chunks_cursor *c = (cloudsync_payload_chunks_cursor *)cursor;
     cloudsync_context *data = c->vtab->data;
+    if (!cloudsync_context_is_initialized(data)) {
+        c->vtab->base.zErrMsg = sqlite3_mprintf(
+            "cloudsync is not initialized: call SELECT cloudsync_init('<table_name>') "
+            "to enable sync on a table before querying cloudsync_payload_chunks.");
+        return SQLITE_ERROR;
+    }
     if (c->src) { sqlite3_finalize(c->src); c->src = NULL; }
     if (c->payload) { cloudsync_memory_free(c->payload); c->payload = NULL; }
     // Contract: all per-scan state that can be bulk-reset here must live at or
@@ -1489,8 +1500,16 @@ static int payload_chunks_filter(sqlite3_vtab_cursor *cursor, int idxnum, const 
         sqlite3_free(mxsql);
         if (rc != SQLITE_OK) return rc;
         sqlite3_bind_blob(mx, 1, site_id, site_id_len, SQLITE_TRANSIENT);
-        if (sqlite3_step(mx) == SQLITE_ROW) until = sqlite3_column_int64(mx, 0);
+        // MAX() yields exactly one row, so anything else is an error: propagate
+        // it instead of silently scanning an empty window with until=0
+        rc = sqlite3_step(mx);
+        if (rc == SQLITE_ROW) until = sqlite3_column_int64(mx, 0);
         sqlite3_finalize(mx);
+        if (rc != SQLITE_ROW) {
+            if (c->vtab->base.zErrMsg) sqlite3_free(c->vtab->base.zErrMsg);
+            c->vtab->base.zErrMsg = sqlite3_mprintf("%s", sqlite3_errmsg(c->vtab->db));
+            return rc == SQLITE_DONE ? SQLITE_ERROR : rc;
+        }
     }
     c->watermark = until;
 
