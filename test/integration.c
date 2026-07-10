@@ -1521,16 +1521,33 @@ int test_failure_path (const char *db_path) {
     // Give the server time to process and fail the queued apply/check jobs.
     sqlite3_sleep(5000);
 
-    // Second invocation — failures must surface now.
-    // jobId is always > 0 when failure object is present, so ->> + GT0 doubles as
-    // an existence check (NULL → atoi returns 0 → fails GT0).
+    // Second invocation — failures must surface now. The tenant database is not
+    // configured for cloudsync on the node, so every surfaced failure must carry
+    // the actionable "cloudsync is not initialized" message (instr on the message
+    // doubles as the lastFailure existence check: NULL fails GT0).
     rc = db_expect_gt0(db,
-        "SELECT cloudsync_network_send_changes() ->> '$.send.lastFailure.jobId';"); RCHECK
+        "SELECT instr(cloudsync_network_send_changes() ->> '$.send.lastFailure.message', 'cloudsync is not initialized');"); RCHECK
+
+    // The server reports the failed check job as non-retryable, so
+    // receive_changes raises a SQL error instead of returning JSON.
+    char *errmsg = NULL;
+    if (sqlite3_exec(db, "SELECT cloudsync_network_receive_changes();", NULL, NULL, &errmsg) == SQLITE_OK) {
+        printf("Error: expected cloudsync_network_receive_changes to fail, but it succeeded\n");
+        rc = SQLITE_ERROR;
+        goto abort_test;
+    }
+    if (!errmsg || !strstr(errmsg, "cloudsync is not initialized")) {
+        printf("Error: unexpected receive_changes error: %s\n", errmsg ? errmsg : "(null)");
+        sqlite3_free(errmsg);
+        rc = SQLITE_ERROR;
+        goto abort_test;
+    }
+    sqlite3_free(errmsg);
+
+    // sync keeps emitting structured JSON so its send block survives; the
+    // forwarded message must appear in at least one lastFailure object.
     rc = db_expect_gt0(db,
-        "SELECT cloudsync_network_receive_changes() ->> '$.receive.lastFailure.jobId';"); RCHECK
-    // sync must surface at least one of the two; instr() catches either path.
-    rc = db_expect_gt0(db,
-        "SELECT instr(cloudsync_network_sync(250, 1), '\"lastFailure\":');"); RCHECK
+        "SELECT instr(cloudsync_network_sync(250, 1), 'cloudsync is not initialized');"); RCHECK
 
     rc = db_exec(db, "SELECT cloudsync_terminate();");
 
