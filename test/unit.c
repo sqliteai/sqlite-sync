@@ -12934,6 +12934,48 @@ finalize:
     return result;
 }
 
+// The /check endpoint queries cloudsync_payload_chunks on databases that may not
+// be configured for cloudsync: the vtab must raise the same actionable message
+// cloudsync_payload_apply gives, not a bare "SQL logic error".
+bool do_test_payload_chunks_uninitialized (bool print_result, bool cleanup_databases) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter++;
+
+    db = do_create_database_file(0, timestamp, saved_counter);
+    if (!db) goto finalize;
+
+    // no cloudsync_init on purpose
+    if (sqlite3_prepare_v2(db,
+        "SELECT payload FROM cloudsync_payload_chunks(0, cloudsync_uuid_blob('0190a1b2-c3d4-7e5f-8a9b-001122334455'), NULL, 1) LIMIT 1;",
+        -1, &stmt, NULL) != SQLITE_OK) goto finalize;
+    if (sqlite3_step(stmt) != SQLITE_ERROR) goto finalize;
+    if (!strstr(sqlite3_errmsg(db), "cloudsync is not initialized")) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+
+    result = true;
+
+finalize:
+    if (!result && print_result) {
+        printf("do_test_payload_chunks_uninitialized error: %s\n", db ? sqlite3_errmsg(db) : "no db");
+    }
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) close_db(db);
+    if (cleanup_databases) {
+        char path[256], walpath[300], shmpath[300];
+        do_build_database_path(path, 0, timestamp, saved_counter);
+        snprintf(walpath, sizeof(walpath), "%s-wal", path);
+        snprintf(shmpath, sizeof(shmpath), "%s-shm", path);
+        file_delete_internal(path);
+        file_delete_internal(walpath);
+        file_delete_internal(shmpath);
+    }
+    return result;
+}
+
 bool do_test_payload_idempotency (int nclients, bool print_result, bool cleanup_databases) {
     sqlite3 *db[2] = {NULL, NULL};
     bool result = false;
@@ -13386,6 +13428,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Payload Chunks Site Exclusion:", do_test_payload_chunks_site_exclusion(print_result, cleanup_databases));
     result += test_report("Payload Chunks Split db_version:", do_test_payload_chunks_split_dbversion(print_result, cleanup_databases));
     result += test_report("Payload Chunks Positional Resume:", do_test_payload_chunks_positional_resume(print_result, cleanup_databases));
+    result += test_report("Payload Chunks Uninitialized:", do_test_payload_chunks_uninitialized(print_result, cleanup_databases));
 
     // close local database
     close_db(db);

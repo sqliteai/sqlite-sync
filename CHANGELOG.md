@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.1.1] - 2026-07-10
+
+### Fixed
+
+- Querying the SQLite `cloudsync_payload_chunks()` virtual table on a database where cloudsync is not initialized now raises the same actionable error as `cloudsync_payload_apply()` ("cloudsync is not initialized: call SELECT cloudsync_init('<table_name>') ...") instead of a bare "SQL logic error". Errors raised by the internal `cloudsync_changes` scan (including the watermark computation, which previously ignored them) are now propagated with their message instead of being masked.
+
 ## [1.1.0] - 2026-07-09
 
 ### Added
