@@ -12976,6 +12976,41 @@ finalize:
     return result;
 }
 
+// A database whose cloudsync_table_settings rows survived while the *_cloudsync
+// meta tables were lost (e.g. a dump/restore that skipped them) must raise an
+// actionable error from cloudsync_changes, not a misclassified SQLITE_NOMEM
+// that servers report as "Not enough memory to execute query".
+bool do_test_changes_vtab_missing_meta_tables (bool print_result) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+
+    db = do_create_database();
+    if (!db) goto finalize;
+
+    if (sqlite3_exec(db, "CREATE TABLE barang (id TEXT PRIMARY KEY, name TEXT);", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+    if (sqlite3_exec(db, "SELECT cloudsync_init('barang');", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+    if (sqlite3_exec(db, "INSERT INTO barang VALUES ('1','test');", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+
+    // settings rows survive, meta table does not
+    if (sqlite3_exec(db, "DROP TABLE barang_cloudsync;", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM cloudsync_changes;", -1, &stmt, NULL) != SQLITE_OK) goto finalize;
+    if (sqlite3_step(stmt) != SQLITE_ERROR) goto finalize;
+    if (!strstr(sqlite3_errmsg(db), "sync metadata")) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+
+    result = true;
+
+finalize:
+    if (!result && print_result) {
+        printf("do_test_changes_vtab_missing_meta_tables error: %s\n", db ? sqlite3_errmsg(db) : "no db");
+    }
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) close_db(db);
+    return result;
+}
+
 bool do_test_payload_idempotency (int nclients, bool print_result, bool cleanup_databases) {
     sqlite3 *db[2] = {NULL, NULL};
     bool result = false;
@@ -13429,6 +13464,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Payload Chunks Split db_version:", do_test_payload_chunks_split_dbversion(print_result, cleanup_databases));
     result += test_report("Payload Chunks Positional Resume:", do_test_payload_chunks_positional_resume(print_result, cleanup_databases));
     result += test_report("Payload Chunks Uninitialized:", do_test_payload_chunks_uninitialized(print_result, cleanup_databases));
+    result += test_report("Changes Vtab Missing Meta Tables:", do_test_changes_vtab_missing_meta_tables(print_result));
 
     // close local database
     close_db(db);

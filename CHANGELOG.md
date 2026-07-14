@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.1.2] - 2026-07-13
+
+### Fixed
+
+- Querying the SQLite `cloudsync_changes` virtual table (directly or via `cloudsync_payload_blob_checked()`) on a database whose `cloudsync_table_settings` rows survived while all `*_cloudsync` meta tables were lost (e.g. a dump/restore that skipped them) now raises an actionable error ("cloudsync settings reference tables whose sync metadata is missing ...") instead of a misclassified `SQLITE_NOMEM`, which servers reported as "Not enough memory to execute query".
+
 ## [1.1.1] - 2026-07-10
 
 ### Fixed
