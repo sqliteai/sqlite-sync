@@ -5,6 +5,7 @@
 //  Created by Gioele Cantoni on 05/06/25.
 //  Set INTEGRATION_TEST_OFFLINE_DATABASE_ID and INTEGRATION_TEST_DATABASE_ID environment variables before running this test.
 //  Set INTEGRATION_TEST_CHUNKED_DATABASE_ID to enable the chunked-payload e2e test against an isolated remote database.
+//  Set INTEGRATION_TEST_WEBLITE_ADDRESS to enable the token-auth e2e test (mints a user token from the gateway /v2/tokens endpoint).
 //
 
 #include <stdio.h>
@@ -12,6 +13,7 @@
 #include <string.h>
 #include <errno.h>
 #include <stdint.h>
+#include <time.h>
 #include "utils.h"
 #include "sqlite3.h"
 
@@ -29,6 +31,11 @@
 #include <pthread.h>
 #endif
 #endif // PEERS
+
+#ifdef _WIN32
+#define popen _popen
+#define pclose _pclose
+#endif
 
 #ifdef CLOUDSYNC_LOAD_FROM_SOURCES
 #include "cloudsync.h"
@@ -265,7 +272,7 @@ int db_send_await_converge (sqlite3 *db, int max_attempts, int delay_ms) {
     return SQLITE_ERROR;
 }
 
-int integration_network_init(sqlite3 *db, const char *database_id, char *network_init, size_t network_init_len) {
+int integration_network_init_base(sqlite3 *db, const char *database_id, char *network_init, size_t network_init_len) {
     if (!database_id) {
         fprintf(stderr, "Error: integration database ID not set.\n");
         return SQLITE_ERROR;
@@ -280,7 +287,11 @@ int integration_network_init(sqlite3 *db, const char *database_id, char *network
             "SELECT cloudsync_network_init('%s');", database_id);
     }
 
-    int rc = db_exec(db, network_init);
+    return db_exec(db, network_init);
+}
+
+int integration_network_init(sqlite3 *db, const char *database_id, char *network_init, size_t network_init_len) {
+    int rc = integration_network_init_base(db, database_id, network_init, network_init_len);
     if (rc != SQLITE_OK) return rc;
 
     const char* apikey = getenv("INTEGRATION_TEST_APIKEY");
@@ -292,6 +303,57 @@ int integration_network_init(sqlite3 *db, const char *database_id, char *network
     }
 
     return rc;
+}
+
+// Fixed, obviously-synthetic user id ("e2e test") used for every minted token.
+#define TOKEN_TEST_USER_ID "e2e7e57e-0000-4000-8000-000000000001"
+
+// Mint a user token from the gateway (POST /v2/tokens) via the curl CLI: this binary
+// is built without networking, HTTP lives only in the loaded extension.
+// Returns TEST_SKIPPED when the gateway address or apikey is not configured.
+int fetch_gateway_token (char *token, size_t token_len) {
+    const char *gateway = getenv("INTEGRATION_TEST_WEBLITE_ADDRESS");
+    const char *apikey = getenv("INTEGRATION_TEST_APIKEY");
+    if (!gateway || !*gateway || !apikey || !*apikey) return TEST_SKIPPED;
+
+    // expire the token in 24h so repeated runs don't leave live credentials behind
+    time_t expires_time = time(NULL) + 24*60*60;
+    char expires[32];
+    strftime(expires, sizeof(expires), "%Y-%m-%d %H:%M:%S", gmtime(&expires_time));
+
+    char command[1024];
+    snprintf(command, sizeof(command),
+        "curl -s -X POST \"%s/v2/tokens\""
+        " -H \"Authorization: Bearer %s\""
+        " -H \"Content-Type: application/json; charset=utf-8\""
+        " -d \"{\\\"userId\\\":\\\"%s\\\",\\\"name\\\":\\\"integration-test-token\\\",\\\"expiresAt\\\":\\\"%s\\\"}\"",
+        gateway, apikey, TOKEN_TEST_USER_ID, expires);
+
+    FILE *pipe = popen(command, "r");
+    if (!pipe) {
+        printf("Error: unable to run curl to mint the gateway token\n");
+        return SQLITE_ERROR;
+    }
+    char response[4096];
+    size_t nread = fread(response, 1, sizeof(response) - 1, pipe);
+    pclose(pipe);
+    response[nread] = '\0';
+
+    const char *marker = "\"token\":\"";
+    char *start = strstr(response, marker);
+    if (!start) {
+        printf("Error: no token in gateway response: %s\n", response);
+        return SQLITE_ERROR;
+    }
+    start += strlen(marker);
+    char *end = strchr(start, '"');
+    if (!end || (size_t)(end - start) >= token_len) {
+        printf("Error: malformed token in gateway response: %s\n", response);
+        return SQLITE_ERROR;
+    }
+    memcpy(token, start, (size_t)(end - start));
+    token[end - start] = '\0';
+    return SQLITE_OK;
 }
 
 int test_chunked_schema_init(sqlite3 *db) {
@@ -662,6 +724,39 @@ int test_send_gap_from_clock_hole(const char *db_path) {
     rc = db_exec(db, "SELECT cloudsync_cleanup('users');"); RCHECK
     rc = db_exec(db, "SELECT cloudsync_cleanup('activities');"); RCHECK
     rc = db_exec(db, "SELECT cloudsync_cleanup('workouts');"); RCHECK
+
+ABORT_TEST
+}
+
+// Same roundtrip as test_init, but authenticated with a gateway-minted user token
+// (cloudsync_network_set_token) instead of the apikey.
+int test_token_auth (void) {
+    char token[512];
+    int rc = fetch_gateway_token(token, sizeof(token));
+    if (rc != SQLITE_OK) return rc;
+
+    sqlite3 *db = NULL;
+    rc = open_load_ext(":memory:", &db); RCHECK
+    rc = db_init(db); RCHECK
+
+    rc = db_exec(db, "SELECT cloudsync_init('users');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_init('activities');"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_init('workouts');"); RCHECK
+
+    char network_init[1024];
+    rc = integration_network_init_base(db, getenv("INTEGRATION_TEST_DATABASE_ID"), network_init, sizeof(network_init)); RCHECK
+
+    char set_token[1024];
+    snprintf(set_token, sizeof(set_token), "SELECT cloudsync_network_set_token('%s');", token);
+    rc = db_exec(db, set_token); RCHECK
+
+    char value[UUID_STR_MAXLEN];
+    cloudsync_uuid_v7_string(value, true);
+    char sql[256];
+    snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s', '%s');", value, value);
+    rc = db_exec(db, sql); RCHECK
+    rc = db_expect_gt0(db, "SELECT cloudsync_network_sync(250,10) ->> '$.receive.rows';"); RCHECK
+    rc = db_exec(db, "SELECT cloudsync_terminate();");
 
 ABORT_TEST
 }
@@ -1623,6 +1718,7 @@ int main (void) {
     rc += test_report("DB Version Test:", test_db_version(DB_PATH));
     rc += test_report("Enable Disable Test:", test_enable_disable(DB_PATH));
     rc += test_report("Send Gap From Clock Hole Test:", test_send_gap_from_clock_hole(":memory:"));
+    rc += test_report("Token Auth Test:", test_token_auth());
 
     // Chunked payload tests run only when INTEGRATION_TEST_CHUNKED_DATABASE_ID points at a
     // tenant with a small payload_max_chunk_size; state the skip reason once for the group.

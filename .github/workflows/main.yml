@@ -96,6 +96,7 @@ jobs:
       INTEGRATION_TEST_CLOUDSYNC_ADDRESS: ${{ secrets.INTEGRATION_TEST_CLOUDSYNC_ADDRESS }}
       INTEGRATION_TEST_OFFLINE_DATABASE_ID: ${{ secrets.INTEGRATION_TEST_OFFLINE_DATABASE_ID }}
       INTEGRATION_TEST_FAILURE_DATABASE_ID: ${{ secrets.INTEGRATION_TEST_FAILURE_DATABASE_ID }}
+      INTEGRATION_TEST_WEBLITE_ADDRESS: ${{ secrets.INTEGRATION_TEST_WEBLITE_ADDRESS }}
       # Chunked tests need an EXCLUSIVE tenant (the negative-cache test's Phase 2 asserts
       # an idle tenant, so concurrent writers from other matrix legs cause false failures).
       # Run them on a single leg only; every other leg gets '' and skips them (treated as
@@ -151,6 +152,7 @@ jobs:
             -e INTEGRATION_TEST_OFFLINE_DATABASE_ID="${{ env.INTEGRATION_TEST_OFFLINE_DATABASE_ID }}" \
             -e INTEGRATION_TEST_FAILURE_DATABASE_ID="${{ env.INTEGRATION_TEST_FAILURE_DATABASE_ID }}" \
             -e INTEGRATION_TEST_CHUNKED_DATABASE_ID="${{ env.INTEGRATION_TEST_CHUNKED_DATABASE_ID }}" \
+            -e INTEGRATION_TEST_WEBLITE_ADDRESS="${{ env.INTEGRATION_TEST_WEBLITE_ADDRESS }}" \
             alpine:latest \
             tail -f /dev/null
           docker exec alpine sh -c "apk update && apk add --no-cache gcc make curl sqlite openssl-dev musl-dev linux-headers"
@@ -227,6 +229,7 @@ jobs:
             export INTEGRATION_TEST_OFFLINE_DATABASE_ID="$INTEGRATION_TEST_OFFLINE_DATABASE_ID"
             export INTEGRATION_TEST_FAILURE_DATABASE_ID="$INTEGRATION_TEST_FAILURE_DATABASE_ID"
             export INTEGRATION_TEST_CHUNKED_DATABASE_ID="$INTEGRATION_TEST_CHUNKED_DATABASE_ID"
+            export INTEGRATION_TEST_WEBLITE_ADDRESS="$INTEGRATION_TEST_WEBLITE_ADDRESS"
             $(make test PLATFORM=$PLATFORM ARCH=$ARCH -n)
           EOF
           echo "::endgroup::"
