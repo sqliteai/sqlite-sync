@@ -413,6 +413,21 @@ int cloudsync_changesvtab_filter (sqlite3_vtab_cursor *cursor, int idxn, const c
                 "SELECT cloudsync_init('<table_name>') to enable sync on a "
                 "table before querying cloudsync_changes.");
         }
+        // settings rows exist but no *_cloudsync tables do (e.g. a dump/restore
+        // that skipped the meta tables): still not an OOM
+        sqlite3_stmt *vm = NULL;
+        bool meta_missing = false;
+        if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND tbl_name LIKE '%_cloudsync' LIMIT 1;", -1, &vm, NULL) == SQLITE_OK) {
+            meta_missing = (sqlite3_step(vm) != SQLITE_ROW);
+        }
+        if (vm) sqlite3_finalize(vm);
+        if (meta_missing) {
+            return vtab_set_error((sqlite3_vtab *)c->vtab,
+                "cloudsync settings reference tables whose sync metadata is "
+                "missing (no *_cloudsync tables found). Re-run "
+                "SELECT cloudsync_init('<table_name>') for each configured "
+                "table to rebuild it.");
+        }
         return SQLITE_NOMEM;
     }
     
