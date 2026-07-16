@@ -265,6 +265,34 @@ int db_send_await_converge (sqlite3 *db, int max_attempts, int delay_ms) {
     return SQLITE_ERROR;
 }
 
+// Bring a fresh receiver up to date with the tenant's accumulated history before a
+// capped-receive test: send a sentinel row from the sender, then drain (uncapped)
+// until it arrives. A fresh site's first check makes the server spool the ENTIRE
+// tenant history — which grows with every run — answering 202 while it prepares, and
+// a 202 yields rows=0/complete=1, indistinguishable from "already drained", so only
+// the sentinel's arrival proves the replay actually finished. This keeps the capped
+// attempt budgets O(this test's batch) instead of O(tenant history).
+int chunked_receiver_catch_up (sqlite3 *sender, sqlite3 *receiver, const char *sentinel_id) {
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+        "INSERT INTO chunked_payload_items (id, body) VALUES ('%s', 'sentinel');", sentinel_id);
+    int rc = db_exec(sender, sql); if (rc != SQLITE_OK) return rc;
+    rc = db_send_ok(sender); if (rc != SQLITE_OK) return rc;
+
+    for (int i = 0; i < 120; i++) {
+        int matches = 0;
+        rc = db_exec(receiver, "SELECT cloudsync_network_receive_changes();");
+        if (rc != SQLITE_OK) return rc;
+        snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM chunked_payload_items WHERE id='%s';", sentinel_id);
+        rc = db_select_int(receiver, sql, &matches); if (rc != SQLITE_OK) return rc;
+        if (matches == 1) return SQLITE_OK;
+        sqlite3_sleep(500);
+    }
+    printf("Error: receiver did not catch up with tenant history (sentinel %s missing).\n", sentinel_id);
+    return SQLITE_ERROR;
+}
+
 int integration_network_init(sqlite3 *db, const char *database_id, char *network_init, size_t network_init_len) {
     if (!database_id) {
         fprintf(stderr, "Error: integration database ID not set.\n");
@@ -918,6 +946,7 @@ int test_chunked_payload_capped_receive(void) {
     sqlite3 *receiver = NULL;
     char network_init[1024];
     char batch_id[UUID_STR_MAXLEN];
+    char sentinel_id[UUID_STR_MAXLEN];
     char sql[1024];
     bool found = false;
     bool observed_capped_partial = false;  // saw chunks==1 && complete=0 from a receive(1) call
@@ -937,6 +966,14 @@ int test_chunked_payload_capped_receive(void) {
     if (rc != SQLITE_OK) goto cleanup;
 
     cloudsync_uuid_v7_string(batch_id, true);
+    cloudsync_uuid_v7_string(sentinel_id, true);
+
+    // Replay accumulated tenant history up front so the 80x1-chunk budget below only
+    // has to fetch this test's batch (see chunked_receiver_catch_up).
+    rc = chunked_receiver_catch_up(sender, receiver, sentinel_id);
+    if (rc != SQLITE_OK) goto cleanup;
+    cleanup_remote_rows = true;
+
     rc = db_exec(sender, "SELECT cloudsync_set('payload_max_chunk_size', '262144');"); if (rc != SQLITE_OK) goto cleanup;
     snprintf(sql, sizeof(sql),
         "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < %d) "
@@ -948,7 +985,6 @@ int test_chunked_payload_capped_receive(void) {
     rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks();", 2); if (rc != SQLITE_OK) goto cleanup;
 
     rc = db_send_ok(sender); if (rc != SQLITE_OK) goto cleanup;
-    cleanup_remote_rows = true;
 
     for (int attempt = 0; attempt < 80; ++attempt) {
         int chunks = 0, complete = 0, matches = 0;
@@ -1003,7 +1039,7 @@ int test_chunked_payload_capped_receive(void) {
 
 cleanup:
     if (cleanup_remote_rows && sender) {
-        snprintf(sql, sizeof(sql), "DELETE FROM chunked_payload_items WHERE id LIKE '%s-%%';", batch_id);
+        snprintf(sql, sizeof(sql), "DELETE FROM chunked_payload_items WHERE id LIKE '%s-%%' OR id='%s';", batch_id, sentinel_id);
         if (db_exec(sender, sql) == SQLITE_OK) {
             db_exec(sender, "SELECT cloudsync_network_send_changes();");
         }
@@ -1021,6 +1057,7 @@ int test_chunked_payload_batched_receive(void) {
     sqlite3 *receiver = NULL;
     char network_init[1024];
     char batch_id[UUID_STR_MAXLEN];
+    char sentinel_id[UUID_STR_MAXLEN];
     char sql[1024];
     bool found = false;
     bool observed_batched_partial = false;  // saw chunks==2 && complete=0 from receive(2)
@@ -1033,6 +1070,14 @@ int test_chunked_payload_batched_receive(void) {
     if (rc != SQLITE_OK) goto cleanup;
 
     cloudsync_uuid_v7_string(batch_id, true);
+    cloudsync_uuid_v7_string(sentinel_id, true);
+
+    // Replay accumulated tenant history up front so the capped budget below only has
+    // to fetch this test's batch (see chunked_receiver_catch_up).
+    rc = chunked_receiver_catch_up(sender, receiver, sentinel_id);
+    if (rc != SQLITE_OK) goto cleanup;
+    cleanup_remote_rows = true;
+
     rc = db_exec(sender, "SELECT cloudsync_set('payload_max_chunk_size', '262144');"); if (rc != SQLITE_OK) goto cleanup;
     snprintf(sql, sizeof(sql),
         "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < %d) "
@@ -1044,7 +1089,6 @@ int test_chunked_payload_batched_receive(void) {
     rc = db_expect_min(sender, "SELECT COUNT(*) FROM cloudsync_payload_chunks();", 3); if (rc != SQLITE_OK) goto cleanup;
 
     rc = db_send_ok(sender); if (rc != SQLITE_OK) goto cleanup;
-    cleanup_remote_rows = true;
 
     for (int attempt = 0; attempt < 80; ++attempt) {
         int chunks = 0, complete = 0, matches = 0;
@@ -1091,7 +1135,7 @@ int test_chunked_payload_batched_receive(void) {
 
 cleanup:
     if (cleanup_remote_rows && sender) {
-        snprintf(sql, sizeof(sql), "DELETE FROM chunked_payload_items WHERE id LIKE '%s-%%';", batch_id);
+        snprintf(sql, sizeof(sql), "DELETE FROM chunked_payload_items WHERE id LIKE '%s-%%' OR id='%s';", batch_id, sentinel_id);
         if (db_exec(sender, sql) == SQLITE_OK) {
             db_exec(sender, "SELECT cloudsync_network_send_changes();");
         }
