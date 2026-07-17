@@ -336,13 +336,29 @@ int integration_network_init(sqlite3 *db, const char *database_id, char *network
 // Fixed, obviously-synthetic user id ("e2e test") used for every minted token.
 #define TOKEN_TEST_USER_ID "e2e7e57e-0000-4000-8000-000000000001"
 
+// Some platforms that run the tests have no curl CLI (e.g. Android emulator images).
+int curl_cli_available (void) {
+#ifdef _WIN32
+    FILE *pipe = popen("curl --version 2>nul", "r");
+#else
+    FILE *pipe = popen("curl --version 2>/dev/null", "r");
+#endif
+    if (!pipe) return 0;
+    char buffer[64];
+    size_t nread = fread(buffer, 1, sizeof(buffer), pipe);
+    pclose(pipe);
+    return nread > 0;
+}
+
 // Mint a user token from the gateway (POST /v2/tokens) via the curl CLI: this binary
 // is built without networking, HTTP lives only in the loaded extension.
-// Returns TEST_SKIPPED when the gateway address or apikey is not configured.
+// Returns TEST_SKIPPED when the gateway address or apikey is not configured,
+// or when there is no curl CLI to mint the token with.
 int fetch_gateway_token (char *token, size_t token_len) {
     const char *gateway = getenv("INTEGRATION_TEST_WEBLITE_ADDRESS");
     const char *apikey = getenv("INTEGRATION_TEST_APIKEY");
     if (!gateway || !*gateway || !apikey || !*apikey) return TEST_SKIPPED;
+    if (!curl_cli_available()) return TEST_SKIPPED;
 
     // expire the token in 24h so repeated runs don't leave live credentials behind
     time_t expires_time = time(NULL) + 24*60*60;
