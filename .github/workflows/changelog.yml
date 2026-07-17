@@ -1,0 +1,21 @@
+name: Release and Update Website Changelog
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      test_version:
+        description: "The fake version to test (e.g., 99.9.9)"
+        required: true
+        default: "99.9.9"
+
+jobs:
+  release:
+    uses: sqlitecloud/changelog-action/.github/workflows/action.yml@main
+    with:
+      name: "SQLite-Sync"
+      create_release: false
+    secrets:
+      personal_access_token: ${{ secrets.WEBSITE_REPO_PAT }}
