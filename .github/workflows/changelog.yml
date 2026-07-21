@@ -13,9 +13,14 @@ on:
 
 jobs:
   release:
-    uses: sqlitecloud/changelog-action/.github/workflows/action.yml@main
+    # Pin to a reviewed release tag (or, strongest, a full commit SHA) — not @main. See "Security" below.
+    uses: sqlitecloud/changelog-action/.github/workflows/action.yml@v1
     with:
       name: "SQLite-Sync"
+      stage_branch: ${{ vars.WEBSITE_STAGE_BRANCH }} # staging branch changelog PRs target
       create_release: false
     secrets:
       personal_access_token: ${{ secrets.WEBSITE_REPO_PAT }}
+      website_repo: ${{ secrets.WEBSITE_REPO }}
+      website_changelog_dir: ${{ secrets.WEBSITE_CHANGELOG_DIR }}
+
