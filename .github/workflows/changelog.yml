@@ -13,6 +13,11 @@ on:
 
 jobs:
   release:
+    # Repo default is read-only; the called workflow needs write, and a reusable
+    # workflow can never hold more than its caller.
+    permissions:
+      contents: write
+      issues: write
     # Pin to a reviewed release tag (or, strongest, a full commit SHA) — not @main. See "Security" below.
     uses: sqlitecloud/changelog-action/.github/workflows/action.yml@v1
     with:
