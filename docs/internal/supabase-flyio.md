@@ -79,11 +79,11 @@ Without this, the build will fail with `fractional_indexing.h: No such file or d
 
 ## Step 2: Build the custom Supabase Postgres image
 
-> **Important — match the Postgres version!** Check which Postgres version the Supabase docker-compose uses by looking at the `db` service `image` tag in `docker-compose.yml` (e.g., `supabase/postgres:15.8.1.085` means PG 15). You must build your custom image with the **same tag**. Using the wrong version will cause init script failures.
+> **Important — match the Postgres version!** Check which Postgres version the Supabase docker-compose uses by looking at the `db` service `image` tag in `docker-compose.yml` (e.g., `supabase/postgres:15.8.1.135` means PG 15). You must build your custom image with the **same tag**. Using the wrong version will cause init script failures.
 
 The `make postgres-supabase-build` command does the following:
 
-1. **Pulls the official Supabase Postgres base image** (e.g., `public.ecr.aws/supabase/postgres:15.8.1.085`) — this is Supabase's standard PostgreSQL image that ships with ~30 extensions pre-installed (PostGIS, pgvector, etc.)
+1. **Pulls the official Supabase Postgres base image** (e.g., `public.ecr.aws/supabase/postgres:15.8.1.135`) — this is Supabase's standard PostgreSQL image that ships with ~30 extensions pre-installed (PostGIS, pgvector, etc.)
 2. **Runs a multi-stage Docker build** using `docker/postgresql/Dockerfile.supabase`:
    - **Stage 1 (builder)**: Installs C build tools (`gcc`, `make`), copies the CloudSync source code (`src/`, `modules/`), and compiles `cloudsync.so` against Supabase's `pg_config`
    - **Stage 2 (runtime)**: Starts from a clean Supabase Postgres image and copies in just three kinds of file:
@@ -96,27 +96,27 @@ To find the correct tag, clone the Supabase repo and check:
 
 ```bash
 grep 'image: supabase/postgres:' supabase/docker/docker-compose.yml
-# Example output: image: supabase/postgres:15.8.1.085
+# Example output: image: supabase/postgres:15.8.1.135
 # Use the version after the colon as your SUPABASE_POSTGRES_TAG
 ```
 
 Run from the sqlite-sync-dev repo root:
 
 ```bash
-make postgres-supabase-build SUPABASE_POSTGRES_TAG=15.8.1.085
+make postgres-supabase-build SUPABASE_POSTGRES_TAG=15.8.1.135
 ```
 
 Verify the image was built:
 
 ```bash
 docker images | grep supabase-postgres-cloudsync
-# Should show: <your-dockerhub-username>/supabase-postgres-cloudsync   15.8.1.085   ...
+# Should show: <your-dockerhub-username>/supabase-postgres-cloudsync   15.8.1.135   ...
 ```
 
 Verify CloudSync is installed inside the image:
 
 ```bash
-docker run --rm <your-dockerhub-username>/supabase-postgres-cloudsync:15.8.1.085 \
+docker run --rm <your-dockerhub-username>/supabase-postgres-cloudsync:15.8.1.135 \
   find / -name "cloudsync*" -type f 2>/dev/null
 # Should list cloudsync.so, cloudsync.control, and cloudsync--<version>.sql
 # (plus any cloudsync--<from>--<to>.sql upgrade scripts)
@@ -134,32 +134,32 @@ The Fly.io VM needs to pull your custom image from a container registry. We use 
 First, pull the base image for amd64 (this ensures Docker has the correct platform variant cached):
 
 ```bash
-docker pull --platform linux/amd64 public.ecr.aws/supabase/postgres:15.8.1.085
+docker pull --platform linux/amd64 public.ecr.aws/supabase/postgres:15.8.1.135
 ```
 
 Then build for `linux/amd64` (x86, which is what Fly.io uses):
 
 ```bash
 docker build --platform linux/amd64 \
-  --build-arg SUPABASE_POSTGRES_TAG=15.8.1.085 \
+  --build-arg SUPABASE_POSTGRES_TAG=15.8.1.135 \
   -f docker/postgresql/Dockerfile.supabase \
-  -t <your-dockerhub-username>/supabase-postgres-cloudsync:15.8.1.085 \
+  -t <your-dockerhub-username>/supabase-postgres-cloudsync:15.8.1.135 \
   .
 ```
 
 Push the image (you must be logged in: `docker login`):
 
 ```bash
-docker push <your-dockerhub-username>/supabase-postgres-cloudsync:15.8.1.085
+docker push <your-dockerhub-username>/supabase-postgres-cloudsync:15.8.1.135
 ```
 
 > **Note**: `docker buildx build ... --push` may fail with ECR registry resolution errors. The two-step approach above (build then push) is more reliable.
 
 > If you're building on an Intel Mac or a Linux x86 machine, `make postgres-supabase-build` already produces an amd64 image, so you can simply tag and push:
 > ```bash
-> docker tag public.ecr.aws/supabase/postgres:15.8.1.085 \
->   <your-dockerhub-username>/supabase-postgres-cloudsync:15.8.1.085
-> docker push <your-dockerhub-username>/supabase-postgres-cloudsync:15.8.1.085
+> docker tag public.ecr.aws/supabase/postgres:15.8.1.135 \
+>   <your-dockerhub-username>/supabase-postgres-cloudsync:15.8.1.135
+> docker push <your-dockerhub-username>/supabase-postgres-cloudsync:15.8.1.135
 > ```
 
 ---
@@ -395,10 +395,10 @@ services:
   db:
     # BEFORE: image: supabase/postgres:${POSTGRES_VERSION}
     # AFTER:
-    image: sqlitecloud/sqlite-sync-supabase:15.8.1.085
+    image: sqlitecloud/sqlite-sync-supabase:15.8.1.135
 ```
 
-Use `sqlitecloud/sqlite-sync-supabase:15.8.1.085` if you want the published image. If you built and pushed your own image in Step 3 for internal testing, use that exact image path instead.
+Use `sqlitecloud/sqlite-sync-supabase:15.8.1.135` if you want the published image. If you built and pushed your own image in Step 3 for internal testing, use that exact image path instead.
 
 ### Add the CloudSync init script
 
@@ -876,10 +876,10 @@ On your local machine, rebuild and push the image:
 cd /path/to/sqlite-sync-dev
 git pull  # get latest CloudSync code
 git submodule update --init --recursive  # ensure submodules are up to date
-make postgres-supabase-build SUPABASE_POSTGRES_TAG=15.8.1.085
-docker tag public.ecr.aws/supabase/postgres:15.8.1.085 \
-  <your-dockerhub-username>/supabase-postgres-cloudsync:15.8.1.085
-docker push <your-dockerhub-username>/supabase-postgres-cloudsync:15.8.1.085
+make postgres-supabase-build SUPABASE_POSTGRES_TAG=15.8.1.135
+docker tag public.ecr.aws/supabase/postgres:15.8.1.135 \
+  <your-dockerhub-username>/supabase-postgres-cloudsync:15.8.1.135
+docker push <your-dockerhub-username>/supabase-postgres-cloudsync:15.8.1.135
 ```
 
 On the Fly VM:

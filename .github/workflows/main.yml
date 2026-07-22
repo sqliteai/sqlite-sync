@@ -659,7 +659,16 @@ jobs:
           - image: sqlite-sync-supabase
             pg_major: '15'
             dockerfile: docker/postgresql/Dockerfile.supabase.release
-            supabase_tag: '15.8.1.085'
+            supabase_tag: '15.8.1.135'
+          # Newer Supabase 17 images use an Alpine userland (still a glibc Nix
+          # postgres, so the same glibc artifact is installed). Published behind
+          # explicit -alpine / exact-base tags; the shared :17 alias stays on the
+          # Ubuntu build until we decide the alias scheme.
+          - image: sqlite-sync-supabase
+            pg_major: '17'
+            dockerfile: docker/postgresql/Dockerfile.supabase.release
+            supabase_tag: '17.6.1.151'
+            tag_suffix: '-alpine'
 
     steps:
 
@@ -729,12 +738,15 @@ jobs:
           VERSION=${{ steps.version.outputs.version }}
           IMAGE=${{ env.DOCKERHUB_ORG }}/${{ matrix.image }}
           SUPABASE_TAG=${{ matrix.supabase_tag }}
+          # Empty for the default (Ubuntu) rows; "-alpine" for the Alpine variant.
+          # Keeps the Alpine images from colliding with the :<major> aliases.
+          SUFFIX="${{ matrix.tag_suffix }}"
           BETA="${{ steps.beta.outputs.slug }}"
           {
             if [ -n "$BETA" ]; then
-              echo "tags=${IMAGE}:${{ matrix.pg_major }}-beta-${BETA}"
+              echo "tags=${IMAGE}:${{ matrix.pg_major }}${SUFFIX}-beta-${BETA}"
             else
-              echo "tags=${IMAGE}:${{ matrix.pg_major }},${IMAGE}:${{ matrix.pg_major }}-${VERSION},${IMAGE}:${SUPABASE_TAG}"
+              echo "tags=${IMAGE}:${{ matrix.pg_major }}${SUFFIX},${IMAGE}:${{ matrix.pg_major }}${SUFFIX}-${VERSION},${IMAGE}:${SUPABASE_TAG}"
             fi
             echo "build_args<<EOF"
             echo "SUPABASE_POSTGRES_TAG=${SUPABASE_TAG}"

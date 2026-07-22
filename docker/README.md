@@ -112,6 +112,15 @@ includes CloudSync, then tag it with the same name so the CLI reuses it. This
 keeps your local Supabase stack intact (auth, realtime, storage, etc.) while
 enabling the extension in the CLI-managed Postgres container.
 
+> **Note on Ubuntu vs Alpine bases.** Newer Supabase Postgres images (roughly
+> `17.6.1.084` and later) use an Alpine-based userland instead of the earlier
+> Ubuntu one. The published release image (`Dockerfile.supabase.release`, used
+> for `sqlitecloud/sqlite-sync-supabase:*`) detects the userland automatically
+> and works on both. The local build-from-source flow below
+> (`make postgres-supabase-build`, `Dockerfile.supabase`) currently assumes an
+> Ubuntu base; if your CLI stack pulls a newer Alpine image, prefer the
+> published `:17-alpine` release image.
+
 ### Prerequisites
 
 - Supabase CLI installed (`supabase start` works)

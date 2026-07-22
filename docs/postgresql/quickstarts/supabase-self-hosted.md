@@ -14,14 +14,20 @@ Follow [Supabase's Installing Supabase](https://supabase.com/docs/guides/self-ho
 db:
   # Supabase on PostgreSQL 15
   image: sqlitecloud/sqlite-sync-supabase:15
-  # instead of: public.ecr.aws/supabase/postgres:15.8.1.085
+  # instead of: public.ecr.aws/supabase/postgres:15.8.1.135
 
   # OR Supabase on PostgreSQL 17
   image: sqlitecloud/sqlite-sync-supabase:17
   # instead of: public.ecr.aws/supabase/postgres:17.6.1.071
+
+  # OR Supabase on PostgreSQL 17 with a newer Alpine-based Supabase image
+  image: sqlitecloud/sqlite-sync-supabase:17-alpine
+  # instead of: public.ecr.aws/supabase/postgres:17.6.1.151
 ```
 
-Use the CloudSync image tag that matches your Supabase PostgreSQL major version. The published major tags `sqlitecloud/sqlite-sync-supabase:15` and `sqlitecloud/sqlite-sync-supabase:17` are the standard choice. Exact Supabase base-image tags may also be published for some releases, but they are optional and not required for normal setup.
+Use the CloudSync image tag that matches your Supabase PostgreSQL major version. The published major tags `sqlitecloud/sqlite-sync-supabase:15` and `sqlitecloud/sqlite-sync-supabase:17` are the standard choice.
+
+**Ubuntu vs Alpine base:** newer Supabase Postgres images (roughly `17.6.1.084` and later) ship an Alpine-based userland instead of the earlier Ubuntu one. The extension itself is identical on both — the PostgreSQL binary is glibc-linked in either case — so functionally they are interchangeable. If your Supabase stack pins one of these newer Alpine base images, use the matching `sqlitecloud/sqlite-sync-supabase:17-alpine` tag (or the exact base tag, e.g. `sqlitecloud/sqlite-sync-supabase:17.6.1.151`) so the CloudSync image is built from the same base. Exact Supabase base-image tags are published for both families but are optional for normal setup.
 
 ### Add the CloudSync Init Script
 
