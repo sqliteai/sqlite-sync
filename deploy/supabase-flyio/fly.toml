@@ -1,0 +1,35 @@
+# No `app` / `primary_region` here on purpose: both are deployment-specific and
+# are passed on the command line instead.
+#
+#   fly deploy . --config fly.toml --app "$FLY_APP" --primary-region "$FLY_REGION"
+#
+# The public URLs follow from FLY_APP_NAME at boot (see entrypoint.sh) and the
+# CloudSync image tag from CLOUDSYNC_IMAGE (see docker-compose.cloudsync.yml);
+# override either with `fly secrets set`.
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  COMPOSE_FILE = "docker-compose.yml:docker-compose.cloudsync.yml"
+  SITE_URL = "http://localhost:3000"
+  POOLER_TENANT_ID = "cloudsync"
+  STUDIO_DEFAULT_ORGANIZATION = "CloudSync"
+  STUDIO_DEFAULT_PROJECT = "Supabase"
+
+[[mounts]]
+  source = "supabase_data"
+  destination = "/data"
+  initial_size = "50gb"
+
+[[vm]]
+  size = "shared-cpu-4x"
+  memory = "4096"
+
+# Kong. Gives Studio and the REST/Auth/Storage APIs HTTPS on <app>.fly.dev.
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1

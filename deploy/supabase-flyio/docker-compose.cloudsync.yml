@@ -1,0 +1,17 @@
+# Layered on top of the upstream docker-compose.yml via COMPOSE_FILE.
+# Keeps the upstream file untouched so it can be re-pinned without merge work.
+services:
+  db:
+    # Released tag by default; set CLOUDSYNC_IMAGE (e.g. `fly secrets set`) to
+    # run a beta build without touching the repo.
+    image: ${CLOUDSYNC_IMAGE:-sqlitecloud/sqlite-sync-supabase:17-alpine}
+    volumes:
+      - ./cloudsync.sql:/docker-entrypoint-initdb.d/init-scripts/100-cloudsync.sql:Z
+    ports:
+      # Direct Postgres, bypassing Supavisor (which already owns 5432).
+      - "5433:5432"
+
+  supavisor:
+    # Skips /app/limits.sh, whose `ulimit -n 100000` is refused by the Fly kernel
+    # and crashes the container. Same tini init, same command.
+    entrypoint: ["/usr/bin/tini", "-s", "-g", "--"]

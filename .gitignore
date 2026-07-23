@@ -20,6 +20,9 @@ openssl/
 unittest
 .env
 
+# Generated Supabase secrets, if a deployment .env is ever pulled down locally
+/deploy/supabase-flyio/.env*
+
 # Node.js
 **/node_modules/**
 package-lock.json
