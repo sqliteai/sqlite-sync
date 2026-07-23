@@ -754,6 +754,52 @@ jobs:
             echo "EOF"
           } >> $GITHUB_OUTPUT
 
+      # Build amd64 natively first and load it into the daemon, so the extension
+      # is proven to load before anything is published. The multi-arch push below
+      # reuses these layers from the builder cache.
+      - name: build amd64 image for the smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          load: true
+          tags: cloudsync-smoke:test
+          build-args: ${{ matrix.image == 'sqlite-sync-postgres' && steps.standalone.outputs.build_args || steps.supabase.outputs.build_args }}
+
+      - name: smoke test the extension
+        env:
+          # the supabase bases ship a `postgres` role that cannot create the
+          # extension; their own docs use supabase_admin
+          PSQL_USER: ${{ matrix.image == 'sqlite-sync-supabase' && 'supabase_admin' || 'postgres' }}
+        run: |
+          docker run -d --name cloudsync-smoke -e POSTGRES_PASSWORD=postgres cloudsync-smoke:test
+          # the entrypoint's init-time server listens on the unix socket only, so
+          # a TCP connection only succeeds once the real server is up
+          ready=''
+          for _ in $(seq 1 60); do
+            if docker exec -e PGPASSWORD=postgres cloudsync-smoke \
+                 psql -h 127.0.0.1 -U "$PSQL_USER" -d postgres -tAc 'SELECT 1' >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ -z "$ready" ]; then
+            echo "::error::postgres never accepted TCP connections"
+            docker logs cloudsync-smoke
+            exit 1
+          fi
+          if ! docker exec -e PGPASSWORD=postgres cloudsync-smoke \
+                 psql -h 127.0.0.1 -U "$PSQL_USER" -d postgres -v ON_ERROR_STOP=1 \
+                 -c 'CREATE EXTENSION IF NOT EXISTS cloudsync;' \
+                 -c 'SELECT cloudsync_version();'; then
+            echo "::error::cloudsync failed to load in ${{ matrix.image }} pg${{ matrix.pg_major }}${{ matrix.tag_suffix }}"
+            docker logs cloudsync-smoke
+            exit 1
+          fi
+          docker rm -f cloudsync-smoke
+
       - uses: docker/build-push-action@v6
         with:
           context: .
