@@ -631,7 +631,7 @@ jobs:
 
   docker-publish:
     runs-on: ubuntu-22.04
-    name: docker ${{ matrix.image }} pg${{ matrix.pg_major }}${{ github.ref != 'refs/heads/main' && ' beta' || '' }}
+    name: docker ${{ matrix.image }} pg${{ matrix.pg_major }}${{ matrix.tag_suffix }}${{ github.ref != 'refs/heads/main' && ' beta' || '' }}
     needs: [build, postgres-test, postgres-build, release]
     # main: publish the versioned release tags, only when the release job cut a new
     # release. Any other branch: release is skipped, publish/overwrite a per-branch
