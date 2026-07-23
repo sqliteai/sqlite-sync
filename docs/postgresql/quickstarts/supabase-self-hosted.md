@@ -67,6 +67,7 @@ Follow [Supabase's Updating](https://supabase.com/docs/guides/self-hosting/docke
 # Update docker-compose.yml to use:
 # sqlitecloud/sqlite-sync-supabase:15
 # or sqlitecloud/sqlite-sync-supabase:17
+# or sqlitecloud/sqlite-sync-supabase:17-alpine (newer Alpine-based Supabase bases)
 docker compose pull
 docker compose down && docker compose up -d
 ```

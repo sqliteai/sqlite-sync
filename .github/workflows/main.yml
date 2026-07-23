@@ -618,7 +618,7 @@ jobs:
             [**Android**](https://central.sonatype.com/artifact/ai.sqlite/sync): `ai.sqlite:sync:${{ steps.tag.outputs.version }}`
             [**Swift**](https://github.com/sqliteai/sqlite-sync#swift-package): [Installation Guide](https://github.com/sqliteai/sqlite-sync#swift-package)
             [**Docker (PostgreSQL)**](https://hub.docker.com/r/sqlitecloud/sqlite-sync-postgres): `docker pull sqlitecloud/sqlite-sync-postgres:17` or `:15`
-            [**Docker (Supabase)**](https://hub.docker.com/r/sqlitecloud/sqlite-sync-supabase): `docker pull sqlitecloud/sqlite-sync-supabase:17` or `:15`
+            [**Docker (Supabase)**](https://hub.docker.com/r/sqlitecloud/sqlite-sync-supabase): `docker pull sqlitecloud/sqlite-sync-supabase:17`, `:15` or `:17-alpine`
 
             ---
 

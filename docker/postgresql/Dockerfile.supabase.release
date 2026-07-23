@@ -10,7 +10,7 @@
 # Usage:
 #   docker build \
 #     --build-arg SUPABASE_POSTGRES_TAG=17.6.1.151 \
-#     --build-arg CLOUDSYNC_VERSION=1.1.2 \
+#     --build-arg CLOUDSYNC_VERSION=<version> \
 #     -f docker/postgresql/Dockerfile.supabase.release \
 #     -t my-cloudsync-supabase-postgres .
 #
