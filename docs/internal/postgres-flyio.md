@@ -869,6 +869,15 @@ cd /data
 put /absolute/path/to/cloudsync-postgresql17-linux-x86_64.zip cloudsync-postgresql17-linux-x86_64.zip
 ```
 
+If the upload fails because `cloudsync-postgresql17-linux-x86_64.zip` already exists on the VM, exit the SFTP prompt and remove it from a normal SSH shell first:
+
+```bash
+fly ssh console --app <your-app-name>
+rm -f /data/cloudsync-postgresql17-linux-x86_64.zip
+```
+
+Then start `fly ssh sftp shell` again and rerun `put`. The SFTP prompt only supports a small command set such as `cd`, `ls`, `get`, `put`, and `chmod`; it does not support `rm`.
+
 3. SSH back into the VM, extract the package, and verify the files:
 
 ```bash

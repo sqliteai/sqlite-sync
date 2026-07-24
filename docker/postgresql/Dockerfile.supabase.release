@@ -1,14 +1,21 @@
 # Supabase PostgreSQL with pre-compiled CloudSync (sqlite-sync) extension
 #
+# Works with both Supabase base image families:
+#   - Ubuntu/glibc images (e.g. PG15 15.8.1.135, older PG17 17.6.1.071)
+#   - Alpine-userland images (e.g. PG17 17.6.1.084+); still a glibc Nix postgres
+# Both run a Nix-built, glibc-linked PostgreSQL, so the SAME glibc extension
+# artifact is installed in either case. Only the build-time userland tooling
+# differs (apt-get vs apk), which this file detects at runtime.
+#
 # Usage:
 #   docker build \
-#     --build-arg SUPABASE_POSTGRES_TAG=15.8.1.085 \
-#     --build-arg CLOUDSYNC_VERSION=1.0.6 \
+#     --build-arg SUPABASE_POSTGRES_TAG=17.6.1.151 \
+#     --build-arg CLOUDSYNC_VERSION=<version> \
 #     -f docker/postgresql/Dockerfile.supabase.release \
 #     -t my-cloudsync-supabase-postgres .
 #
 # Or pull the pre-built image from Docker Hub:
-#   docker pull sqlitecloud/sqlite-sync-supabase:15
+#   docker pull sqlitecloud/sqlite-sync-supabase:17
 #
 
 ARG SUPABASE_POSTGRES_TAG=17.6.1.071
@@ -17,60 +24,97 @@ FROM public.ecr.aws/supabase/postgres:${SUPABASE_POSTGRES_TAG}
 ARG CLOUDSYNC_VERSION
 ARG TARGETARCH
 
-ENV CLOUDSYNC_PG_CONFIG=/root/.nix-profile/bin/pg_config
+# pg_config is resolved dynamically at build time (its path differs between the
+# Ubuntu and Alpine Supabase bases). Pass --build-arg CLOUDSYNC_PG_CONFIG=<path>
+# to override. Kept an ARG so it does not leak into the published image.
+ARG CLOUDSYNC_PG_CONFIG=""
 
 # CI beta builds stage pre-built artifacts here; when the tarball for this arch
 # is present it is used instead of the GitHub release download
 COPY docker/postgresql/beta-artifacts/ /tmp/beta-artifacts/
 
 # Download pre-compiled extension and install into Supabase's Nix layout
-RUN case "${TARGETARCH}" in \
+RUN set -eu; \
+    : "${CLOUDSYNC_VERSION:?required: pass --build-arg CLOUDSYNC_VERSION=<semver>}"; \
+    case "${TARGETARCH:-}" in \
       amd64) ARCH="x86_64" ;; \
       arm64) ARCH="arm64" ;; \
-      *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
-    esac && \
+      *) echo "Unsupported architecture: ${TARGETARCH:-<unset>}"; exit 1 ;; \
+    esac; \
+    # Resolve pg_config: the Nix profiles the Supabase bases ship first, PATH last
+    PG_CONFIG="${CLOUDSYNC_PG_CONFIG:-}"; \
+    if [ -z "$PG_CONFIG" ]; then \
+      for c in /root/.nix-profile/bin/pg_config /nix/var/nix/profiles/default/bin/pg_config "$(command -v pg_config || true)"; do \
+        if [ -x "$c" ]; then PG_CONFIG="$c"; break; fi; \
+      done; \
+    fi; \
+    if [ ! -x "$PG_CONFIG" ]; then echo "Error: pg_config not found${PG_CONFIG:+ at $PG_CONFIG}"; exit 1; fi; \
     # Derive PG major version from pg_config
-    PG_MAJOR=$(${CLOUDSYNC_PG_CONFIG} --version | sed 's/[^0-9]*//' | cut -d. -f1) && \
-    apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
-    ASSET="cloudsync-postgresql${PG_MAJOR}-linux-${ARCH}-${CLOUDSYNC_VERSION}.tar.gz" && \
+    PG_MAJOR=$(${PG_CONFIG} --version | sed 's/[^0-9]*//' | cut -d. -f1); \
+    ASSET="cloudsync-postgresql${PG_MAJOR}-linux-${ARCH}-${CLOUDSYNC_VERSION}.tar.gz"; \
     if [ -f "/tmp/beta-artifacts/${ASSET}" ]; then \
-      echo "Using local artifact ${ASSET}" && \
+      echo "Using local artifact ${ASSET}"; \
       cp "/tmp/beta-artifacts/${ASSET}" /tmp/cloudsync.tar.gz; \
     else \
-      URL="https://github.com/sqliteai/sqlite-sync/releases/download/${CLOUDSYNC_VERSION}/${ASSET}" && \
-      echo "Downloading ${URL}" && \
+      # curl is only needed for the release download; install it with whichever
+      # package manager the userland provides, and remove it afterwards only if
+      # it was not already part of the base image
+      HAD_CURL=1; \
+      command -v curl >/dev/null 2>&1 || HAD_CURL=0; \
+      if command -v apk >/dev/null 2>&1; then \
+        PKGMGR=apk; \
+        apk add --no-cache curl ca-certificates; \
+      elif command -v apt-get >/dev/null 2>&1; then \
+        PKGMGR=apt; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends curl ca-certificates; \
+      else \
+        echo "No supported package manager (apk/apt-get) found"; exit 1; \
+      fi; \
+      URL="https://github.com/sqliteai/sqlite-sync/releases/download/${CLOUDSYNC_VERSION}/${ASSET}"; \
+      echo "Downloading ${URL}"; \
       curl -fSL "${URL}" -o /tmp/cloudsync.tar.gz; \
-    fi && \
-    mkdir -p /tmp/cloudsync && \
-    tar -xzf /tmp/cloudsync.tar.gz -C /tmp/cloudsync && \
-    # Resolve Supabase's Nix library path
-    PKGLIBDIR="$(${CLOUDSYNC_PG_CONFIG} --pkglibdir)" && \
-    NIX_PGLIBDIR="$(grep -E '^export NIX_PGLIBDIR' /usr/bin/postgres | sed -E "s/.*'([^']+)'.*/\1/" || true)" && \
-    if [ -n "$NIX_PGLIBDIR" ]; then PKGLIBDIR="$NIX_PGLIBDIR"; fi && \
-    SHAREDIR_PGCONFIG="$(${CLOUDSYNC_PG_CONFIG} --sharedir)" && \
-    SHAREDIR_STD="/usr/share/postgresql" && \
-    install -d "$PKGLIBDIR" "$SHAREDIR_PGCONFIG/extension" && \
-    install -m 755 /tmp/cloudsync/cloudsync.so "$PKGLIBDIR/" && \
-    install -m 644 /tmp/cloudsync/cloudsync--*.sql /tmp/cloudsync/cloudsync.control "$SHAREDIR_PGCONFIG/extension/" && \
-    if [ "$SHAREDIR_STD" != "$SHAREDIR_PGCONFIG" ]; then \
-        install -d "$SHAREDIR_STD/extension" && \
+      if [ "$HAD_CURL" = 0 ]; then \
+        if [ "$PKGMGR" = apk ]; then apk del curl; else apt-get purge -y curl; apt-get autoremove -y; fi; \
+      fi; \
+      if [ "$PKGMGR" = apt ]; then rm -rf /var/lib/apt/lists/*; fi; \
+    fi; \
+    mkdir -p /tmp/cloudsync; \
+    tar -xzf /tmp/cloudsync.tar.gz -C /tmp/cloudsync; \
+    # Resolve Supabase's Nix library path (postgres wrapper overrides libdir)
+    PKGLIBDIR="$(${PG_CONFIG} --pkglibdir)"; \
+    NIX_PGLIBDIR="$(grep -E '^export NIX_PGLIBDIR' /usr/bin/postgres | sed -E "s/.*'([^']+)'.*/\1/" || true)"; \
+    if [ -n "$NIX_PGLIBDIR" ]; then PKGLIBDIR="$NIX_PGLIBDIR"; fi; \
+    SHAREDIR_PGCONFIG="$(${PG_CONFIG} --sharedir)"; \
+    SHAREDIR_STD="/usr/share/postgresql"; \
+    install -d "$PKGLIBDIR" "$SHAREDIR_PGCONFIG/extension"; \
+    install -m 755 /tmp/cloudsync/cloudsync.so "$PKGLIBDIR/"; \
+    install -m 644 /tmp/cloudsync/cloudsync--*.sql /tmp/cloudsync/cloudsync.control "$SHAREDIR_PGCONFIG/extension/"; \
+    if [ "$SHAREDIR_STD" != "$SHAREDIR_PGCONFIG" ] && [ -d "$SHAREDIR_STD" ]; then \
+        install -d "$SHAREDIR_STD/extension"; \
         install -m 644 /tmp/cloudsync/cloudsync--*.sql /tmp/cloudsync/cloudsync.control "$SHAREDIR_STD/extension/"; \
-    fi && \
-    rm -rf /tmp/cloudsync /tmp/cloudsync.tar.gz /tmp/beta-artifacts && \
-    apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+    fi; \
+    rm -rf /tmp/cloudsync /tmp/cloudsync.tar.gz /tmp/beta-artifacts
 
 # Verify installation
-RUN NIX_PGLIBDIR="$(grep -E '^export NIX_PGLIBDIR' /usr/bin/postgres | sed -E "s/.*'([^']+)'.*/\1/" || true)" && \
-    echo "Verifying CloudSync extension installation..." && \
+RUN set -eu; \
+    PG_CONFIG="${CLOUDSYNC_PG_CONFIG:-}"; \
+    if [ -z "$PG_CONFIG" ]; then \
+      for c in /root/.nix-profile/bin/pg_config /nix/var/nix/profiles/default/bin/pg_config "$(command -v pg_config || true)"; do \
+        if [ -x "$c" ]; then PG_CONFIG="$c"; break; fi; \
+      done; \
+    fi; \
+    NIX_PGLIBDIR="$(grep -E '^export NIX_PGLIBDIR' /usr/bin/postgres | sed -E "s/.*'([^']+)'.*/\1/" || true)"; \
+    echo "Verifying CloudSync extension installation..."; \
     if [ -n "$NIX_PGLIBDIR" ]; then \
         ls -la "$NIX_PGLIBDIR/cloudsync.so"; \
     else \
-        ls -la "$(${CLOUDSYNC_PG_CONFIG} --pkglibdir)/cloudsync.so"; \
-    fi && \
-    ls -la "$(${CLOUDSYNC_PG_CONFIG} --sharedir)/extension/cloudsync"* && \
+        ls -la "$(${PG_CONFIG} --pkglibdir)/cloudsync.so"; \
+    fi; \
+    ls -la "$(${PG_CONFIG} --sharedir)/extension/cloudsync"*; \
     if [ -d "/usr/share/postgresql/extension" ]; then \
         ls -la /usr/share/postgresql/extension/cloudsync*; \
-    fi && \
+    fi; \
     echo "CloudSync extension installed successfully"
 
 EXPOSE 5432

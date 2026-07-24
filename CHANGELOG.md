@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+
+- **`sqlitecloud/sqlite-sync-supabase:17-alpine`** — CloudSync on the newer Alpine-userland Supabase Postgres images (roughly `17.6.1.084` and later). The extension is identical to the Ubuntu build — the PostgreSQL binary is glibc-linked on both — so only the base image differs. Use it when your Supabase stack pins one of these newer bases; `:17` continues to track the Ubuntu base.
+
+### Changed
+
+- **The `sqlitecloud/sqlite-sync-supabase:15` image now builds on Supabase base `15.8.1.135`** (previously `15.8.1.085`), which moves it from Ubuntu 20.04 to 24.04. Ubuntu 24.04 allocates system UIDs differently, so the `postgres` user changes from `105:106` to `101:102` and an **existing** data directory becomes unreadable: the container fails with `cat: /etc/postgresql-custom/pgsodium_root.key: Permission denied` followed by `FATAL: invalid secret key`. Existing deployments need a one-time `chown -R 101:102` on the data directory and the `supabase_db-config` volume before starting the new image — see [Self-Hosted Supabase](docs/postgresql/quickstarts/supabase-self-hosted.md) for the procedure. New deployments are unaffected, and the CloudSync extension itself is unchanged.
+
 ## [1.1.2] - 2026-07-13
 
 ### Fixed
