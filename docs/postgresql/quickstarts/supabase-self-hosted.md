@@ -27,7 +27,7 @@ db:
 
 Use the CloudSync image tag that matches your Supabase PostgreSQL major version. The published major tags `sqlitecloud/sqlite-sync-supabase:15` and `sqlitecloud/sqlite-sync-supabase:17` are the standard choice.
 
-**Ubuntu vs Alpine base:** newer Supabase Postgres images (roughly `17.6.1.084` and later) ship an Alpine-based userland instead of the earlier Ubuntu one. The extension itself is identical on both — the PostgreSQL binary is glibc-linked in either case — so functionally they are interchangeable. If your Supabase stack pins one of these newer Alpine base images, use the matching `sqlitecloud/sqlite-sync-supabase:17-alpine` tag (or the exact base tag, e.g. `sqlitecloud/sqlite-sync-supabase:17.6.1.151`) so the CloudSync image is built from the same base. Exact Supabase base-image tags are published for both families but are optional for normal setup.
+**Ubuntu vs Alpine base:** newer Supabase Postgres images (roughly `17.6.1.084` and later) ship an Alpine-based userland instead of the earlier Ubuntu one. The extension itself is identical on both — the PostgreSQL binary is glibc-linked in either case — so for a new deployment the two are interchangeable. Moving an **existing** deployment from one family to the other needs the ownership fix described under [For Existing Deployments](#for-existing-deployments). If your Supabase stack pins one of these newer Alpine base images, use the matching `sqlitecloud/sqlite-sync-supabase:17-alpine` tag (or the exact base tag, e.g. `sqlitecloud/sqlite-sync-supabase:17.6.1.151`) so the CloudSync image is built from the same base. Exact Supabase base-image tags are published for both families but are optional for normal setup.
 
 ### Add the CloudSync Init Script
 
@@ -77,6 +77,31 @@ If Postgres has already been initialized and you are adding CloudSync afterward,
 ```sql
 CREATE EXTENSION IF NOT EXISTS cloudsync;
 ```
+
+#### If Postgres fails to start after moving to a different base image
+
+Supabase base images do not pin the `postgres` user's UID, so it differs between them — for example `105` on the Ubuntu 20.04 based `15.8.1.085`, `101` on the Ubuntu 24.04 based `15.8.1.135`, and `100` on the Alpine based `17.6.1.151`. A data directory created under one base is unreadable by another, and the container fails to start with:
+
+```
+cat: /etc/postgresql-custom/pgsodium_root.key: Permission denied
+FATAL:  invalid secret key
+```
+
+Re-own the two postgres-owned paths with the UID and GID of the new image:
+
+```bash
+docker compose stop db
+
+# UID:GID of the postgres user in the new image
+docker compose run --rm --no-deps --entrypoint id db postgres
+
+chown -R <uid>:<gid> ./volumes/db/data
+chown -R <uid>:<gid> "$(docker volume inspect supabase_db-config --format '{{.Mountpoint}}')"
+
+docker compose up -d db
+```
+
+Take a `pg_dumpall` backup first: the change is one-way, and the previous image can no longer read the data directory afterwards. Only deployments whose volumes were initialized under a different base are affected; new deployments are not.
 
 ---
 
