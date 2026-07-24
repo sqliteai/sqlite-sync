@@ -193,7 +193,7 @@ fly secrets set -a "$FLY_APP" POSTGRES_PASSWORD=...
 | REST / Auth / Storage / Realtime | `https://$FLY_APP.fly.dev/{rest,auth,storage,realtime}/v1/` |
 | Postgres, direct, from another Fly app | `postgres://postgres:<pw>@$FLY_APP.internal:5433/postgres` |
 | Postgres, direct, from a laptop | `fly proxy 5433 -a "$FLY_APP"` then connect to `localhost:5433` |
-| Postgres via Supavisor pooler | machine port `5432` (session) / `6543` (transaction) |
+| Postgres via Supavisor pooler | machine port `5432` (session) / `6543` (transaction), username `postgres.$POOLER_TENANT_ID` |
 | Shell | `fly ssh console -a "$FLY_APP"` then `cd /data/supabase-docker` |
 
 Register with the CloudSync server using the direct (non-pooled) connection
@@ -211,7 +211,7 @@ release the public IPs, and use `fly proxy 8000 -a <app>`.
 | Update the CloudSync image | released tag: redeploy (compose pulls `:17-alpine`); beta: `fly secrets set CLOUDSYNC_IMAGE=…` |
 | Update Supabase services | bump `SUPABASE_REF` in the `Dockerfile`, `fly deploy` |
 | Restart the stack | `fly machine restart -a <app>` — the entrypoint re-runs everything |
-| Inspect containers | `fly ssh console -a <app> -C "docker -H unix:///var/run/docker.sock ps"` |
+| Inspect containers | `fly ssh console -a <app> -C "docker ps"` |
 | Resize hardware | `fly scale vm shared-cpu-8x --vm-memory 8192 -a <app>` |
 | Grow the volume | `fly volumes extend <vol-id> --size 80 -a <app>` |
 | Destroy | `fly apps destroy <app>` (removes the volume too) |
@@ -227,7 +227,7 @@ The CloudSync server needs a Postgres connection string it can reach. If it runs
 in the same Fly org, use the private network directly — no public exposure needed:
 
 ```bash
-export CLOUDSYNC_URL="https://cloudsync-staging-testing.fly.dev"   # or https://cloudsync.sqlite.ai
+export CLOUDSYNC_URL="<cloudsync-server-url>"
 export ORG_API_KEY="<organization-api-key>"
 export CONNECTION_STRING="postgres://postgres:<POSTGRES_PASSWORD>@$FLY_APP.internal:5433/postgres"
 
@@ -237,7 +237,19 @@ curl "$CLOUDSYNC_URL/healthz"     # {"status":"ok"}
 If the server runs outside Fly, tunnel instead: `fly proxy 5433 -a "$FLY_APP"` and
 use `@localhost:5433`.
 
-Register, then verify connectivity:
+A managed database belongs to a workspace, and an org-wide key must name one.
+`PUT` is idempotent — it returns the existing workspace if the slug is taken:
+
+```bash
+curl --request PUT "$CLOUDSYNC_URL/v1/workspaces/<slug>" \
+  --header "Authorization: Bearer $ORG_API_KEY" \
+  --header "Content-Type: application/json" \
+  --data '{"name": "Supabase PG17 Test"}'      # → workspaceId
+```
+
+Register the database. Because GoTrue here is HS256-only (see [Client
+token](#client-token)), pass `jwtSecret` and the issuer/audience so CloudSync
+validates tokens with the shared secret instead of JWKS:
 
 ```bash
 curl --request POST "$CLOUDSYNC_URL/v1/databases" \
@@ -249,16 +261,20 @@ curl --request POST "$CLOUDSYNC_URL/v1/databases" \
     "provider": "postgres",
     "flavor": "supabase",
     "projectId": "'"$FLY_APP"'",
-    "databaseName": "postgres"
+    "databaseName": "postgres",
+    "workspaceId": "<workspaceId>",
+    "jwtSecret": "<JWT_SECRET from .env>",
+    "jwtAllowedIssuers": ["https://'"$FLY_APP"'.fly.dev/auth/v1"],
+    "jwtExpectedAudiences": ["authenticated"]
   }'
 
 export MANAGED_DATABASE_ID="<returned-id>"
-
-curl --request POST "$CLOUDSYNC_URL/v1/databases/$MANAGED_DATABASE_ID/verify" \
-  --header "Authorization: Bearer $ORG_API_KEY"
 ```
 
-Always register the **direct** port 5433, not the Supavisor pooler.
+The response should show `"auth": {"mode": "jwt_hmac", …}`. Always register the
+**direct** port 5433, not the Supavisor pooler. There is no `/verify` endpoint —
+the `cloudsync/tables` call below doubles as the connectivity check, since it only
+answers once the server has reached the database.
 
 Create a table and enable sync on it:
 
@@ -304,8 +320,12 @@ curl -X POST "https://$FLY_APP.fly.dev/auth/v1/token?grant_type=password" \
   -d '{"email":"sync-test@example.com","password":"..."}'      # → access_token
 ```
 
-Tokens are HS256, signed with `JWT_SECRET` from `.env`, issuer `API_EXTERNAL_URL`,
-audience `authenticated`. Validate one with
+Tokens are HS256, signed with `JWT_SECRET` from `.env`, audience `authenticated`,
+issuer `https://$FLY_APP.fly.dev/auth/v1`. Read the issuer from the service, not
+from `.env`: the entrypoint derives `API_EXTERNAL_URL` from the app name and
+exports it, so process env wins and the `.env` line still reads
+`http://localhost:8000/auth/v1`. Confirm with
+`docker compose exec auth printenv GOTRUE_JWT_ISSUER`. Validate one with
 `GET /auth/v1/user` + `Authorization: Bearer <token>`. Note that
 `/auth/v1/.well-known/jwks.json` returns `{"keys":[]}`: upstream ships
 `GOTRUE_JWT_KEYS` commented out, so GoTrue stays HS256-only even though `.env`
@@ -319,19 +339,34 @@ carries the ES256 material (PostgREST does use it, via `PGRST_JWT_SECRET`).
 CREATE TABLE todos (
   id TEXT PRIMARY KEY DEFAULT (cloudsync_uuid()),
   title TEXT NOT NULL DEFAULT '',
-  done BOOLEAN DEFAULT false
+  done INTEGER DEFAULT 0
 );
 SELECT cloudsync_init('todos');
-SELECT cloudsync_network_init('<MANAGED_DATABASE_ID>');
+SELECT cloudsync_network_init_custom('<cloudsync-server-url>', '<MANAGED_DATABASE_ID>');
 SELECT cloudsync_network_set_token('<access_token>');
 
-INSERT INTO todos (title) VALUES ('from SQLite');
-SELECT cloudsync_network_sync(500, 5);
+INSERT INTO todos (id, title) VALUES (cloudsync_uuid(), 'from SQLite');
+SELECT cloudsync_network_send_changes();
+SELECT cloudsync_terminate();
 ```
 
 Then check the row landed in Postgres, insert one there, and pull it back with
-`SELECT cloudsync_network_check_changes();` on the client. `cloudsync_network_init`
-and `cloudsync_network_set_token` are per-session — they are not persisted.
+`SELECT cloudsync_network_receive_changes();` on the client — allow ~10 s, the
+server picks up Postgres-side changes on its own cadence.
+
+Three things that will bite otherwise:
+
+- **Declare the SQLite column `INTEGER`, not `BOOLEAN`, for a Postgres `boolean`.**
+  The schema hash normalizes types per side: PostgreSQL maps `boolean` → `integer`,
+  while SQLite maps a `BOOLEAN` declaration → `text`. The hashes then differ and the
+  server rejects the payload with
+  `Cannot apply the received payload because the schema hash is unknown <n>`.
+- **`cloudsync_uuid()` in a `DEFAULT` clause fails on insert** with
+  `unsafe use of cloudsync_uuid()` unless `PRAGMA trusted_schema=ON`. Pass the id
+  explicitly instead: `INSERT INTO todos (id, …) VALUES (cloudsync_uuid(), …)`.
+- **`cloudsync_network_init` targets the default server.** For any other CloudSync
+  server use `cloudsync_network_init_custom('<url>', '<id>')`. Neither this nor
+  `cloudsync_network_set_token` is persisted — both must run in every session.
 
 ---
 
