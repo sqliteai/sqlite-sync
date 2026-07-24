@@ -1,11 +1,7 @@
 # Self-Hosted Supabase on Fly.io — `fly deploy` Strategy
 
-This is the recommended way to run a self-hosted Supabase stack with the CloudSync
-Postgres extension on Fly.io. It replaces the manual VM setup in
-[`supabase-flyio.md`](supabase-flyio.md), which is kept for reference and for the
-troubleshooting table.
-
-Everything lives in `deploy/supabase-flyio/` and is deployed with a single
+How to run a self-hosted Supabase stack with the CloudSync Postgres extension on
+Fly.io. Everything lives in `deploy/supabase-flyio/` and is deployed with a single
 `fly deploy`. No SSH, no `apt-get`, no editing files on the VM.
 
 Nothing in `deploy/supabase-flyio/` names a specific deployment: the app name,
@@ -74,6 +70,33 @@ Notable decisions:
   by default — without this, server-to-server access over `.internal` fails.
 - **`docker compose logs -f` is the foreground process**, so `fly logs` shows all
   services. If it exits, the Machine restarts and the bootstrap re-runs.
+- **A failed `compose up` does not kill the Machine.** It used to: with `set -e`,
+  one service failing its dependency condition exited the entrypoint, Fly
+  restarted, it failed again, and after 10 rounds the Machine was stopped — taking
+  the healthy services with it and leaving nothing to inspect. Now the failure is
+  logged and the boot continues to the log stream.
+- **Containers of services dropped from the config are removed before `up`.**
+  `--remove-orphans` does not cover a service that still exists but sits in a
+  disabled profile, so its container keeps running *and keeps its published
+  ports*. That is exactly what happens when swapping the gateway: the old
+  `supabase-kong` container held port 8000 and Envoy could not bind.
+
+### API gateway: Envoy
+
+`COMPOSE_FILE` layers `docker-compose.envoy.yml`, which parks Kong in a disabled
+profile and runs `envoyproxy/envoy` as `api-gw` / `supabase-envoy` on the same
+host port 8000, keeping the network aliases `kong` and `envoy` so other services'
+internal URLs still resolve. Upstream makes Envoy the default in the ~August 2026
+release ([discussion 48048](https://github.com/orgs/supabase/discussions/48048));
+after that the override becomes a no-op shim and Kong moves to
+`docker-compose.kong.yml`.
+
+The Envoy default has no `:8443` HTTPS listener, which does not matter here —
+Fly terminates TLS at the edge and only plain 8000 is ever exposed.
+
+Envoy is stricter than Kong about credentials. `/rest/v1/` (the PostgREST OpenAPI
+root) is service-role-only and answers `RBAC: access denied` to an anon key; that
+is intended hardening, not a broken route.
 
 ### Overrides applied to upstream compose
 
@@ -145,8 +168,20 @@ fly secrets set -a "$FLY_APP" POSTGRES_PASSWORD=...
 ```
 
 > Changing `POSTGRES_PASSWORD` *after* the database has been initialized leaves
-> the existing roles on the old password. Fix with the `ALTER USER` block in
-> [`supabase-flyio.md`](supabase-flyio.md#fix-services-fail-with-password-authentication-failed).
+> the existing roles on the old password, and services then fail with
+> `FATAL: password authentication failed for user "authenticator"`. Realign them:
+>
+> ```bash
+> cd /data/supabase-docker
+> for role in authenticator supabase_auth_admin supabase_storage_admin supabase_admin; do
+>     docker compose exec -T db psql -U postgres \
+>         -c "ALTER USER $role WITH PASSWORD 'NEW_PASSWORD';"
+> done
+> docker compose restart
+> ```
+>
+> Upstream also ships `sh ./utils/db-passwd.sh` for a guided rotation, followed by
+> `docker compose up -d --force-recreate`.
 
 ---
 
@@ -154,7 +189,7 @@ fly secrets set -a "$FLY_APP" POSTGRES_PASSWORD=...
 
 | What | How |
 |---|---|
-| Studio / Kong | `https://$FLY_APP.fly.dev` (basic auth: `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD`) |
+| Studio / API gateway | `https://$FLY_APP.fly.dev` (basic auth: `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD`) |
 | REST / Auth / Storage / Realtime | `https://$FLY_APP.fly.dev/{rest,auth,storage,realtime}/v1/` |
 | Postgres, direct, from another Fly app | `postgres://postgres:<pw>@$FLY_APP.internal:5433/postgres` |
 | Postgres, direct, from a laptop | `fly proxy 5433 -a "$FLY_APP"` then connect to `localhost:5433` |
@@ -186,22 +221,162 @@ the database survive; only the ~135 MB app image is re-pulled.
 
 ---
 
-## Differences vs. the old manual guide
+## Registering the database with the CloudSync server
 
-- Upstream compose **no longer ships `analytics` (Logflare) or `vector`** — the
-  Logflare workaround in the old guide is obsolete.
-- **`db` no longer publishes 5432**; Supavisor does. Hence the `5433:5432` override
-  for direct access.
-- The **Supavisor `ulimit` crash** and the **`auth.uid()` ownership fix** are still
-  needed; both are automated in `entrypoint.sh`.
-- Upstream now has **asymmetric auth keys** (`JWT_KEYS`, `JWT_JWKS`,
-  `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY`); `add-new-auth-keys.sh`
-  generates them on first boot.
-- The old guide's HTTPS/Caddy section is unnecessary — `[http_service]` gives TLS
-  on `<app>.fly.dev` for free.
-- If you keep a hand-built VM anyway, add `persist_rootfs = "always"` (or
-  `fly machine update --rootfs-persist always`) so Docker survives stop/start and
-  you can drop the "reinstall Docker on every restart" ritual.
+The CloudSync server needs a Postgres connection string it can reach. If it runs
+in the same Fly org, use the private network directly — no public exposure needed:
+
+```bash
+export CLOUDSYNC_URL="https://cloudsync-staging-testing.fly.dev"   # or https://cloudsync.sqlite.ai
+export ORG_API_KEY="<organization-api-key>"
+export CONNECTION_STRING="postgres://postgres:<POSTGRES_PASSWORD>@$FLY_APP.internal:5433/postgres"
+
+curl "$CLOUDSYNC_URL/healthz"     # {"status":"ok"}
+```
+
+If the server runs outside Fly, tunnel instead: `fly proxy 5433 -a "$FLY_APP"` and
+use `@localhost:5433`.
+
+Register, then verify connectivity:
+
+```bash
+curl --request POST "$CLOUDSYNC_URL/v1/databases" \
+  --header "Authorization: Bearer $ORG_API_KEY" \
+  --header "Content-Type: application/json" \
+  --data '{
+    "label": "Supabase Fly.io Test",
+    "connectionString": "'"$CONNECTION_STRING"'",
+    "provider": "postgres",
+    "flavor": "supabase",
+    "projectId": "'"$FLY_APP"'",
+    "databaseName": "postgres"
+  }'
+
+export MANAGED_DATABASE_ID="<returned-id>"
+
+curl --request POST "$CLOUDSYNC_URL/v1/databases/$MANAGED_DATABASE_ID/verify" \
+  --header "Authorization: Bearer $ORG_API_KEY"
+```
+
+Always register the **direct** port 5433, not the Supavisor pooler.
+
+Create a table and enable sync on it:
+
+```bash
+fly ssh console -a "$FLY_APP"
+cd /data/supabase-docker && docker compose exec db psql -U postgres
+```
+
+```sql
+CREATE TABLE IF NOT EXISTS todos (
+  id TEXT PRIMARY KEY DEFAULT cloudsync_uuid(),
+  title TEXT NOT NULL DEFAULT '',
+  done BOOLEAN DEFAULT false
+);
+SELECT cloudsync_init('todos');
+```
+
+```bash
+curl --request POST "$CLOUDSYNC_URL/v1/databases/$MANAGED_DATABASE_ID/cloudsync/enable" \
+  --header "Authorization: Bearer $ORG_API_KEY" \
+  --header "Content-Type: application/json" \
+  --data '{"tables":["todos"]}'
+
+curl --request GET "$CLOUDSYNC_URL/v1/databases/$MANAGED_DATABASE_ID/cloudsync/tables" \
+  --header "Authorization: Bearer $ORG_API_KEY"     # todos should show "enabled": true
+```
+
+### Client token
+
+For a `supabase`-flavored database the client authenticates with a GoTrue JWT, not
+an org key. Create the user once, then take an `access_token` per session:
+
+```bash
+ANON_KEY=$(fly ssh console -a "$FLY_APP" -C \
+  "grep ^ANON_KEY= /data/supabase-docker/.env" | tail -1 | tr -d '\r' | cut -d= -f2-)
+
+curl -X POST "https://$FLY_APP.fly.dev/auth/v1/signup" \
+  -H "apikey: $ANON_KEY" -H "Content-Type: application/json" \
+  -d '{"email":"sync-test@example.com","password":"..."}'
+
+curl -X POST "https://$FLY_APP.fly.dev/auth/v1/token?grant_type=password" \
+  -H "apikey: $ANON_KEY" -H "Content-Type: application/json" \
+  -d '{"email":"sync-test@example.com","password":"..."}'      # → access_token
+```
+
+Tokens are HS256, signed with `JWT_SECRET` from `.env`, issuer `API_EXTERNAL_URL`,
+audience `authenticated`. Validate one with
+`GET /auth/v1/user` + `Authorization: Bearer <token>`. Note that
+`/auth/v1/.well-known/jwks.json` returns `{"keys":[]}`: upstream ships
+`GOTRUE_JWT_KEYS` commented out, so GoTrue stays HS256-only even though `.env`
+carries the ES256 material (PostgREST does use it, via `PGRST_JWT_SECRET`).
+
+### Roundtrip
+
+```sql
+-- SQLite client (Homebrew sqlite3; the system one cannot load extensions)
+.load dist/cloudsync.dylib
+CREATE TABLE todos (
+  id TEXT PRIMARY KEY DEFAULT (cloudsync_uuid()),
+  title TEXT NOT NULL DEFAULT '',
+  done BOOLEAN DEFAULT false
+);
+SELECT cloudsync_init('todos');
+SELECT cloudsync_network_init('<MANAGED_DATABASE_ID>');
+SELECT cloudsync_network_set_token('<access_token>');
+
+INSERT INTO todos (title) VALUES ('from SQLite');
+SELECT cloudsync_network_sync(500, 5);
+```
+
+Then check the row landed in Postgres, insert one there, and pull it back with
+`SELECT cloudsync_network_check_changes();` on the client. `cloudsync_network_init`
+and `cloudsync_network_set_token` are per-session — they are not persisted.
+
+---
+
+## Building a custom CloudSync Postgres image
+
+CI publishes a beta tag for every branch push (see the publish matrix in
+`.github/workflows/main.yml`), which is usually all you need — point the machine at
+it with `CLOUDSYNC_IMAGE`. To build one locally instead:
+
+```bash
+git submodule update --init --recursive   # else: fractional_indexing.h: No such file or directory
+
+docker build --platform linux/amd64 \
+  --build-arg SUPABASE_POSTGRES_TAG=17.6.1.151 \
+  -f docker/postgresql/Dockerfile.supabase \
+  -t <registry>/<image>:<tag> .
+
+docker push <registry>/<image>:<tag>
+fly secrets set -a "$FLY_APP" CLOUDSYNC_IMAGE=<registry>/<image>:<tag>
+```
+
+`--platform linux/amd64` matters: Fly Machines are x86_64, and an Apple Silicon
+build produces an ARM image that will not start. The image must be pullable
+without credentials, or `docker login` has to run on the Machine.
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `Bind for 0.0.0.0:8000 failed: port is already allocated` | A container from a previous compose config still holds the port. The entrypoint now removes containers whose service left the config; otherwise `docker rm -f <name>`. |
+| Machine stopped, `machine has reached its max restart count of 10` | Something failed during boot and crash-looped. Read `fly logs`, fix, then `fly machine start <id>`. |
+| `password authentication failed for user "authenticator"` | Roles hold a different password than `.env` — see the `ALTER USER` block under [Secrets](#secrets). |
+| `cloudsync_version()` does not exist | Init scripts only run on an empty PGDATA. `docker compose exec -T db psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS cloudsync;"` (the entrypoint does this on every boot). |
+| Auth restarts, `must be owner of function uid (SQLSTATE 42501)` | GoTrue migrates as `supabase_auth_admin` and must own `auth.uid()`/`role()`/`email()`. Automated in `entrypoint.sh`; rerun by deleting `/data/.cloudsync-post-init-done` and restarting. |
+| Supavisor crashes on `ulimit: open files: cannot modify limit` | The Fly kernel refuses `/app/limits.sh`. Handled by the entrypoint override in `docker-compose.cloudsync.yml`. |
+| `RBAC: access denied` on `/rest/v1/` | Envoy restricts the PostgREST OpenAPI root to the service-role key. Use a table path, or the service-role key. |
+| `.internal` unreachable *from inside a container* | Containers have no route to Fly's 6PN. Use `db:5432` (compose network), `127.0.0.1:5432` (inside `supabase-db`), or the bridge gateway on `:5433`. |
+| Services unhealthy right after boot | Give it ~2 minutes, then `docker compose logs <service>`. Studio and Envoy come last. |
+| `no space left on device` during a pull | `fly volumes extend <vol-id> --size 80 -a "$FLY_APP"`. |
+| `cannot stop container … did not receive an exit event` | Zombie container: `kill -9 $(pidof dockerd) $(pidof containerd)`, `rm -rf /data/docker/containers/<id>*`, then restart the Machine. |
+| Cannot pull the CloudSync image | The tag must be public, or run `docker login` on the Machine. |
+
+---
 
 ## Image / version notes
 
@@ -210,10 +385,18 @@ publish matrix in `.github/workflows/main.yml`), while the pinned upstream compo
 expects `17.6.1.136`. Same PG 17 line, newer patch base — fine, but re-check after
 bumping either side.
 
+The pinned compose runs 11 services: `db`, `supavisor`, `auth`, `rest`, `realtime`,
+`storage`, `imgproxy`, `meta`, `functions`, `studio` and the gateway. Upstream has
+dropped `analytics` (Logflare) and `vector`, so nothing here needs the old
+"disable Logflare" workaround. `db` no longer publishes 5432 either — Supavisor
+owns it, which is why the override maps direct Postgres to 5433.
+
 Verified on the first deployment of this setup (`shared-cpu-4x` / 4 GB / 50 GB,
 beta image `…:17-alpine-beta-<branch>`): all 11 services
 healthy on first boot, `PostgreSQL 17.6`, `cloudsync` extension `1.1` /
 `cloudsync_version()` = `1.1.2`, `cloudsync_init()` + insert produced a row in
-`cloudsync_changes`, Kong reachable over HTTPS, and ports 5432/5433/8000 published
+`cloudsync_changes`, the gateway reachable over HTTPS (Envoy: `/auth/v1/health` and
+`/storage/v1/version` 200 with the anon key, `/rest/v1/` 200 with the service-role
+key), and ports 5432/5433/8000 published
 on both `0.0.0.0` and `[::]` (so `<app>.internal` works). First boot took ~9
 minutes, almost all of it image pulls.

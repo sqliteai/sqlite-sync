@@ -50,16 +50,41 @@ if [ -n "${FLY_APP_NAME:-}" ]; then
     export SUPABASE_PUBLIC_URL API_EXTERNAL_URL
 fi
 
+# Services dropped from the active config — a gateway swapped out via an override
+# profile, say — keep their containers and their published ports, which blocks the
+# replacement from binding. `--remove-orphans` does not cover them.
+active_services=$(docker compose config --services 2>/dev/null || true)
+docker compose ps -a --format '{{.Service}}|{{.Name}}' 2>/dev/null | while IFS='|' read -r svc name; do
+    [ -n "$svc" ] || continue
+    echo "$active_services" | grep -qx "$svc" && continue
+    echo "=== removing disabled service: $svc ($name) ==="
+    docker rm -f "$name" >/dev/null 2>&1 || true
+done
+
 echo "=== starting supabase ==="
-docker compose up -d --remove-orphans
+# A service that fails its dependency conditions must not kill the machine:
+# exiting here would crash-loop until Fly gives up, taking the healthy services
+# with it and leaving nothing to debug.
+docker compose up -d --remove-orphans || echo "WARNING: compose up reported a failure, continuing"
 
 echo "=== waiting for postgres ==="
-until docker compose exec -T db pg_isready -U postgres -h localhost >/dev/null 2>&1; do sleep 2; done
+pg_ready=0
+for _ in $(seq 1 90); do
+    if docker compose exec -T db pg_isready -U postgres -h localhost >/dev/null 2>&1; then
+        pg_ready=1
+        break
+    fi
+    sleep 2
+done
 
-# Init scripts only run on an empty PGDATA, so create the extension explicitly.
-docker compose exec -T db psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS cloudsync;"
+if [ "$pg_ready" = 1 ]; then
+    # Init scripts only run on an empty PGDATA, so create the extension explicitly.
+    docker compose exec -T db psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS cloudsync;" || true
+else
+    echo "WARNING: postgres never became ready, skipping post-init"
+fi
 
-if [ ! -f "$INIT_MARKER" ]; then
+if [ "$pg_ready" = 1 ] && [ ! -f "$INIT_MARKER" ]; then
     # GoTrue runs its migrations as supabase_auth_admin and must own these.
     echo "=== fixing auth function ownership ==="
     for fn in "auth.uid()" "auth.role()" "auth.email()"; do
