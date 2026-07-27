@@ -108,8 +108,8 @@ PG_MIGRATION_SQLS = $(wildcard $(PG_MIGRATIONS_DIR)/$(EXTENSION)--*--*.sql)
         postgres-docker-build postgres-docker-build-asan postgres-docker-run postgres-docker-run-asan postgres-docker-stop postgres-docker-rebuild \
         postgres-docker-debug-build postgres-docker-debug-run postgres-docker-debug-rebuild \
         postgres-docker-shell postgres-dev-rebuild postgres-help unittest-pg \
-        postgres-supabase-build postgres-supabase-rebuild postgres-supabase-run-smoke-test \
-        postgres-docker-run-smoke-test
+        postgres-supabase-build postgres-supabase-rebuild postgres-supabase-run-test \
+        postgres-docker-run-test
 
 # Verify that a cloudsync--<prev>--<curr>.sql upgrade script exists for the
 # current CLOUDSYNC_VERSION in src/cloudsync.h. Release-blocking: a missing
@@ -364,10 +364,12 @@ postgres-supabase-build:
 		rm -f "$$tmp_dockerfile"; \
 		exit 1; \
 	fi; \
-	echo "Using base image: $$supabase_cli_image"; \
+	pg_major="$${supabase_cli_image##*:}"; pg_major="$${pg_major%%.*}"; \
+	case "$$pg_major" in ''|*[!0-9]*) pg_major=17;; esac; \
+	echo "Using base image: $$supabase_cli_image (PostgreSQL major $$pg_major)"; \
 	echo "Pulling fresh base image to avoid layer accumulation..."; \
 	docker pull "$$supabase_cli_image" 2>/dev/null || true; \
-	docker build --build-arg SUPABASE_POSTGRES_TAG="$(SUPABASE_POSTGRES_TAG)" --build-arg CLOUDSYNC_VERSION="$(CLOUDSYNC_VERSION_FULL)" -f "$$tmp_dockerfile" -t "$$supabase_cli_image" .; \
+	docker build --build-arg SUPABASE_POSTGRES_TAG="$(SUPABASE_POSTGRES_TAG)" --build-arg PG_MAJOR="$$pg_major" --build-arg CLOUDSYNC_VERSION="$(CLOUDSYNC_VERSION_FULL)" -f "$$tmp_dockerfile" -t "$$supabase_cli_image" .; \
 	rm -f "$$tmp_dockerfile"; \
 	echo "Build complete: $$supabase_cli_image"
 
@@ -434,8 +436,8 @@ postgres-help:
 	@echo "  postgres-docker-shell   - Open bash shell in running container"
 	@echo "  postgres-supabase-build     - Build CloudSync into Supabase CLI postgres image"
 	@echo "  postgres-supabase-rebuild   - Build CloudSync image and restart Supabase CLI stack"
-	@echo "  postgres-supabase-run-smoke-test - Run smoke test against Supabase CLI database"
-	@echo "  postgres-docker-run-smoke-test   - Run smoke test against Docker database"
+	@echo "  postgres-supabase-run-test  - Run smoke test against Supabase CLI database"
+	@echo "  postgres-docker-run-test    - Run smoke test against Docker database"
 	@echo ""
 	@echo "Development:"
 	@echo "  postgres-dev-rebuild    - Rebuild extension in running container (fast)"
