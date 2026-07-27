@@ -364,10 +364,12 @@ postgres-supabase-build:
 		rm -f "$$tmp_dockerfile"; \
 		exit 1; \
 	fi; \
-	echo "Using base image: $$supabase_cli_image"; \
+	pg_major="$${supabase_cli_image##*:}"; pg_major="$${pg_major%%.*}"; \
+	case "$$pg_major" in ''|*[!0-9]*) pg_major=17;; esac; \
+	echo "Using base image: $$supabase_cli_image (PostgreSQL major $$pg_major)"; \
 	echo "Pulling fresh base image to avoid layer accumulation..."; \
 	docker pull "$$supabase_cli_image" 2>/dev/null || true; \
-	docker build --build-arg SUPABASE_POSTGRES_TAG="$(SUPABASE_POSTGRES_TAG)" --build-arg CLOUDSYNC_VERSION="$(CLOUDSYNC_VERSION_FULL)" -f "$$tmp_dockerfile" -t "$$supabase_cli_image" .; \
+	docker build --build-arg SUPABASE_POSTGRES_TAG="$(SUPABASE_POSTGRES_TAG)" --build-arg PG_MAJOR="$$pg_major" --build-arg CLOUDSYNC_VERSION="$(CLOUDSYNC_VERSION_FULL)" -f "$$tmp_dockerfile" -t "$$supabase_cli_image" .; \
 	rm -f "$$tmp_dockerfile"; \
 	echo "Build complete: $$supabase_cli_image"
 
