@@ -33,7 +33,8 @@ Save these as variables:
 - `CUSTOM_ADDRESS` (only if the user provided a non-default address)
 - `CONNECTION_STRING` (the full sqlitecloud:// connection string)
 - `DB_NAME` (database name extracted or provided)
-- `HOST` (hostname extracted from connection string)
+- `HOST` (node hostname extracted from connection string, `<project_id>.<hosted_zone>.sqlite.cloud`)
+- `GATEWAY_HOST` (the multitenant gateway host serving the HTTPS API: `<project_id>.<hosted_zone>.gateway.sqlite.cloud`, i.e. `HOST` with `gateway.` inserted before `sqlite.cloud`. Staging projects use the `staging-gateway.` label instead, `<project_id>.<hosted_zone>.staging-gateway.sqlite.cloud`; ask the user for the HTTPS address if neither answers)
 - `APIKEY` (apikey extracted from connection string)
 - `ROWS` (number of rows per iteration)
 - `ITERATIONS` (number of delete/insert/update cycles)
@@ -86,7 +87,7 @@ No tokens are needed. Skip token creation entirely.
 
 For each user N:
 ```bash
-curl -s -X "POST" "https://<HOST>/v2/tokens" \
+curl -s -X "POST" "https://<GATEWAY_HOST>/v2/tokens" \
    -H 'Authorization: Bearer <APIKEY>' \
    -H 'Content-Type: application/json; charset=utf-8' \
    -d '{"name": "claude<N>@sqlitecloud.io", "userId": "018ecfc2-b2b1-7cc3-a9f0-<N_PADDED_12_CHARS>"}'

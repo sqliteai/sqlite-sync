@@ -54,6 +54,14 @@ Ask the user to describe the policy in plain English.
 
 Ask the user to provide a connection string in the form of "sqlitecloud://<host>:<port>/<db_name>?apikey=<apikey>" to be later used with the sqlitecloud cli (sqlc) with `~/go/bin/sqlc "<connection_string>"`.
 
+The `<host>` is the node address, `<project_id>.<hosted_zone>.sqlite.cloud`. Derive the multitenant gateway host that serves the HTTPS API by inserting `gateway.` before `sqlite.cloud`, and save it as `GATEWAY_HOST`:
+
+```
+<project_id>.<hosted_zone>.gateway.sqlite.cloud
+```
+
+Production projects use the `gateway.` label; staging projects use `staging-gateway.` (`<project_id>.<hosted_zone>.staging-gateway.sqlite.cloud`). Ask the user for the HTTPS address if neither answers.
+
 ### Step 5: Setup SQLiteCloud with RLS
 
 Connect to SQLiteCloud and prepare the environment:
@@ -143,7 +151,7 @@ Get auth tokens for both test users by running the token script twice:
 
 **User 1: claude1@sqlitecloud.io**
 ```bash
-curl -X "POST" "https://<hostname_from_connection_string>/v2/tokens" \
+curl -X "POST" "https://<GATEWAY_HOST>/v2/tokens" \
    -H 'Authorization: Bearer <apikey_from_connection_string>' \
    -H 'Content-Type: application/json; charset=utf-8' \
    -d $'{
@@ -159,7 +167,7 @@ save the userId and the token values as USER1_ID and TOKEN_USER1 to be reused la
 
 **User 2: claude2@sqlitecloud.io**
 ```bash
-curl -X "POST" "https://<hostname_from_connection_string>/v2/tokens" \
+curl -X "POST" "https://<GATEWAY_HOST>/v2/tokens" \
    -H 'Authorization: Bearer <apikey_from_connection_string>' \
    -H 'Content-Type: application/json; charset=utf-8' \
    -d $'{
