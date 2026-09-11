@@ -581,6 +581,7 @@ static int map_spi_result (int rc) {
 static void clear_fetch_batch (pg_stmt_t *stmt) {
     if (!stmt) return;
     if (stmt->last_tuptable) {
+        if (SPI_tuptable == stmt->last_tuptable) SPI_tuptable = NULL;
         SPI_freetuptable(stmt->last_tuptable);
         stmt->last_tuptable = NULL;
     }
@@ -2199,6 +2200,7 @@ int databasevm_step (dbvm_t *vm) {
                 clear_fetch_batch(stmt);
                 
                 SPI_cursor_fetch(stmt->portal, true, 1);
+                stmt->last_tuptable = SPI_tuptable;
                 
                 if (SPI_processed == 0) {
                     clear_fetch_batch(stmt);
@@ -2218,6 +2220,7 @@ int databasevm_step (dbvm_t *vm) {
                 MemoryContextReset(stmt->row_mcxt);
                 
                 stmt->last_tuptable = SPI_tuptable;
+                SPI_tuptable = NULL;
                 stmt->current_tupdesc = stmt->last_tuptable->tupdesc;
                 stmt->current_tuple = stmt->last_tuptable->vals[0];
                 rc = DBRES_ROW;
@@ -2242,6 +2245,7 @@ int databasevm_step (dbvm_t *vm) {
                         // fetch first row
                         clear_fetch_batch(stmt);
                         SPI_cursor_fetch(stmt->portal, true, 1);
+                        stmt->last_tuptable = SPI_tuptable;
                         
                         if (SPI_processed == 0) {
                             // No rows - close portal, don't set portal_open
@@ -2262,6 +2266,7 @@ int databasevm_step (dbvm_t *vm) {
                         MemoryContextReset(stmt->row_mcxt);
                         
                         stmt->last_tuptable = SPI_tuptable;
+                        SPI_tuptable = NULL;
                         stmt->current_tupdesc = stmt->last_tuptable->tupdesc;
                         stmt->current_tuple = stmt->last_tuptable->vals[0];
                         
@@ -2298,7 +2303,11 @@ int databasevm_step (dbvm_t *vm) {
     {
         MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
-        int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        // PostgreSQL uses 42501 for both missing privileges and RLS. Only the
+        // executor's WITH CHECK policy rejection is safe to skip during merge.
+        bool policy_denied = edata->sqlerrcode == ERRCODE_INSUFFICIENT_PRIVILEGE &&
+                             edata->funcname && strcmp(edata->funcname, "ExecWithCheckOptions") == 0;
+        int err = cloudsync_set_error(data, edata->message, policy_denied ? DBRES_POLICY_DENIED : DBRES_ERROR);
         FreeErrorData(edata);
         FlushErrorState();
         
@@ -2320,10 +2329,7 @@ void databasevm_finalize (dbvm_t *vm) {
     {
         clear_fetch_batch(stmt);
         close_portal(stmt);
-        if (SPI_tuptable) {
-            SPI_freetuptable(SPI_tuptable);
-            SPI_tuptable = NULL;
-        }
+        // Only free this statement's tuple table, never another active cursor's.
         
         if (stmt->plan_is_prepared && stmt->plan) {
             SPI_freeplan(stmt->plan);
@@ -2350,11 +2356,7 @@ void databasevm_reset (dbvm_t *vm) {
     clear_fetch_batch(stmt);
     close_portal(stmt);
 
-    // Clear global SPI tuple table if any
-    if (SPI_tuptable) {
-        SPI_freetuptable(SPI_tuptable);
-        SPI_tuptable = NULL;
-    }
+    // Non-row results are freed by step(); cursor results belong to last_tuptable.
 
     // Reset execution state
     stmt->executed_nonselect = false;

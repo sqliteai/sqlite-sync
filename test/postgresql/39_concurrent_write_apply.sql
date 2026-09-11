@@ -81,9 +81,13 @@ BEGIN;
 \set ON_ERROR_ROLLBACK on
 SET LOCAL lock_timeout = '500ms';
 
+-- Expected: the apply cannot take its lock and reports the failure — locally
+-- disable ON_ERROR_STOP. ON_ERROR_ROLLBACK keeps the transaction usable.
+\set ON_ERROR_STOP off
 \if :payload_upd_ok
 SELECT cloudsync_payload_apply(decode(substr(:'payload_upd', 3), 'hex')) AS _blocked_apply \gset
 \endif
+\set ON_ERROR_STOP on
 
 COMMIT;
 \set ON_ERROR_ROLLBACK off

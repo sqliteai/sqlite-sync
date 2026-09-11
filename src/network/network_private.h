@@ -12,6 +12,25 @@
 #include <stddef.h>
 
 #define CLOUDSYNC_DEFAULT_ADDRESS           "https://cloudsync.sqlite.ai"
+#ifndef CLOUDSYNC_CONNECT_TIMEOUT_SECONDS
+#define CLOUDSYNC_CONNECT_TIMEOUT_SECONDS 30L
+#endif
+#ifndef CLOUDSYNC_REQUEST_TIMEOUT_SECONDS
+#define CLOUDSYNC_REQUEST_TIMEOUT_SECONDS 300L
+#endif
+// Artifact transfers are bulk, so they are bounded by lack of progress rather than
+// by elapsed time: a large payload on a slow link would otherwise be killed
+// mid-flight. The absolute value is only a backstop against a transfer that
+// trickles just fast enough to stay alive, since nothing can cancel one in flight.
+#ifndef CLOUDSYNC_ARTIFACT_TIMEOUT_SECONDS
+#define CLOUDSYNC_ARTIFACT_TIMEOUT_SECONDS 3600L
+#endif
+#ifndef CLOUDSYNC_ARTIFACT_LOW_SPEED_LIMIT
+#define CLOUDSYNC_ARTIFACT_LOW_SPEED_LIMIT 1024L
+#endif
+#ifndef CLOUDSYNC_ARTIFACT_LOW_SPEED_TIME
+#define CLOUDSYNC_ARTIFACT_LOW_SPEED_TIME 60L
+#endif
 #define CLOUDSYNC_ENDPOINT_PREFIX           "v2/cloudsync/databases"
 #define CLOUDSYNC_ENDPOINT_UPLOAD           "upload"
 #define CLOUDSYNC_ENDPOINT_CHECK            "check"

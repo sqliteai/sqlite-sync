@@ -371,19 +371,40 @@ static bool network_curl_pool_enabled(network_data *data) {
     return data->curl_pool_enabled > 0;
 }
 
+// API calls carry small JSON, so a cap on elapsed time is the right shape for them.
+// Artifact transfers are bulk and are bounded on progress instead: 256 MiB inside a
+// 300s cap would demand a sustained ~875 KB/s, killing a healthy transfer on a slow
+// link. Low-speed also detects a genuine stall sooner than the absolute cap does.
+static void network_curl_apply_deadlines(CURL *handle, bool is_api) {
+    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, CLOUDSYNC_CONNECT_TIMEOUT_SECONDS);
+    curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
+    if (is_api) {
+        curl_easy_setopt(handle, CURLOPT_TIMEOUT, CLOUDSYNC_REQUEST_TIMEOUT_SECONDS);
+        return;
+    }
+    curl_easy_setopt(handle, CURLOPT_TIMEOUT, CLOUDSYNC_ARTIFACT_TIMEOUT_SECONDS);
+    curl_easy_setopt(handle, CURLOPT_LOW_SPEED_LIMIT, CLOUDSYNC_ARTIFACT_LOW_SPEED_LIMIT);
+    curl_easy_setopt(handle, CURLOPT_LOW_SPEED_TIME, CLOUDSYNC_ARTIFACT_LOW_SPEED_TIME);
+}
+
 static CURL *network_curl_for_endpoint(network_data *data, const char *endpoint, bool *pooled) {
     if (pooled) *pooled = false;
+    bool is_api = network_endpoint_is_api(data, endpoint);
     if (!network_curl_pool_enabled(data)) {
-        return curl_easy_init();
+        CURL *handle = curl_easy_init();
+        if (!handle) return NULL;
+        network_curl_apply_deadlines(handle, is_api);
+        return handle;
     }
 
-    CURL **slot = network_endpoint_is_api(data, endpoint) ? &data->api_curl : &data->artifact_curl;
+    CURL **slot = is_api ? &data->api_curl : &data->artifact_curl;
     if (!*slot) {
         *slot = curl_easy_init();
     } else {
         curl_easy_reset(*slot);
     }
     if (!*slot) return NULL;
+    network_curl_apply_deadlines(*slot, is_api);
 
     curl_easy_setopt(*slot, CURLOPT_MAXCONNECTS, CLOUDSYNC_CURL_MAXCONNECTS);
     curl_easy_setopt(*slot, CURLOPT_MAXAGE_CONN, CLOUDSYNC_CURL_MAXAGE_CONN_SECONDS);
@@ -391,6 +412,36 @@ static CURL *network_curl_for_endpoint(network_data *data, const char *endpoint,
     if (pooled) *pooled = true;
     return *slot;
 }
+
+#if defined(CLOUDSYNC_UNITTEST) && !defined(CLOUDSYNC_OMIT_CURL)
+bool network_test_curl_timeout(const char *url, bool use_pool, bool as_api) {
+    network_data data = {0};
+    data.curl_pool_enabled = use_pool ? 1 : -1;
+    // Classifying the url as the check endpoint selects the API deadline policy;
+    // leaving every endpoint NULL selects the artifact one.
+    if (as_api) data.check_endpoint = (char *)url;
+    bool ok = true;
+    // The second pooled call exercises curl_easy_reset as well as initialization.
+    for (int i = 0; i < 2; i++) {
+        bool pooled = false;
+        CURL *handle = network_curl_for_endpoint(&data, url, &pooled);
+        if (!handle) { ok = false; break; }
+        curl_easy_setopt(handle, CURLOPT_URL, url);
+        curl_easy_setopt(handle, CURLOPT_PROXY, "");
+        CURLcode rc = curl_easy_perform(handle);
+        double seconds = 0;
+        curl_easy_getinfo(handle, CURLINFO_TOTAL_TIME, &seconds);
+        // curl reports a low-speed abort as CURLE_OPERATION_TIMEDOUT as well, so only
+        // the budget differs between the two policies.
+        long budget = as_api ? CLOUDSYNC_REQUEST_TIMEOUT_SECONDS : CLOUDSYNC_ARTIFACT_LOW_SPEED_TIME;
+        ok = ok && rc == CURLE_OPERATION_TIMEDOUT && seconds < budget + 2;
+        if (!pooled) curl_easy_cleanup(handle);
+    }
+    if (data.api_curl) curl_easy_cleanup(data.api_curl);
+    if (data.artifact_curl) curl_easy_cleanup(data.artifact_curl);
+    return ok;
+}
+#endif
 
 static bool network_buffer_check (network_buffer *data, size_t needed) {
     // alloc/resize buffer
@@ -813,13 +864,6 @@ static bool jsmn_token_eq(const char *json, const jsmntok_t *tok, const char *s)
             strncmp(json + tok->start, s, tok->end - tok->start) == 0);
 }
 
-static int jsmn_find_key(const char *json, const jsmntok_t *tokens, int ntokens, const char *key) {
-    for (int i = 1; i + 1 < ntokens; i++) {
-        if (jsmn_token_eq(json, &tokens[i], key)) return i;
-    }
-    return -1;
-}
-
 static int jsmn_token_span(const jsmntok_t *tokens, int ntokens, int index) {
     if (!tokens || index < 0 || index >= ntokens) return 0;
     int start = tokens[index].start;
@@ -871,41 +915,83 @@ static jsmntok_t *json_parse_tokens_alloc(const char *json, size_t json_len, int
     return tokens;
 }
 
-static char *json_unescape_string(const char *src, int len) {
-    char *out = cloudsync_memory_zeroalloc(len + 1);
-    if (!out) return NULL;
+static int jsmn_find_key(const char *json, const jsmntok_t *tokens, int ntokens, const char *key) {
+    int value_index;
+    return jsmn_find_object_value(json, tokens, ntokens, 0, key, &value_index) ? value_index - 1 : -1;
+}
 
+static int json_hex4(const char *src) {
+    int value = 0;
+    for (int i = 0; i < 4; i++) {
+        unsigned char c = (unsigned char)src[i];
+        int digit = c >= '0' && c <= '9' ? c - '0' :
+                    c >= 'a' && c <= 'f' ? c - 'a' + 10 :
+                    c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (digit < 0) return -1;
+        value = (value << 4) | digit;
+    }
+    return value;
+}
+
+static char *json_unescape_string(const char *src, int len) {
+    char *out = cloudsync_memory_zeroalloc((uint64_t)len + 1);
+    if (!out) return NULL;
     int j = 0;
-    for (int i = 0; i < len; ) {
-        if (src[i] == '\\' && i + 1 < len) {
-            char c = src[i + 1];
-            if (c == '"' || c == '\\' || c == '/') { out[j++] = c; i += 2; }
-            else if (c == 'n') { out[j++] = '\n'; i += 2; }
-            else if (c == 'r') { out[j++] = '\r'; i += 2; }
-            else if (c == 't') { out[j++] = '\t'; i += 2; }
-            else if (c == 'b') { out[j++] = '\b'; i += 2; }
-            else if (c == 'f') { out[j++] = '\f'; i += 2; }
-            else if (c == 'u' && i + 5 < len) {
-                unsigned int cp = 0;
-                for (int k = 0; k < 4; k++) {
-                    char h = src[i + 2 + k];
-                    cp <<= 4;
-                    if (h >= '0' && h <= '9') cp |= h - '0';
-                    else if (h >= 'a' && h <= 'f') cp |= 10 + h - 'a';
-                    else if (h >= 'A' && h <= 'F') cp |= 10 + h - 'A';
+    for (int i = 0; i < len;) {
+        unsigned char c = (unsigned char)src[i++];
+        if (c != '\\') { out[j++] = (char)c; continue; }
+        if (i == len) goto invalid;
+        c = (unsigned char)src[i++];
+        switch (c) {
+            case '"': case '\\': case '/': out[j++] = (char)c; break;
+            case 'n': out[j++] = '\n'; break;
+            case 'r': out[j++] = '\r'; break;
+            case 't': out[j++] = '\t'; break;
+            case 'b': out[j++] = '\b'; break;
+            case 'f': out[j++] = '\f'; break;
+            case 'u': {
+                if (len - i < 4) goto invalid;
+                int cp = json_hex4(src + i);
+                if (cp < 0) goto invalid;
+                i += 4;
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    if (len - i < 6 || src[i] != '\\' || src[i + 1] != 'u') goto invalid;
+                    int low = json_hex4(src + i + 2);
+                    if (low < 0xDC00 || low > 0xDFFF) goto invalid;
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + low - 0xDC00;
+                    i += 6;
+                } else if (cp >= 0xDC00 && cp <= 0xDFFF) goto invalid;
+                // Network consumers use C strings: reject embedded NUL truncation.
+                if (cp == 0) goto invalid;
+                if (cp < 0x80) out[j++] = (char)cp;
+                else if (cp < 0x800) {
+                    out[j++] = (char)(0xC0 | (cp >> 6));
+                    out[j++] = (char)(0x80 | (cp & 0x3F));
+                } else {
+                    if (cp >= 0x10000) {
+                        out[j++] = (char)(0xF0 | (cp >> 18));
+                        out[j++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                    } else out[j++] = (char)(0xE0 | (cp >> 12));
+                    out[j++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                    out[j++] = (char)(0x80 | (cp & 0x3F));
                 }
-                if (cp < 0x80) { out[j++] = (char)cp; }
-                else { out[j++] = '?'; } // non-ASCII: replace
-                i += 6;
+                break;
             }
-            else { out[j++] = src[i]; i++; }
-        } else {
-            out[j++] = src[i]; i++;
+            default: goto invalid;
         }
     }
     out[j] = '\0';
     return out;
+invalid:
+    cloudsync_memory_free(out);
+    return NULL;
 }
+
+#ifdef CLOUDSYNC_UNITTEST
+char *network_test_unescape(const char *src) {
+    return json_unescape_string(src, (int)strlen(src));
+}
+#endif
 
 static char *json_extract_string(const char *json, size_t json_len, const char *key) {
     if (!json || json_len == 0 || !key) return NULL;
@@ -924,6 +1010,12 @@ static char *json_extract_string(const char *json, size_t json_len, const char *
     cloudsync_memory_free(tokens);
     return result;
 }
+
+#ifdef CLOUDSYNC_UNITTEST
+char *network_test_extract_string(const char *json, const char *key) {
+    return json_extract_string(json, strlen(json), key);
+}
+#endif
 
 static int64_t json_extract_int(const char *json, size_t json_len, const char *key, int64_t default_value) {
     if (!json || json_len == 0 || !key) return default_value;
@@ -1324,6 +1416,20 @@ typedef struct {
     int64_t     send_bytes;         // serialized payload bytes sent this call
 } sync_result;
 
+// Gateway success responses wrap the payload in {"data": {...}}; legacy servers
+// and chunk objects sliced out of a chunks array are not wrapped. Key lookups are
+// scoped to one object, so a caller reading a raw response body resolves the
+// payload first. Frees through *owned. Mirrors the /check unwrap below.
+static const char *json_response_payload(const char *json, size_t json_len, char **owned, size_t *payload_len) {
+    *owned = json_extract_object_raw(json, json_len, "data");
+    if (*owned) {
+        *payload_len = strlen(*owned);
+        return *owned;
+    }
+    *payload_len = json_len;
+    return json;
+}
+
 // Returns a malloc'd raw JSON copy of failures.<stage_key> ("apply" or "check"),
 // or NULL when the field is missing or is JSON null. Caller frees with cloudsync_memory_free.
 static char *json_extract_failure_stage(const char *json, size_t json_len, const char *stage_key) {
@@ -1579,7 +1685,12 @@ static int network_send_payload_to_apply(sqlite3_context *context, network_data 
         return SQLITE_ERROR;
     }
 
-    char *s3_url = json_extract_string(upload_res.buffer, upload_res.blen, "url");
+    char *upload_payload_owned = NULL;
+    size_t upload_payload_len = 0;
+    const char *upload_payload = json_response_payload(upload_res.buffer, upload_res.blen,
+                                                       &upload_payload_owned, &upload_payload_len);
+    char *s3_url = json_extract_string(upload_payload, upload_payload_len, "url");
+    cloudsync_memory_free(upload_payload_owned);
     if (!s3_url) {
         sqlite3_result_error(context, "cloudsync_network_send_changes: missing 'url' in upload response.", -1);
         network_result_cleanup(&upload_res);
@@ -1623,24 +1734,29 @@ void network_sync_state_update_from_response(NETWORK_RESULT *res,
     // BACKWARD on a rollback when a later send chunk fails, and lastOptimisticVersion
     // becomes the durable send checkpoint — masking a decrease would advance the
     // checkpoint past the rolled-back changes and silently drop them.
-    int64_t parsed_optimistic = json_extract_int(res->buffer, res->blen, "lastOptimisticVersion", -1);
+    char *state_owned = NULL;
+    size_t state_len = 0;
+    const char *state_json = json_response_payload(res->buffer, res->blen, &state_owned, &state_len);
+
+    int64_t parsed_optimistic = json_extract_int(state_json, state_len, "lastOptimisticVersion", -1);
     if (parsed_optimistic >= 0) *last_optimistic_version = parsed_optimistic;
-    int64_t parsed_confirmed = json_extract_int(res->buffer, res->blen, "lastConfirmedVersion", -1);
+    int64_t parsed_confirmed = json_extract_int(state_json, state_len, "lastConfirmedVersion", -1);
     if (parsed_confirmed >= 0) *last_confirmed_version = parsed_confirmed;
-    int parsed_gaps_size = json_extract_array_size(res->buffer, res->blen, "gaps");
+    int parsed_gaps_size = json_extract_array_size(state_json, state_len, "gaps");
     if (parsed_gaps_size >= 0) *gaps_size = parsed_gaps_size;
 
-    char *apply_failure = json_extract_failure_stage(res->buffer, res->blen, "apply");
+    char *apply_failure = json_extract_failure_stage(state_json, state_len, "apply");
     if (apply_failure) {
         if (*apply_failure_json) cloudsync_memory_free(*apply_failure_json);
         *apply_failure_json = apply_failure;
     }
 
-    char *check_failure = json_extract_failure_stage(res->buffer, res->blen, "check");
+    char *check_failure = json_extract_failure_stage(state_json, state_len, "check");
     if (check_failure) {
         if (*check_failure_json) cloudsync_memory_free(*check_failure_json);
         *check_failure_json = check_failure;
     }
+    cloudsync_memory_free(state_owned);
 
     #ifdef CLOUDSYNC_NETWORK_TRACE
     // Full endpoint response body that the sync-state fields above were parsed from.
@@ -1685,7 +1801,11 @@ void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, s
     int64_t last_optimistic_version = -1;
 
     if (res.code == CLOUDSYNC_NETWORK_BUFFER && res.buffer) {
-        last_optimistic_version = json_extract_int(res.buffer, res.blen, "lastOptimisticVersion", -1);
+        char *ack_owned = NULL;
+        size_t ack_len = 0;
+        const char *ack_json = json_response_payload(res.buffer, res.blen, &ack_owned, &ack_len);
+        last_optimistic_version = json_extract_int(ack_json, ack_len, "lastOptimisticVersion", -1);
+        cloudsync_memory_free(ack_owned);
     } else if (res.code != CLOUDSYNC_NETWORK_OK) {
         network_result_to_sqlite_error(context, res, "unable to retrieve current status from remote host.");
         network_result_cleanup(&res);
@@ -2056,7 +2176,11 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
         if (data_json) cloudsync_memory_free(data_json);
         // failures.check may appear in either shape; extract opportunistically.
         if (out) {
-            char *check_failure = json_extract_failure_stage(result.buffer, result.blen, "check");
+            char *failure_owned = NULL;
+            size_t failure_len = 0;
+            const char *failure_json = json_response_payload(result.buffer, result.blen, &failure_owned, &failure_len);
+            char *check_failure = json_extract_failure_stage(failure_json, failure_len, "check");
+            cloudsync_memory_free(failure_owned);
             if (check_failure) {
                 if (out->check_failure_json) cloudsync_memory_free(out->check_failure_json);
                 out->check_failure_json = check_failure;
@@ -2087,6 +2211,7 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
 // Result of a receive drain (see network_drain_changes).
 typedef struct {
     int     rows;          // cumulative rows applied across the drain
+    int     denied;        // payload entries rejected by a row-level security policy
     int     chunks;        // payload chunks applied this drain
     int64_t bytes;         // serialized payload bytes received this drain
     bool    complete;      // true iff the receive stream is fully drained (nothing pending)
@@ -2111,8 +2236,11 @@ static int network_drain_changes (sqlite3_context *context, sync_result *sr,
     int64_t drain_prev_dbv = cloudsync_dbversion(data);
     sr->defer_tables = true;
 
+    // Denials accumulate on the context across every chunk of this drain, so a
+    // denial in an early chunk is still reported by the call that finishes it.
+    cloudsync_apply_stats_reset(data);
+
     int ntries = 0;          // counts only "nothing ready" (202) polls
-    int nrows_total = 0;     // cumulative rows applied across the whole drain
     int nchunks = 0;         // payload chunks applied this call
     int64_t bytes_total = 0; // serialized payload bytes received this call
     bool complete = true;    // false iff the stream is known to have more pending
@@ -2136,14 +2264,13 @@ static int network_drain_changes (sqlite3_context *context, sync_result *sr,
             request_max_chunks = safety_remaining;
         }
 
-        int nrows = 0;
+        int nrows = 0;   // required out-param; the drain total comes from the context
         rc = cloudsync_network_check_internal(context, &nrows, sr, &receive_err, request_max_chunks);
         // a receive error (network or apply) won't fix itself across retries
         if (rc != SQLITE_OK) { complete = false; break; }
 
         if (sr->page_delivered) {
-            nrows_total += nrows;                 // a staged (incomplete) fragment contributes 0
-            bytes_total += sr->bytes_received;
+            bytes_total += sr->bytes_received;    // a staged (incomplete) fragment applies 0 rows
             nchunks += sr->chunks_received;
             complete = !sr->more_pending;         // reflects whether the stream is finished
             if (!sr->more_pending) break;                                 // final batch -> drained
@@ -2172,11 +2299,18 @@ static int network_drain_changes (sqlite3_context *context, sync_result *sr,
     }
 
     // Compute the affected-tables union once, over the whole drain window.
-    if (!receive_err && rc == SQLITE_OK && nrows_total > 0) {
+    // Report rows actually written, not payload entries: an all-denied receive would
+    // otherwise claim {"rows":N,"denied":N} while tables is correctly empty. The apply
+    // return value still counts payload entries, which is a tested part of the SQL
+    // surface, so the accurate count is accumulated on the context instead.
+    int applied_total = cloudsync_apply_rows_count(data);
+
+    if (!receive_err && rc == SQLITE_OK && applied_total > 0) {
         sr->tables_json = network_get_affected_tables(db, drain_prev_dbv);
     }
 
-    dr->rows = nrows_total;
+    dr->rows = applied_total;
+    dr->denied = cloudsync_apply_denied_count(data);
     dr->chunks = nchunks;
     dr->bytes = bytes_total;
     dr->complete = complete;
@@ -2229,20 +2363,20 @@ void cloudsync_network_sync (sqlite3_context *context, int wait_ms, int max_retr
     char *recv_part;
     if (escaped_err && sr.check_failure_json) {
         recv_part = cloudsync_memory_mprintf(
-            "\"receive\":{\"rows\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s,\"error\":\"%s\",\"lastFailure\":%s}",
-            nrows_total, tables, dr.chunks, (long long)dr.bytes, complete_str, escaped_err, sr.check_failure_json);
+            "\"receive\":{\"rows\":%d,\"denied\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s,\"error\":\"%s\",\"lastFailure\":%s}",
+            nrows_total, dr.denied, tables, dr.chunks, (long long)dr.bytes, complete_str, escaped_err, sr.check_failure_json);
     } else if (escaped_err) {
         recv_part = cloudsync_memory_mprintf(
-            "\"receive\":{\"rows\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s,\"error\":\"%s\"}",
-            nrows_total, tables, dr.chunks, (long long)dr.bytes, complete_str, escaped_err);
+            "\"receive\":{\"rows\":%d,\"denied\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s,\"error\":\"%s\"}",
+            nrows_total, dr.denied, tables, dr.chunks, (long long)dr.bytes, complete_str, escaped_err);
     } else if (sr.check_failure_json) {
         recv_part = cloudsync_memory_mprintf(
-            "\"receive\":{\"rows\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s,\"lastFailure\":%s}",
-            nrows_total, tables, dr.chunks, (long long)dr.bytes, complete_str, sr.check_failure_json);
+            "\"receive\":{\"rows\":%d,\"denied\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s,\"lastFailure\":%s}",
+            nrows_total, dr.denied, tables, dr.chunks, (long long)dr.bytes, complete_str, sr.check_failure_json);
     } else {
         recv_part = cloudsync_memory_mprintf(
-            "\"receive\":{\"rows\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s}",
-            nrows_total, tables, dr.chunks, (long long)dr.bytes, complete_str);
+            "\"receive\":{\"rows\":%d,\"denied\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s}",
+            nrows_total, dr.denied, tables, dr.chunks, (long long)dr.bytes, complete_str);
     }
 
     char *buf = cloudsync_memory_mprintf("{%s,%s}", send_part, recv_part);
@@ -2329,17 +2463,17 @@ static void network_receive_changes_impl (sqlite3_context *context, int max_chun
     char *escaped = receive_err ? json_escape_string(receive_err) : NULL;
     char *buf;
     if (escaped && sr.check_failure_json) {
-        buf = cloudsync_memory_mprintf("{\"receive\":{\"rows\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s,\"error\":\"%s\",\"lastFailure\":%s}}",
-                                       nrows, tables, dr.chunks, (long long)dr.bytes, complete_str, escaped, sr.check_failure_json);
+        buf = cloudsync_memory_mprintf("{\"receive\":{\"rows\":%d,\"denied\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s,\"error\":\"%s\",\"lastFailure\":%s}}",
+                                       nrows, dr.denied, tables, dr.chunks, (long long)dr.bytes, complete_str, escaped, sr.check_failure_json);
     } else if (escaped) {
-        buf = cloudsync_memory_mprintf("{\"receive\":{\"rows\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s,\"error\":\"%s\"}}",
-                                       nrows, tables, dr.chunks, (long long)dr.bytes, complete_str, escaped);
+        buf = cloudsync_memory_mprintf("{\"receive\":{\"rows\":%d,\"denied\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s,\"error\":\"%s\"}}",
+                                       nrows, dr.denied, tables, dr.chunks, (long long)dr.bytes, complete_str, escaped);
     } else if (sr.check_failure_json) {
-        buf = cloudsync_memory_mprintf("{\"receive\":{\"rows\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s,\"lastFailure\":%s}}",
-                                       nrows, tables, dr.chunks, (long long)dr.bytes, complete_str, sr.check_failure_json);
+        buf = cloudsync_memory_mprintf("{\"receive\":{\"rows\":%d,\"denied\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s,\"lastFailure\":%s}}",
+                                       nrows, dr.denied, tables, dr.chunks, (long long)dr.bytes, complete_str, sr.check_failure_json);
     } else {
-        buf = cloudsync_memory_mprintf("{\"receive\":{\"rows\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s}}",
-                                       nrows, tables, dr.chunks, (long long)dr.bytes, complete_str);
+        buf = cloudsync_memory_mprintf("{\"receive\":{\"rows\":%d,\"denied\":%d,\"tables\":%s,\"chunks\":%d,\"bytes\":%lld,\"complete\":%s}}",
+                                       nrows, dr.denied, tables, dr.chunks, (long long)dr.bytes, complete_str);
     }
     sqlite3_result_text(context, buf, -1, cloudsync_memory_free);
     if (escaped) cloudsync_memory_free(escaped);

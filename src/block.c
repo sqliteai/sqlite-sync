@@ -65,7 +65,11 @@ static bool block_list_append(block_list_t *list, const char *content, size_t co
     block_entry_t *e = &list->entries[list->count];
     e->content = cloudsync_string_ndup(content, content_len);
     e->position_id = position_id ? cloudsync_string_dup(position_id) : NULL;
-    if (!e->content) return false;
+    if (!e->content || (position_id && !e->position_id)) {
+        cloudsync_memory_free(e->content);
+        cloudsync_memory_free(e->position_id);
+        return false;
+    }
     list->count++;
     return true;
 }
@@ -95,14 +99,21 @@ block_list_t *block_split(const char *text, const char *delimiter) {
 
     if (!text || !*text) {
         // Empty text produces a single empty block
-        block_list_append(list, "", 0, NULL);
+        if (!block_list_append(list, "", 0, NULL)) {
+            block_list_free(list);
+            return NULL;
+        }
         return list;
     }
 
+    if (!delimiter) delimiter = BLOCK_DEFAULT_DELIMITER;
     size_t dlen = strlen(delimiter);
     if (dlen == 0) {
         // No delimiter: entire text is one block
-        block_list_append(list, text, strlen(text), NULL);
+        if (!block_list_append(list, text, strlen(text), NULL)) {
+            block_list_free(list);
+            return NULL;
+        }
         return list;
     }
 
@@ -176,6 +187,11 @@ static bool block_diff_append(block_diff_t *diff, block_diff_type type, const ch
     e->type = type;
     e->position_id = cloudsync_string_dup(position_id);
     e->content = content ? cloudsync_string_dup(content) : NULL;
+    if (!e->position_id || (content && !e->content)) {
+        cloudsync_memory_free(e->position_id);
+        cloudsync_memory_free(e->content);
+        return false;
+    }
     diff->count++;
     return true;
 }
@@ -228,7 +244,7 @@ block_diff_t *block_diff(block_entry_t *old_blocks, int old_count,
                 // Exact match — mark any skipped old blocks as REMOVED
                 for (int si = old_scan; si < oi; si++) {
                     if (!old_consumed[si]) {
-                        block_diff_append(diff, BLOCK_DIFF_REMOVED, old_blocks[si].position_id, NULL);
+                        if (!block_diff_append(diff, BLOCK_DIFF_REMOVED, old_blocks[si].position_id, NULL)) goto fail;
                         old_consumed[si] = true;
                     }
                 }
@@ -252,10 +268,12 @@ block_diff_t *block_diff(block_entry_t *old_blocks, int old_count,
             }
 
             char *new_pos = block_position_between(last_position, next_pos);
-            if (new_pos) {
-                block_diff_append(diff, BLOCK_DIFF_ADDED, new_pos, new_parts[ni]);
-                last_position = diff->entries[diff->count - 1].position_id;
+            if (!new_pos) goto fail;
+            {
+                bool appended = block_diff_append(diff, BLOCK_DIFF_ADDED, new_pos, new_parts[ni]);
                 cloudsync_memory_free(new_pos);
+                if (!appended) goto fail;
+                last_position = diff->entries[diff->count - 1].position_id;
             }
         }
     }
@@ -263,12 +281,16 @@ block_diff_t *block_diff(block_entry_t *old_blocks, int old_count,
     // Mark remaining unconsumed old blocks as REMOVED
     for (int oi = old_scan; oi < old_count; oi++) {
         if (!old_consumed[oi]) {
-            block_diff_append(diff, BLOCK_DIFF_REMOVED, old_blocks[oi].position_id, NULL);
+            if (!block_diff_append(diff, BLOCK_DIFF_REMOVED, old_blocks[oi].position_id, NULL)) goto fail;
         }
     }
 
     if (old_consumed) cloudsync_memory_free(old_consumed);
     return diff;
+fail:
+    cloudsync_memory_free(old_consumed);
+    block_diff_free(diff);
+    return NULL;
 }
 
 // MARK: - Materialization -

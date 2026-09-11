@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.1.4] - 2026-09-11
+
+### Added
+
+- **Rows rejected by a row-level security policy are now reported** as `receive.denied` in the JSON returned by `cloudsync_network_receive_changes()` and `cloudsync_network_sync()`, counted across every chunk of a receive. A denial is a permanent, expected outcome — those rows are not this site's to hold — so they are skipped and the receive cursor still advances past them; without a count, discarding them would be invisible. They are not counted in `receive.rows`, which reports what was actually written. This does not yet extend to a value large enough to be sent in fragments: a denial there is still reported as a receive error and the cursor does not advance. A non-zero `denied` with a zero `rows` is the shape of an apply connection whose session identity (`auth.uid()` / `app.current_user_id`) is not set.
+- **Network requests now have deadlines**, where previously a stalled server left a sync call waiting indefinitely. 30 seconds to connect, on every request. API calls are then capped at 300 seconds of elapsed time. Artifact transfers are bounded on progress instead — they abort after 60 seconds below 1 KB/s — because a large payload on a slow link would otherwise be killed mid-flight by an elapsed-time cap, and because a genuine stall is detected sooner this way. A 1-hour absolute backstop still bounds an artifact transfer that trickles just fast enough to stay alive. Override at build time with `CLOUDSYNC_CONNECT_TIMEOUT_SECONDS`, `CLOUDSYNC_REQUEST_TIMEOUT_SECONDS`, `CLOUDSYNC_ARTIFACT_LOW_SPEED_LIMIT`, `CLOUDSYNC_ARTIFACT_LOW_SPEED_TIME` and `CLOUDSYNC_ARTIFACT_TIMEOUT_SECONDS`.
+- **Decompressed payloads are capped at 256 MiB before allocation**, overridable with `CLOUDSYNC_MAX_PAYLOAD_EXPANDED_SIZE` (LZ4's own `INT_MAX` bound still applies). Default chunk sizes are far below this limit; an oversized legacy monolithic payload must be rechunked or the limit raised explicitly.
+
+### Fixed
+
+- **A failed payload write now reports the error and leaves the receive cursor where it was.** An error on one row could previously be overwritten by a later successful row, so `cloudsync_payload_apply` could report success after dropping changes and still advance the checkpoint — losing them silently. SQLite keeps its existing per-group partial-application behaviour.
+- **Primary-key doubles keep their deployed little-endian IEEE754 byte order on every architecture.** The previous code combined host conversion with manual big-endian serialization; the historical format is now explicit. Integer keys are unchanged, and no migration is needed for little-endian deployments.
+- **PostgreSQL no longer frees a tuple table belonging to another open cursor.** A block write that failed while a second SPI cursor was active could release rows still in use; tuple tables are now owned per statement.
+- **Block-level LWW text writes roll back cleanly when a block write fails**, instead of leaving the row partially written.
+- **Block-column failures now say which table and column failed**, instead of aborting the statement with a blank message. Reading the row back is part of writing a block column, so a row the session cannot `SELECT` — a row-level security policy narrower for reads than for writes, say — is reported with that cause rather than as an empty "not an error".
+- **64-bit clock values above `UINT32_MAX` are handled correctly on incoming changes** — column and database versions, causal length, and sequence.
+- **The Node package rejects `ia32` on every operating system** rather than selecting an incompatible binary. `x64` and `arm64-musl` selection is unchanged.
+
 ## [1.1.3] - 2026-09-11
 
 ### Added

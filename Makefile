@@ -93,10 +93,9 @@ TEST_TARGET = $(patsubst %.c,$(DIST_DIR)/%$(EXE), $(notdir $(TEST_SRC)))
 # tested directly on in-memory buffers. NT_LDFLAGS reuses the platform LDFLAGS
 # (which carries -lcurl) minus the shared-library-only flags (-shared on Linux,
 # -dynamiclib on macOS) so it links as an executable, plus the test link libs.
-# -undefined dynamic_lookup is kept: the test never opens a connection, so curl's
-# transport symbols are linked but never invoked.
+# The deadline regression uses a loopback socket; no external service is needed.
 BUILD_NETTEST = build/nettest
-NT_CFLAGS = $(filter-out -DCLOUDSYNC_OMIT_NETWORK,$(T_CFLAGS))
+NT_CFLAGS = $(filter-out -DCLOUDSYNC_OMIT_NETWORK,$(T_CFLAGS)) -DCLOUDSYNC_REQUEST_TIMEOUT_SECONDS=1L -DCLOUDSYNC_CONNECT_TIMEOUT_SECONDS=1L -DCLOUDSYNC_ARTIFACT_LOW_SPEED_TIME=1L -DCLOUDSYNC_ARTIFACT_TIMEOUT_SECONDS=30L
 NT_LDFLAGS = $(filter-out -shared -dynamiclib -headerpad_max_install_names,$(LDFLAGS)) $(T_LDFLAGS)
 NT_SRC = $(SRC_FILES) $(SQLITE_DIR)/sqlite3.c $(TEST_DIR)/network_unit.c
 NT_OBJ = $(patsubst %.c,$(BUILD_NETTEST)/%.o,$(notdir $(NT_SRC)))
@@ -298,8 +297,22 @@ ifneq ($(COVERAGE),false)
 endif
 
 # Run only unit tests
-unittest: $(TARGET) $(DIST_DIR)/unit$(EXE)
+unittest: $(TARGET) $(DIST_DIR)/unit$(EXE) $(DIST_DIR)/review_regressions$(EXE)
 	@./$(DIST_DIR)/unit$(EXE)
+	@./$(DIST_DIR)/review_regressions$(EXE)
+
+# Force pk.c's endian-conversion branch while preserving the real host ABI.
+# This catches double conversion regressions even on a little-endian CI host.
+$(BUILD_TEST)/pk_forced_big_endian.o: $(SRC_DIR)/pk.c $(SRC_DIR)/cloudsync_endian.h
+	@mkdir -p $(BUILD_TEST)
+	$(CC) $(T_CFLAGS) -U__BYTE_ORDER__ -D__BYTE_ORDER__=__ORDER_BIG_ENDIAN__ -c $< -o $@
+
+$(DIST_DIR)/review_regressions_big_endian$(EXE): $(TEST_OBJ) $(BUILD_TEST)/pk_forced_big_endian.o
+	$(CC) $(filter-out $(BUILD_TEST)/pk.o $(patsubst %.c,$(BUILD_TEST)/%.o,$(notdir $(TEST_SRC))),$(TEST_OBJ)) $(BUILD_TEST)/review_regressions.o $(BUILD_TEST)/pk_forced_big_endian.o -o $@ $(T_LDFLAGS)
+
+.PHONY: endian-unittest
+endian-unittest: $(DIST_DIR)/review_regressions_big_endian$(EXE)
+	@./$(DIST_DIR)/review_regressions_big_endian$(EXE)
 
 # Network-enabled unit test binary. Link it via a file rule (like dist/unit), not in
 # the run recipe below: on Android `make test` runs binaries on the emulator from a
@@ -308,7 +321,7 @@ unittest: $(TARGET) $(DIST_DIR)/unit$(EXE)
 $(DIST_DIR)/network_unit$(EXE): $(CURL_LIB) $(NT_OBJ)
 	$(CC) $(NT_OBJ) -o $@ $(NT_LDFLAGS)
 
-# Run the network-layer unit tests (networking compiled in, no server)
+# Run the network-layer unit tests (networking compiled in, loopback only)
 network-unittest: $(DIST_DIR)/network_unit$(EXE)
 	@./$(DIST_DIR)/network_unit$(EXE)
 
