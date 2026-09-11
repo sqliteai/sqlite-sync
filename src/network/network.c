@@ -2157,7 +2157,11 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
         if (data_json) cloudsync_memory_free(data_json);
         // failures.check may appear in either shape; extract opportunistically.
         if (out) {
-            char *check_failure = json_extract_failure_stage(result.buffer, result.blen, "check");
+            char *failure_owned = NULL;
+            size_t failure_len = 0;
+            const char *failure_json = json_response_payload(result.buffer, result.blen, &failure_owned, &failure_len);
+            char *check_failure = json_extract_failure_stage(failure_json, failure_len, "check");
+            cloudsync_memory_free(failure_owned);
             if (check_failure) {
                 if (out->check_failure_json) cloudsync_memory_free(out->check_failure_json);
                 out->check_failure_json = check_failure;
