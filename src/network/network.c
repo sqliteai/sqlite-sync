@@ -371,27 +371,40 @@ static bool network_curl_pool_enabled(network_data *data) {
     return data->curl_pool_enabled > 0;
 }
 
+// API calls carry small JSON, so a cap on elapsed time is the right shape for them.
+// Artifact transfers are bulk and are bounded on progress instead: 256 MiB inside a
+// 300s cap would demand a sustained ~875 KB/s, killing a healthy transfer on a slow
+// link. Low-speed also detects a genuine stall sooner than the absolute cap does.
+static void network_curl_apply_deadlines(CURL *handle, bool is_api) {
+    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, CLOUDSYNC_CONNECT_TIMEOUT_SECONDS);
+    curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
+    if (is_api) {
+        curl_easy_setopt(handle, CURLOPT_TIMEOUT, CLOUDSYNC_REQUEST_TIMEOUT_SECONDS);
+        return;
+    }
+    curl_easy_setopt(handle, CURLOPT_TIMEOUT, CLOUDSYNC_ARTIFACT_TIMEOUT_SECONDS);
+    curl_easy_setopt(handle, CURLOPT_LOW_SPEED_LIMIT, CLOUDSYNC_ARTIFACT_LOW_SPEED_LIMIT);
+    curl_easy_setopt(handle, CURLOPT_LOW_SPEED_TIME, CLOUDSYNC_ARTIFACT_LOW_SPEED_TIME);
+}
+
 static CURL *network_curl_for_endpoint(network_data *data, const char *endpoint, bool *pooled) {
     if (pooled) *pooled = false;
+    bool is_api = network_endpoint_is_api(data, endpoint);
     if (!network_curl_pool_enabled(data)) {
         CURL *handle = curl_easy_init();
         if (!handle) return NULL;
-        curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, CLOUDSYNC_CONNECT_TIMEOUT_SECONDS);
-        curl_easy_setopt(handle, CURLOPT_TIMEOUT, CLOUDSYNC_REQUEST_TIMEOUT_SECONDS);
-        curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
+        network_curl_apply_deadlines(handle, is_api);
         return handle;
     }
 
-    CURL **slot = network_endpoint_is_api(data, endpoint) ? &data->api_curl : &data->artifact_curl;
+    CURL **slot = is_api ? &data->api_curl : &data->artifact_curl;
     if (!*slot) {
         *slot = curl_easy_init();
     } else {
         curl_easy_reset(*slot);
     }
     if (!*slot) return NULL;
-    curl_easy_setopt(*slot, CURLOPT_CONNECTTIMEOUT, CLOUDSYNC_CONNECT_TIMEOUT_SECONDS);
-    curl_easy_setopt(*slot, CURLOPT_TIMEOUT, CLOUDSYNC_REQUEST_TIMEOUT_SECONDS);
-    curl_easy_setopt(*slot, CURLOPT_NOSIGNAL, 1L);
+    network_curl_apply_deadlines(*slot, is_api);
 
     curl_easy_setopt(*slot, CURLOPT_MAXCONNECTS, CLOUDSYNC_CURL_MAXCONNECTS);
     curl_easy_setopt(*slot, CURLOPT_MAXAGE_CONN, CLOUDSYNC_CURL_MAXAGE_CONN_SECONDS);
@@ -401,9 +414,12 @@ static CURL *network_curl_for_endpoint(network_data *data, const char *endpoint,
 }
 
 #if defined(CLOUDSYNC_UNITTEST) && !defined(CLOUDSYNC_OMIT_CURL)
-bool network_test_curl_timeout(const char *url, bool use_pool) {
+bool network_test_curl_timeout(const char *url, bool use_pool, bool as_api) {
     network_data data = {0};
     data.curl_pool_enabled = use_pool ? 1 : -1;
+    // Classifying the url as the check endpoint selects the API deadline policy;
+    // leaving every endpoint NULL selects the artifact one.
+    if (as_api) data.check_endpoint = (char *)url;
     bool ok = true;
     // The second pooled call exercises curl_easy_reset as well as initialization.
     for (int i = 0; i < 2; i++) {
@@ -415,7 +431,10 @@ bool network_test_curl_timeout(const char *url, bool use_pool) {
         CURLcode rc = curl_easy_perform(handle);
         double seconds = 0;
         curl_easy_getinfo(handle, CURLINFO_TOTAL_TIME, &seconds);
-        ok = ok && rc == CURLE_OPERATION_TIMEDOUT && seconds < CLOUDSYNC_REQUEST_TIMEOUT_SECONDS + 2;
+        // curl reports a low-speed abort as CURLE_OPERATION_TIMEDOUT as well, so only
+        // the budget differs between the two policies.
+        long budget = as_api ? CLOUDSYNC_REQUEST_TIMEOUT_SECONDS : CLOUDSYNC_ARTIFACT_LOW_SPEED_TIME;
+        ok = ok && rc == CURLE_OPERATION_TIMEDOUT && seconds < budget + 2;
         if (!pooled) curl_easy_cleanup(handle);
     }
     if (data.api_curl) curl_easy_cleanup(data.api_curl);

@@ -95,7 +95,7 @@ TEST_TARGET = $(patsubst %.c,$(DIST_DIR)/%$(EXE), $(notdir $(TEST_SRC)))
 # -dynamiclib on macOS) so it links as an executable, plus the test link libs.
 # The deadline regression uses a loopback socket; no external service is needed.
 BUILD_NETTEST = build/nettest
-NT_CFLAGS = $(filter-out -DCLOUDSYNC_OMIT_NETWORK,$(T_CFLAGS)) -DCLOUDSYNC_REQUEST_TIMEOUT_SECONDS=1L -DCLOUDSYNC_CONNECT_TIMEOUT_SECONDS=1L
+NT_CFLAGS = $(filter-out -DCLOUDSYNC_OMIT_NETWORK,$(T_CFLAGS)) -DCLOUDSYNC_REQUEST_TIMEOUT_SECONDS=1L -DCLOUDSYNC_CONNECT_TIMEOUT_SECONDS=1L -DCLOUDSYNC_ARTIFACT_LOW_SPEED_TIME=1L -DCLOUDSYNC_ARTIFACT_TIMEOUT_SECONDS=30L
 NT_LDFLAGS = $(filter-out -shared -dynamiclib -headerpad_max_install_names,$(LDFLAGS)) $(T_LDFLAGS)
 NT_SRC = $(SRC_FILES) $(SQLITE_DIR)/sqlite3.c $(TEST_DIR)/network_unit.c
 NT_OBJ = $(patsubst %.c,$(BUILD_NETTEST)/%.o,$(notdir $(NT_SRC)))

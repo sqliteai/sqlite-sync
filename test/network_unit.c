@@ -215,7 +215,7 @@ static bool test_unicode(void) {
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
-extern bool network_test_curl_timeout(const char *, bool);
+extern bool network_test_curl_timeout(const char *, bool, bool);
 static bool test_stalled_http_timeout(void) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return false;
@@ -228,7 +228,10 @@ static bool test_stalled_http_timeout(void) {
     char url[80];
     snprintf(url, sizeof(url), "http://127.0.0.1:%u/", ntohs(address.sin_port));
     // A listening socket that never sends HTTP simulates a stalled server.
-    if (ok) ok = network_test_curl_timeout(url, false) && network_test_curl_timeout(url, true);
+    // An API endpoint is bounded by elapsed time; an artifact transfer by a stall.
+    // Both shapes must abort against a server that accepts and then sends nothing.
+    if (ok) ok = network_test_curl_timeout(url, false, true) && network_test_curl_timeout(url, true, true);
+    if (ok) ok = network_test_curl_timeout(url, false, false) && network_test_curl_timeout(url, true, false);
     close(fd);
     return ok;
 }
@@ -236,7 +239,7 @@ static bool test_stalled_http_timeout(void) {
 
 int main(void) {
 #if !defined(_WIN32) && !defined(CLOUDSYNC_OMIT_CURL)
-    check("HTTP deadlines for new and reset pooled handles:", test_stalled_http_timeout());
+    check("HTTP deadlines: API elapsed cap and artifact stall cap:", test_stalled_http_timeout());
 #endif
     check("JSON keys only match root object members:", test_json_scope());
     check("Gateway data envelope is unwrapped before scoped lookups:", test_json_envelope());
