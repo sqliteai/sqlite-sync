@@ -3937,9 +3937,9 @@ static int cloudsync_payload_apply_reassembled_fragment (cloudsync_context *data
     if (rc == DBRES_OK) {
         databasevm_bind_text(vm, 1, value_id, -1);
         // A failed delete is deliberately tolerated rather than propagated: the value
-        // itself is already applied or permanently denied, so failing here would stall
-        // the cursor and re-deliver it, and a delete that fails once fails again on
-        // every retry. The leftover rows are bounded by the stale-fragment cleanup.
+        // is already applied, so failing here would stall the cursor and re-deliver
+        // it, and a delete that fails once fails again on every retry. The leftover
+        // rows are bounded by the stale-fragment cleanup.
         // (The former `if (step_rc == DBRES_DONE) rc = DBRES_OK;` only looked like a
         // check: rc was already DBRES_OK from the prepare.)
         databasevm_step(vm);
