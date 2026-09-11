@@ -1542,7 +1542,14 @@ cleanup:
     if (rc != DBRES_OK) snprintf(error_message, sizeof(error_message), "%s", cloudsync_errmsg(data));
     merge_pending_free_entries(batch);
     if (flush_savepoint) {
-        if (rc == DBRES_OK) rc = database_commit_savepoint(data, "merge_flush");
+        if (rc == DBRES_OK) {
+            rc = database_commit_savepoint(data, "merge_flush");
+            // Snapshot here too: arriving with rc OK leaves error_message empty, and a
+            // commit that fails (a deadlock or serialization failure, say) sets a real
+            // message that the generic fallback below would otherwise replace. The
+            // rollback runs after, and touches the error state itself.
+            if (rc != DBRES_OK) snprintf(error_message, sizeof(error_message), "%s", cloudsync_errmsg(data));
+        }
         if (rc != DBRES_OK) database_rollback_savepoint(data, "merge_flush");
     }
     if (rc != DBRES_OK) cloudsync_set_error(data, error_message[0] ? error_message : "Unable to flush pending changes", rc);
