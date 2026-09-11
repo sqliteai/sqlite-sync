@@ -31,7 +31,7 @@ docker exec -it cloudsync-postgres psql -U postgres -d cloudsync_test -c "CREATE
 ```
 
 This starts:
-- PostgreSQL 16 on `localhost:5432`
+- PostgreSQL 17 on `localhost:5432` (override with `POSTGRES_TAG`, e.g. `18` or `15`)
 - CloudSync extension pre-installed
 - pgAdmin on `localhost:5050` (optional, use `--profile admin`)
 
@@ -107,19 +107,18 @@ Run the SQL that exercises the code path. If `psql` blocks, the backend is pause
 
 Use this when you're running `supabase start` and want CloudSync inside the local stack.
 The Supabase CLI uses a bundled PostgreSQL image (for example,
-`public.ecr.aws/supabase/postgres:17.6.1.071`). Build a matching image that
+`public.ecr.aws/supabase/postgres:17.6.1.170`). Build a matching image that
 includes CloudSync, then tag it with the same name so the CLI reuses it. This
 keeps your local Supabase stack intact (auth, realtime, storage, etc.) while
 enabling the extension in the CLI-managed Postgres container.
 
-> **Note on Ubuntu vs Alpine bases.** Newer Supabase Postgres images (roughly
-> `17.6.1.084` and later) use an Alpine-based userland instead of the earlier
-> Ubuntu one. The published release image (`Dockerfile.supabase.release`, used
-> for `sqlitecloud/sqlite-sync-supabase:*`) detects the userland automatically
-> and works on both. The local build-from-source flow below
-> (`make postgres-supabase-build`, `Dockerfile.supabase`) currently assumes an
-> Ubuntu base; if your CLI stack pulls a newer Alpine image, prefer the
-> published `:17-alpine` release image.
+> **Note on Ubuntu vs Alpine bases.** Supabase moved both the PG15 and PG17
+> lines to an Alpine-based userland, starting at roughly `15.14.1.x` and
+> `17.6.1.084` respectively; earlier bases in both lines were Ubuntu. The published release
+> image (`Dockerfile.supabase.release`, used for
+> `sqlitecloud/sqlite-sync-supabase:*`) and the local build-from-source flow
+> below (`make postgres-supabase-build`, `Dockerfile.supabase`) both detect the
+> userland automatically and work on either family.
 
 ### Prerequisites
 
@@ -149,12 +148,12 @@ enabling the extension in the CLI-managed Postgres container.
    `SUPABASE_CLI_IMAGE=public.ecr.aws/supabase/postgres:<tag>`.
    Example: 
    ```bash
-   SUPABASE_CLI_IMAGE=public.ecr.aws/supabase/postgres:17.6.1.071 make postgres-supabase-build
+   SUPABASE_CLI_IMAGE=public.ecr.aws/supabase/postgres:17.6.1.170 make postgres-supabase-build
    ```
    You can also set the Supabase base image tag explicitly (defaults to
-   `17.6.1.071`). This only affects the base image used in the Dockerfile:
+   `17.6.1.170`). This only affects the base image used in the Dockerfile:
    ```bash
-   SUPABASE_POSTGRES_TAG=17.6.1.071 make postgres-supabase-build
+   SUPABASE_POSTGRES_TAG=17.6.1.170 make postgres-supabase-build
    ```
 
 4. Restart the stack:
