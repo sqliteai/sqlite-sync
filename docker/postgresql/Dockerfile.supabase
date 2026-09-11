@@ -1,8 +1,8 @@
 # Supabase PostgreSQL with CloudSync (sqlite-sync) built from source
 #
 # Works with both Supabase base image families:
-#   - Ubuntu/glibc images (e.g. PG15 15.8.1.135, older PG17 17.6.1.071)
-#   - Alpine-userland images (e.g. PG17 17.6.1.084+); still a glibc Nix postgres
+#   - Alpine-userland images, which both the PG15 and PG17 lines now ship
+#   - the older Ubuntu/glibc images (PG17 up to 17.6.1.071, PG15 up to 15.8.1.x)
 # Both families run a Nix-built, glibc-linked PostgreSQL, so the extension is
 # compiled in a glibc builder stage (official postgres image + PGDG headers,
 # the same toolchain that produces the release artifacts) and the identical
@@ -12,7 +12,7 @@
 # PG_MAJOR must match the major version of SUPABASE_POSTGRES_TAG; the
 # postgres-supabase-build Makefile target derives it automatically.
 ARG PG_MAJOR=17
-ARG SUPABASE_POSTGRES_TAG=17.6.1.071
+ARG SUPABASE_POSTGRES_TAG=17.6.1.170
 
 # Build stage for CloudSync extension (glibc toolchain, matching PG headers)
 FROM postgres:${PG_MAJOR} AS cloudsync-builder

@@ -63,6 +63,7 @@
 \ir 53_payload_blob_checked_pg_try.sql
 \ir 54_payload_chunks_fragment_state.sql
 \ir 55_payload_chunks_positional_resume.sql
+\ir 56_many_columns.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

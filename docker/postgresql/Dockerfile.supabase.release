@@ -1,15 +1,15 @@
 # Supabase PostgreSQL with pre-compiled CloudSync (sqlite-sync) extension
 #
 # Works with both Supabase base image families:
-#   - Ubuntu/glibc images (e.g. PG15 15.8.1.135, older PG17 17.6.1.071)
-#   - Alpine-userland images (e.g. PG17 17.6.1.084+); still a glibc Nix postgres
+#   - Alpine-userland images, which both the PG15 and PG17 lines now ship
+#   - the older Ubuntu/glibc images (PG17 up to 17.6.1.071, PG15 up to 15.8.1.x)
 # Both run a Nix-built, glibc-linked PostgreSQL, so the SAME glibc extension
 # artifact is installed in either case. Only the build-time userland tooling
 # differs (apt-get vs apk), which this file detects at runtime.
 #
 # Usage:
 #   docker build \
-#     --build-arg SUPABASE_POSTGRES_TAG=17.6.1.151 \
+#     --build-arg SUPABASE_POSTGRES_TAG=17.6.1.170 \
 #     --build-arg CLOUDSYNC_VERSION=<version> \
 #     -f docker/postgresql/Dockerfile.supabase.release \
 #     -t my-cloudsync-supabase-postgres .
@@ -18,7 +18,7 @@
 #   docker pull sqlitecloud/sqlite-sync-supabase:17
 #
 
-ARG SUPABASE_POSTGRES_TAG=17.6.1.071
+ARG SUPABASE_POSTGRES_TAG=17.6.1.170
 FROM public.ecr.aws/supabase/postgres:${SUPABASE_POSTGRES_TAG}
 
 ARG CLOUDSYNC_VERSION

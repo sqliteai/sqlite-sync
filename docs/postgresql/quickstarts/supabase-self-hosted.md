@@ -14,20 +14,18 @@ Follow [Supabase's Installing Supabase](https://supabase.com/docs/guides/self-ho
 db:
   # Supabase on PostgreSQL 15
   image: sqlitecloud/sqlite-sync-supabase:15
-  # instead of: public.ecr.aws/supabase/postgres:15.8.1.135
+  # instead of: public.ecr.aws/supabase/postgres:15.14.1.170
 
   # OR Supabase on PostgreSQL 17
   image: sqlitecloud/sqlite-sync-supabase:17
-  # instead of: public.ecr.aws/supabase/postgres:17.6.1.071
-
-  # OR Supabase on PostgreSQL 17 with a newer Alpine-based Supabase image
-  image: sqlitecloud/sqlite-sync-supabase:17-alpine
-  # instead of: public.ecr.aws/supabase/postgres:17.6.1.151
+  # instead of: public.ecr.aws/supabase/postgres:17.6.1.170
 ```
 
-Use the CloudSync image tag that matches your Supabase PostgreSQL major version. The published major tags `sqlitecloud/sqlite-sync-supabase:15` and `sqlitecloud/sqlite-sync-supabase:17` are the standard choice.
+Use the CloudSync image tag that matches your Supabase PostgreSQL major version. `:15` and `:17` each track the base image Supabase currently ships for that major, so they are the standard choice.
 
-**Ubuntu vs Alpine base:** newer Supabase Postgres images (roughly `17.6.1.084` and later) ship an Alpine-based userland instead of the earlier Ubuntu one. The extension itself is identical on both — the PostgreSQL binary is glibc-linked in either case — so for a new deployment the two are interchangeable. Moving an **existing** deployment from one family to the other needs the ownership fix described under [For Existing Deployments](#for-existing-deployments). If your Supabase stack pins one of these newer Alpine base images, use the matching `sqlitecloud/sqlite-sync-supabase:17-alpine` tag (or the exact base tag, e.g. `sqlitecloud/sqlite-sync-supabase:17.6.1.151`) so the CloudSync image is built from the same base. Exact Supabase base-image tags are published for both families but are optional for normal setup.
+**Pinning an exact base:** if your Supabase stack pins a specific base image, an exact-base CloudSync tag is published alongside the major tags (e.g. `sqlitecloud/sqlite-sync-supabase:17.6.1.170`). Use it when you need the CloudSync image built from precisely the base your stack expects; otherwise the major tag is simpler.
+
+**Ubuntu vs Alpine base:** Supabase moved both the PG15 and PG17 lines to an Alpine userland — starting at roughly `15.14.1.x` and `17.6.1.084` respectively; earlier bases in both lines were Ubuntu. The extension is identical on either — the PostgreSQL binary is glibc-linked in both families — so for a new deployment the difference does not matter. Moving an **existing** data directory from one family to the other needs the ownership fix described under [For Existing Deployments](#for-existing-deployments).
 
 ### Add the CloudSync Init Script
 
@@ -67,7 +65,6 @@ Follow [Supabase's Updating](https://supabase.com/docs/guides/self-hosting/docke
 # Update docker-compose.yml to use:
 # sqlitecloud/sqlite-sync-supabase:15
 # or sqlitecloud/sqlite-sync-supabase:17
-# or sqlitecloud/sqlite-sync-supabase:17-alpine (newer Alpine-based Supabase bases)
 docker compose pull
 docker compose down && docker compose up -d
 ```
@@ -80,7 +77,7 @@ CREATE EXTENSION IF NOT EXISTS cloudsync;
 
 #### If Postgres fails to start after moving to a different base image
 
-Supabase base images do not pin the `postgres` user's UID, so it differs between them — for example `105` on the Ubuntu 20.04 based `15.8.1.085`, `101` on the Ubuntu 24.04 based `15.8.1.135`, and `100` on the Alpine based `17.6.1.151`. A data directory created under one base is unreadable by another, and the container fails to start with:
+Supabase base images do not pin the `postgres` user's UID, so it differs between them — for example `105` on the Ubuntu 20.04 based `15.8.1.085`, `101` on the Ubuntu 24.04 based `15.8.1.135`, and `100` on the Alpine based `17.6.1.151`. Discover the UID of the image you are moving to rather than assuming one. A data directory created under one base is unreadable by another, and the container fails to start with:
 
 ```
 cat: /etc/postgresql-custom/pgsodium_root.key: Permission denied

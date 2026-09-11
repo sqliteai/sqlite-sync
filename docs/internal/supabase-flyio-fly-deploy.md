@@ -103,7 +103,7 @@ is intended hardening, not a broken route.
 ```yaml
 services:
   db:
-    image: ${CLOUDSYNC_IMAGE:-sqlitecloud/sqlite-sync-supabase:17-alpine}
+    image: ${CLOUDSYNC_IMAGE:-sqlitecloud/sqlite-sync-supabase:17}
     volumes:
       - ./cloudsync.sql:/docker-entrypoint-initdb.d/init-scripts/100-cloudsync.sql:Z
     ports:
@@ -140,7 +140,7 @@ override:
 
 ```bash
 fly secrets set -a "$FLY_APP" \
-  CLOUDSYNC_IMAGE=sqlitecloud/sqlite-sync-supabase:17-alpine-beta-<branch>
+  CLOUDSYNC_IMAGE=sqlitecloud/sqlite-sync-supabase:17-beta-<branch>
 ```
 
 ### Secrets
@@ -208,7 +208,7 @@ release the public IPs, and use `fly proxy 8000 -a <app>`.
 
 | Task | Command |
 |---|---|
-| Update the CloudSync image | released tag: redeploy (compose pulls `:17-alpine`); beta: `fly secrets set CLOUDSYNC_IMAGE=…` |
+| Update the CloudSync image | released tag: redeploy (compose pulls `:17`); beta: `fly secrets set CLOUDSYNC_IMAGE=…` |
 | Update Supabase services | bump `SUPABASE_REF` in the `Dockerfile`, `fly deploy` |
 | Restart the stack | `fly machine restart -a <app>` — the entrypoint re-runs everything |
 | Inspect containers | `fly ssh console -a <app> -C "docker ps"` |
@@ -380,7 +380,7 @@ it with `CLOUDSYNC_IMAGE`. To build one locally instead:
 git submodule update --init --recursive   # else: fractional_indexing.h: No such file or directory
 
 docker build --platform linux/amd64 \
-  --build-arg SUPABASE_POSTGRES_TAG=17.6.1.151 \
+  --build-arg SUPABASE_POSTGRES_TAG=17.6.1.170 \
   -f docker/postgresql/Dockerfile.supabase \
   -t <registry>/<image>:<tag> .
 
@@ -415,10 +415,11 @@ without credentials, or `docker login` has to run on the Machine.
 
 ## Image / version notes
 
-The Alpine CloudSync images are built from `supabase/postgres:17.6.1.151` (see the
-publish matrix in `.github/workflows/main.yml`), while the pinned upstream compose
-expects `17.6.1.136`. Same PG 17 line, newer patch base — fine, but re-check after
-bumping either side.
+`:17` is built from `supabase/postgres:17.6.1.170` (see the publish matrix in
+`.github/workflows/main.yml`), while the pinned upstream compose expects
+`17.6.1.136`. Same PG 17 line, newer patch base — fine, but re-check after bumping
+either side. The tag tracks whatever base Supabase currently ships for the major,
+so it moves when upstream does; there is no longer a separate `:17-alpine` tag.
 
 The pinned compose runs 11 services: `db`, `supavisor`, `auth`, `rest`, `realtime`,
 `storage`, `imgproxy`, `meta`, `functions`, `studio` and the gateway. Upstream has

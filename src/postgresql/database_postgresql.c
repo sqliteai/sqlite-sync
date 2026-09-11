@@ -10,6 +10,7 @@
 #include "postgres.h"
 
 #include <inttypes.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -49,7 +50,7 @@
 
 // PostgreSQL SPI handles require knowing parameter count and types upfront.
 // Solution: Defer actual SPI_prepare until first step(), after all bindings are set.
-#define MAX_PARAMS 32
+#define INITIAL_PARAM_CAPACITY 32
 
 typedef struct {
     // Prepared plan
@@ -67,11 +68,12 @@ typedef struct {
 
     // Params
     int             nparams;
-    Oid             types[MAX_PARAMS];
-    Oid             prepared_types[MAX_PARAMS]; // types used when plan was SPI_prepare'd
+    int             param_capacity;
+    Oid            *types;
+    Oid            *prepared_types; // types used when plan was SPI_prepare'd
     int             prepared_nparams;           // nparams at prepare time
-    Datum           values[MAX_PARAMS];
-    char            nulls[MAX_PARAMS];
+    Datum          *values;
+    char           *nulls;
     bool            executed_nonselect; // non-select executed already
 
     // Memory
@@ -85,6 +87,7 @@ typedef struct {
 } pg_stmt_t;
 
 static int database_refresh_snapshot (void);
+static int databasevm_reserve_params (pg_stmt_t *stmt, int required);
 
 // MARK: - SQL -
 
@@ -1988,16 +1991,70 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
 
 // MARK: - VM -
 
+static int databasevm_reserve_params (pg_stmt_t *stmt, int required) {
+    if (!stmt || required < 0) return DBRES_ERROR;
+    if (required <= stmt->param_capacity) return DBRES_OK;
+
+    int new_capacity = stmt->param_capacity > 0 ? stmt->param_capacity : INITIAL_PARAM_CAPACITY;
+    while (new_capacity < required) {
+        if (new_capacity > INT_MAX / 2) {
+            new_capacity = required;
+            break;
+        }
+        new_capacity *= 2;
+    }
+
+    if ((Size)new_capacity > MaxAllocSize / sizeof(Oid) ||
+        (Size)new_capacity > MaxAllocSize / sizeof(Datum)) {
+        return cloudsync_set_error(stmt->data, "Too many SQL parameters", DBRES_NOMEM);
+    }
+
+    Oid *new_types = (Oid *)MemoryContextAllocExtended(
+        stmt->stmt_mcxt, sizeof(Oid) * (Size)new_capacity, MCXT_ALLOC_ZERO | MCXT_ALLOC_NO_OOM);
+    Oid *new_prepared_types = (Oid *)MemoryContextAllocExtended(
+        stmt->stmt_mcxt, sizeof(Oid) * (Size)new_capacity, MCXT_ALLOC_ZERO | MCXT_ALLOC_NO_OOM);
+    Datum *new_values = (Datum *)MemoryContextAllocExtended(
+        stmt->stmt_mcxt, sizeof(Datum) * (Size)new_capacity, MCXT_ALLOC_ZERO | MCXT_ALLOC_NO_OOM);
+    char *new_nulls = (char *)MemoryContextAllocExtended(
+        stmt->stmt_mcxt, sizeof(char) * (Size)new_capacity, MCXT_ALLOC_ZERO | MCXT_ALLOC_NO_OOM);
+
+    if (!new_types || !new_prepared_types || !new_values || !new_nulls) {
+        if (new_types) pfree(new_types);
+        if (new_prepared_types) pfree(new_prepared_types);
+        if (new_values) pfree(new_values);
+        if (new_nulls) pfree(new_nulls);
+        return cloudsync_set_error(stmt->data, "Not enough memory for SQL parameters", DBRES_NOMEM);
+    }
+
+    if (stmt->param_capacity > 0) {
+        memcpy(new_types, stmt->types, sizeof(Oid) * (Size)stmt->param_capacity);
+        memcpy(new_prepared_types, stmt->prepared_types, sizeof(Oid) * (Size)stmt->param_capacity);
+        memcpy(new_values, stmt->values, sizeof(Datum) * (Size)stmt->param_capacity);
+        memcpy(new_nulls, stmt->nulls, sizeof(char) * (Size)stmt->param_capacity);
+    }
+    for (int i = stmt->param_capacity; i < new_capacity; i++) {
+        new_types[i] = UNKNOWNOID;
+        new_nulls[i] = 'n';
+    }
+
+    if (stmt->types) pfree(stmt->types);
+    if (stmt->prepared_types) pfree(stmt->prepared_types);
+    if (stmt->values) pfree(stmt->values);
+    if (stmt->nulls) pfree(stmt->nulls);
+    stmt->types = new_types;
+    stmt->prepared_types = new_prepared_types;
+    stmt->values = new_values;
+    stmt->nulls = new_nulls;
+    stmt->param_capacity = new_capacity;
+    return DBRES_OK;
+}
+
 int databasevm_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, int flags) {
     if (!sql || !vm) {
         return cloudsync_set_error(data, "Invalid parameters to databasevm_prepare", DBRES_ERROR);
     }
     *vm = NULL;
     cloudsync_reset_error(data);
-    
-    // sanity check number of parameters
-    // int counter = count_params(sql);
-    // if (counter > MAX_PARAMS) return cloudsync_set_error(data, "Maximum number of parameters reached", DBRES_MISUSE);
     
     // create PostgreSQL VM statement
     pg_stmt_t *stmt = (pg_stmt_t *)cloudsync_memory_zeroalloc(sizeof(pg_stmt_t));
@@ -2065,7 +2122,9 @@ int databasevm_step0 (pg_stmt_t *stmt) {
         stmt->plan_is_prepared = true;
 
         // Save the types used for this plan so we can detect type changes
-        memcpy(stmt->prepared_types, stmt->types, sizeof(Oid) * stmt->nparams);
+        if (stmt->nparams > 0) {
+            memcpy(stmt->prepared_types, stmt->types, sizeof(Oid) * (Size)stmt->nparams);
+        }
         stmt->prepared_nparams = stmt->nparams;
     }
     PG_CATCH();
@@ -2321,7 +2380,7 @@ void databasevm_clear_bindings (dbvm_t *vm) {
     stmt->nparams = 0;
 
     // Reset params array to defaults
-    for (int i = 0; i < MAX_PARAMS; i++) {
+    for (int i = 0; i < stmt->param_capacity; i++) {
         stmt->types[i] = UNKNOWNOID;
         stmt->values[i] = (Datum) 0;
         stmt->nulls[i] = 'n';   // default NULL
@@ -2355,9 +2414,9 @@ int databasevm_bind_blob (dbvm_t *vm, int index, const void *value, uint64_t siz
     if (size > (uint64) (MaxAllocSize - VARHDRSZ)) return DBRES_NOMEM;
     
     int idx = index - 1;
-    if (idx >= MAX_PARAMS) return DBRES_ERROR;
-    
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    int rc = databasevm_reserve_params(stmt, index);
+    if (rc != DBRES_OK) return rc;
     MemoryContext old = MemoryContextSwitchTo(stmt->bind_mcxt);
     
     // Convert binary data to PostgreSQL bytea
@@ -2379,9 +2438,9 @@ int databasevm_bind_double (dbvm_t *vm, int index, double value) {
     if (!vm || index < 1) return DBRES_ERROR;
 
     int idx = index - 1;
-    if (idx >= MAX_PARAMS) return DBRES_ERROR;
-    
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    int rc = databasevm_reserve_params(stmt, index);
+    if (rc != DBRES_OK) return rc;
     stmt->values[idx] = Float8GetDatum(value);
     stmt->types[idx] = FLOAT8OID;
     stmt->nulls[idx] = ' ';
@@ -2394,9 +2453,9 @@ int databasevm_bind_int (dbvm_t *vm, int index, int64_t value) {
     if (!vm || index < 1) return DBRES_ERROR;
 
     int idx = index - 1;
-    if (idx >= MAX_PARAMS) return DBRES_ERROR;
-    
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    int rc = databasevm_reserve_params(stmt, index);
+    if (rc != DBRES_OK) return rc;
     stmt->values[idx] = Int64GetDatum(value);
     stmt->types[idx] = INT8OID;
     stmt->nulls[idx] = ' ';
@@ -2409,9 +2468,9 @@ int databasevm_bind_null (dbvm_t *vm, int index) {
     if (!vm || index < 1) return DBRES_ERROR;
 
     int idx = index - 1;
-    if (idx >= MAX_PARAMS) return DBRES_ERROR;
-    
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    int rc = databasevm_reserve_params(stmt, index);
+    if (rc != DBRES_OK) return rc;
     stmt->values[idx] = (Datum)0;
     stmt->types[idx] = TEXTOID;  // TEXTOID has casts to most types
     stmt->nulls[idx] = 'n';
@@ -2429,9 +2488,9 @@ int databasevm_bind_text (dbvm_t *vm, int index, const char *value, int size) {
     if ((Size)size > MaxAllocSize - VARHDRSZ) return DBRES_NOMEM;
     
     int idx = index - 1;
-    if (idx >= MAX_PARAMS) return DBRES_ERROR;
-    
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    int rc = databasevm_reserve_params(stmt, index);
+    if (rc != DBRES_OK) return rc;
     MemoryContext old = MemoryContextSwitchTo(stmt->bind_mcxt);
     
     text *t = cstring_to_text_with_len(value, size);
@@ -2452,9 +2511,9 @@ int databasevm_bind_value (dbvm_t *vm, int index, dbvalue_t *value) {
     // validate index bounds properly (1-based index)
     if (index < 1) return DBRES_ERROR;
     int idx = index - 1;
-    if (idx >= MAX_PARAMS) return DBRES_ERROR;
-    
     pg_stmt_t *stmt = (pg_stmt_t*)vm;
+    int rc = databasevm_reserve_params(stmt, index);
+    if (rc != DBRES_OK) return rc;
     pgvalue_t *v = (pgvalue_t *)value;
     if (!v || v->isnull) {
         stmt->values[idx] = (Datum)0;
@@ -3072,5 +3131,3 @@ uint64_t dbmem_size (void *ptr) {
     // Return 0 as a safe default
     return 0;
 }
-
-
