@@ -18,7 +18,10 @@
 extern "C" {
 #endif
 
-#define CLOUDSYNC_VERSION                       "1.1.3"
+#define CLOUDSYNC_VERSION                       "1.1.4"
+#ifndef CLOUDSYNC_MAX_PAYLOAD_EXPANDED_SIZE
+#define CLOUDSYNC_MAX_PAYLOAD_EXPANDED_SIZE (256U * 1024U * 1024U)
+#endif
 #define CLOUDSYNC_MAX_TABLENAME_LEN             512
 
 #define CLOUDSYNC_VALUE_NOTSET                  -1
@@ -207,6 +210,8 @@ int local_mark_insert_or_update_meta (cloudsync_table_context *table, const void
 int local_mark_delete_meta (cloudsync_table_context *table, const void *pk, size_t pklen, int64_t db_version, int seq);
 int local_mark_delete_block_meta (cloudsync_table_context *table, const void *pk, size_t pklen, const char *block_colname, int64_t db_version, int seq);
 int block_delete_value_external (cloudsync_context *data, cloudsync_table_context *table, const void *pk, size_t pklen, const char *block_colname);
+int local_block_update(cloudsync_context *data, cloudsync_table_context *table, const void *pk, size_t pklen, int column, const char *text, int64_t version, bool initial);
+int local_block_insert(cloudsync_context *data, cloudsync_table_context *table, const void *pk, size_t pklen, int column, int64_t version);
 int local_drop_meta (cloudsync_table_context *table, const void *pk, size_t pklen);
 int local_update_move_meta (cloudsync_table_context *table, const void *pk, size_t pklen, const void *pk2, size_t pklen2, int64_t db_version);
 

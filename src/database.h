@@ -25,7 +25,8 @@ typedef enum {
     DBRES_CONSTRAINT = 19,
     DBRES_MISUSE     = 21,
     DBRES_ROW        = 100,
-    DBRES_DONE       = 101
+    DBRES_DONE       = 101,
+    DBRES_POLICY_DENIED = 1001  // PostgreSQL RLS WITH CHECK denial, not a generic SQL error
 } DBRES;
 
 typedef enum {

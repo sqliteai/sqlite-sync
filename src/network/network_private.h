@@ -12,6 +12,12 @@
 #include <stddef.h>
 
 #define CLOUDSYNC_DEFAULT_ADDRESS           "https://cloudsync.sqlite.ai"
+#ifndef CLOUDSYNC_CONNECT_TIMEOUT_SECONDS
+#define CLOUDSYNC_CONNECT_TIMEOUT_SECONDS 30L
+#endif
+#ifndef CLOUDSYNC_REQUEST_TIMEOUT_SECONDS
+#define CLOUDSYNC_REQUEST_TIMEOUT_SECONDS 300L
+#endif
 #define CLOUDSYNC_ENDPOINT_PREFIX           "v2/cloudsync/databases"
 #define CLOUDSYNC_ENDPOINT_UPLOAD           "upload"
 #define CLOUDSYNC_ENDPOINT_CHECK            "check"

@@ -374,7 +374,12 @@ static bool network_curl_pool_enabled(network_data *data) {
 static CURL *network_curl_for_endpoint(network_data *data, const char *endpoint, bool *pooled) {
     if (pooled) *pooled = false;
     if (!network_curl_pool_enabled(data)) {
-        return curl_easy_init();
+        CURL *handle = curl_easy_init();
+        if (!handle) return NULL;
+        curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, CLOUDSYNC_CONNECT_TIMEOUT_SECONDS);
+        curl_easy_setopt(handle, CURLOPT_TIMEOUT, CLOUDSYNC_REQUEST_TIMEOUT_SECONDS);
+        curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
+        return handle;
     }
 
     CURL **slot = network_endpoint_is_api(data, endpoint) ? &data->api_curl : &data->artifact_curl;
@@ -384,6 +389,9 @@ static CURL *network_curl_for_endpoint(network_data *data, const char *endpoint,
         curl_easy_reset(*slot);
     }
     if (!*slot) return NULL;
+    curl_easy_setopt(*slot, CURLOPT_CONNECTTIMEOUT, CLOUDSYNC_CONNECT_TIMEOUT_SECONDS);
+    curl_easy_setopt(*slot, CURLOPT_TIMEOUT, CLOUDSYNC_REQUEST_TIMEOUT_SECONDS);
+    curl_easy_setopt(*slot, CURLOPT_NOSIGNAL, 1L);
 
     curl_easy_setopt(*slot, CURLOPT_MAXCONNECTS, CLOUDSYNC_CURL_MAXCONNECTS);
     curl_easy_setopt(*slot, CURLOPT_MAXAGE_CONN, CLOUDSYNC_CURL_MAXAGE_CONN_SECONDS);
@@ -391,6 +399,30 @@ static CURL *network_curl_for_endpoint(network_data *data, const char *endpoint,
     if (pooled) *pooled = true;
     return *slot;
 }
+
+#if defined(CLOUDSYNC_UNITTEST) && !defined(CLOUDSYNC_OMIT_CURL)
+bool network_test_curl_timeout(const char *url, bool use_pool) {
+    network_data data = {0};
+    data.curl_pool_enabled = use_pool ? 1 : -1;
+    bool ok = true;
+    // The second pooled call exercises curl_easy_reset as well as initialization.
+    for (int i = 0; i < 2; i++) {
+        bool pooled = false;
+        CURL *handle = network_curl_for_endpoint(&data, url, &pooled);
+        if (!handle) { ok = false; break; }
+        curl_easy_setopt(handle, CURLOPT_URL, url);
+        curl_easy_setopt(handle, CURLOPT_PROXY, "");
+        CURLcode rc = curl_easy_perform(handle);
+        double seconds = 0;
+        curl_easy_getinfo(handle, CURLINFO_TOTAL_TIME, &seconds);
+        ok = ok && rc == CURLE_OPERATION_TIMEDOUT && seconds < CLOUDSYNC_REQUEST_TIMEOUT_SECONDS + 2;
+        if (!pooled) curl_easy_cleanup(handle);
+    }
+    if (data.api_curl) curl_easy_cleanup(data.api_curl);
+    if (data.artifact_curl) curl_easy_cleanup(data.artifact_curl);
+    return ok;
+}
+#endif
 
 static bool network_buffer_check (network_buffer *data, size_t needed) {
     // alloc/resize buffer
@@ -813,13 +845,6 @@ static bool jsmn_token_eq(const char *json, const jsmntok_t *tok, const char *s)
             strncmp(json + tok->start, s, tok->end - tok->start) == 0);
 }
 
-static int jsmn_find_key(const char *json, const jsmntok_t *tokens, int ntokens, const char *key) {
-    for (int i = 1; i + 1 < ntokens; i++) {
-        if (jsmn_token_eq(json, &tokens[i], key)) return i;
-    }
-    return -1;
-}
-
 static int jsmn_token_span(const jsmntok_t *tokens, int ntokens, int index) {
     if (!tokens || index < 0 || index >= ntokens) return 0;
     int start = tokens[index].start;
@@ -871,41 +896,83 @@ static jsmntok_t *json_parse_tokens_alloc(const char *json, size_t json_len, int
     return tokens;
 }
 
-static char *json_unescape_string(const char *src, int len) {
-    char *out = cloudsync_memory_zeroalloc(len + 1);
-    if (!out) return NULL;
+static int jsmn_find_key(const char *json, const jsmntok_t *tokens, int ntokens, const char *key) {
+    int value_index;
+    return jsmn_find_object_value(json, tokens, ntokens, 0, key, &value_index) ? value_index - 1 : -1;
+}
 
+static int json_hex4(const char *src) {
+    int value = 0;
+    for (int i = 0; i < 4; i++) {
+        unsigned char c = (unsigned char)src[i];
+        int digit = c >= '0' && c <= '9' ? c - '0' :
+                    c >= 'a' && c <= 'f' ? c - 'a' + 10 :
+                    c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (digit < 0) return -1;
+        value = (value << 4) | digit;
+    }
+    return value;
+}
+
+static char *json_unescape_string(const char *src, int len) {
+    char *out = cloudsync_memory_zeroalloc((uint64_t)len + 1);
+    if (!out) return NULL;
     int j = 0;
-    for (int i = 0; i < len; ) {
-        if (src[i] == '\\' && i + 1 < len) {
-            char c = src[i + 1];
-            if (c == '"' || c == '\\' || c == '/') { out[j++] = c; i += 2; }
-            else if (c == 'n') { out[j++] = '\n'; i += 2; }
-            else if (c == 'r') { out[j++] = '\r'; i += 2; }
-            else if (c == 't') { out[j++] = '\t'; i += 2; }
-            else if (c == 'b') { out[j++] = '\b'; i += 2; }
-            else if (c == 'f') { out[j++] = '\f'; i += 2; }
-            else if (c == 'u' && i + 5 < len) {
-                unsigned int cp = 0;
-                for (int k = 0; k < 4; k++) {
-                    char h = src[i + 2 + k];
-                    cp <<= 4;
-                    if (h >= '0' && h <= '9') cp |= h - '0';
-                    else if (h >= 'a' && h <= 'f') cp |= 10 + h - 'a';
-                    else if (h >= 'A' && h <= 'F') cp |= 10 + h - 'A';
+    for (int i = 0; i < len;) {
+        unsigned char c = (unsigned char)src[i++];
+        if (c != '\\') { out[j++] = (char)c; continue; }
+        if (i == len) goto invalid;
+        c = (unsigned char)src[i++];
+        switch (c) {
+            case '"': case '\\': case '/': out[j++] = (char)c; break;
+            case 'n': out[j++] = '\n'; break;
+            case 'r': out[j++] = '\r'; break;
+            case 't': out[j++] = '\t'; break;
+            case 'b': out[j++] = '\b'; break;
+            case 'f': out[j++] = '\f'; break;
+            case 'u': {
+                if (len - i < 4) goto invalid;
+                int cp = json_hex4(src + i);
+                if (cp < 0) goto invalid;
+                i += 4;
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    if (len - i < 6 || src[i] != '\\' || src[i + 1] != 'u') goto invalid;
+                    int low = json_hex4(src + i + 2);
+                    if (low < 0xDC00 || low > 0xDFFF) goto invalid;
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + low - 0xDC00;
+                    i += 6;
+                } else if (cp >= 0xDC00 && cp <= 0xDFFF) goto invalid;
+                // Network consumers use C strings: reject embedded NUL truncation.
+                if (cp == 0) goto invalid;
+                if (cp < 0x80) out[j++] = (char)cp;
+                else if (cp < 0x800) {
+                    out[j++] = (char)(0xC0 | (cp >> 6));
+                    out[j++] = (char)(0x80 | (cp & 0x3F));
+                } else {
+                    if (cp >= 0x10000) {
+                        out[j++] = (char)(0xF0 | (cp >> 18));
+                        out[j++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                    } else out[j++] = (char)(0xE0 | (cp >> 12));
+                    out[j++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                    out[j++] = (char)(0x80 | (cp & 0x3F));
                 }
-                if (cp < 0x80) { out[j++] = (char)cp; }
-                else { out[j++] = '?'; } // non-ASCII: replace
-                i += 6;
+                break;
             }
-            else { out[j++] = src[i]; i++; }
-        } else {
-            out[j++] = src[i]; i++;
+            default: goto invalid;
         }
     }
     out[j] = '\0';
     return out;
+invalid:
+    cloudsync_memory_free(out);
+    return NULL;
 }
+
+#ifdef CLOUDSYNC_UNITTEST
+char *network_test_unescape(const char *src) {
+    return json_unescape_string(src, (int)strlen(src));
+}
+#endif
 
 static char *json_extract_string(const char *json, size_t json_len, const char *key) {
     if (!json || json_len == 0 || !key) return NULL;

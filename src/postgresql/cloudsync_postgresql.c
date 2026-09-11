@@ -2125,50 +2125,7 @@ Datum cloudsync_insert (PG_FUNCTION_ARGS) {
             // Process each non-primary key column for insert or update
             for (int i = 0; i < table_count_cols(table); i++) {
                 if (table_col_algo(table, i) == col_algo_block) {
-                    // Block column: read value from base table, split into blocks, store each block
-                    dbvm_t *val_vm = table_column_lookup(table, table_colname(table, i), false, NULL);
-                    if (!val_vm) { rc = DBRES_ERROR; break; }
-
-                    int bind_rc = pk_decode_prikey(cleanup.pk, pklen, pk_decode_bind_callback, (void *)val_vm);
-                    if (bind_rc < 0) { databasevm_reset(val_vm); rc = DBRES_ERROR; break; }
-
-                    int step_rc = databasevm_step(val_vm);
-                    if (step_rc == DBRES_ROW) {
-                        const char *text = database_column_text(val_vm, 0);
-                        const char *delim = table_col_delimiter(table, i);
-                        const char *col = table_colname(table, i);
-
-                        block_list_t *blocks = block_split(text ? text : "", delim);
-                        if (blocks) {
-                            char **positions = block_initial_positions(blocks->count);
-                            if (positions) {
-                                for (int b = 0; b < blocks->count; b++) {
-                                    char *block_cn = block_build_colname(col, positions[b]);
-                                    if (block_cn) {
-                                        rc = local_mark_insert_or_update_meta(table, cleanup.pk, pklen, block_cn, db_version, cloudsync_bumpseq(data));
-
-                                        // Store block value in blocks table
-                                        dbvm_t *wvm = table_block_value_write_stmt(table);
-                                        if (wvm && rc == DBRES_OK) {
-                                            databasevm_bind_blob(wvm, 1, cleanup.pk, (int)pklen);
-                                            databasevm_bind_text(wvm, 2, block_cn, -1);
-                                            databasevm_bind_text(wvm, 3, blocks->entries[b].content, -1);
-                                            databasevm_step(wvm);
-                                            databasevm_reset(wvm);
-                                        }
-
-                                        cloudsync_memory_free(block_cn);
-                                    }
-                                    cloudsync_memory_free(positions[b]);
-                                    if (rc != DBRES_OK) break;
-                                }
-                                cloudsync_memory_free(positions);
-                            }
-                            block_list_free(blocks);
-                        }
-                    }
-                    databasevm_reset(val_vm);
-                    if (step_rc == DBRES_ROW || step_rc == DBRES_DONE) { if (rc == DBRES_OK) continue; }
+                    rc = local_block_insert(data, table, cleanup.pk, pklen, i, db_version);
                     if (rc != DBRES_OK) break;
                 } else {
                     rc = local_mark_insert_or_update_meta(table, cleanup.pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
@@ -2476,93 +2433,8 @@ Datum cloudsync_update_finalfn (PG_FUNCTION_ARGS) {
 
             if (dbutils_value_compare((dbvalue_t *)payload->old_values[col_index], (dbvalue_t *)payload->new_values[col_index]) != 0) {
                 if (table_col_algo(table, i) == col_algo_block) {
-                    // Block column: diff old and new text, emit per-block metadata changes
-                    const char *new_text = (const char *)database_value_text(payload->new_values[col_index]);
-                    const char *delim = table_col_delimiter(table, i);
-                    const char *col = table_colname(table, i);
-
-                    // Read existing blocks from blocks table
-                    block_list_t *old_blocks = block_list_create_empty();
-                    char *like_pattern = block_build_colname(col, "%");
-                    if (like_pattern && old_blocks) {
-                        char *list_sql = cloudsync_memory_mprintf(
-                            "SELECT col_name, col_value FROM %s WHERE pk = $1 AND col_name LIKE $2 ORDER BY col_name COLLATE \"C\"",
-                            table_blocks_ref(table));
-                        if (list_sql) {
-                            dbvm_t *list_vm = NULL;
-                            if (databasevm_prepare(data, list_sql, &list_vm, 0) == DBRES_OK) {
-                                databasevm_bind_blob(list_vm, 1, pk, (int)pklen);
-                                databasevm_bind_text(list_vm, 2, like_pattern, -1);
-                                while (databasevm_step(list_vm) == DBRES_ROW) {
-                                    const char *bcn = database_column_text(list_vm, 0);
-                                    const char *bval = database_column_text(list_vm, 1);
-                                    const char *pos = block_extract_position_id(bcn);
-                                    if (pos && old_blocks) {
-                                        block_list_add(old_blocks, bval ? bval : "", pos);
-                                    }
-                                }
-                                databasevm_finalize(list_vm);
-                            }
-                            cloudsync_memory_free(list_sql);
-                        }
-                    }
-
-                    // Split new text into parts (NULL text = all blocks removed)
-                    block_list_t *new_blocks = new_text ? block_split(new_text, delim) : block_list_create_empty();
-                    if (new_blocks && old_blocks) {
-                        // Build array of new content strings (NULL when count is 0)
-                        const char **new_parts = NULL;
-                        if (new_blocks->count > 0) {
-                            new_parts = (const char **)cloudsync_memory_alloc(
-                                (uint64_t)(new_blocks->count * sizeof(char *)));
-                            if (new_parts) {
-                                for (int b = 0; b < new_blocks->count; b++) {
-                                    new_parts[b] = new_blocks->entries[b].content;
-                                }
-                            }
-                        }
-
-                        if (new_parts || new_blocks->count == 0) {
-                            block_diff_t *diff = block_diff(old_blocks->entries, old_blocks->count,
-                                                             new_parts, new_blocks->count);
-                            if (diff) {
-                                for (int d = 0; d < diff->count; d++) {
-                                    block_diff_entry_t *de = &diff->entries[d];
-                                    char *block_cn = block_build_colname(col, de->position_id);
-                                    if (!block_cn) continue;
-
-                                    if (de->type == BLOCK_DIFF_ADDED || de->type == BLOCK_DIFF_MODIFIED) {
-                                        rc = local_mark_insert_or_update_meta(table, pk, pklen, block_cn,
-                                                                              db_version, cloudsync_bumpseq(data));
-                                        // Store block value
-                                        if (rc == DBRES_OK && table_block_value_write_stmt(table)) {
-                                            dbvm_t *wvm = table_block_value_write_stmt(table);
-                                            databasevm_bind_blob(wvm, 1, pk, (int)pklen);
-                                            databasevm_bind_text(wvm, 2, block_cn, -1);
-                                            databasevm_bind_text(wvm, 3, de->content, -1);
-                                            databasevm_step(wvm);
-                                            databasevm_reset(wvm);
-                                        }
-                                    } else if (de->type == BLOCK_DIFF_REMOVED) {
-                                        // Mark block as deleted in metadata (even col_version)
-                                        rc = local_mark_delete_block_meta(table, pk, pklen, block_cn,
-                                                                          db_version, cloudsync_bumpseq(data));
-                                        // Remove from blocks table
-                                        if (rc == DBRES_OK) {
-                                            block_delete_value_external(data, table, pk, pklen, block_cn);
-                                        }
-                                    }
-                                    cloudsync_memory_free(block_cn);
-                                    if (rc != DBRES_OK) break;
-                                }
-                                block_diff_free(diff);
-                            }
-                            if (new_parts) cloudsync_memory_free((void *)new_parts);
-                        }
-                    }
-                    if (new_blocks) block_list_free(new_blocks);
-                    if (old_blocks) block_list_free(old_blocks);
-                    if (like_pattern) cloudsync_memory_free(like_pattern);
+                    rc = local_block_update(data, table, pk, pklen, i,
+                        (const char *)database_value_text(payload->new_values[col_index]), db_version, false);
                     if (rc != DBRES_OK) goto cleanup;
                 } else {
                     rc = local_mark_insert_or_update_meta(table, pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));

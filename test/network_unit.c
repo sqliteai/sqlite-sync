@@ -5,7 +5,8 @@
 //  Unit tests for the network layer's pure response-handling logic. Built with
 //  networking ENABLED (unlike dist/unit, which is -DCLOUDSYNC_OMIT_NETWORK), so it
 //  can call the internal functions directly on crafted in-memory NETWORK_RESULT
-//  buffers — no server, no sockets.
+//  buffers. The deadline regression also uses a stalled loopback HTTP socket;
+//  no external server is contacted.
 //
 
 #include <stdio.h>
@@ -127,7 +128,68 @@ static bool test_compute_status(void) {
     return ok;
 }
 
+extern char *network_test_unescape(const char *);
+static bool test_json_scope(void) {
+    char json[] = "{\"noise\":\"lastOptimisticVersion\",\"nested\":{\"lastConfirmedVersion\":999},\"lastOptimisticVersion\":42,\"lastConfirmedVersion\":7}";
+    NETWORK_RESULT r = json_buffer(json);
+    int64_t optimistic = -1, confirmed = -1;
+    int gaps = -1;
+    char *apply = NULL, *check_failure = NULL;
+    network_sync_state_update_from_response(&r, &optimistic, &confirmed, &gaps, &apply, &check_failure);
+    bool ok = optimistic == 42 && confirmed == 7;
+    cloudsync_memory_free(apply);
+    cloudsync_memory_free(check_failure);
+    char nested[] = "{\"nested\":{\"lastOptimisticVersion\":999,\"lastConfirmedVersion\":999}}";
+    r = json_buffer(nested);
+    apply = check_failure = NULL;
+    network_sync_state_update_from_response(&r, &optimistic, &confirmed, &gaps, &apply, &check_failure);
+    ok = ok && optimistic == 42 && confirmed == 7;
+    cloudsync_memory_free(apply);
+    cloudsync_memory_free(check_failure);
+    return ok;
+}
+static bool test_unicode(void) {
+    char *s = network_test_unescape("caf\\u00e9 \\u20ac \\ud83d\\ude80 \\/\\n");
+    bool ok = s && strcmp(s, "caf\xc3\xa9 \xe2\x82\xac \xf0\x9f\x9a\x80 /\n") == 0;
+    cloudsync_memory_free(s);
+    const char *invalid[] = {"\\ud800", "\\udc00", "\\ud800\\u0041", "\\u0000", "\\uZZZZ", "\\u123", "\\"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(*invalid); i++) {
+        s = network_test_unescape(invalid[i]);
+        ok = ok && s == NULL;
+        cloudsync_memory_free(s);
+    }
+    return ok;
+}
+
+#if !defined(_WIN32) && !defined(CLOUDSYNC_OMIT_CURL)
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+extern bool network_test_curl_timeout(const char *, bool);
+static bool test_stalled_http_timeout(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+    struct sockaddr_in address = {0};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    bool ok = bind(fd, (struct sockaddr *)&address, sizeof(address)) == 0 && listen(fd, 8) == 0;
+    socklen_t len = sizeof(address);
+    ok = ok && getsockname(fd, (struct sockaddr *)&address, &len) == 0;
+    char url[80];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", ntohs(address.sin_port));
+    // A listening socket that never sends HTTP simulates a stalled server.
+    if (ok) ok = network_test_curl_timeout(url, false) && network_test_curl_timeout(url, true);
+    close(fd);
+    return ok;
+}
+#endif
+
 int main(void) {
+#if !defined(_WIN32) && !defined(CLOUDSYNC_OMIT_CURL)
+    check("HTTP deadlines for new and reset pooled handles:", test_stalled_http_timeout());
+#endif
+    check("JSON keys only match root object members:", test_json_scope());
+    check("JSON Unicode, surrogate pairs and malformed escapes:", test_unicode());
     printf("\nNetwork unit tests\n");
     check("optimistic/confirmed version folds latest-valid (allows rollback):", test_optimistic_version_rollback());
     check("non-buffer response is a no-op:", test_non_buffer_is_noop());

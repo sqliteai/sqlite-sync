@@ -18,6 +18,7 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+#include <dirent.h>
 #endif
 
 #include "pk.h"
@@ -30,6 +31,7 @@
 extern char *OUT_OF_MEMORY_BUFFER;
 extern bool force_vtab_filter_abort;
 extern bool force_uncompressed_blob;
+static char test_directory[192];
 
 void dbvm_reset (dbvm_t *stmt);
 int dbvm_count (dbvm_t *stmt, const char *value, size_t len, int type);
@@ -1130,7 +1132,7 @@ bool do_alter_tables (int table_mask, sqlite3 *db, int alter_version) {
     }
     
     if (table_mask & TEST_NOCOLS) {
-        const char *sql;
+        const char *sql = NULL;
         switch (alter_version) {
             case 1:
                 sql = "SELECT cloudsync_begin_alter('" CUSTOMERS_NOCOLS_TABLE "'); "
@@ -1168,7 +1170,7 @@ bool do_alter_tables (int table_mask, sqlite3 *db, int alter_version) {
     
     if (table_mask & TEST_NOPRIKEYS) {
         // TEST a table with implicit rowid primary key
-        const char *sql;
+        const char *sql = NULL;
         switch (alter_version) {
             case 1:
                 sql = "SELECT cloudsync_begin_alter('customers_noprikey'); "
@@ -1735,7 +1737,7 @@ bool do_test_rowid (int ntest, bool print_result) {
         // for an explanation see https://github.com/sqliteai/sqlite-sync/blob/main/docs/RowID.md
         int64_t db_version = random_int64_range(1, 17179869183);
         int64_t seq = random_int64_range(1, 1073741823);
-        int64_t rowid = (db_version << 30) | seq;
+        int64_t rowid = (int64_t)(((uint64_t)db_version << 30) | (uint64_t)seq);
         
         int64_t value1;
         int64_t value2;
@@ -1747,7 +1749,7 @@ bool do_test_rowid (int ntest, bool print_result) {
     // special case that failed in an old version
     int64_t db_version = 14963874252;
     int64_t seq = 172784902;
-    int64_t rowid = (db_version << 30) | seq;
+    int64_t rowid = (int64_t)(((uint64_t)db_version << 30) | (uint64_t)seq);
     
     int64_t value1;
     int64_t value2;
@@ -2346,11 +2348,7 @@ bool do_test_stale_table_settings(bool cleanup_databases) {
     char dbpath[256];
     time_t timestamp = time(NULL);
 
-    #ifdef __ANDROID__
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-%ld.sqlite", ".", timestamp);
-    #else
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-%ld.sqlite", getenv("HOME"), timestamp);
-    #endif
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-%ld.sqlite", test_directory, timestamp);
 
     // Phase 1: create database, table, and init cloudsync
     sqlite3 *db = NULL;
@@ -2417,11 +2415,7 @@ bool do_test_stale_table_settings_dropped_meta(bool cleanup_databases) {
     char dbpath[256];
     time_t timestamp = time(NULL);
 
-    #ifdef __ANDROID__
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-meta-%ld.sqlite", ".", timestamp);
-    #else
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-meta-%ld.sqlite", getenv("HOME"), timestamp);
-    #endif
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-meta-%ld.sqlite", test_directory, timestamp);
 
     // Phase 1: create database, table, and init cloudsync
     sqlite3 *db = NULL;
@@ -4130,18 +4124,64 @@ sqlite3 *do_create_database (void) {
     return db;
 }
 
+static bool create_test_directory(void) {
+#ifdef _WIN32
+    char base[MAX_PATH];
+    DWORD n = GetTempPathA(sizeof(base), base);
+    if (!n || n >= sizeof(base)) return false;
+    int len = snprintf(test_directory, sizeof(test_directory), "%scloudsync-%lu-%llu", base,
+                       (unsigned long)GetCurrentProcessId(), (unsigned long long)GetTickCount64());
+    return len > 0 && len < sizeof(test_directory) && CreateDirectoryA(test_directory, NULL);
+#else
+    const char *base = getenv("TMPDIR");
+    if (!base || !*base) {
+#ifdef __ANDROID__
+        base = "."; // Android test runners execute from /data/local/tmp.
+#else
+        base = "/tmp";
+#endif
+    }
+    int len = snprintf(test_directory, sizeof(test_directory), "%s/cloudsync-test-XXXXXX", base);
+    return len > 0 && (size_t)len < sizeof(test_directory) && mkdtemp(test_directory) != NULL;
+#endif
+}
+
+static bool remove_test_directory(void) {
+    char path[512];
+#ifdef _WIN32
+    WIN32_FIND_DATAA entry;
+    snprintf(path, sizeof(path), "%s\\*", test_directory);
+    HANDLE handle = FindFirstFileA(path, &entry);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    do {
+        if (strncmp(entry.cFileName, "cloudsync-test-", 15) != 0) continue;
+        snprintf(path, sizeof(path), "%s\\%s", test_directory, entry.cFileName);
+        DeleteFileA(path);
+    } while (FindNextFileA(handle, &entry));
+    FindClose(handle);
+    return RemoveDirectoryA(test_directory) != 0;
+#else
+    DIR *dir = opendir(test_directory);
+    if (!dir) return false;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "cloudsync-test-", 15) != 0) continue;
+        snprintf(path, sizeof(path), "%s/%s", test_directory, entry->d_name);
+        unlink(path);
+    }
+    closedir(dir);
+    return rmdir(test_directory) == 0;
+#endif
+}
+
 void do_build_database_path (char buf[256], int i, time_t timestamp, int ntest) {
-    #ifdef __ANDROID__
-    snprintf(buf, 256, "%s/cloudsync-test-%ld-%d-%d.sqlite", ".", timestamp, ntest, i);
-    #else
-    snprintf(buf, 256, "%s/cloudsync-test-%ld-%d-%d.sqlite", getenv("HOME"), timestamp, ntest, i);
-    #endif
+    snprintf(buf, 256, "%s/cloudsync-test-%ld-%d-%d.sqlite", test_directory, timestamp, ntest, i);
 }
 
 sqlite3 *do_create_database_file_v2 (int i, time_t timestamp, int ntest) {
     sqlite3 *db = NULL;
 
-    // open database in home dir
+    // Open database in the private per-run temporary directory.
     char buf[256];
     do_build_database_path(buf, i, timestamp, ntest);
     int rc = sqlite3_open(buf, &db);
@@ -9241,11 +9281,7 @@ bool do_test_block_column_reload(bool cleanup_databases) {
     char dbpath[256];
     time_t timestamp = time(NULL);
 
-    #ifdef __ANDROID__
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blockreload-%ld.sqlite", ".", timestamp);
-    #else
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blockreload-%ld.sqlite", getenv("HOME"), timestamp);
-    #endif
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blockreload-%ld.sqlite", test_directory, timestamp);
 
     // Phase 1: create database, table, init cloudsync, mark a column as block algo.
     // Use a custom delimiter so both "algo" and "delimiter" rows get persisted.
@@ -9346,11 +9382,7 @@ bool do_test_block_lww_existing_data(bool cleanup_databases) {
     char dbpath[256];
     time_t timestamp = time(NULL);
 
-    #ifdef __ANDROID__
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blockexist-%ld.sqlite", ".", timestamp);
-    #else
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blockexist-%ld.sqlite", getenv("HOME"), timestamp);
-    #endif
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blockexist-%ld.sqlite", test_directory, timestamp);
 
     int rc = sqlite3_open(dbpath, &db);
     if (rc != SQLITE_OK) return false;
@@ -13389,6 +13421,10 @@ int test_report(const char *description, bool result){
 }
 
 int main (int argc, const char * argv[]) {
+    if (!create_test_directory()) {
+        fprintf(stderr, "Unable to create private test directory\n");
+        return 1;
+    }
     sqlite3 *db = NULL;
     int result = 0;
     bool print_result = false;
@@ -13590,6 +13626,8 @@ finalize:
         printf("\tleaked: %" PRId64 " B\n", memory_used);
         result++;
     }
+
+    if (cleanup_databases) result += test_report("Temporary Directory Cleanup:", remove_test_directory());
     
     return result;
 }
