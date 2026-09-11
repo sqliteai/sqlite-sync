@@ -277,6 +277,8 @@ SELECT COALESCE(max(db_version), 0) AS max_dbv_5 FROM cloudsync_changes \gset
 -- Apply as test_rls_user with USER1 identity — should be denied (doc4 owned by USER2)
 \connect cloudsync_test_27_b
 \ir helper_psql_conn_setup.sql
+-- read the receive cursor on the target, as superuser, before dropping to the RLS role
+SELECT coalesce((SELECT value::BIGINT FROM cloudsync_settings WHERE key='check_dbversion'), 0) AS ckpt_before_denied \gset
 SET app.current_user_id = :'USER1';
 SET ROLE test_rls_user;
 SELECT cloudsync_payload_apply(decode(:'payload_hex_5', 'hex')) AS apply_5 \gset
@@ -291,6 +293,18 @@ SELECT (:apply_5::int = 3) AS apply_5_ok \gset
 \echo [PASS] (:testid) RLS auth: denied apply returned :apply_5
 \else
 \echo [FAIL] (:testid) RLS auth: denied apply returned :apply_5 (expected 3)
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- A denial is permanent, so the cursor must still move past those rows: holding it
+-- back re-delivers them on every check forever, and in a chunked batch the final
+-- chunk would checkpoint past them anyway, dropping them with no report.
+SELECT coalesce((SELECT value::BIGINT FROM cloudsync_settings WHERE key='check_dbversion'), 0) AS ckpt_after_denied \gset
+SELECT (:ckpt_after_denied::bigint > :ckpt_before_denied::bigint) AS ckpt_ok \gset
+\if :ckpt_ok
+\echo [PASS] (:testid) RLS auth: denied apply still advanced the receive checkpoint
+\else
+\echo [FAIL] (:testid) RLS auth: denied apply left the checkpoint at :ckpt_after_denied (expected > :ckpt_before_denied)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 

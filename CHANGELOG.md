@@ -8,12 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Rows rejected by a row-level security policy are now reported** as `receive.denied` in the JSON returned by `cloudsync_network_receive_changes()` and `cloudsync_network_sync()`, counted across every chunk of a receive. A denial is a permanent, expected outcome — those rows are not this site's to hold — so they are skipped and the receive cursor still advances past them; without a count, discarding them would be invisible. A non-zero `denied` with a zero `rows` is the shape of an apply connection whose session identity (`auth.uid()` / `app.current_user_id`) is not set.
 - **Network requests now have deadlines** — 30 seconds to connect and 300 seconds in total, applied to pooled handles as well as new ones. A stalled server previously left a sync call waiting indefinitely. Override at build time with `CLOUDSYNC_CONNECT_TIMEOUT_SECONDS` and `CLOUDSYNC_REQUEST_TIMEOUT_SECONDS`.
 - **Decompressed payloads are capped at 256 MiB before allocation**, overridable with `CLOUDSYNC_MAX_PAYLOAD_EXPANDED_SIZE` (LZ4's own `INT_MAX` bound still applies). Default chunk sizes are far below this limit; an oversized legacy monolithic payload must be rechunked or the limit raised explicitly.
 
 ### Fixed
 
-- **A failed payload write now reports the error and leaves the receive cursor where it was.** An error on one row could previously be overwritten by a later successful row, so `cloudsync_payload_apply` could report success after dropping changes and still advance the checkpoint — losing them silently. PostgreSQL's RLS `WITH CHECK` rejection remains a skippable policy outcome, distinct from generic SQL and permission errors: the call still reports the rows it processed, but does not advance the cursor when a policy denied rows. SQLite keeps its existing per-group partial-application behaviour.
+- **A failed payload write now reports the error and leaves the receive cursor where it was.** An error on one row could previously be overwritten by a later successful row, so `cloudsync_payload_apply` could report success after dropping changes and still advance the checkpoint — losing them silently. SQLite keeps its existing per-group partial-application behaviour.
 - **Primary-key doubles keep their deployed little-endian IEEE754 byte order on every architecture.** The previous code combined host conversion with manual big-endian serialization; the historical format is now explicit. Integer keys are unchanged, and no migration is needed for little-endian deployments.
 - **PostgreSQL no longer frees a tuple table belonging to another open cursor.** A block write that failed while a second SPI cursor was active could release rows still in use; tuple tables are now owned per statement.
 - **Block-level LWW text writes roll back cleanly when a block write fails**, instead of leaving the row partially written.

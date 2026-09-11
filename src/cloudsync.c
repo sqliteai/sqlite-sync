@@ -192,6 +192,11 @@ struct cloudsync_context {
     // CLOUDSYNC_CHECKPOINT_LAST_APPLIED receive-checkpoint mode (-1 = none yet).
     int64_t    apply_last_db_version;
     int64_t    apply_last_seq;
+
+    // payload entries rejected by a row-level security policy, accumulated across
+    // a receive drain so a denial in one chunk is still visible when a later chunk
+    // reports. Reset with cloudsync_apply_denied_reset.
+    int        apply_denied;
 };
 
 struct cloudsync_table_context {
@@ -615,6 +620,14 @@ int cloudsync_set_dberror (cloudsync_context *data) {
 
 const char *cloudsync_errmsg (cloudsync_context *data) {
     return data->errmsg;
+}
+
+void cloudsync_apply_denied_reset (cloudsync_context *data) {
+    if (data) data->apply_denied = 0;
+}
+
+int cloudsync_apply_denied_count (cloudsync_context *data) {
+    return (data) ? data->apply_denied : 0;
 }
 
 int cloudsync_errcode (cloudsync_context *data) {
@@ -4114,7 +4127,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     uint32_t nrows = header.nrows;
     int64_t last_payload_db_version = -1;
     int first_error = DBRES_OK;
-    bool policy_denied = false;
+    int denied_entries = 0;
     char first_error_message[1024] = {0};
     cloudsync_pk_decode_bind_context decoded_context = {.vm = vm};
 
@@ -4152,8 +4165,9 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
 
         // Flush pending batch before any boundary change
         if (pk_changed || tbl_changed || db_version_changed) {
+            int pending_entries = batch.count;
             int flush_rc = merge_flush_pending(data);
-            if (flush_rc == DBRES_POLICY_DENIED) policy_denied = true;
+            if (flush_rc == DBRES_POLICY_DENIED) denied_entries += (pending_entries > 0) ? pending_entries : 1;
             else if (flush_rc != DBRES_OK && first_error == DBRES_OK) {
                 first_error = flush_rc;
                 snprintf(first_error_message, sizeof(first_error_message), "%s", cloudsync_errmsg(data));
@@ -4200,7 +4214,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         last_tbl_len = decoded_context.tbl_len;
 
         rc = databasevm_step(vm);
-        if (rc == DBRES_POLICY_DENIED) { policy_denied = true; rc = DBRES_DONE; }
+        if (rc == DBRES_POLICY_DENIED) { denied_entries++; rc = DBRES_DONE; }
         if (rc != DBRES_DONE) {
             if (first_error == DBRES_OK) {
                 first_error = rc;
@@ -4217,8 +4231,9 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
 
     // Final flush after loop
     {
+        int pending_entries = batch.count;
         int flush_rc = merge_flush_pending(data);
-        if (flush_rc == DBRES_POLICY_DENIED) policy_denied = true;
+        if (flush_rc == DBRES_POLICY_DENIED) denied_entries += (pending_entries > 0) ? pending_entries : 1;
         else if (flush_rc != DBRES_OK && first_error == DBRES_OK) {
             first_error = flush_rc;
             snprintf(first_error_message, sizeof(first_error_message), "%s", cloudsync_errmsg(data));
@@ -4238,6 +4253,17 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     }
 
     if (rc == DBRES_DONE) rc = DBRES_OK;
+
+    data->apply_denied += denied_entries;
+
+    // A policy denial is permanent: those rows are not this site's to hold, so the
+    // cursor must still advance. Holding it back would re-deliver the same rows on
+    // every check forever, and a single denied row would stall every later change
+    // behind it. Denials are counted and reported instead (receive.denied), so
+    // discarding stays visible without being an error: a payload can be entirely
+    // denied and still be a correct outcome, since a single-row payload that
+    // belongs to another user is denied in full.
+
     if (rc == DBRES_OK) {
         // Record the last applied (db_version, seq) and advance the receive cursor
         // once, gated on the caller-supplied checkpoint. A non-final chunk passes
@@ -4247,7 +4273,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
             data->apply_last_db_version = decoded_context.db_version;
             data->apply_last_seq = decoded_context.seq;
         }
-        if (!policy_denied) cloudsync_payload_apply_checkpoint(data, checkpoint_db_version, checkpoint_seq);
+        cloudsync_payload_apply_checkpoint(data, checkpoint_db_version, checkpoint_seq);
     }
 
 cleanup:

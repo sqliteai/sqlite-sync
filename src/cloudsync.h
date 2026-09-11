@@ -110,6 +110,12 @@ int cloudsync_set_dberror (cloudsync_context *data);
 const char *cloudsync_errmsg (cloudsync_context *data);
 int cloudsync_errcode (cloudsync_context *data);
 void cloudsync_reset_error (cloudsync_context *data);
+
+// Payload entries rejected by a row-level security policy. The count accumulates
+// across a receive drain (reset once before it) so denials in an early chunk are
+// still reported by the call that finishes the drain.
+void cloudsync_apply_denied_reset (cloudsync_context *data);
+int cloudsync_apply_denied_count (cloudsync_context *data);
 int cloudsync_commit_hook (void *ctx);
 void cloudsync_rollback_hook (void *ctx);
 void cloudsync_set_schema (cloudsync_context *data, const char *schema);
