@@ -65,6 +65,7 @@
 \ir 55_payload_chunks_positional_resume.sql
 \ir 56_many_columns.sql
 \ir 57_audit_regressions.sql
+\ir 58_v3_denied_checkpoint.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

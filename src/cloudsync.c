@@ -629,6 +629,13 @@ void cloudsync_apply_stats_reset (cloudsync_context *data) {
     if (data) { data->apply_rows = 0; data->apply_denied = 0; }
 }
 
+// Saturating: only a receive drain resets these, so on the direct-SQL apply path they
+// accumulate for the life of the connection and signed overflow would be undefined.
+static void cloudsync_apply_stats_add (cloudsync_context *data, int rows, int denied) {
+    if (rows > 0) data->apply_rows = (data->apply_rows > INT_MAX - rows) ? INT_MAX : data->apply_rows + rows;
+    if (denied > 0) data->apply_denied = (data->apply_denied > INT_MAX - denied) ? INT_MAX : data->apply_denied + denied;
+}
+
 int cloudsync_apply_rows_count (cloudsync_context *data) {
     return (data) ? data->apply_rows : 0;
 }
@@ -3921,19 +3928,23 @@ static int cloudsync_payload_apply_reassembled_fragment (cloudsync_context *data
     rc = cloudsync_payload_apply_single_decoded_row(data, tbl, tbl_len, pk, pk_len, col_name, col_name_len,
                                                     value, (size_t)total_size, col_version, db_version,
                                                     site_id, site_id_len, cl, seq, pnrows);
-    // A denied value is permanently not ours to hold, so its staged fragments are as
-    // finished as an applied one's: drop them here rather than leave them churning
-    // until stale cleanup. Any other failure keeps them for the retry.
-    int apply_rc = rc;
-    if (rc != DBRES_OK && rc != DBRES_POLICY_DENIED) goto cleanup;
+    // A denial leaves the transaction unusable until the caller's savepoint rolls it
+    // back, so the staged fragments cannot be dropped here. They are bounded by the
+    // stale-fragment cleanup instead.
+    if (rc != DBRES_OK) goto cleanup;
 
     rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_DELETE, &vm, 0);
     if (rc == DBRES_OK) {
         databasevm_bind_text(vm, 1, value_id, -1);
-        int step_rc = databasevm_step(vm);
-        if (step_rc == DBRES_DONE) rc = DBRES_OK;
+        // A failed delete is deliberately tolerated rather than propagated: the value
+        // itself is already applied or permanently denied, so failing here would stall
+        // the cursor and re-deliver it, and a delete that fails once fails again on
+        // every retry. The leftover rows are bounded by the stale-fragment cleanup.
+        // (The former `if (step_rc == DBRES_DONE) rc = DBRES_OK;` only looked like a
+        // check: rc was already DBRES_OK from the prepare.)
+        databasevm_step(vm);
     }
-    if (rc == DBRES_OK) rc = apply_rc;
+
 
 cleanup:
     if (vm) databasevm_finalize(vm);
@@ -4127,7 +4138,6 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     if (header.version == CLOUDSYNC_PAYLOAD_VERSION_3) {
         int rc = DBRES_OK;
         int applied_rows = 0;
-        int denied_entries = 0;
         if (header.ncols != CLOUDSYNC_CHANGES_NCOLS) {
             if (clone) cloudsync_memory_free(clone);
             return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid v3 column count", DBRES_MISUSE);
@@ -4143,18 +4153,19 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
             }
             int n = 0;
             rc = cloudsync_payload_apply_fragment_row(data, &row, &n);
-            // Same policy as the row path below: a denial is permanent, so skip it,
-            // count it, and let the cursor advance. Failing here would abort the whole
-            // drain and re-deliver the same value on every retry.
-            if (rc == DBRES_POLICY_DENIED) { denied_entries++; rc = DBRES_OK; }
-            else if (rc != DBRES_OK) break;
+            // A denial is NOT skipped here, unlike the row path. Continuing past one
+            // leaves PostgreSQL's transaction unusable — the next statement fails with
+            // "buffer pin is not owned by resource owner" — and neither a savepoint
+            // around this call nor dropping the staged-fragment delete recovers it.
+            // A denied oversize value is therefore still a hard receive error that
+            // stalls the cursor. See test 58_v3_denied_checkpoint.sql.
+            if (rc != DBRES_OK) break;
             applied_rows += n;
             buffer += seek;
             buf_len -= seek;
         }
         if (clone) cloudsync_memory_free(clone);
-        data->apply_denied += denied_entries;
-        if (rc == DBRES_OK) data->apply_rows += applied_rows;
+        cloudsync_apply_stats_add(data, (rc == DBRES_OK) ? applied_rows : 0, 0);
         if (pnrows) *pnrows = applied_rows;
         // Advance the receive cursor only after the whole payload is applied,
         // gated on the caller-supplied checkpoint (a non-final chunk passes
@@ -4303,10 +4314,9 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
 
     if (rc == DBRES_DONE) rc = DBRES_OK;
 
-    data->apply_denied += denied_entries;
-    if (rc == DBRES_OK) {
-        int applied = (int)nrows - denied_entries;
-        data->apply_rows += (applied > 0) ? applied : 0;
+    {
+        int applied = (rc == DBRES_OK) ? (int)nrows - denied_entries : 0;
+        cloudsync_apply_stats_add(data, (applied > 0) ? applied : 0, denied_entries);
     }
 
     // A policy denial is permanent: those rows are not this site's to hold, so the
