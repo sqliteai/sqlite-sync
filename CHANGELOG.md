@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Primary-key doubles keep their deployed little-endian IEEE754 byte order on every architecture.** The previous code combined host conversion with manual big-endian serialization; the historical format is now explicit. Integer keys are unchanged, and no migration is needed for little-endian deployments.
 - **PostgreSQL no longer frees a tuple table belonging to another open cursor.** A block write that failed while a second SPI cursor was active could release rows still in use; tuple tables are now owned per statement.
 - **Block-level LWW text writes roll back cleanly when a block write fails**, instead of leaving the row partially written.
+- **Block-column failures now say which table and column failed**, instead of aborting the statement with a blank message. Reading the row back is part of writing a block column, so a row the session cannot `SELECT` — a row-level security policy narrower for reads than for writes, say — is reported with that cause rather than as an empty "not an error".
 - **64-bit clock values above `UINT32_MAX` are handled correctly on incoming changes** — column and database versions, causal length, and sequence.
 - **The Node package rejects `ia32` on every operating system** rather than selecting an incompatible binary. `x64` and `arm64-musl` selection is unchanged.
 

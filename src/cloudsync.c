@@ -2202,21 +2202,44 @@ static int block_migrate_existing_rows (cloudsync_context *data, cloudsync_table
     }
 
     // Reuse the checked block writer; the scan above excludes migrated rows.
+    // As in local_block_insert, every failure carries a message: the migration aborts
+    // on one, and a bare code would surface as a blank error. Aborting is recoverable
+    // — the Phase 1 scan skips already-migrated rows, so a re-run resumes.
+    char errmsg[512];
     dbvm_t *val_vm = table_column_lookup(table, col_name, false, NULL);
-    rc = val_vm ? DBRES_OK : DBRES_MISUSE;
+    if (!val_vm) {
+        snprintf(errmsg, sizeof(errmsg), "Missing value statement for block column \"%s\" of table \"%s\"", col_name, table->name);
+        rc = cloudsync_set_error(data, errmsg, DBRES_MISUSE);
+    } else {
+        rc = DBRES_OK;
+    }
     for (int p = 0; p < pk_count && rc == DBRES_OK; p++) {
         rc = pk_decode_prikey(pks[p], pklens[p], pk_decode_bind_callback, val_vm);
-        if (rc >= 0) rc = databasevm_step(val_vm);
+        if (rc < 0) {
+            snprintf(errmsg, sizeof(errmsg), "Unable to decode the primary key of a row in \"%s\" while migrating block column \"%s\"", table->name, col_name);
+            rc = cloudsync_set_error(data, errmsg, DBRES_ERROR);
+            databasevm_reset(val_vm);
+            break;
+        }
+        rc = databasevm_step(val_vm);
         if (rc == DBRES_ROW) {
             const char *text = database_column_text(val_vm, 0);
             bool has_text = text != NULL;
             char *copy = text ? cloudsync_string_dup(text) : NULL;
             databasevm_reset(val_vm);
-            rc = has_text && !copy ? DBRES_NOMEM : DBRES_OK;
+            if (has_text && !copy) {
+                snprintf(errmsg, sizeof(errmsg), "Not enough memory to migrate block column \"%s\" of table \"%s\"", col_name, table->name);
+                rc = cloudsync_set_error(data, errmsg, DBRES_NOMEM);
+            } else {
+                rc = DBRES_OK;
+            }
             if (rc == DBRES_OK && copy)
                 rc = local_block_update(data, table, pks[p], pklens[p], col_idx, copy, db_version, true);
             cloudsync_memory_free(copy);
-        } else if (rc == DBRES_DONE) rc = DBRES_ERROR;
+        } else if (rc == DBRES_DONE) {
+            snprintf(errmsg, sizeof(errmsg), "Unable to read block column \"%s\" of table \"%s\" while migrating: a tracked row is not visible to this connection (check the table's row-level security SELECT policy)", col_name, table->name);
+            rc = cloudsync_set_error(data, errmsg, DBRES_ERROR);
+        }
         databasevm_reset(val_vm);
     }
     for (int i = 0; i < pk_count; i++) cloudsync_memory_free(pks[i]);
@@ -4376,17 +4399,38 @@ done:
 
 int local_block_insert(cloudsync_context *data, cloudsync_table_context *table,
                        const void *pk, size_t pklen, int column, int64_t version) {
-    dbvm_t *vm = table_column_lookup(table, table_colname(table, column), false, NULL);
+    const char *colname = table_colname(table, column);
+    dbvm_t *vm = table_column_lookup(table, colname, false, NULL);
     if (!vm) return cloudsync_set_error(data, "Missing block column statement", DBRES_MISUSE);
+
+    // Every failure below must carry a message: databasevm_step clears the error on
+    // entry, so a bare code reaches the caller as a blank "not an error".
+    char errmsg[512];
     int rc = pk_decode_prikey((char *)pk, pklen, pk_decode_bind_callback, vm);
-    if (rc >= 0) rc = databasevm_step(vm);
+    if (rc < 0) {
+        databasevm_reset(vm);
+        snprintf(errmsg, sizeof(errmsg), "Unable to decode the primary key of a row in \"%s\" while writing block column \"%s\"", table->name, colname);
+        return cloudsync_set_error(data, errmsg, DBRES_ERROR);
+    }
+
+    rc = databasevm_step(vm);
     char *copy = NULL;
     if (rc == DBRES_ROW) {
         const char *text = database_column_text(vm, 0);
         copy = cloudsync_string_dup(text ? text : "");
-        rc = copy ? DBRES_OK : DBRES_NOMEM;
+        if (copy) rc = DBRES_OK;
+        else {
+            snprintf(errmsg, sizeof(errmsg), "Not enough memory to read block column \"%s\" of table \"%s\"", colname, table->name);
+            rc = cloudsync_set_error(data, errmsg, DBRES_NOMEM);
+        }
     }
-    else if (rc == DBRES_DONE) rc = DBRES_ERROR;
+    else if (rc == DBRES_DONE) {
+        // Reading the row back is part of the block write: without its text there is
+        // nothing to split. A row that its own session cannot select cannot sync at
+        // all, so report it here rather than leave the column silently untracked.
+        snprintf(errmsg, sizeof(errmsg), "Unable to read back block column \"%s\" of table \"%s\": the row just written is not visible to this connection (check the table's row-level security SELECT policy)", colname, table->name);
+        rc = cloudsync_set_error(data, errmsg, DBRES_ERROR);
+    }
     // End the read cursor before writes that can invoke nested triggers/SPI errors.
     databasevm_reset(vm);
     if (rc == DBRES_OK) rc = local_block_update(data, table, pk, pklen, column, copy, version, true);

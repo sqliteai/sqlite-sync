@@ -72,6 +72,41 @@ BEGIN
     END IF;
 END $$;
 \echo [PASS] (57-audit) block insert/update failures roll back base rows and metadata
+
+DROP TRIGGER deny_block ON t_cloudsync_blocks;
+
+-- Reading the row back is part of the block write, so a row the session cannot
+-- select is an error — but it must be a legible one. A bare code would reach the
+-- caller blank, because databasevm_step clears the error text on entry.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'audit_block_user') THEN
+        CREATE ROLE audit_block_user LOGIN;
+    END IF;
+END $$;
+GRANT USAGE ON SCHEMA public TO audit_block_user;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO audit_block_user;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO audit_block_user;
+ALTER TABLE t ENABLE ROW LEVEL SECURITY;
+CREATE POLICY t_ins ON t FOR INSERT WITH CHECK (true);
+CREATE POLICY t_sel ON t FOR SELECT USING (false);
+DO $$
+DECLARE msg TEXT := ''; failed BOOLEAN := false;
+BEGIN
+    SET LOCAL ROLE audit_block_user;
+    BEGIN INSERT INTO t VALUES('invisible','text');
+    EXCEPTION WHEN OTHERS THEN failed := true; msg := SQLERRM; END;
+    RESET ROLE;
+    IF NOT failed THEN RAISE EXCEPTION 'Unreadable block row did not report an error'; END IF;
+    IF coalesce(btrim(msg), '') = '' THEN RAISE EXCEPTION 'Unreadable block row reported a blank error'; END IF;
+    IF msg NOT LIKE '%not visible to this connection%' OR msg NOT LIKE '%value%' THEN
+        RAISE EXCEPTION 'Unreadable block row reported an unhelpful error: %', msg;
+    END IF;
+END $$;
+DROP POLICY t_sel ON t;
+DROP POLICY t_ins ON t;
+ALTER TABLE t DISABLE ROW LEVEL SECURITY;
+\echo [PASS] (57-audit) an unreadable block row reports which table and column, not a blank error
+
 \connect postgres
 DROP DATABASE cloudsync_audit_source;
 DROP DATABASE cloudsync_audit_target;
