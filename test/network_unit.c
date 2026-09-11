@@ -129,6 +129,7 @@ static bool test_compute_status(void) {
 }
 
 extern char *network_test_unescape(const char *);
+extern char *network_test_extract_string(const char *, const char *);
 static bool test_json_scope(void) {
     char json[] = "{\"noise\":\"lastOptimisticVersion\",\"nested\":{\"lastConfirmedVersion\":999},\"lastOptimisticVersion\":42,\"lastConfirmedVersion\":7}";
     NETWORK_RESULT r = json_buffer(json);
@@ -146,6 +147,55 @@ static bool test_json_scope(void) {
     ok = ok && optimistic == 42 && confirmed == 7;
     cloudsync_memory_free(apply);
     cloudsync_memory_free(check_failure);
+    return ok;
+}
+
+// Gateway success responses wrap the payload in {"data": ...} (API.md, "Success
+// envelope"); legacy servers do not. Key lookups stay scoped to one object, so
+// readers of a raw response body must unwrap first.
+static bool test_json_envelope(void) {
+    char enveloped[] = "{\"data\":{\"nested\":{\"lastOptimisticVersion\":999},"
+                       "\"lastOptimisticVersion\":15,\"lastConfirmedVersion\":12}}";
+    NETWORK_RESULT r = json_buffer(enveloped);
+    int64_t optimistic = -1, confirmed = -1;
+    int gaps = -1;
+    char *apply = NULL, *check_failure = NULL;
+    network_sync_state_update_from_response(&r, &optimistic, &confirmed, &gaps, &apply, &check_failure);
+    bool ok = optimistic == 15 && confirmed == 12;
+    cloudsync_memory_free(apply);
+    cloudsync_memory_free(check_failure);
+
+    // the enveloped 202 status payload also carries gaps and failures
+    char full[] = "{\"data\":{\"lastOptimisticVersion\":20,\"lastConfirmedVersion\":18,"
+                  "\"gaps\":[{\"dbVersionMin\":13,\"dbVersionMax\":15}],"
+                  "\"failures\":{\"apply\":null,\"check\":{\"code\":\"boom\",\"retryable\":false}}}}";
+    r = json_buffer(full);
+    apply = check_failure = NULL;
+    network_sync_state_update_from_response(&r, &optimistic, &confirmed, &gaps, &apply, &check_failure);
+    ok = ok && optimistic == 20 && confirmed == 18 && gaps == 1;
+    ok = ok && check_failure && strstr(check_failure, "boom");
+    cloudsync_memory_free(apply);
+    cloudsync_memory_free(check_failure);
+
+    // a legacy un-enveloped body still parses
+    char legacy[] = "{\"lastOptimisticVersion\":7,\"lastConfirmedVersion\":5}";
+    r = json_buffer(legacy);
+    apply = check_failure = NULL;
+    network_sync_state_update_from_response(&r, &optimistic, &confirmed, &gaps, &apply, &check_failure);
+    ok = ok && optimistic == 7 && confirmed == 5;
+    cloudsync_memory_free(apply);
+    cloudsync_memory_free(check_failure);
+
+    // key lookups remain scoped to one object: an enveloped url is not visible
+    // to a root-scoped read, which is why raw-response readers unwrap first
+    char *url = network_test_extract_string("{\"data\":{\"url\":\"https://s3/a\"}}", "url");
+    ok = ok && url == NULL;
+    cloudsync_memory_free(url);
+
+    // an un-enveloped chunk object sliced out of chunks[] resolves directly
+    url = network_test_extract_string("{\"cursor\":0,\"url\":\"https://s3/b\",\"watermark\":18}", "url");
+    ok = ok && url && strcmp(url, "https://s3/b") == 0;
+    cloudsync_memory_free(url);
     return ok;
 }
 static bool test_unicode(void) {
@@ -189,6 +239,7 @@ int main(void) {
     check("HTTP deadlines for new and reset pooled handles:", test_stalled_http_timeout());
 #endif
     check("JSON keys only match root object members:", test_json_scope());
+    check("Gateway data envelope is unwrapped before scoped lookups:", test_json_envelope());
     check("JSON Unicode, surrogate pairs and malformed escapes:", test_unicode());
     printf("\nNetwork unit tests\n");
     check("optimistic/confirmed version folds latest-valid (allows rollback):", test_optimistic_version_rollback());

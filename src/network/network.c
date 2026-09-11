@@ -992,6 +992,12 @@ static char *json_extract_string(const char *json, size_t json_len, const char *
     return result;
 }
 
+#ifdef CLOUDSYNC_UNITTEST
+char *network_test_extract_string(const char *json, const char *key) {
+    return json_extract_string(json, strlen(json), key);
+}
+#endif
+
 static int64_t json_extract_int(const char *json, size_t json_len, const char *key, int64_t default_value) {
     if (!json || json_len == 0 || !key) return default_value;
 
@@ -1391,6 +1397,20 @@ typedef struct {
     int64_t     send_bytes;         // serialized payload bytes sent this call
 } sync_result;
 
+// Gateway success responses wrap the payload in {"data": {...}}; legacy servers
+// and chunk objects sliced out of a chunks array are not wrapped. Key lookups are
+// scoped to one object, so a caller reading a raw response body resolves the
+// payload first. Frees through *owned. Mirrors the /check unwrap below.
+static const char *json_response_payload(const char *json, size_t json_len, char **owned, size_t *payload_len) {
+    *owned = json_extract_object_raw(json, json_len, "data");
+    if (*owned) {
+        *payload_len = strlen(*owned);
+        return *owned;
+    }
+    *payload_len = json_len;
+    return json;
+}
+
 // Returns a malloc'd raw JSON copy of failures.<stage_key> ("apply" or "check"),
 // or NULL when the field is missing or is JSON null. Caller frees with cloudsync_memory_free.
 static char *json_extract_failure_stage(const char *json, size_t json_len, const char *stage_key) {
@@ -1646,7 +1666,12 @@ static int network_send_payload_to_apply(sqlite3_context *context, network_data 
         return SQLITE_ERROR;
     }
 
-    char *s3_url = json_extract_string(upload_res.buffer, upload_res.blen, "url");
+    char *upload_payload_owned = NULL;
+    size_t upload_payload_len = 0;
+    const char *upload_payload = json_response_payload(upload_res.buffer, upload_res.blen,
+                                                       &upload_payload_owned, &upload_payload_len);
+    char *s3_url = json_extract_string(upload_payload, upload_payload_len, "url");
+    cloudsync_memory_free(upload_payload_owned);
     if (!s3_url) {
         sqlite3_result_error(context, "cloudsync_network_send_changes: missing 'url' in upload response.", -1);
         network_result_cleanup(&upload_res);
@@ -1690,24 +1715,29 @@ void network_sync_state_update_from_response(NETWORK_RESULT *res,
     // BACKWARD on a rollback when a later send chunk fails, and lastOptimisticVersion
     // becomes the durable send checkpoint — masking a decrease would advance the
     // checkpoint past the rolled-back changes and silently drop them.
-    int64_t parsed_optimistic = json_extract_int(res->buffer, res->blen, "lastOptimisticVersion", -1);
+    char *state_owned = NULL;
+    size_t state_len = 0;
+    const char *state_json = json_response_payload(res->buffer, res->blen, &state_owned, &state_len);
+
+    int64_t parsed_optimistic = json_extract_int(state_json, state_len, "lastOptimisticVersion", -1);
     if (parsed_optimistic >= 0) *last_optimistic_version = parsed_optimistic;
-    int64_t parsed_confirmed = json_extract_int(res->buffer, res->blen, "lastConfirmedVersion", -1);
+    int64_t parsed_confirmed = json_extract_int(state_json, state_len, "lastConfirmedVersion", -1);
     if (parsed_confirmed >= 0) *last_confirmed_version = parsed_confirmed;
-    int parsed_gaps_size = json_extract_array_size(res->buffer, res->blen, "gaps");
+    int parsed_gaps_size = json_extract_array_size(state_json, state_len, "gaps");
     if (parsed_gaps_size >= 0) *gaps_size = parsed_gaps_size;
 
-    char *apply_failure = json_extract_failure_stage(res->buffer, res->blen, "apply");
+    char *apply_failure = json_extract_failure_stage(state_json, state_len, "apply");
     if (apply_failure) {
         if (*apply_failure_json) cloudsync_memory_free(*apply_failure_json);
         *apply_failure_json = apply_failure;
     }
 
-    char *check_failure = json_extract_failure_stage(res->buffer, res->blen, "check");
+    char *check_failure = json_extract_failure_stage(state_json, state_len, "check");
     if (check_failure) {
         if (*check_failure_json) cloudsync_memory_free(*check_failure_json);
         *check_failure_json = check_failure;
     }
+    cloudsync_memory_free(state_owned);
 
     #ifdef CLOUDSYNC_NETWORK_TRACE
     // Full endpoint response body that the sync-state fields above were parsed from.
@@ -1752,7 +1782,11 @@ void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, s
     int64_t last_optimistic_version = -1;
 
     if (res.code == CLOUDSYNC_NETWORK_BUFFER && res.buffer) {
-        last_optimistic_version = json_extract_int(res.buffer, res.blen, "lastOptimisticVersion", -1);
+        char *ack_owned = NULL;
+        size_t ack_len = 0;
+        const char *ack_json = json_response_payload(res.buffer, res.blen, &ack_owned, &ack_len);
+        last_optimistic_version = json_extract_int(ack_json, ack_len, "lastOptimisticVersion", -1);
+        cloudsync_memory_free(ack_owned);
     } else if (res.code != CLOUDSYNC_NETWORK_OK) {
         network_result_to_sqlite_error(context, res, "unable to retrieve current status from remote host.");
         network_result_cleanup(&res);
