@@ -4,22 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [1.1.3] - 2026-09-11
 
 ### Added
 
-- **`sqlitecloud/sqlite-sync-supabase:17-alpine`** — CloudSync on the newer Alpine-userland Supabase Postgres images (roughly `17.6.1.084` and later). The extension is identical to the Ubuntu build — the PostgreSQL binary is glibc-linked on both — so only the base image differs. Use it when your Supabase stack pins one of these newer bases; `:17` continues to track the Ubuntu base.
+- **`sqlitecloud/sqlite-sync-postgres:18`** — CloudSync on PostgreSQL 18, alongside the existing `:17` and `:15` images. PostgreSQL 18 release artifacts (`cloudsync-postgresql18-*`) are published for Linux x86_64/arm64 and macOS arm64/x86_64, and the test suite runs against 18 in CI.
 
 ### Changed
 
+- **The Supabase images now track the base image Supabase currently ships for each major.** `sqlitecloud/sqlite-sync-supabase:17` moves from `17.6.1.071` to `17.6.1.170` and `:15` moves from `15.8.1.085` to `15.14.1.170` — the latter also advances PostgreSQL from 15.8 to 15.14. Both Supabase lines are now on an Alpine userland, so `:<major>` is the only tag you need; the transitional `:17-alpine` tag is retired because `:17` is the same image. Exact-base tags (e.g. `:17.6.1.170`) are still published for stacks that pin one. Supabase base images do not pin the `postgres` user's UID, so moving an **existing** data directory across base families needs a one-time `chown` of the data directory and the `supabase_db-config` volume — see [Self-Hosted Supabase](docs/postgresql/quickstarts/supabase-self-hosted.md) for how to discover the new UID and apply it. The CloudSync extension itself is unchanged.
 - **The local build-from-source path (`make postgres-supabase-build`, `docker/postgresql/Dockerfile.supabase`) now works with the Alpine-userland Supabase bases** as well as the Ubuntu ones. The extension is compiled in a dedicated glibc builder stage (official `postgres:<major>` image with PGDG headers, the same toolchain that produces the release artifacts) whose PostgreSQL major version is derived from the base image tag, and `pg_config` is resolved by probing the Nix profile paths instead of a hardcoded Ubuntu-only path. The runtime stage no longer needs a compiler or package manager, so the base userland is irrelevant.
-- **The `sqlitecloud/sqlite-sync-supabase:15` image now builds on Supabase base `15.8.1.135`** (previously `15.8.1.085`), which moves it from Ubuntu 20.04 to 24.04. Ubuntu 24.04 allocates system UIDs differently, so the `postgres` user changes from `105:106` to `101:102` and an **existing** data directory becomes unreadable: the container fails with `cat: /etc/postgresql-custom/pgsodium_root.key: Permission denied` followed by `FATAL: invalid secret key`. Existing deployments need a one-time `chown -R 101:102` on the data directory and the `supabase_db-config` volume before starting the new image — see [Self-Hosted Supabase](docs/postgresql/quickstarts/supabase-self-hosted.md) for the procedure. New deployments are unaffected, and the CloudSync extension itself is unchanged.
-
-## [1.1.3] - 2026-09-11
+- **The development Docker Compose files mount the Postgres data volume at `/var/lib/postgresql` instead of `/var/lib/postgresql/data`.** PostgreSQL 18 keeps its data in a major-version subdirectory and refuses to start when a volume is mounted at the old path; the parent path works for every supported major. Existing local volumes need to be recreated (`docker compose -f docker/postgresql/docker-compose.yml down -v`).
 
 ### Fixed
 
 - PostgreSQL payload apply now supports wide tables by growing prepared-statement parameter storage dynamically instead of rejecting statements with more than 32 bound values.
+- The website changelog workflow now triggers on the release tags this repository actually creates (`1.1.3`); it was listening for `v`-prefixed tags and never fired automatically.
 
 ## [1.1.2] - 2026-07-13
 

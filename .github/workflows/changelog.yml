@@ -3,7 +3,8 @@ name: Release and Update Website Changelog
 on:
   push:
     tags:
-      - "v*.*.*"
+      # main.yml creates release tags without a "v" prefix (e.g. 1.1.3)
+      - "*.*.*"
   workflow_dispatch:
     inputs:
       test_version:

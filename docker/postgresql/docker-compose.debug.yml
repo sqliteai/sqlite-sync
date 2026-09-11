@@ -23,7 +23,10 @@ services:
       - ../../Makefile:/tmp/cloudsync/Makefile:ro
       - ../../.vscode:/tmp/cloudsync/.vscode:ro
       # Persist database data
-      - postgres_data:/var/lib/postgresql/data
+      # PostgreSQL 18+ stores data in a major-version subdirectory and refuses to
+      # start with a mount at the old /var/lib/postgresql/data path, so mount the
+      # parent instead — it works for every supported major.
+      - postgres_data:/var/lib/postgresql
       # Mount init script
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:

@@ -13,13 +13,14 @@ You can enable CloudSync in one of two ways:
 Use the published PostgreSQL image that already includes the CloudSync extension:
 - `sqlitecloud/sqlite-sync-postgres:15`
 - `sqlitecloud/sqlite-sync-postgres:17`
+- `sqlitecloud/sqlite-sync-postgres:18`
 
 Example using Docker Compose:
 
 ```yaml
 services:
   db:
-    image: sqlitecloud/sqlite-sync-postgres:17
+    image: sqlitecloud/sqlite-sync-postgres:18
     container_name: cloudsync-postgres
     environment:
       POSTGRES_USER: postgres
@@ -28,12 +29,14 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pg_data:/var/lib/postgresql/data
+      - pg_data:/var/lib/postgresql
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
 
 volumes:
   pg_data:
 ```
+
+**Data volume path:** PostgreSQL 18 stores its data in a major-version subdirectory and refuses to start if a volume is mounted at the old `/var/lib/postgresql/data` path, so mount the parent `/var/lib/postgresql` as above. That path also works on 15 and 17, which keep their data in `data/` underneath it. An existing 15 or 17 volume mounted at `/var/lib/postgresql/data` is unaffected until you change the mount, and moving between major versions still requires `pg_upgrade`.
 
 Create `init.sql`:
 ```sql

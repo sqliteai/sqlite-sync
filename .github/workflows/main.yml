@@ -287,7 +287,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres_tag: ['17', '15']
+        postgres_tag: ['18', '17', '15']
 
     steps:
 
@@ -335,6 +335,10 @@ jobs:
           - os: ubuntu-22.04
             arch: x86_64
             name: linux
+            postgres_version: '18'
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: linux
             postgres_version: '17'
           - os: ubuntu-22.04
             arch: x86_64
@@ -343,6 +347,10 @@ jobs:
           - os: ubuntu-22.04-arm
             arch: arm64
             name: linux
+            postgres_version: '18'
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            name: linux
             postgres_version: '17'
           - os: ubuntu-22.04-arm
             arch: arm64
@@ -351,11 +359,19 @@ jobs:
           - os: macos-15
             arch: arm64
             name: macos
+            postgres_version: '18'
+          - os: macos-15
+            arch: arm64
+            name: macos
             postgres_version: '17'
           - os: macos-15
             arch: arm64
             name: macos
             postgres_version: '15'
+          - os: macos-15
+            arch: x86_64
+            name: macos
+            postgres_version: '18'
           - os: macos-15
             arch: x86_64
             name: macos
@@ -617,8 +633,8 @@ jobs:
             [**Expo**](https://www.npmjs.com/package/@sqliteai/sqlite-sync-expo): `npm install @sqliteai/sqlite-sync-expo`
             [**Android**](https://central.sonatype.com/artifact/ai.sqlite/sync): `ai.sqlite:sync:${{ steps.tag.outputs.version }}`
             [**Swift**](https://github.com/sqliteai/sqlite-sync#swift-package): [Installation Guide](https://github.com/sqliteai/sqlite-sync#swift-package)
-            [**Docker (PostgreSQL)**](https://hub.docker.com/r/sqlitecloud/sqlite-sync-postgres): `docker pull sqlitecloud/sqlite-sync-postgres:17` or `:15`
-            [**Docker (Supabase)**](https://hub.docker.com/r/sqlitecloud/sqlite-sync-supabase): `docker pull sqlitecloud/sqlite-sync-supabase:17`, `:15` or `:17-alpine`
+            [**Docker (PostgreSQL)**](https://hub.docker.com/r/sqlitecloud/sqlite-sync-postgres): `docker pull sqlitecloud/sqlite-sync-postgres:18`, `:17` or `:15`
+            [**Docker (Supabase)**](https://hub.docker.com/r/sqlitecloud/sqlite-sync-supabase): `docker pull sqlitecloud/sqlite-sync-supabase:17` or `:15`
 
             ---
 
@@ -631,7 +647,7 @@ jobs:
 
   docker-publish:
     runs-on: ubuntu-22.04
-    name: docker ${{ matrix.image }} pg${{ matrix.pg_major }}${{ matrix.tag_suffix }}${{ github.ref != 'refs/heads/main' && ' beta' || '' }}
+    name: docker ${{ matrix.image }} pg${{ matrix.pg_major }}${{ github.ref != 'refs/heads/main' && ' beta' || '' }}
     needs: [build, postgres-test, postgres-build, release]
     # main: publish the versioned release tags, only when the release job cut a new
     # release. Any other branch: release is skipped, publish/overwrite a per-branch
@@ -647,28 +663,25 @@ jobs:
       matrix:
         include:
           - image: sqlite-sync-postgres
+            pg_major: '18'
+            dockerfile: docker/postgresql/Dockerfile.release
+          - image: sqlite-sync-postgres
             pg_major: '17'
             dockerfile: docker/postgresql/Dockerfile.release
           - image: sqlite-sync-postgres
             pg_major: '15'
             dockerfile: docker/postgresql/Dockerfile.release
+          # :<major> tracks whatever base Supabase currently ships for that major.
+          # Both lines are on an Alpine userland now (still a glibc Nix postgres,
+          # so the same glibc artifact is installed); there are no family suffixes.
           - image: sqlite-sync-supabase
             pg_major: '17'
             dockerfile: docker/postgresql/Dockerfile.supabase.release
-            supabase_tag: '17.6.1.071'
+            supabase_tag: '17.6.1.170'
           - image: sqlite-sync-supabase
             pg_major: '15'
             dockerfile: docker/postgresql/Dockerfile.supabase.release
-            supabase_tag: '15.8.1.135'
-          # Newer Supabase 17 images use an Alpine userland (still a glibc Nix
-          # postgres, so the same glibc artifact is installed). Published behind
-          # explicit -alpine / exact-base tags; the shared :17 alias stays on the
-          # Ubuntu build until we decide the alias scheme.
-          - image: sqlite-sync-supabase
-            pg_major: '17'
-            dockerfile: docker/postgresql/Dockerfile.supabase.release
-            supabase_tag: '17.6.1.151'
-            tag_suffix: '-alpine'
+            supabase_tag: '15.14.1.170'
 
     steps:
 
@@ -738,15 +751,12 @@ jobs:
           VERSION=${{ steps.version.outputs.version }}
           IMAGE=${{ env.DOCKERHUB_ORG }}/${{ matrix.image }}
           SUPABASE_TAG=${{ matrix.supabase_tag }}
-          # Empty for the default (Ubuntu) rows; "-alpine" for the Alpine variant.
-          # Keeps the Alpine images from colliding with the :<major> aliases.
-          SUFFIX="${{ matrix.tag_suffix }}"
           BETA="${{ steps.beta.outputs.slug }}"
           {
             if [ -n "$BETA" ]; then
-              echo "tags=${IMAGE}:${{ matrix.pg_major }}${SUFFIX}-beta-${BETA}"
+              echo "tags=${IMAGE}:${{ matrix.pg_major }}-beta-${BETA}"
             else
-              echo "tags=${IMAGE}:${{ matrix.pg_major }}${SUFFIX},${IMAGE}:${{ matrix.pg_major }}${SUFFIX}-${VERSION},${IMAGE}:${SUPABASE_TAG}"
+              echo "tags=${IMAGE}:${{ matrix.pg_major }},${IMAGE}:${{ matrix.pg_major }}-${VERSION},${IMAGE}:${SUPABASE_TAG}"
             fi
             echo "build_args<<EOF"
             echo "SUPABASE_POSTGRES_TAG=${SUPABASE_TAG}"
@@ -794,7 +804,7 @@ jobs:
                  psql -h 127.0.0.1 -U "$PSQL_USER" -d postgres -v ON_ERROR_STOP=1 \
                  -c 'CREATE EXTENSION IF NOT EXISTS cloudsync;' \
                  -c 'SELECT cloudsync_version();'; then
-            echo "::error::cloudsync failed to load in ${{ matrix.image }} pg${{ matrix.pg_major }}${{ matrix.tag_suffix }}"
+            echo "::error::cloudsync failed to load in ${{ matrix.image }} pg${{ matrix.pg_major }}"
             docker logs cloudsync-smoke
             exit 1
           fi
