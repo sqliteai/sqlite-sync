@@ -111,10 +111,13 @@ const char *cloudsync_errmsg (cloudsync_context *data);
 int cloudsync_errcode (cloudsync_context *data);
 void cloudsync_reset_error (cloudsync_context *data);
 
-// Payload entries rejected by a row-level security policy. The count accumulates
-// across a receive drain (reset once before it) so denials in an early chunk are
-// still reported by the call that finishes the drain.
-void cloudsync_apply_denied_reset (cloudsync_context *data);
+// Entries applied, and entries rejected by a row-level security policy. Both counts
+// accumulate across a receive drain (reset once before it) so denials in an early
+// chunk are still reported by the call that finishes the drain. The applied count is
+// tracked here rather than derived from the apply return value, which reports the
+// payload's entry count (denied ones included) as part of the SQL surface.
+void cloudsync_apply_stats_reset (cloudsync_context *data);
+int cloudsync_apply_rows_count (cloudsync_context *data);
 int cloudsync_apply_denied_count (cloudsync_context *data);
 int cloudsync_commit_hook (void *ctx);
 void cloudsync_rollback_hook (void *ctx);

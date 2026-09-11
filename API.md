@@ -813,10 +813,11 @@ If the network is misconfigured or the remote server is unreachable, the functio
 **Returns:** A JSON string with the receive result:
 
 ```json
-{"receive": {"rows": N, "tables": ["table1", "table2"], "chunks": C, "bytes": B, "complete": true, "error": "...", "lastFailure": {...}}}
+{"receive": {"rows": N, "denied": D, "tables": ["table1", "table2"], "chunks": C, "bytes": B, "complete": true, "error": "...", "lastFailure": {...}}}
 ```
 
 - `receive.rows`: The total number of rows received and applied to the local database, summed across all chunks drained this call. `0` when the receive phase failed, when nothing was available, or when only intermediate fragments were staged without completing a value.
+- `receive.denied`: The number of entries a row-level security policy rejected, summed across all chunks drained this call. Denied entries are skipped and the receive cursor still advances past them: the rejection is permanent, so holding the cursor back would re-deliver the same entries on every call. They are not counted in `receive.rows`, so a non-zero `denied` alongside a `rows` of `0` means nothing was written — the shape of an apply connection whose session identity is not set.
 - `receive.tables`: An array of table names that received changes (the union across all drained chunks). Empty (`[]`) if no changes were applied or the receive phase failed.
 - `receive.chunks`: The number of payload chunks applied by this call. `0` when nothing was ready, `1` for a single monolithic/inline page, and `N` for a drained `N`-chunk stream (bounded by `max_chunks` if given).
 - `receive.bytes`: The total serialized payload bytes received this call (uncompressed cloudsync payload size, summed across chunks; transport-independent, not the compressed wire size). Useful for byte-budgeted draining together with `max_chunks`.
@@ -828,16 +829,16 @@ If the network is misconfigured or the remote server is unreachable, the functio
 
 ```sql
 SELECT cloudsync_network_receive_changes();
--- '{"receive":{"rows":3,"tables":["tasks"],"chunks":1,"bytes":820,"complete":true}}'
+-- '{"receive":{"rows":3,"denied":0,"tables":["tasks"],"chunks":1,"bytes":820,"complete":true}}'
 
 -- Capped drain with more pending (call again to continue):
--- '{"receive":{"rows":40,"tables":["docs"],"chunks":5,"bytes":1310720,"complete":false}}'
+-- '{"receive":{"rows":40,"denied":0,"tables":["docs"],"chunks":5,"bytes":1310720,"complete":false}}'
 
 -- With a client-side apply error:
--- '{"receive":{"rows":0,"tables":[],"chunks":0,"bytes":0,"complete":true,"error":"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."}}'
+-- '{"receive":{"rows":0,"denied":0,"tables":[],"chunks":0,"bytes":0,"complete":true,"error":"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."}}'
 
 -- With a server-reported check-job failure:
--- '{"receive":{"rows":0,"tables":[],"chunks":0,"bytes":0,"complete":true,"lastFailure":{"jobId":456,"dbVersion":15,"seq":1,"code":"tenant_unreachable","stage":"encode_changes","message":"tenant check failed","retryable":true,"failedAt":"2026-04-24T10:22:00Z"}}}'
+-- '{"receive":{"rows":0,"denied":0,"tables":[],"chunks":0,"bytes":0,"complete":true,"lastFailure":{"jobId":456,"dbVersion":15,"seq":1,"code":"tenant_unreachable","stage":"encode_changes","message":"tenant check failed","retryable":true,"failedAt":"2026-04-24T10:22:00Z"}}}'
 ```
 
 ---
@@ -867,7 +868,7 @@ When the server delivers changes as a stream of chunks, this function drains the
 ```json
 {
   "send": {"status": "synced|syncing|out-of-sync|error", "localVersion": N, "serverVersion": N, "chunks": C, "bytes": B, "lastFailure": {...}},
-  "receive": {"rows": N, "tables": ["table1", "table2"], "chunks": C, "bytes": B, "complete": true, "error": "...", "lastFailure": {...}}
+  "receive": {"rows": N, "denied": D, "tables": ["table1", "table2"], "chunks": C, "bytes": B, "complete": true, "error": "...", "lastFailure": {...}}
 }
 ```
 
@@ -877,6 +878,7 @@ When the server delivers changes as a stream of chunks, this function drains the
 - `send.chunks` / `send.bytes`: Number of payload chunks sent and total serialized payload bytes sent during the send phase. Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes).
 - `send.lastFailure` (optional): Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes) — forwarded verbatim from the server's `failures.apply` whenever a failed apply job is reported, regardless of `status`.
 - `receive.rows`: The **total** number of rows received and applied during the receive phase, summed across **all** chunks drained in this call. `0` when the receive phase failed.
+- `receive.denied`: The **total** number of entries rejected by a row-level security policy across **all** chunks drained in this call. Skipped rather than retried, and not counted in `receive.rows` — see [Receive Changes](#receive-changes).
 - `receive.tables`: An array of table names that received changes (the union across all drained chunks). Empty (`[]`) if no changes were applied or the receive phase failed.
 - `receive.chunks`: The number of payload chunks applied in this call. `0` when nothing was ready, `1` for a single monolithic/inline page, and `N` for a fully drained `N`-chunk stream. `cloudsync_network_sync()` always drains the whole stream (it does not cap chunks).
 - `receive.bytes`: The total serialized payload bytes received this call (uncompressed cloudsync payload size, summed across chunks; not the compressed wire size). Same semantics as in [`cloudsync_network_receive_changes()`](#cloudsync_network_receive_changesmax_chunks).
@@ -889,15 +891,15 @@ When the server delivers changes as a stream of chunks, this function drains the
 ```sql
 -- Perform a single synchronization cycle
 SELECT cloudsync_network_sync();
--- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":2048},"receive":{"rows":3,"tables":["tasks"],"chunks":1,"bytes":820,"complete":true}}'
+-- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":2048},"receive":{"rows":3,"denied":0,"tables":["tasks"],"chunks":1,"bytes":820,"complete":true}}'
 
 -- Perform a synchronization cycle with custom retry settings
 SELECT cloudsync_network_sync(500, 3);
 -- A large download drained as a multi-chunk stream in a single call:
--- '{"send":{"status":"synced","localVersion":42,"serverVersion":42,"chunks":0,"bytes":0},"receive":{"rows":1200,"tables":["docs"],"chunks":7,"bytes":1835008,"complete":true}}'
+-- '{"send":{"status":"synced","localVersion":42,"serverVersion":42,"chunks":0,"bytes":0},"receive":{"rows":1200,"denied":0,"tables":["docs"],"chunks":7,"bytes":1835008,"complete":true}}'
 
 -- Receive phase failed but send phase completed — the error is surfaced in JSON, not as a SQL error:
--- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":512},"receive":{"rows":0,"tables":[],"chunks":0,"bytes":0,"complete":false,"error":"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."}}'
+-- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":512},"receive":{"rows":0,"denied":0,"tables":[],"chunks":0,"bytes":0,"complete":false,"error":"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."}}'
 ```
 
 ---

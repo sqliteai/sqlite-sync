@@ -2238,10 +2238,9 @@ static int network_drain_changes (sqlite3_context *context, sync_result *sr,
 
     // Denials accumulate on the context across every chunk of this drain, so a
     // denial in an early chunk is still reported by the call that finishes it.
-    cloudsync_apply_denied_reset(data);
+    cloudsync_apply_stats_reset(data);
 
     int ntries = 0;          // counts only "nothing ready" (202) polls
-    int nrows_total = 0;     // cumulative rows applied across the whole drain
     int nchunks = 0;         // payload chunks applied this call
     int64_t bytes_total = 0; // serialized payload bytes received this call
     bool complete = true;    // false iff the stream is known to have more pending
@@ -2265,14 +2264,13 @@ static int network_drain_changes (sqlite3_context *context, sync_result *sr,
             request_max_chunks = safety_remaining;
         }
 
-        int nrows = 0;
+        int nrows = 0;   // required out-param; the drain total comes from the context
         rc = cloudsync_network_check_internal(context, &nrows, sr, &receive_err, request_max_chunks);
         // a receive error (network or apply) won't fix itself across retries
         if (rc != SQLITE_OK) { complete = false; break; }
 
         if (sr->page_delivered) {
-            nrows_total += nrows;                 // a staged (incomplete) fragment contributes 0
-            bytes_total += sr->bytes_received;
+            bytes_total += sr->bytes_received;    // a staged (incomplete) fragment applies 0 rows
             nchunks += sr->chunks_received;
             complete = !sr->more_pending;         // reflects whether the stream is finished
             if (!sr->more_pending) break;                                 // final batch -> drained
@@ -2301,11 +2299,17 @@ static int network_drain_changes (sqlite3_context *context, sync_result *sr,
     }
 
     // Compute the affected-tables union once, over the whole drain window.
-    if (!receive_err && rc == SQLITE_OK && nrows_total > 0) {
+    // Report rows actually written, not payload entries: an all-denied receive would
+    // otherwise claim {"rows":N,"denied":N} while tables is correctly empty. The apply
+    // return value still counts payload entries, which is a tested part of the SQL
+    // surface, so the accurate count is accumulated on the context instead.
+    int applied_total = cloudsync_apply_rows_count(data);
+
+    if (!receive_err && rc == SQLITE_OK && applied_total > 0) {
         sr->tables_json = network_get_affected_tables(db, drain_prev_dbv);
     }
 
-    dr->rows = nrows_total;
+    dr->rows = applied_total;
     dr->denied = cloudsync_apply_denied_count(data);
     dr->chunks = nchunks;
     dr->bytes = bytes_total;

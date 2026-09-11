@@ -193,9 +193,12 @@ struct cloudsync_context {
     int64_t    apply_last_db_version;
     int64_t    apply_last_seq;
 
-    // payload entries rejected by a row-level security policy, accumulated across
-    // a receive drain so a denial in one chunk is still visible when a later chunk
-    // reports. Reset with cloudsync_apply_denied_reset.
+    // Entries applied, and entries rejected by a row-level security policy, both
+    // accumulated across a receive drain so a denial in one chunk is still visible
+    // when a later chunk reports. Reset with cloudsync_apply_stats_reset. Kept here
+    // rather than derived from the apply return value, which reports payload entries
+    // (denied ones included) and is a tested part of the SQL surface.
+    int        apply_rows;
     int        apply_denied;
 };
 
@@ -622,8 +625,12 @@ const char *cloudsync_errmsg (cloudsync_context *data) {
     return data->errmsg;
 }
 
-void cloudsync_apply_denied_reset (cloudsync_context *data) {
-    if (data) data->apply_denied = 0;
+void cloudsync_apply_stats_reset (cloudsync_context *data) {
+    if (data) { data->apply_rows = 0; data->apply_denied = 0; }
+}
+
+int cloudsync_apply_rows_count (cloudsync_context *data) {
+    return (data) ? data->apply_rows : 0;
 }
 
 int cloudsync_apply_denied_count (cloudsync_context *data) {
@@ -3914,7 +3921,11 @@ static int cloudsync_payload_apply_reassembled_fragment (cloudsync_context *data
     rc = cloudsync_payload_apply_single_decoded_row(data, tbl, tbl_len, pk, pk_len, col_name, col_name_len,
                                                     value, (size_t)total_size, col_version, db_version,
                                                     site_id, site_id_len, cl, seq, pnrows);
-    if (rc != DBRES_OK) goto cleanup;
+    // A denied value is permanently not ours to hold, so its staged fragments are as
+    // finished as an applied one's: drop them here rather than leave them churning
+    // until stale cleanup. Any other failure keeps them for the retry.
+    int apply_rc = rc;
+    if (rc != DBRES_OK && rc != DBRES_POLICY_DENIED) goto cleanup;
 
     rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_DELETE, &vm, 0);
     if (rc == DBRES_OK) {
@@ -3922,6 +3933,7 @@ static int cloudsync_payload_apply_reassembled_fragment (cloudsync_context *data
         int step_rc = databasevm_step(vm);
         if (step_rc == DBRES_DONE) rc = DBRES_OK;
     }
+    if (rc == DBRES_OK) rc = apply_rc;
 
 cleanup:
     if (vm) databasevm_finalize(vm);
@@ -4115,6 +4127,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     if (header.version == CLOUDSYNC_PAYLOAD_VERSION_3) {
         int rc = DBRES_OK;
         int applied_rows = 0;
+        int denied_entries = 0;
         if (header.ncols != CLOUDSYNC_CHANGES_NCOLS) {
             if (clone) cloudsync_memory_free(clone);
             return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid v3 column count", DBRES_MISUSE);
@@ -4130,12 +4143,18 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
             }
             int n = 0;
             rc = cloudsync_payload_apply_fragment_row(data, &row, &n);
-            if (rc != DBRES_OK) break;
+            // Same policy as the row path below: a denial is permanent, so skip it,
+            // count it, and let the cursor advance. Failing here would abort the whole
+            // drain and re-deliver the same value on every retry.
+            if (rc == DBRES_POLICY_DENIED) { denied_entries++; rc = DBRES_OK; }
+            else if (rc != DBRES_OK) break;
             applied_rows += n;
             buffer += seek;
             buf_len -= seek;
         }
         if (clone) cloudsync_memory_free(clone);
+        data->apply_denied += denied_entries;
+        if (rc == DBRES_OK) data->apply_rows += applied_rows;
         if (pnrows) *pnrows = applied_rows;
         // Advance the receive cursor only after the whole payload is applied,
         // gated on the caller-supplied checkpoint (a non-final chunk passes
@@ -4285,6 +4304,10 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     if (rc == DBRES_DONE) rc = DBRES_OK;
 
     data->apply_denied += denied_entries;
+    if (rc == DBRES_OK) {
+        int applied = (int)nrows - denied_entries;
+        data->apply_rows += (applied > 0) ? applied : 0;
+    }
 
     // A policy denial is permanent: those rows are not this site's to hold, so the
     // cursor must still advance. Holding it back would re-deliver the same rows on
