@@ -301,19 +301,6 @@ unittest: $(TARGET) $(DIST_DIR)/unit$(EXE) $(DIST_DIR)/review_regressions$(EXE)
 	@./$(DIST_DIR)/unit$(EXE)
 	@./$(DIST_DIR)/review_regressions$(EXE)
 
-# Force pk.c's endian-conversion branch while preserving the real host ABI.
-# This catches double conversion regressions even on a little-endian CI host.
-$(BUILD_TEST)/pk_forced_big_endian.o: $(SRC_DIR)/pk.c $(SRC_DIR)/cloudsync_endian.h
-	@mkdir -p $(BUILD_TEST)
-	$(CC) $(T_CFLAGS) -U__BYTE_ORDER__ -D__BYTE_ORDER__=__ORDER_BIG_ENDIAN__ -c $< -o $@
-
-$(DIST_DIR)/review_regressions_big_endian$(EXE): $(TEST_OBJ) $(BUILD_TEST)/pk_forced_big_endian.o
-	$(CC) $(filter-out $(BUILD_TEST)/pk.o $(patsubst %.c,$(BUILD_TEST)/%.o,$(notdir $(TEST_SRC))),$(TEST_OBJ)) $(BUILD_TEST)/review_regressions.o $(BUILD_TEST)/pk_forced_big_endian.o -o $@ $(T_LDFLAGS)
-
-.PHONY: endian-unittest
-endian-unittest: $(DIST_DIR)/review_regressions_big_endian$(EXE)
-	@./$(DIST_DIR)/review_regressions_big_endian$(EXE)
-
 # Run the SQLite unit and regression suites on a real big-endian host (s390x) under QEMU
 # emulation. The payload and primary-key encodings are byte-order sensitive; this is the
 # only build that executes them on big-endian hardware semantics. Needs Docker with

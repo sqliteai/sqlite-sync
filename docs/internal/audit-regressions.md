@@ -67,7 +67,7 @@ The previously reported `MAX_PARAMS` issue is outside this change.
 | Area | Focused coverage |
 | --- | --- |
 | 64-bit clocks | Incoming column/database versions, causal length and sequence above UINT32_MAX |
-| Double encoding | Golden bytes, decoding a deployed fixture, negative-value roundtrip; forced big-endian conversion build; the unit and regression suites on a real big-endian host (`make unittest-s390x`, s390x under QEMU) |
+| Double encoding | Golden bytes, decoding a deployed fixture, negative-value roundtrip; the unit and regression suites on a real big-endian host (`make unittest-s390x`, s390x under QEMU) |
 | Virtual-table planner | Unusable/unsupported constraints before an accepted constraint; no accepted constraints |
 | RLS denials | Block-column and GOS denials skipped; every column of a permitted block/GOS row written; a column hidden from UPDATE not recorded as applied; order-dependent denials applied on retry in both the batched and trigger paths; permanently denied rows skipped with checkpoint advanced |
 | Block materialization errors | Write failure via cloudsync_text_materialize keeps cause, code/SQLSTATE and names stage, column, table; single-shot allocation failure at every allocation never yields a blank error |
@@ -83,7 +83,7 @@ The previously reported `MAX_PARAMS` issue is outside this change.
 | Fractional indexing | 4096-byte common prefix plus the existing module suite |
 | Test harness | Temporary directory cleanup, memory accounting and sanitizer-safe RowID generation |
 
-Run `make unittest`, `make unittest-s390x`, `make endian-unittest`, `make network-unittest`, and
+Run `make unittest`, `make unittest-s390x`, `make network-unittest`, and
 `make -C modules/fractional-indexing/test run`. The network test needs permission
 to bind a loopback socket; it does not contact an external service. Run Node
 checks from `packages/node` with `npm test -- --run`, `npm run typecheck`, and
@@ -114,3 +114,10 @@ runtime suites were not executed. The x86_64 runtime attempt was unavailable on
 this host (`Bad CPU type in executable`, Rosetta not available). The endian
 test exercises conversion logic; it is not a substitute for real big-endian
 hardware testing.
+
+Update: `make endian-unittest` has since been removed. Once `pk.c` stopped using
+host-order conversions, forcing `__BYTE_ORDER__` produced a byte-identical object, so
+it could no longer fail; the host-order helpers it exercised are gone from
+`cloudsync_endian.h`. Big-endian coverage is now `make unittest-s390x`: the SQLite unit
+and regression suites run on s390x under QEMU, and with the pre-1.1.4 double encoding
+restored they fail there on the golden bytes while passing on little-endian hosts.
