@@ -9,10 +9,15 @@ The previously reported `MAX_PARAMS` issue is outside this change.
   byte swapping now makes the historical format explicit on every architecture.
   Integers keep their existing encoding. No migration is needed for supported
   little-endian deployments.
-- Decompressed payloads are limited to 256 MiB before allocation. Builds may
-  override `CLOUDSYNC_MAX_PAYLOAD_EXPANDED_SIZE`; LZ4's `INT_MAX` bound still
-  applies. Existing default chunk sizes are below this limit. Oversized legacy
-  monolithic payloads must be rechunked or used with an explicitly raised limit.
+- A compressed payload's declared expanded size must not exceed what its compressed
+  bytes can decompress to under LZ4's 255:1 maximum ratio (plus a small constant), nor
+  LZ4's `INT_MAX` API limit. There is no fixed size cap, so large payloads produced by
+  `cloudsync_payload_encode` / `cloudsync_payload_save` remain loadable; a forged header
+  can no longer trigger a large allocation. A genuine repetitive 8 MiB value compresses
+  to 254.3:1, inside the bound.
+- Curl requests now have a 30-second connection deadline and a 300-second total
+  deadline, including reused handles. Build overrides are
+  `CLOUDSYNC_CONNECT_TIMEOUT_SECONDS` and `CLOUDSYNC_REQUEST_TIMEOUT_SECONDS`.
 - Payload writes that fail on their data (constraint, raising trigger, type
   error) are skipped, logged as a warning and counted (`receive.failed`), and the
   receive cursor advances: they fail identically on every retry. Transient
@@ -64,7 +69,7 @@ The previously reported `MAX_PARAMS` issue is outside this change.
 | Block materialization errors | Write failure via cloudsync_text_materialize keeps cause, code/SQLSTATE and names stage, column, table; single-shot allocation failure at every allocation never yields a blank error |
 | Error origin | SQLSTATE 40001/23505 through the block and metadata triggers; 40001 and a non-policy 42501 through payload apply, not skipped; SQLite trigger failure keeps SQLITE_CONSTRAINT and names column and table |
 | Group atomicity | Resurrected row rejected (data and transient failure): no metadata left, re-delivery creates it, 3 entries counted; existing row keeps its clocks; RLS retry of a resurrected row; apply inside an aborted caller subtransaction |
-| Payload failures | First, middle and final PK errors skipped with a warning and checkpoint advanced; locked database fails and keeps the checkpoint (SQLite rollback journal, WAL, PostgreSQL lock_timeout); allocation limits |
+| Payload failures | First, middle and final PK errors skipped with a warning and checkpoint advanced; locked database fails and keeps the checkpoint (SQLite rollback journal, WAL, PostgreSQL lock_timeout); expanded-size bound (forged 4GB/268MB headers, exact 255:1 boundary, genuine 254:1 payload) |
 | Metadata refill | Trigger rejects insertion of a missing column clock |
 | Block LWW | Insert/update rollback on block write failure; migration past orphaned metadata; allocation failure at each split/list/diff allocation |
 | PostgreSQL ownership | Block failure while another SPI cursor is active; no invalid tuple-table cleanup |

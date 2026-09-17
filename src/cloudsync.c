@@ -4456,9 +4456,14 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     // check if payload is compressed
     char *clone = NULL;
     if (header.expanded_size != 0) {
-        // Bound untrusted allocation sizes before passing them to LZ4's int API.
-        if (header.expanded_size > CLOUDSYNC_MAX_PAYLOAD_EXPANDED_SIZE || header.expanded_size > INT_MAX) {
-            return cloudsync_set_error(data, "Error on cloudsync_payload_apply: expanded payload exceeds limit", DBRES_MISUSE);
+        // The declared size is untrusted and is allocated before decompressing, so bound
+        // it by what the compressed bytes can actually expand to: a few forged header bytes
+        // must not make us allocate gigabytes. A genuinely large payload stays loadable,
+        // whatever its size. INT_MAX is LZ4's own API limit: past it the cast below turns
+        // negative and LZ4_decompress_safe does not validate a negative capacity.
+        if (header.expanded_size > INT_MAX ||
+            (uint64_t)header.expanded_size > (uint64_t)buf_len * CLOUDSYNC_PAYLOAD_LZ4_MAX_RATIO + 64) {
+            return cloudsync_set_error(data, "Error on cloudsync_payload_apply: declared expanded size is inconsistent with the compressed payload", DBRES_MISUSE);
         }
         clone = (char *)cloudsync_memory_alloc(header.expanded_size);
         if (!clone) return cloudsync_set_error(data, "Unable to allocate memory to uncompress payload", DBRES_NOMEM);

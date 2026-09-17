@@ -144,12 +144,33 @@ static void test_payload_errors(void) {
 
     sqlite3 *db = open_db();
     CHECK(sql(db, "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL); SELECT cloudsync_init('t');") == SQLITE_OK);
-    // v1 header: request a 4GB decompression without checksum/schema requirements.
+    // v1 headers (no checksum or schema requirements) over a 2-byte compressed body.
+    // Declaring 4GB, or 268MB, from 2 bytes is inconsistent with LZ4's maximum ratio.
     CHECK(sql(db, "SELECT cloudsync_payload_decode(x'434C535901000000FFFFFFFF00090000000000000000000000000000000000000000')") != SQLITE_OK);
-    CHECK(strstr(sqlite3_errmsg(db), "exceeds limit") != NULL);
+    CHECK(strstr(sqlite3_errmsg(db), "inconsistent") != NULL);
     CHECK(sql(db, "SELECT cloudsync_payload_decode(x'434C5359010000001000000100090000000000000000000000000000000000000000')") != SQLITE_OK);
-    CHECK(strstr(sqlite3_errmsg(db), "exceeds limit") != NULL);
+    CHECK(strstr(sqlite3_errmsg(db), "inconsistent") != NULL);
+    // At the bound (2 * 255 + 64 = 574 bytes) the size is plausible and decompression is
+    // attempted, failing on the bogus data; one byte past it is rejected up front.
+    CHECK(sql(db, "SELECT cloudsync_payload_decode(x'434C5359010000000000023E00090000000000000000000000000000000000000000')") != SQLITE_OK);
+    CHECK(strstr(sqlite3_errmsg(db), "unable to decompress") != NULL);
+    CHECK(sql(db, "SELECT cloudsync_payload_decode(x'434C5359010000000000023F00090000000000000000000000000000000000000000')") != SQLITE_OK);
+    CHECK(strstr(sqlite3_errmsg(db), "inconsistent") != NULL);
     CHECK(close_db(db) == SQLITE_OK);
+}
+static void test_payload_high_compression(void) {
+    // A genuine payload compresses close to LZ4's maximum ratio when its values repeat;
+    // the size check must never reject what the library itself produced.
+    sqlite3 *source = open_db(), *target = open_db();
+    const char *schema = "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, value TEXT); SELECT cloudsync_init('t');";
+    CHECK(sql(source, schema) == SQLITE_OK && sql(target, schema) == SQLITE_OK);
+    CHECK(sql(source, "INSERT INTO t VALUES('big', replace(hex(zeroblob(4*1024*1024)), '0', 'A'))") == SQLITE_OK);
+    CHECK(sql(source, "INSERT INTO t VALUES('small', 'x')") == SQLITE_OK);
+    CHECK(apply_payload(source, target) == SQLITE_ROW);
+    CHECK(scalar(target, "SELECT length(value) FROM t WHERE id='big'") == 8 * 1024 * 1024);
+    CHECK(scalar(target, "SELECT count(*) FROM t") == 2);
+    CHECK(close_db(source) == SQLITE_OK);
+    CHECK(close_db(target) == SQLITE_OK);
 }
 static void fail_busy(sqlite3_context *context, int argc, sqlite3_value **argv) {
     (void)argc; (void)argv;
@@ -358,6 +379,7 @@ int main(void) {
     test_clocks_and_double();
     test_best_index();
     test_payload_errors();
+    test_payload_high_compression();
     test_resurrected_group_rollback();
     test_block_write_errors();
     test_block_materialize_errors();

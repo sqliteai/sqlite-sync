@@ -19,9 +19,9 @@ extern "C" {
 #endif
 
 #define CLOUDSYNC_VERSION                       "1.1.4"
-#ifndef CLOUDSYNC_MAX_PAYLOAD_EXPANDED_SIZE
-#define CLOUDSYNC_MAX_PAYLOAD_EXPANDED_SIZE (256U * 1024U * 1024U)
-#endif
+// LZ4's block format cannot expand input by more than 255:1, so a compressed payload
+// declaring a larger expansion is forged or corrupt (see cloudsync_payload_apply).
+#define CLOUDSYNC_PAYLOAD_LZ4_MAX_RATIO         255
 #define CLOUDSYNC_MAX_TABLENAME_LEN             512
 
 #define CLOUDSYNC_VALUE_NOTSET                  -1

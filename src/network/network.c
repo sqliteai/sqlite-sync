@@ -372,9 +372,9 @@ static bool network_curl_pool_enabled(network_data *data) {
 }
 
 // API calls carry small JSON, so a cap on elapsed time is the right shape for them.
-// Artifact transfers are bulk and are bounded on progress instead: 256 MiB inside a
-// 300s cap would demand a sustained ~875 KB/s, killing a healthy transfer on a slow
-// link. Low-speed also detects a genuine stall sooner than the absolute cap does.
+// Artifact transfers are bulk and are bounded on progress instead: a large payload
+// inside a 300s cap would demand a sustained transfer rate, killing a healthy transfer
+// on a slow link. Low-speed also detects a genuine stall sooner than the absolute cap does.
 static void network_curl_apply_deadlines(CURL *handle, bool is_api) {
     curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, CLOUDSYNC_CONNECT_TIMEOUT_SECONDS);
     curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
