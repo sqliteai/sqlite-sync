@@ -222,6 +222,21 @@ static void test_block_write_errors(void) {
         CHECK(close_db(db) == SQLITE_OK);
     }
 }
+static void test_block_migration_orphan(void) {
+    // Metadata can outlive its base row (deleted while sync was disabled). Converting
+    // the column must skip that row, not fail, and still migrate the readable ones.
+    sqlite3 *db = open_db();
+    CHECK(sql(db, "CREATE TABLE docs(id TEXT PRIMARY KEY NOT NULL, body TEXT); SELECT cloudsync_init('docs');"
+                  "INSERT INTO docs VALUES('a','hello world'),('b','x y');"
+                  "SELECT cloudsync_disable('docs'); DELETE FROM docs WHERE id='b'; SELECT cloudsync_enable('docs');") == SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_set_column('docs','body','algo','block')") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_table_settings WHERE tbl_name='docs' AND key='algo' AND value='block'") == 1);
+    CHECK(scalar(db, "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk=cloudsync_pk_encode('a')") == 1);
+    CHECK(scalar(db, "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk=cloudsync_pk_encode('b')") == 0);
+    CHECK(sql(db, "UPDATE docs SET body='hello world' || char(10) || 'again' WHERE id='a'") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM docs_cloudsync_blocks WHERE pk=cloudsync_pk_encode('a')") == 2);
+    CHECK(close_db(db) == SQLITE_OK);
+}
 static void test_block_not_null_payload(void) {
     // A received block is materialized into a row whose other columns arrive in the same
     // payload; a constraint on one of them (here a trigger requiring an owner, as a NOT
@@ -346,6 +361,7 @@ int main(void) {
     test_resurrected_group_rollback();
     test_block_write_errors();
     test_block_materialize_errors();
+    test_block_migration_orphan();
     test_block_not_null_payload();
     test_refill_error();
     test_block_oom();

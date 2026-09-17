@@ -246,6 +246,28 @@ DROP TRIGGER fail_block ON t_cloudsync_blocks;
 DROP TRIGGER fail_meta ON plain_audit_cloudsync;
 \echo [PASS] (57-audit) tracking-trigger failures keep their SQLSTATE and name the column and table
 
+-- Converting a column to block must skip metadata whose base row is gone, rather
+-- than fail the conversion.
+CREATE TABLE orphan_docs(id TEXT PRIMARY KEY NOT NULL, body TEXT);
+SELECT cloudsync_init('orphan_docs') \gset
+INSERT INTO orphan_docs VALUES ('a','hello world'), ('b','x y');
+SELECT cloudsync_disable('orphan_docs') \gset
+DELETE FROM orphan_docs WHERE id = 'b';
+SELECT cloudsync_enable('orphan_docs') \gset
+SELECT cloudsync_set_column('orphan_docs','body','algo','block') \gset
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT FROM cloudsync_table_settings WHERE tbl_name='orphan_docs' AND key='algo' AND value='block') THEN
+        RAISE EXCEPTION 'Block conversion was not persisted';
+    END IF;
+    IF (SELECT count(*) FROM orphan_docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('a')) <> 1 THEN
+        RAISE EXCEPTION 'Readable row was not migrated';
+    END IF;
+    IF EXISTS (SELECT FROM orphan_docs_cloudsync_blocks WHERE pk = cloudsync_pk_encode('b')) THEN
+        RAISE EXCEPTION 'Orphan row produced blocks';
+    END IF;
+END $$;
+\echo [PASS] (57-audit) block conversion skips metadata whose base row is gone
+
 \connect postgres
 DROP DATABASE cloudsync_audit_source;
 DROP DATABASE cloudsync_audit_target;

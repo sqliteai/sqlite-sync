@@ -2374,7 +2374,8 @@ static int block_migrate_existing_rows (cloudsync_context *data, cloudsync_table
     // Reuse the checked block writer; the scan above excludes migrated rows.
     // As in local_block_insert, every failure carries a message: the migration aborts
     // on one, and a bare code would surface as a blank error. Aborting is recoverable
-    // — the Phase 1 scan skips already-migrated rows, so a re-run resumes.
+    // — the Phase 1 scan skips already-migrated rows, so a re-run resumes. A row that
+    // cannot be read back is skipped rather than failed (see below).
     char errmsg[512];
     dbvm_t *val_vm = table_column_lookup(table, col_name, false, NULL);
     if (!val_vm) {
@@ -2407,8 +2408,13 @@ static int block_migrate_existing_rows (cloudsync_context *data, cloudsync_table
                 rc = local_block_update(data, table, pks[p], pklens[p], col_idx, copy, db_version, true);
             cloudsync_memory_free(copy);
         } else if (rc == DBRES_DONE) {
-            snprintf(errmsg, sizeof(errmsg), "Unable to read block column \"%s\" of table \"%s\" while migrating: a tracked row is not visible to this connection (check the table's row-level security SELECT policy)", col_name, table->name);
-            rc = cloudsync_set_error(data, errmsg, DBRES_ERROR);
+            // The scan reads the metadata table, not the base table, so it can return a
+            // pk whose row is gone: deleted while sync was disabled, say, or hidden from
+            // this session by a row-level security SELECT policy. There is no current
+            // value to split, and failing here would make the column impossible to
+            // convert. Skip it as the migration always has; if the row reappears, its
+            // next local write creates the blocks.
+            rc = DBRES_OK;
         }
         databasevm_reset(val_vm);
     }

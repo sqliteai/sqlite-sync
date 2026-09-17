@@ -31,6 +31,7 @@ The previously reported `MAX_PARAMS` issue is outside this change.
   (`databasevm_changes` exposes the affected row count on both backends).
 - PostgreSQL savepoints restore the caller's resource owner and memory context, so
   a payload applied from a table scan no longer trips a foreign buffer pin.
+- Block-column migration skips tracked rows whose base row cannot be read.
 - Each PK group of a payload is applied under one savepoint (`cloudsync_merge_group`)
   that also covers the metadata its rows write before the flush (sentinel, zeroed
   clocks, block values, winner clocks); a failed flush rolls it all back, so a retried or
@@ -65,7 +66,7 @@ The previously reported `MAX_PARAMS` issue is outside this change.
 | Group atomicity | Resurrected row rejected (data and transient failure): no metadata left, re-delivery creates it, 3 entries counted; existing row keeps its clocks; RLS retry of a resurrected row; apply inside an aborted caller subtransaction |
 | Payload failures | First, middle and final PK errors skipped with a warning and checkpoint advanced; locked database fails and keeps the checkpoint (SQLite rollback journal, WAL, PostgreSQL lock_timeout); allocation limits |
 | Metadata refill | Trigger rejects insertion of a missing column clock |
-| Block LWW | Insert/update rollback on block write failure; allocation failure at each split/list/diff allocation |
+| Block LWW | Insert/update rollback on block write failure; migration past orphaned metadata; allocation failure at each split/list/diff allocation |
 | PostgreSQL ownership | Block failure while another SPI cursor is active; no invalid tuple-table cleanup |
 | JSON | Root-only member lookup, string values resembling keys, nested keys, Unicode and invalid surrogates |
 | Curl | Stalled loopback HTTP server, unpooled handle and pooled handle before/after reset |
