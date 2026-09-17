@@ -13,14 +13,42 @@ The previously reported `MAX_PARAMS` issue is outside this change.
   override `CLOUDSYNC_MAX_PAYLOAD_EXPANDED_SIZE`; LZ4's `INT_MAX` bound still
   applies. Existing default chunk sizes are below this limit. Oversized legacy
   monolithic payloads must be rechunked or used with an explicitly raised limit.
-- Curl requests now have a 30-second connection deadline and a 300-second total
-  deadline, including reused handles. Build overrides are
-  `CLOUDSYNC_CONNECT_TIMEOUT_SECONDS` and `CLOUDSYNC_REQUEST_TIMEOUT_SECONDS`.
-- Failed payload writes report an error and do not advance the receive cursor.
-  PostgreSQL's explicit RLS WITH CHECK rejection remains a skippable policy
-  outcome, distinct from generic SQL/permission errors; the call still reports
-  processed rows, but does not advance the cursor when a policy denied rows.
-  SQLite retains its existing per-group partial-application behavior.
+- Payload writes that fail on their data (constraint, raising trigger, type
+  error) are skipped, logged as a warning and counted (`receive.failed`), and the
+  receive cursor advances: they fail identically on every retry. Transient
+  failures (busy/locked, deadlock, serialization failure, cancel, out of memory or
+  disk, I/O) and, on PostgreSQL, failures not contained by a savepoint fail the
+  apply and leave the cursor in place. PostgreSQL's RLS WITH CHECK rejection stays
+  a separate outcome: every row is applied in its own savepoint so a denial raised
+  inside the cloudsync_changes trigger (block columns, GOS tables) is contained too;
+  denied rows are retried after the rest of the payload while retries make progress,
+  then skipped with one summary WARNING. `receive.denied` was removed: denials never
+  occur on the SQLite client where the network functions run.
+- Block materialization writes a row's pending columns first, and block and GOS
+  column writes update an existing row in place, so they pass INSERT policies and NOT
+  NULL constraints on other columns. An update that changes no row falls back to the
+  upsert, so a row hidden by an UPDATE policy is reported instead of silently skipped
+  (`databasevm_changes` exposes the affected row count on both backends).
+- PostgreSQL savepoints restore the caller's resource owner and memory context, so
+  a payload applied from a table scan no longer trips a foreign buffer pin.
+- Each PK group of a payload is applied under one savepoint (`cloudsync_merge_group`)
+  that also covers the metadata its rows write before the flush (sentinel, zeroed
+  clocks, block values, winner clocks); a failed flush rolls it all back, so a retried or
+  re-delivered row applies cleanly. The flush uses that savepoint instead of its own.
+  Skipped entries are counted from `merge_pending_batch.rows` (payload rows that joined
+  the batch, including an explicit sentinel, excluding one implied by a column row).
+- Only the outermost savepoint opened by cloudsync swaps the active snapshot when it
+  ends; nested ones advance the command counter, keeping the caller's snapshot stack
+  balanced when an enclosing subtransaction rolls back.
+- Every block materialization failure goes through one exit that names the stage,
+  column and table and composes the database error; allocation failures clear any
+  unrelated database error first so they are not misreported.
+- Errors keep their origin. PostgreSQL records the SQLSTATE of every caught error on
+  the context (`cloudsync_sqlstate`), preserved across savepoint rollbacks, and every
+  `ereport` built from the context error uses it (internal_error only for cloudsync's
+  own failures). The SQLite tracking triggers report cloudsync's message and the real
+  result code. A missing privilege (`42501` outside a policy check, `SQLITE_PERM` /
+  `SQLITE_AUTH`) or a read-only database is not skipped by a payload apply.
 - Test database files live in a private per-run temporary directory, not HOME.
   The harness deletes only its own flat test files at shutdown.
 
@@ -31,7 +59,11 @@ The previously reported `MAX_PARAMS` issue is outside this change.
 | 64-bit clocks | Incoming column/database versions, causal length and sequence above UINT32_MAX |
 | Double encoding | Golden bytes, decoding a deployed fixture, negative-value roundtrip; forced big-endian conversion build |
 | Virtual-table planner | Unusable/unsupported constraints before an accepted constraint; no accepted constraints |
-| Payload failures | First, middle and final PK errors; checkpoint unchanged; allocation limits |
+| RLS denials | Block-column and GOS denials skipped; every column of a permitted block/GOS row written; a column hidden from UPDATE not recorded as applied; order-dependent denials applied on retry in both the batched and trigger paths; permanently denied rows skipped with checkpoint advanced |
+| Block materialization errors | Write failure via cloudsync_text_materialize keeps cause, code/SQLSTATE and names stage, column, table; single-shot allocation failure at every allocation never yields a blank error |
+| Error origin | SQLSTATE 40001/23505 through the block and metadata triggers; 40001 and a non-policy 42501 through payload apply, not skipped; SQLite trigger failure keeps SQLITE_CONSTRAINT and names column and table |
+| Group atomicity | Resurrected row rejected (data and transient failure): no metadata left, re-delivery creates it, 3 entries counted; existing row keeps its clocks; RLS retry of a resurrected row; apply inside an aborted caller subtransaction |
+| Payload failures | First, middle and final PK errors skipped with a warning and checkpoint advanced; locked database fails and keeps the checkpoint (SQLite rollback journal, WAL, PostgreSQL lock_timeout); allocation limits |
 | Metadata refill | Trigger rejects insertion of a missing column clock |
 | Block LWW | Insert/update rollback on block write failure; allocation failure at each split/list/diff allocation |
 | PostgreSQL ownership | Block failure while another SPI cursor is active; no invalid tuple-table cleanup |

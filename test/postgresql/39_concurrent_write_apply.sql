@@ -76,6 +76,7 @@ SELECT dblink_exec('locker', 'LOCK TABLE concurrent_tbl IN EXCLUSIVE MODE') AS _
 
 \if :{?_lock}
 -- ===== Lock acquired — run lock-contention test =====
+SELECT coalesce((SELECT value::BIGINT FROM cloudsync_settings WHERE key='check_dbversion'), 0) AS ckpt_before_blocked \gset
 
 BEGIN;
 \set ON_ERROR_ROLLBACK on
@@ -99,6 +100,17 @@ SELECT (:'row1_val_check' = 'val_a') AS blocked_ok \gset
 \echo [PASS] (:testid) Apply correctly blocked by concurrent table lock
 \else
 \echo [FAIL] (:testid) Expected val_a (blocked), got :'row1_val_check'
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- A lock timeout is transient: the change must not be skipped, so the receive
+-- cursor stays where it was and the next apply retries it.
+SELECT coalesce((SELECT value::BIGINT FROM cloudsync_settings WHERE key='check_dbversion'), 0) AS ckpt_after_blocked \gset
+SELECT (:ckpt_after_blocked::bigint = :ckpt_before_blocked::bigint) AS blocked_ckpt_ok \gset
+\if :blocked_ckpt_ok
+\echo [PASS] (:testid) Lock-blocked apply left the receive checkpoint in place
+\else
+\echo [FAIL] (:testid) Lock-blocked apply moved the checkpoint from :ckpt_before_blocked to :ckpt_after_blocked
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 

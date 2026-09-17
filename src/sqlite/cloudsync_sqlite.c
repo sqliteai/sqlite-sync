@@ -47,6 +47,17 @@ typedef struct {
     int             capacity;
 } cloudsync_update_payload;
 
+// Reports a failed tracking write from the insert/update/delete triggers: cloudsync's
+// own message when it set one (it names the table and column and carries the database
+// error), else SQLite's, and the real result code, so a caller can still tell SQLITE_BUSY
+// from a constraint violation. The context error is reset on entry to each trigger, so
+// the message is never a stale one.
+static void dbsync_result_trigger_error (sqlite3_context *context, cloudsync_context *data, int rc) {
+    const char *message = cloudsync_errmsg(data);
+    sqlite3_result_error(context, (message && message[0]) ? message : database_errmsg(data), -1);
+    sqlite3_result_error_code(context, (rc > 0) ? rc : SQLITE_ERROR);
+}
+
 void dbsync_set_error (sqlite3_context *context, const char *format, ...) {
     char buffer[2048];
     
@@ -428,6 +439,7 @@ void dbsync_insert (sqlite3_context *context, int argc, sqlite3_value **argv) {
     
     // retrieve context
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    cloudsync_reset_error(data);
     
     // lookup table
     const char *table_name = (const char *)database_value_text(argv[0]);
@@ -481,7 +493,7 @@ void dbsync_insert (sqlite3_context *context, int argc, sqlite3_value **argv) {
     }
 
 cleanup:
-    if (rc != SQLITE_OK) sqlite3_result_error(context, database_errmsg(data), -1);
+    if (rc != SQLITE_OK) dbsync_result_trigger_error(context, data, rc);
     // free memory if the primary key was dynamically allocated
     if (pk != buffer) cloudsync_memory_free(pk);
 }
@@ -492,6 +504,7 @@ void dbsync_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
     
     // retrieve context
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    cloudsync_reset_error(data);
     
     // lookup table
     const char *table_name = (const char *)database_value_text(argv[0]);
@@ -528,7 +541,7 @@ void dbsync_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
     if (rc != SQLITE_OK) goto cleanup;
     
 cleanup:
-    if (rc != SQLITE_OK) sqlite3_result_error(context, database_errmsg(data), -1);
+    if (rc != SQLITE_OK) dbsync_result_trigger_error(context, data, rc);
     // free memory if the primary key was dynamically allocated
     if (pk != buffer) cloudsync_memory_free(pk);
 }
@@ -618,6 +631,7 @@ void dbsync_update_final (sqlite3_context *context) {
     
     // retrieve context
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
+    cloudsync_reset_error(data);
     
     // lookup table
     const char *table_name = (const char *)database_value_text(payload->table_name);
@@ -712,7 +726,7 @@ void dbsync_update_final (sqlite3_context *context) {
     }
     
 cleanup:
-    if (rc != SQLITE_OK) sqlite3_result_error(context, database_errmsg(data), -1);
+    if (rc != SQLITE_OK) dbsync_result_trigger_error(context, data, rc);
     if (pk != buffer) cloudsync_memory_free(pk);
     if (oldpk && (oldpk != buffer2)) cloudsync_memory_free(oldpk);
     
@@ -1836,6 +1850,7 @@ void dbsync_text_materialize (sqlite3_context *context, int argc, sqlite3_value 
     int rc = block_materialize_column(data, table, pk, (int)pklen, col_name);
     if (rc != DBRES_OK) {
         sqlite3_result_error(context, cloudsync_errmsg(data), -1);
+        sqlite3_result_error_code(context, rc);
     } else {
         sqlite3_result_int(context, 1);
     }

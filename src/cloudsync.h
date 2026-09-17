@@ -110,15 +110,23 @@ int cloudsync_set_dberror (cloudsync_context *data);
 const char *cloudsync_errmsg (cloudsync_context *data);
 int cloudsync_errcode (cloudsync_context *data);
 void cloudsync_reset_error (cloudsync_context *data);
+// SQLSTATE of the database error behind the current error, encoded as PostgreSQL's
+// MAKE_SQLSTATE integer; 0 when there is none (always 0 on SQLite). Reported by the
+// PostgreSQL functions so a caller can still tell a serialization failure (40001) or a
+// unique violation (23505) from an internal error.
+void cloudsync_set_sqlstate (cloudsync_context *data, int sqlstate);
+int cloudsync_sqlstate (cloudsync_context *data);
 
-// Entries applied, and entries rejected by a row-level security policy. Both counts
-// accumulate across a receive drain (reset once before it) so denials in an early
-// chunk are still reported by the call that finishes the drain. The applied count is
-// tracked here rather than derived from the apply return value, which reports the
-// payload's entry count (denied ones included) as part of the SQL surface.
+// Entries applied and entries skipped because their write failed. Both counts accumulate
+// across a receive drain (reset once before it) so an early chunk is still reported by
+// the call that finishes the drain. The applied count is tracked here rather than
+// derived from the apply return value, which reports the payload's entry count (skipped
+// ones included) as part of the SQL surface. cloudsync_apply_failure_message returns the
+// first skipped failure's message since the last reset, or NULL.
 void cloudsync_apply_stats_reset (cloudsync_context *data);
 int cloudsync_apply_rows_count (cloudsync_context *data);
-int cloudsync_apply_denied_count (cloudsync_context *data);
+int cloudsync_apply_failed_count (cloudsync_context *data);
+const char *cloudsync_apply_failure_message (cloudsync_context *data);
 int cloudsync_commit_hook (void *ctx);
 void cloudsync_rollback_hook (void *ctx);
 void cloudsync_set_schema (cloudsync_context *data, const char *schema);

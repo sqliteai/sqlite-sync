@@ -119,6 +119,21 @@ typedef struct {
     bool        cached_row_exists;
     int         cached_col_count;
     const char  **cached_col_names; // array of pointers into table_context (not owned)
+
+    // Set by merge_flush_pending when a failure could not be contained by its savepoint
+    // (the savepoint could not be opened or rolled back), so the caller must not continue.
+    bool        flush_uncontained;
+
+    // Payload rows waiting in this batch (column rows and an explicit sentinel row), the
+    // count of changes lost if its flush fails. A sentinel implied by a column row is not
+    // a payload row of its own and is not counted.
+    int         rows;
+
+    // True while cloudsync_payload_apply holds a savepoint around the whole PK group: the
+    // flush then writes inside it instead of opening its own, so that a failed flush also
+    // rolls back what the group's rows already wrote (a resurrected row's sentinel and
+    // zeroed clocks, block values, winner clocks).
+    bool        group_savepoint;
 } merge_pending_batch;
 
 // MARK: -
@@ -143,6 +158,7 @@ struct cloudsync_context {
     void        *db;
     char        errmsg[1024];
     int         errcode;
+    int         sqlstate;       // SQLSTATE behind errmsg (PostgreSQL), 0 if none
     
     char        *libversion;
     uint8_t     site_id[UUID_LEN];
@@ -193,13 +209,15 @@ struct cloudsync_context {
     int64_t    apply_last_db_version;
     int64_t    apply_last_seq;
 
-    // Entries applied, and entries rejected by a row-level security policy, both
-    // accumulated across a receive drain so a denial in one chunk is still visible
-    // when a later chunk reports. Reset with cloudsync_apply_stats_reset. Kept here
-    // rather than derived from the apply return value, which reports payload entries
-    // (denied ones included) and is a tested part of the SQL surface.
+    // Entries applied, and entries skipped because their write failed, accumulated
+    // across a receive drain so an early chunk is still visible when a later chunk
+    // reports. Reset with cloudsync_apply_stats_reset. Kept here rather than derived
+    // from the apply return value, which reports payload entries (skipped ones
+    // included) and is a tested part of the SQL surface. Row-level security denials
+    // only occur on PostgreSQL, which has no receive drain: they are logged instead.
     int        apply_rows;
-    int        apply_denied;
+    int        apply_failed;
+    char       apply_failure[512];  // first skipped failure since the last reset ("" = none)
 };
 
 struct cloudsync_table_context {
@@ -210,6 +228,7 @@ struct cloudsync_table_context {
     char        *base_ref;                      // schema-qualified base table name (e.g. "schema"."name")
     char        **col_name;                     // array of column names
     dbvm_t      **col_merge_stmt;               // array of merge insert stmt (indexed by col_name)
+    dbvm_t      **col_update_stmt;              // lazily prepared UPDATE of one column by pk (block materialization)
     dbvm_t      **col_value_stmt;               // array of column value stmt (indexed by col_name)
     int         *col_id;                        // array of column id
     col_algo_t  *col_algo;                      // per-column algorithm (normal or block)
@@ -603,7 +622,9 @@ int cloudsync_set_error (cloudsync_context *data, const char *err_user, int err_
         char db_error_copy[sizeof(data->errmsg)];
         int rc = database_errcode(data);
         if (rc == DBRES_OK) {
+            // no database error behind this one, so no SQLSTATE either
             snprintf(data->errmsg, sizeof(data->errmsg), "%s", err_user);
+            data->sqlstate = 0;
         } else {
             if (db_error == data->errmsg) {
                 snprintf(db_error_copy, sizeof(db_error_copy), "%s", db_error);
@@ -626,22 +647,26 @@ const char *cloudsync_errmsg (cloudsync_context *data) {
 }
 
 void cloudsync_apply_stats_reset (cloudsync_context *data) {
-    if (data) { data->apply_rows = 0; data->apply_denied = 0; }
+    if (data) { data->apply_rows = 0; data->apply_failed = 0; data->apply_failure[0] = 0; }
 }
 
 // Saturating: only a receive drain resets these, so on the direct-SQL apply path they
 // accumulate for the life of the connection and signed overflow would be undefined.
-static void cloudsync_apply_stats_add (cloudsync_context *data, int rows, int denied) {
+static void cloudsync_apply_stats_add (cloudsync_context *data, int rows, int failed) {
     if (rows > 0) data->apply_rows = (data->apply_rows > INT_MAX - rows) ? INT_MAX : data->apply_rows + rows;
-    if (denied > 0) data->apply_denied = (data->apply_denied > INT_MAX - denied) ? INT_MAX : data->apply_denied + denied;
+    if (failed > 0) data->apply_failed = (data->apply_failed > INT_MAX - failed) ? INT_MAX : data->apply_failed + failed;
+}
+
+int cloudsync_apply_failed_count (cloudsync_context *data) {
+    return (data) ? data->apply_failed : 0;
+}
+
+const char *cloudsync_apply_failure_message (cloudsync_context *data) {
+    return (data && data->apply_failure[0]) ? data->apply_failure : NULL;
 }
 
 int cloudsync_apply_rows_count (cloudsync_context *data) {
     return (data) ? data->apply_rows : 0;
-}
-
-int cloudsync_apply_denied_count (cloudsync_context *data) {
-    return (data) ? data->apply_denied : 0;
 }
 
 int cloudsync_errcode (cloudsync_context *data) {
@@ -651,6 +676,15 @@ int cloudsync_errcode (cloudsync_context *data) {
 void cloudsync_reset_error (cloudsync_context *data) {
     data->errmsg[0] = 0;
     data->errcode = DBRES_OK;
+    data->sqlstate = 0;
+}
+
+void cloudsync_set_sqlstate (cloudsync_context *data, int sqlstate) {
+    if (data) data->sqlstate = sqlstate;
+}
+
+int cloudsync_sqlstate (cloudsync_context *data) {
+    return (data) ? data->sqlstate : 0;
 }
 
 void *cloudsync_auxdata (cloudsync_context *data) {
@@ -783,6 +817,12 @@ void table_free (cloudsync_table_context *table) {
             databasevm_finalize(table->col_merge_stmt[i]);
         }
         cloudsync_memory_free(table->col_merge_stmt);
+    }
+    if (table->col_update_stmt) {
+        for (int i=0; i<table->ncols; ++i) {
+            if (table->col_update_stmt[i]) databasevm_finalize(table->col_update_stmt[i]);
+        }
+        cloudsync_memory_free(table->col_update_stmt);
     }
     if (table->col_value_stmt) {
         for (int i=0; i<table->ncols; ++i) {
@@ -1138,6 +1178,9 @@ bool table_add_to_context (cloudsync_context *data, table_algo algo, const char 
         table->col_merge_stmt = (dbvm_t **)cloudsync_memory_zeroalloc((uint64_t)(sizeof(void *) * ncols));
         if (!table->col_merge_stmt) goto abort_add_table;
 
+        table->col_update_stmt = (dbvm_t **)cloudsync_memory_zeroalloc((uint64_t)(sizeof(void *) * ncols));
+        if (!table->col_update_stmt) goto abort_add_table;
+
         table->col_value_stmt = (dbvm_t **)cloudsync_memory_zeroalloc((uint64_t)(sizeof(void *) * ncols));
         if (!table->col_value_stmt) goto abort_add_table;
 
@@ -1360,6 +1403,7 @@ static int merge_pending_add (cloudsync_context *data, cloudsync_table_context *
     e->seq = seq;
 
     batch->count++;
+    batch->rows++;
     return DBRES_OK;
 }
 
@@ -1382,15 +1426,18 @@ static void merge_pending_free_entries (merge_pending_batch *batch) {
     batch->sentinel_pending = false;
     batch->row_exists = false;
     batch->count = 0;
+    batch->rows = 0;
 }
 
 static int merge_flush_pending (cloudsync_context *data) {
     merge_pending_batch *batch = data->pending_batch;
     if (!batch) return DBRES_OK;
+    batch->flush_uncontained = false;
 
     int rc = DBRES_OK;
     bool flush_savepoint = false;
     char error_message[1024] = {0};
+    int error_sqlstate = 0;
 
     // Nothing to write — handle sentinel-only case or skip
     if (batch->count == 0 && !(batch->sentinel_pending && batch->table)) {
@@ -1400,9 +1447,12 @@ static int merge_flush_pending (cloudsync_context *data) {
     // Wrap database operations in a savepoint so that on failure (e.g. RLS
     // denial) the rollback properly releases all executor resources (open
     // relations, snapshots, plan cache) acquired during the failed statement.
-    rc = database_begin_savepoint(data, "merge_flush");
-    if (rc != DBRES_OK) goto cleanup;
-    flush_savepoint = true;
+    // Inside a payload apply's PK-group savepoint the caller rolls back instead.
+    if (!batch->group_savepoint) {
+        rc = database_begin_savepoint(data, "merge_flush");
+        if (rc != DBRES_OK) { batch->flush_uncontained = true; goto cleanup; }
+        flush_savepoint = true;
+    }
 
     if (batch->count == 0) {
         // Sentinel with no winning columns (PK-only row)
@@ -1553,7 +1603,10 @@ static int merge_flush_pending (cloudsync_context *data) {
     }
 
 cleanup:
-    if (rc != DBRES_OK) snprintf(error_message, sizeof(error_message), "%s", cloudsync_errmsg(data));
+    if (rc != DBRES_OK) {
+        snprintf(error_message, sizeof(error_message), "%s", cloudsync_errmsg(data));
+        error_sqlstate = cloudsync_sqlstate(data);
+    }
     merge_pending_free_entries(batch);
     if (flush_savepoint) {
         if (rc == DBRES_OK) {
@@ -1562,18 +1615,53 @@ cleanup:
             // commit that fails (a deadlock or serialization failure, say) sets a real
             // message that the generic fallback below would otherwise replace. The
             // rollback runs after, and touches the error state itself.
-            if (rc != DBRES_OK) snprintf(error_message, sizeof(error_message), "%s", cloudsync_errmsg(data));
+            if (rc != DBRES_OK) {
+                snprintf(error_message, sizeof(error_message), "%s", cloudsync_errmsg(data));
+                error_sqlstate = cloudsync_sqlstate(data);
+            }
         }
-        if (rc != DBRES_OK) database_rollback_savepoint(data, "merge_flush");
+        if (rc != DBRES_OK && database_rollback_savepoint(data, "merge_flush") != DBRES_OK) batch->flush_uncontained = true;
     }
-    if (rc != DBRES_OK) cloudsync_set_error(data, error_message[0] ? error_message : "Unable to flush pending changes", rc);
+    if (rc != DBRES_OK && flush_savepoint) {
+        // the rollback cleared the error state: restore the failure's own message and SQLSTATE
+        cloudsync_reset_error(data);
+        cloudsync_set_error(data, error_message[0] ? error_message : "Unable to flush pending changes", rc);
+        cloudsync_set_sqlstate(data, error_sqlstate);
+    }
     return rc;
+}
+
+// UPDATE of one column by primary key (pk params 1..npks, value npks+1), prepared on first
+// use. Writing a column of an existing row through the column's upsert proposes a row
+// holding only the primary key and that column; PostgreSQL checks an INSERT policy's
+// WITH CHECK against that proposed row even when the conflict turns it into an update,
+// so a policy on any other column rejects it, as does a NOT NULL constraint. An UPDATE
+// is checked against the real row. Returns NULL when it cannot be prepared.
+static dbvm_t *table_column_update_stmt (cloudsync_context *data, cloudsync_table_context *table, int col_idx) {
+    if (!table->col_update_stmt || col_idx < 0 || col_idx >= table->ncols) return NULL;
+    if (!table->col_update_stmt[col_idx]) {
+        const char *colnames[1] = {table->col_name[col_idx]};
+        char *sql = sql_build_update_pk_and_multi_cols(data, table->name, colnames, 1, table->schema);
+        if (!sql) return NULL;
+        databasevm_prepare(data, sql, (void **)&table->col_update_stmt[col_idx], DBFLAG_PERSISTENT);
+        cloudsync_memory_free(sql);
+    }
+    return table->col_update_stmt[col_idx];
 }
 
 int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen, const char *col_name, dbvalue_t *col_value, int64_t col_version, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid) {
     int index;
     dbvm_t *vm = table_column_lookup(table, col_name, true, &index);
     if (vm == NULL) return cloudsync_set_error(data, "Unable to retrieve column merge precompiled statement in merge_insert_col", DBRES_MISUSE);
+
+    // A grow-only set never deletes rows, so tracked metadata means the base row exists:
+    // write the column in place instead of through the upsert (see table_column_update_stmt).
+    bool update_only = false;
+    if (table->algo == table_algo_crdt_gos) {
+        int64_t local_cl = merge_get_local_cl(table, pk, pklen);
+        dbvm_t *update_vm = (local_cl > 0 && local_cl % 2 == 1) ? table_column_update_stmt(data, table, index) : NULL;
+        if (update_vm) { vm = update_vm; update_only = true; }
+    }
     
     // INSERT INTO table (pk1, pk2, col_name) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET col_name=?;"
     
@@ -1588,10 +1676,10 @@ int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, c
     // bind value (always bind all expected parameters for correct prepared statement handling)
     if (col_value) {
         rc = databasevm_bind_value(vm, table->npks+1, col_value);
-        if (rc == DBRES_OK) rc = databasevm_bind_value(vm, table->npks+2, col_value);
+        if (rc == DBRES_OK && !update_only) rc = databasevm_bind_value(vm, table->npks+2, col_value);
     } else {
         rc = databasevm_bind_null(vm, table->npks+1);
-        if (rc == DBRES_OK) rc = databasevm_bind_null(vm, table->npks+2);
+        if (rc == DBRES_OK && !update_only) rc = databasevm_bind_null(vm, table->npks+2);
     }
     if (rc != DBRES_OK) {
         cloudsync_set_dberror(data);
@@ -1609,7 +1697,21 @@ int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, c
     SYNCBIT_SET(data);
     rc = databasevm_step(vm);
     DEBUG_MERGE("merge_insert(%02x%02x): %s (%d)", data->site_id[UUID_LEN-2], data->site_id[UUID_LEN-1], databasevm_sql(vm), rc);
+    bool update_missed = update_only && rc == DBRES_DONE && databasevm_changes(vm) == 0;
     dbvm_reset(vm);
+    if (update_missed) {
+        // The row is not there to update — gone, or hidden by a policy's USING clause,
+        // which an UPDATE skips silently. Fall back to the upsert, which inserts a missing
+        // row or reports the policy, instead of recording a write that never happened.
+        vm = table_column_lookup(table, col_name, true, NULL);
+        rc = vm ? pk_decode_prikey((char *)pk, (size_t)pklen, pk_decode_bind_callback, vm) : DBRES_MISUSE;
+        if (rc >= 0 && vm) {
+            rc = col_value ? databasevm_bind_value(vm, table->npks+1, col_value) : databasevm_bind_null(vm, table->npks+1);
+            if (rc == DBRES_OK) rc = col_value ? databasevm_bind_value(vm, table->npks+2, col_value) : databasevm_bind_null(vm, table->npks+2);
+            if (rc == DBRES_OK) rc = databasevm_step(vm);
+            dbvm_reset(vm);
+        }
+    }
     SYNCBIT_RESET(data);
     if (table->algo == table_algo_crdt_gos) table->enabled = 1;
     
@@ -1877,8 +1979,32 @@ cleanup:
 }
 
 // Materialize all alive blocks for a base column into the base table
+static int block_materialize_column_ex (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen, const char *base_col_name, bool row_exists);
+
+// Every failure of block_materialize_column carries a message naming the stage, column
+// and table: a bare code would reach the caller as a blank error. database_error is
+// false for failures that involve no database call (an allocation), whose message must
+// not pick up an unrelated database error left on the connection.
+static int block_materialize_fail (cloudsync_context *data, cloudsync_table_context *table, const char *column,
+                                   const char *stage, int rc, bool database_error) {
+    char message[512];
+    if (!database_error) cloudsync_reset_error(data);
+    if (rc == DBRES_NOMEM) {
+        snprintf(message, sizeof(message), "Not enough memory to %s the blocks of column \"%s\" of table \"%s\"", stage, column, table->name);
+    } else {
+        snprintf(message, sizeof(message), "Unable to %s the blocks of column \"%s\" of table \"%s\"", stage, column, table->name);
+    }
+    return cloudsync_set_error(data, message, (rc > 0) ? rc : DBRES_ERROR);
+}
+
 int block_materialize_column (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen, const char *base_col_name) {
-    if (!table->block_list_stmt) return cloudsync_set_error(data, "block_materialize_column: blocks table not initialized", DBRES_MISUSE);
+    return block_materialize_column_ex(data, table, pk, pklen, base_col_name, false);
+}
+
+// row_exists selects a plain UPDATE of the column instead of the column's upsert (see
+// table_column_update_stmt).
+static int block_materialize_column_ex (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen, const char *base_col_name, bool row_exists) {
+    if (!table->block_list_stmt) return block_materialize_fail(data, table, base_col_name, "read", DBRES_MISUSE, false);
 
     // Find column index and delimiter
     int col_idx = -1;
@@ -1888,12 +2014,12 @@ int block_materialize_column (cloudsync_context *data, cloudsync_table_context *
             break;
         }
     }
-    if (col_idx < 0) return cloudsync_set_error(data, "block_materialize_column: column not found", DBRES_ERROR);
+    if (col_idx < 0) return block_materialize_fail(data, table, base_col_name, "locate", DBRES_ERROR, false);
     const char *delimiter = table->col_delimiter[col_idx] ? table->col_delimiter[col_idx] : BLOCK_DEFAULT_DELIMITER;
 
     // Build the LIKE pattern for block col_names: "base_col\x1F%"
     char *like_pattern = block_build_colname(base_col_name, "%");
-    if (!like_pattern) return DBRES_NOMEM;
+    if (!like_pattern) return block_materialize_fail(data, table, base_col_name, "read", DBRES_NOMEM, false);
 
     // Query alive blocks from blocks table joined with metadata
     // block_list_stmt: SELECT b.col_value FROM blocks b JOIN meta m
@@ -1902,14 +2028,15 @@ int block_materialize_column (cloudsync_context *data, cloudsync_table_context *
     //   ORDER BY b.col_name
     dbvm_t *vm = table->block_list_stmt;
     int rc = databasevm_bind_blob(vm, 1, pk, pklen);
-    if (rc != DBRES_OK) { cloudsync_memory_free(like_pattern); databasevm_reset(vm); return rc; }
-    rc = databasevm_bind_text(vm, 2, like_pattern, -1);
-    if (rc != DBRES_OK) { cloudsync_memory_free(like_pattern); databasevm_reset(vm); return rc; }
+    if (rc == DBRES_OK) rc = databasevm_bind_text(vm, 2, like_pattern, -1);
     // Bind pk again for the join condition (parameter 3)
-    rc = databasevm_bind_blob(vm, 3, pk, pklen);
-    if (rc != DBRES_OK) { cloudsync_memory_free(like_pattern); databasevm_reset(vm); return rc; }
-    rc = databasevm_bind_text(vm, 4, like_pattern, -1);
-    if (rc != DBRES_OK) { cloudsync_memory_free(like_pattern); databasevm_reset(vm); return rc; }
+    if (rc == DBRES_OK) rc = databasevm_bind_blob(vm, 3, pk, pklen);
+    if (rc == DBRES_OK) rc = databasevm_bind_text(vm, 4, like_pattern, -1);
+    if (rc != DBRES_OK) {
+        cloudsync_memory_free(like_pattern);
+        databasevm_reset(vm);
+        return block_materialize_fail(data, table, base_col_name, "read", rc, true);
+    }
 
     // Collect block values
     const char **block_values = NULL;
@@ -1936,49 +2063,69 @@ int block_materialize_column (cloudsync_context *data, cloudsync_table_context *
         // Free collected values
         for (int i = 0; i < block_count; i++) cloudsync_memory_free((void *)block_values[i]);
         if (block_values) cloudsync_memory_free((void *)block_values);
-        return cloudsync_set_error(data, "Unable to read block values", rc);
+        // an allocation failing while collecting is not a database read failure
+        if (rc == DBRES_NOMEM) return block_materialize_fail(data, table, base_col_name, "collect", rc, false);
+        return block_materialize_fail(data, table, base_col_name, "read", rc, true);
     }
 
     // Materialize text (NULL when no alive blocks)
     char *text = (block_count > 0) ? block_materialize_text(block_values, block_count, delimiter) : NULL;
     for (int i = 0; i < block_count; i++) cloudsync_memory_free((void *)block_values[i]);
     if (block_values) cloudsync_memory_free((void *)block_values);
-    if (block_count > 0 && !text) return DBRES_NOMEM;
+    if (block_count > 0 && !text) return block_materialize_fail(data, table, base_col_name, "join", DBRES_NOMEM, false);
 
     // Update the base table column via the col_merge_stmt (with triggers disabled)
     dbvm_t *merge_vm = table->col_merge_stmt[col_idx];
-    if (!merge_vm) { cloudsync_memory_free(text); return DBRES_ERROR; }
+    bool update_only = false;
+    dbvm_t *update_vm = row_exists ? table_column_update_stmt(data, table, col_idx) : NULL;
+    if (update_vm) { merge_vm = update_vm; update_only = true; }
+    if (!merge_vm) { cloudsync_memory_free(text); return block_materialize_fail(data, table, base_col_name, "write", DBRES_MISUSE, false); }
 
     // Bind PKs
     rc = pk_decode_prikey((char *)pk, (size_t)pklen, pk_decode_bind_callback, merge_vm);
-    if (rc < 0) { cloudsync_memory_free(text); databasevm_reset(merge_vm); return DBRES_ERROR; }
+    if (rc < 0) {
+        cloudsync_memory_free(text);
+        databasevm_reset(merge_vm);
+        return block_materialize_fail(data, table, base_col_name, "write", DBRES_ERROR, true);
+    }
 
-    // Bind the text value twice (INSERT value + ON CONFLICT UPDATE value)
+    // Bind the text value twice (INSERT value + ON CONFLICT UPDATE value); the plain
+    // UPDATE takes it once
     int npks = table->npks;
-    if (text) {
-        rc = databasevm_bind_text(merge_vm, npks + 1, text, -1);
-        if (rc != DBRES_OK) { cloudsync_memory_free(text); databasevm_reset(merge_vm); return rc; }
-        rc = databasevm_bind_text(merge_vm, npks + 2, text, -1);
-        if (rc != DBRES_OK) { cloudsync_memory_free(text); databasevm_reset(merge_vm); return rc; }
-    } else {
-        rc = databasevm_bind_null(merge_vm, npks + 1);
-        if (rc != DBRES_OK) { databasevm_reset(merge_vm); return rc; }
-        rc = databasevm_bind_null(merge_vm, npks + 2);
-        if (rc != DBRES_OK) { databasevm_reset(merge_vm); return rc; }
+    rc = text ? databasevm_bind_text(merge_vm, npks + 1, text, -1) : databasevm_bind_null(merge_vm, npks + 1);
+    if (rc == DBRES_OK && !update_only) rc = text ? databasevm_bind_text(merge_vm, npks + 2, text, -1) : databasevm_bind_null(merge_vm, npks + 2);
+    if (rc != DBRES_OK) {
+        cloudsync_memory_free(text);
+        databasevm_reset(merge_vm);
+        return block_materialize_fail(data, table, base_col_name, "write", rc, true);
     }
 
     // Execute with triggers disabled
     table->enabled = 0;
     SYNCBIT_SET(data);
     rc = databasevm_step(merge_vm);
+    bool update_missed = update_only && rc == DBRES_DONE && databasevm_changes(merge_vm) == 0;
     databasevm_reset(merge_vm);
+    if (update_missed) {
+        // Nothing to update — the row is gone, or a policy's USING clause hides it and the
+        // UPDATE skipped it silently. Fall back to the upsert, which inserts a missing row
+        // or reports the policy, rather than leave the column unwritten without a word.
+        merge_vm = table->col_merge_stmt[col_idx];
+        rc = merge_vm ? pk_decode_prikey((char *)pk, (size_t)pklen, pk_decode_bind_callback, merge_vm) : DBRES_MISUSE;
+        if (rc >= 0 && merge_vm) {
+            rc = text ? databasevm_bind_text(merge_vm, npks + 1, text, -1) : databasevm_bind_null(merge_vm, npks + 1);
+            if (rc == DBRES_OK) rc = text ? databasevm_bind_text(merge_vm, npks + 2, text, -1) : databasevm_bind_null(merge_vm, npks + 2);
+            if (rc == DBRES_OK) rc = databasevm_step(merge_vm);
+            databasevm_reset(merge_vm);
+        }
+    }
     SYNCBIT_RESET(data);
     table->enabled = 1;
 
     cloudsync_memory_free(text);
 
     if (rc == DBRES_DONE) rc = DBRES_OK;
-    if (rc != DBRES_OK) return cloudsync_set_dberror(data);
+    if (rc != DBRES_OK) return block_materialize_fail(data, table, base_col_name, "write", (rc > 0) ? rc : DBRES_ERROR, true);
     return DBRES_OK;
 }
 
@@ -2060,6 +2207,7 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
         int rc = merge_sentinel_only_insert(data, table, insert_pk, insert_pk_len, insert_col_version,
                                             insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
         if (rc != DBRES_OK) cloudsync_set_error(data, "Unable to perform merge_sentinel_only_insert", rc);
+        else if (data->pending_batch) data->pending_batch->rows++;   // an explicit sentinel is a payload row
         return rc;
     }
     
@@ -2110,9 +2258,10 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
         // Materialize the full column from blocks into the base table
         char *base_col = block_extract_base_colname(insert_name);
         if (base_col) {
-            rc = block_materialize_column(data, table, insert_pk, insert_pk_len, base_col);
+            rc = block_materialize_column_ex(data, table, insert_pk, insert_pk_len, base_col, (local_cl % 2 == 1) && !needs_resurrect);
             cloudsync_memory_free(base_col);
-            if (rc != DBRES_OK) return cloudsync_set_error(data, "Unable to materialize block column", rc);
+            // the failure already names the stage, column and table
+            if (rc != DBRES_OK) return rc;
         }
 
         return DBRES_OK;
@@ -4052,6 +4201,189 @@ static void cloudsync_payload_apply_checkpoint (cloudsync_context *data, int64_t
     }
 }
 
+// A failed write is skipped only when retrying could not change the outcome. A lock,
+// deadlock, serialization failure, cancel or resource shortage can succeed on the next
+// attempt, and a missing privilege or a read-only database is fixed by configuration,
+// not by the data: those still fail the apply and leave the receive cursor in place.
+static bool cloudsync_apply_error_is_transient (int rc) {
+    // SQLite can report an extended code (SQLITE_BUSY_SNAPSHOT is 517): its low byte
+    // is the primary code. DBRES_POLICY_DENIED's low byte matches no case below.
+    if (rc <= 0) return false;
+    switch (rc & 0xFF) {
+        case DBRES_PERM:
+        case DBRES_READONLY:
+        case DBRES_AUTH:
+        case DBRES_BUSY:
+        case DBRES_LOCKED:
+        case DBRES_NOMEM:
+        case DBRES_INTERRUPT:
+        case DBRES_IOERR:
+        case DBRES_FULL:
+            return true;
+    }
+    return false;
+}
+
+typedef struct {
+    int  denied;                 // entries rejected by a row-level security policy
+    int  failed;                 // entries skipped because their write failed
+    int  fatal_rc;               // first failure that stops the apply (DBRES_OK = none)
+    int  fatal_sqlstate;
+    char fatal_message[1024];
+} cloudsync_apply_outcome;
+
+// Classifies one failed write of cloudsync_payload_apply. contained is true when the
+// failure has already been rolled back, leaving the transaction usable. Returns true
+// when the apply must stop.
+static bool cloudsync_apply_note_failure (cloudsync_context *data, cloudsync_apply_outcome *out, int rc, int entries, bool contained) {
+    if (entries < 1) entries = 1;
+    if (rc == DBRES_POLICY_DENIED && contained) {
+        out->denied += entries;
+        return false;
+    }
+    if (contained && !cloudsync_apply_error_is_transient(rc)) {
+        // A write that fails on its data (a constraint, a trigger, a type error) fails
+        // the same way on every retry. Holding the cursor back would re-deliver it
+        // forever and stall every later change behind it, so the change is skipped —
+        // but reported, never dropped silently.
+        const char *msg = cloudsync_errmsg(data);
+        if (!msg || !msg[0]) msg = "Unable to apply a received change";
+        out->failed += entries;
+        if (!data->apply_failure[0]) snprintf(data->apply_failure, sizeof(data->apply_failure), "%s", msg);
+        char warning[1200];
+        snprintf(warning, sizeof(warning), "skipped %d received change%s that failed to apply: %s", entries, (entries == 1) ? "" : "s", msg);
+        database_log_warning(data, warning);
+        return false;
+    }
+    if (out->fatal_rc == DBRES_OK) {
+        out->fatal_rc = rc;
+        out->fatal_sqlstate = cloudsync_sqlstate(data);
+        snprintf(out->fatal_message, sizeof(out->fatal_message), "%s", cloudsync_errmsg(data));
+    }
+    return true;
+}
+
+// Steps one decoded payload row (an INSERT into cloudsync_changes). *contained reports
+// whether a failure was rolled back and left the transaction usable. On SQLite a failed
+// statement always is. On PostgreSQL the merge runs inside the cloudsync_changes trigger,
+// so the row gets its own savepoint: a denial or a failed write then rolls back cleanly
+// — metadata included — and the apply can go on to the next row.
+static int cloudsync_payload_apply_row (cloudsync_context *data, dbvm_t *vm, bool *contained) {
+#ifdef CLOUDSYNC_POSTGRESQL_BUILD
+    int rc = database_begin_savepoint(data, "cloudsync_apply_row");
+    if (rc != DBRES_OK) { *contained = false; return rc; }
+    rc = databasevm_step(vm);
+    if (rc == DBRES_DONE) {
+        int commit_rc = database_commit_savepoint(data, "cloudsync_apply_row");
+        if (commit_rc == DBRES_OK) { *contained = true; return DBRES_DONE; }
+        rc = commit_rc;
+    }
+    char message[1024];
+    snprintf(message, sizeof(message), "%s", cloudsync_errmsg(data));
+    int sqlstate = cloudsync_sqlstate(data);
+    *contained = (database_rollback_savepoint(data, "cloudsync_apply_row") == DBRES_OK);
+    cloudsync_reset_error(data);
+    cloudsync_set_error(data, message[0] ? message : "Unable to apply a received change", rc);
+    cloudsync_set_sqlstate(data, sqlstate);
+    return rc;
+#else
+    *contained = true;
+    return databasevm_step(vm);
+#endif
+}
+
+// True when the decoded payload row writes one block of a block column. Its merge
+// materializes the column into the base table, so the row's other pending columns must
+// be written first: materializing into a row that does not exist yet has to insert it
+// with nothing but the primary key and that column.
+static bool cloudsync_payload_row_is_block (const cloudsync_pk_decode_bind_context *row) {
+    return row->col_name && row->col_name_len > 0 &&
+           memchr(row->col_name, BLOCK_SEPARATOR, (size_t)row->col_name_len) != NULL;
+}
+
+// A run of payload rows rejected by a row-level security policy, kept so the apply can
+// retry it once the rest of the payload is in: a policy can depend on rows that arrive
+// later in the same payload (a membership row granting access to the rows before it).
+typedef struct {
+    const char *start;           // first row of the run inside the payload buffer
+    size_t      avail;           // bytes left in the buffer from start
+    uint32_t    rows;            // payload rows in the run
+    int         entries;         // entries counted as denied for the run
+} cloudsync_denied_run;
+
+typedef struct {
+    cloudsync_denied_run *runs;
+    int count;
+    int capacity;
+} cloudsync_denied_runs;
+
+// Records a denied run. A run for a whole PK group absorbs the single-row runs already
+// recorded inside it, so no row is retried twice. Out of memory only loses the retry:
+// the entries stay counted as denied.
+static void cloudsync_denied_runs_add (cloudsync_denied_runs *list, const char *start, size_t avail, uint32_t rows, int entries) {
+    while (list->count > 0 && list->runs[list->count - 1].start >= start) {
+        entries += list->runs[--list->count].entries;
+    }
+    if (list->count == list->capacity) {
+        int capacity = list->capacity ? list->capacity * 2 : 8;
+        cloudsync_denied_run *runs = cloudsync_memory_realloc(list->runs, (uint64_t)capacity * sizeof(*runs));
+        if (!runs) return;
+        list->runs = runs;
+        list->capacity = capacity;
+    }
+    list->runs[list->count++] = (cloudsync_denied_run){.start = start, .avail = avail, .rows = rows, .entries = entries};
+}
+
+// Opens the savepoint around a PK group of payload rows (see merge_pending_batch). If it
+// cannot be opened the group runs without one and the flush falls back to its own.
+static void cloudsync_payload_group_open (cloudsync_context *data, merge_pending_batch *batch) {
+    if (batch->group_savepoint) return;
+    batch->group_savepoint = (database_begin_savepoint(data, "cloudsync_merge_group") == DBRES_OK);
+    if (!batch->group_savepoint) cloudsync_reset_error(data);
+}
+
+// Flushes the pending PK group and closes its savepoint: released when the flush
+// succeeds, rolled back when it fails, so a failed group leaves no trace behind — its
+// rows can then be retried or delivered again and apply cleanly. *entries receives the
+// payload rows the flush covered and *contained whether a failure left the transaction
+// usable. The failure's message and SQLSTATE survive the rollback.
+static int cloudsync_payload_group_flush (cloudsync_context *data, merge_pending_batch *batch, int *entries, bool *contained) {
+    *entries = batch->rows;
+    int rc = merge_flush_pending(data);
+    *contained = !batch->flush_uncontained;
+    if (!batch->group_savepoint) return rc;
+    batch->group_savepoint = false;
+    if (rc == DBRES_OK) {
+        rc = database_commit_savepoint(data, "cloudsync_merge_group");
+        if (rc == DBRES_OK) return DBRES_OK;
+    }
+    char message[1024];
+    snprintf(message, sizeof(message), "%s", cloudsync_errmsg(data));
+    int sqlstate = cloudsync_sqlstate(data);
+    *contained = (database_rollback_savepoint(data, "cloudsync_merge_group") == DBRES_OK);
+    cloudsync_reset_error(data);
+    cloudsync_set_error(data, message[0] ? message : "Unable to flush pending changes", rc);
+    cloudsync_set_sqlstate(data, sqlstate);
+    return rc;
+}
+
+// Abandons an open PK group after the apply stopped: nothing it wrote is kept.
+static void cloudsync_payload_group_abandon (cloudsync_context *data, merge_pending_batch *batch) {
+    merge_pending_free_entries(batch);
+    if (!batch->group_savepoint) return;
+    batch->group_savepoint = false;
+    char message[1024];
+    snprintf(message, sizeof(message), "%s", cloudsync_errmsg(data));
+    int sqlstate = cloudsync_sqlstate(data);
+    int code = cloudsync_errcode(data);
+    database_rollback_savepoint(data, "cloudsync_merge_group");
+    if (code != DBRES_OK) {
+        cloudsync_reset_error(data);
+        cloudsync_set_error(data, message, code);
+        cloudsync_set_sqlstate(data, sqlstate);
+    }
+}
+
 int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int blen, int *pnrows, int64_t checkpoint_db_version, int64_t checkpoint_seq) {
     // Guard against calling payload_apply before cloudsync_init: without this,
     // the settings lookups at the top of this function would each emit a
@@ -4186,9 +4518,12 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     uint16_t ncols = header.ncols;
     uint32_t nrows = header.nrows;
     int64_t last_payload_db_version = -1;
-    int first_error = DBRES_OK;
-    int denied_entries = 0;
-    char first_error_message[1024] = {0};
+    cloudsync_apply_outcome outcome = {0};
+    bool stop = false;
+    cloudsync_denied_runs denied_runs = {0};
+    const char *group_start = NULL;     // first row of the current PK group
+    size_t group_avail = 0;
+    uint32_t group_rows = 0;
     cloudsync_pk_decode_bind_context decoded_context = {.vm = vm};
 
     // Initialize deferred column-batch merge
@@ -4202,9 +4537,11 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
 
     for (uint32_t i=0; i<nrows; ++i) {
         size_t seek = 0;
+        const char *row_start = buffer;
+        size_t row_avail = buf_len;
         int res = pk_decode((char *)buffer, buf_len, ncols, &seek, data->skip_decode_idx, cloudsync_payload_decode_callback, &decoded_context);
         if (res == -1) {
-            merge_flush_pending(data);
+            cloudsync_payload_group_abandon(data, &batch);
             data->pending_batch = NULL;
             if (batch.cached_vm) { databasevm_finalize(batch.cached_vm); batch.cached_vm = NULL; }
             if (batch.cached_col_names) { cloudsync_memory_free(batch.cached_col_names); batch.cached_col_names = NULL; }
@@ -4223,23 +4560,31 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
                              memcmp(last_tbl, decoded_context.tbl, last_tbl_len) != 0));
         bool db_version_changed = (last_payload_db_version != decoded_context.db_version);
 
-        // Flush pending batch before any boundary change
+        // Flush pending batch before any boundary change, closing the PK group
         if (pk_changed || tbl_changed || db_version_changed) {
-            int pending_entries = batch.count;
-            int flush_rc = merge_flush_pending(data);
-            if (flush_rc == DBRES_POLICY_DENIED) denied_entries += (pending_entries > 0) ? pending_entries : 1;
-            else if (flush_rc != DBRES_OK && first_error == DBRES_OK) {
-                first_error = flush_rc;
-                snprintf(first_error_message, sizeof(first_error_message), "%s", cloudsync_errmsg(data));
+            int entries = 0;
+            bool contained = true;
+            int flush_rc = cloudsync_payload_group_flush(data, &batch, &entries, &contained);
+            if (flush_rc == DBRES_POLICY_DENIED && contained && group_start) {
+                cloudsync_denied_runs_add(&denied_runs, group_start, group_avail, group_rows, entries);
             }
+            if (flush_rc != DBRES_OK && cloudsync_apply_note_failure(data, &outcome, flush_rc, entries, contained)) {
+                stop = true;
+                break;
+            }
+            group_start = row_start;
+            group_avail = row_avail;
+            group_rows = 0;
         }
+        if (!group_start) { group_start = row_start; group_avail = row_avail; }
+        group_rows++;
 
         // Per-db_version savepoints group rows with the same source db_version
         // into one transaction. In SQLite autocommit mode, the RELEASE triggers
         // the commit hook which bumps data->db_version and resets seq, ensuring
         // unique (db_version, seq) tuples across groups. In PostgreSQL SPI,
         // database_in_transaction() is always true so this block is inactive —
-        // the inner per-PK savepoint in merge_flush_pending handles RLS instead.
+        // the per-PK group savepoint handles RLS and failed writes instead.
         if (in_savepoint && db_version_changed) {
             rc = database_commit_savepoint(data, "cloudsync_payload_apply");
             if (rc != DBRES_OK) {
@@ -4273,15 +4618,34 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         last_tbl = decoded_context.tbl;
         last_tbl_len = decoded_context.tbl_len;
 
-        rc = databasevm_step(vm);
-        if (rc == DBRES_POLICY_DENIED) { denied_entries++; rc = DBRES_DONE; }
-        if (rc != DBRES_DONE) {
-            if (first_error == DBRES_OK) {
-                first_error = rc;
-                snprintf(first_error_message, sizeof(first_error_message), "%s", cloudsync_errmsg(data));
+        if (batch.count > 0 && cloudsync_payload_row_is_block(&decoded_context)) {
+            int entries = 0;
+            bool contained = true;
+            int flush_rc = cloudsync_payload_group_flush(data, &batch, &entries, &contained);
+            if (flush_rc == DBRES_POLICY_DENIED && contained && group_start && group_rows > 1) {
+                // the rows of this PK group before the current one
+                cloudsync_denied_runs_add(&denied_runs, group_start, group_avail, group_rows - 1, entries);
             }
-            // don't "break;", the error can be due to a RLS policy.
-            // in case of error we try to apply the following changes
+            if (flush_rc != DBRES_OK && cloudsync_apply_note_failure(data, &outcome, flush_rc, entries, contained)) {
+                stop = true;
+                break;
+            }
+        }
+
+        cloudsync_payload_group_open(data, &batch);
+        bool contained = true;
+        rc = cloudsync_payload_apply_row(data, vm, &contained);
+        if (rc != DBRES_DONE) {
+            if (rc == DBRES_POLICY_DENIED && contained) {
+                cloudsync_denied_runs_add(&denied_runs, row_start, row_avail, 1, 1);
+            }
+            if (cloudsync_apply_note_failure(data, &outcome, rc, 1, contained)) {
+                stop = true;
+                buffer += seek;
+                buf_len -= seek;
+                dbvm_reset(vm);
+                break;
+            }
         }
 
         buffer += seek;
@@ -4289,52 +4653,141 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         dbvm_reset(vm);
     }
 
-    // Final flush after loop
-    {
-        int pending_entries = batch.count;
-        int flush_rc = merge_flush_pending(data);
-        if (flush_rc == DBRES_POLICY_DENIED) denied_entries += (pending_entries > 0) ? pending_entries : 1;
-        else if (flush_rc != DBRES_OK && first_error == DBRES_OK) {
-            first_error = flush_rc;
-            snprintf(first_error_message, sizeof(first_error_message), "%s", cloudsync_errmsg(data));
+    // Final flush after loop (a stopped apply discards the open group)
+    if (stop) {
+        cloudsync_payload_group_abandon(data, &batch);
+    } else {
+        int entries = 0;
+        bool contained = true;
+        int flush_rc = cloudsync_payload_group_flush(data, &batch, &entries, &contained);
+        if (flush_rc == DBRES_POLICY_DENIED && contained && group_start) {
+            cloudsync_denied_runs_add(&denied_runs, group_start, group_avail, group_rows, entries);
         }
+        if (flush_rc != DBRES_OK && cloudsync_apply_note_failure(data, &outcome, flush_rc, entries, contained)) stop = true;
     }
+
+    // The receive checkpoint is the last row of the payload, whatever a retry decodes.
+    int64_t payload_last_db_version = decoded_context.db_version;
+    int64_t payload_last_seq = decoded_context.seq;
+
+    // Retry denied runs now that every other row is in: a policy that depends on rows
+    // later in the payload lets them through on a later pass. Repeat while a pass makes
+    // progress, so a chain of such dependencies resolves; a run still denied after the
+    // last pass is final. Rows that already applied are re-merged as no-ops. A denied
+    // group left no trace (its savepoint was rolled back), so it retries cleanly.
+    for (int pass = 0; !stop && denied_runs.count > 0 && pass < 32; pass++) {
+        cloudsync_denied_runs pending = denied_runs;
+        denied_runs = (cloudsync_denied_runs){0};
+        bool progress = false;
+        for (int r = 0; r < pending.count && !stop; r++) {
+            cloudsync_denied_run *run = &pending.runs[r];
+            const char *p = run->start;
+            size_t avail = run->avail;
+            int denied_now = 0;
+            bool decode_failed = false;
+            for (uint32_t k = 0; k < run->rows && !stop; k++) {
+                size_t seek = 0;
+                if (pk_decode((char *)p, avail, ncols, &seek, data->skip_decode_idx, cloudsync_payload_decode_callback, &decoded_context) == -1) {
+                    decode_failed = true;
+                    break;
+                }
+                if (batch.count > 0 && cloudsync_payload_row_is_block(&decoded_context)) {
+                    int entries = 0;
+                    bool contained = true;
+                    int flush_rc = cloudsync_payload_group_flush(data, &batch, &entries, &contained);
+                    if (flush_rc == DBRES_POLICY_DENIED && contained) {
+                        denied_now += entries;
+                    } else if (flush_rc != DBRES_OK && cloudsync_apply_note_failure(data, &outcome, flush_rc, entries, contained)) {
+                        stop = true;
+                        break;
+                    }
+                }
+                cloudsync_payload_group_open(data, &batch);
+                bool contained = true;
+                int step_rc = cloudsync_payload_apply_row(data, vm, &contained);
+                if (step_rc == DBRES_POLICY_DENIED && contained) {
+                    denied_now++;
+                } else if (step_rc != DBRES_DONE && cloudsync_apply_note_failure(data, &outcome, step_rc, 1, contained)) {
+                    stop = true;
+                }
+                p += seek;
+                avail -= seek;
+                dbvm_reset(vm);
+            }
+            if (!stop && !decode_failed) {
+                int entries = 0;
+                bool contained = true;
+                int flush_rc = cloudsync_payload_group_flush(data, &batch, &entries, &contained);
+                if (flush_rc == DBRES_POLICY_DENIED && contained) {
+                    denied_now += entries;
+                } else if (flush_rc != DBRES_OK && cloudsync_apply_note_failure(data, &outcome, flush_rc, entries, contained)) {
+                    stop = true;
+                }
+            } else {
+                cloudsync_payload_group_abandon(data, &batch);
+            }
+            if (stop || decode_failed) {
+                // Keep the run counted as it was; nothing more can be retried.
+                cloudsync_denied_runs_add(&denied_runs, run->start, run->avail, run->rows, run->entries);
+                continue;
+            }
+            outcome.denied -= run->entries;
+            if (denied_now > 0) {
+                outcome.denied += denied_now;
+                cloudsync_denied_runs_add(&denied_runs, run->start, run->avail, run->rows, denied_now);
+            }
+            if (denied_now < run->entries) progress = true;
+        }
+        cloudsync_memory_free(pending.runs);
+        if (!progress) break;
+    }
+    if (outcome.denied < 0) outcome.denied = 0;
     data->pending_batch = NULL;
 
+    rc = DBRES_OK;
     if (in_savepoint) {
         int rc1 = database_commit_savepoint(data, "cloudsync_payload_apply");
-        if (rc1 != DBRES_OK) rc = rc1;
+        if (rc1 != DBRES_OK && outcome.fatal_rc == DBRES_OK) {
+            outcome.fatal_rc = rc1;
+            outcome.fatal_sqlstate = cloudsync_sqlstate(data);
+            snprintf(outcome.fatal_message, sizeof(outcome.fatal_message), "%s", cloudsync_errmsg(data));
+        }
     }
-    if (first_error != DBRES_OK) rc = first_error;
-
-    // save last error (unused if function returns OK)
-    if (rc != DBRES_OK && rc != DBRES_DONE) {
-        cloudsync_set_error(data, first_error_message[0] ? first_error_message : "Unable to apply payload changes", rc);
+    if (outcome.fatal_rc != DBRES_OK) {
+        rc = outcome.fatal_rc;
+        // The captured message already carries the database error; clear it first so
+        // it is not appended to itself a second time.
+        cloudsync_reset_error(data);
+        cloudsync_set_error(data, outcome.fatal_message[0] ? outcome.fatal_message : "Unable to apply payload changes", rc);
+        cloudsync_set_sqlstate(data, outcome.fatal_sqlstate);
     }
-
-    if (rc == DBRES_DONE) rc = DBRES_OK;
 
     {
-        int applied = (rc == DBRES_OK) ? (int)nrows - denied_entries : 0;
-        cloudsync_apply_stats_add(data, (applied > 0) ? applied : 0, denied_entries);
+        int applied = (rc == DBRES_OK) ? (int)nrows - outcome.denied - outcome.failed : 0;
+        cloudsync_apply_stats_add(data, (applied > 0) ? applied : 0, outcome.failed);
     }
 
-    // A policy denial is permanent: those rows are not this site's to hold, so the
-    // cursor must still advance. Holding it back would re-deliver the same rows on
-    // every check forever, and a single denied row would stall every later change
-    // behind it. Denials are counted and reported instead (receive.denied), so
-    // discarding stays visible without being an error: a payload can be entirely
-    // denied and still be a correct outcome, since a single-row payload that
-    // belongs to another user is denied in full.
+    // Policy denials and failed writes that survive the retry are permanent: delivering
+    // them again fails the same way. So the cursor still advances past them — holding it
+    // back would re-deliver them forever and stall every later change behind them. They
+    // are reported instead: a warning per failed write (receive.failed on the network
+    // path) and one summary warning for denials. Only a transient or uncontained failure
+    // fails the apply and keeps the cursor in place.
+    if (rc == DBRES_OK && outcome.denied > 0) {
+        char warning[256];
+        snprintf(warning, sizeof(warning), "skipped %d received change%s denied by a row-level security policy",
+                 outcome.denied, (outcome.denied == 1) ? "" : "s");
+        database_log_warning(data, warning);
+    }
 
     if (rc == DBRES_OK) {
         // Record the last applied (db_version, seq) and advance the receive cursor
         // once, gated on the caller-supplied checkpoint. A non-final chunk passes
         // CLOUDSYNC_CHECKPOINT_NONE so the cursor never lands mid-db_version.
-        if (decoded_context.db_version > data->apply_last_db_version ||
-            (decoded_context.db_version == data->apply_last_db_version && decoded_context.seq > data->apply_last_seq)) {
-            data->apply_last_db_version = decoded_context.db_version;
-            data->apply_last_seq = decoded_context.seq;
+        if (payload_last_db_version > data->apply_last_db_version ||
+            (payload_last_db_version == data->apply_last_db_version && payload_last_seq > data->apply_last_seq)) {
+            data->apply_last_db_version = payload_last_db_version;
+            data->apply_last_seq = payload_last_seq;
         }
         cloudsync_payload_apply_checkpoint(data, checkpoint_db_version, checkpoint_seq);
     }
@@ -4350,6 +4803,7 @@ cleanup:
 
     // cleanup memory
     if (clone) cloudsync_memory_free(clone);
+    cloudsync_memory_free(denied_runs.runs);
 
     // error already saved in (save last error)
     if (rc != DBRES_OK) return rc;
@@ -4433,7 +4887,11 @@ done:
     block_diff_free(diff);
     block_list_free(old);
     block_list_free(next);
-    if (rc != DBRES_OK) cloudsync_set_error(data, "Unable to update block metadata or values", rc);
+    if (rc != DBRES_OK) {
+        char message[512];
+        snprintf(message, sizeof(message), "Unable to write the blocks of column \"%s\" of table \"%s\"", col, table->name);
+        cloudsync_set_error(data, message, rc);
+    }
     return rc;
 }
 

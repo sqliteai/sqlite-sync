@@ -19,10 +19,17 @@ typedef void dbvalue_t;
 typedef enum {
     DBRES_OK         = 0,
     DBRES_ERROR      = 1,
+    DBRES_PERM       = 3,   // missing privilege: fixed by a GRANT, not by the data
     DBRES_ABORT      = 4,
+    DBRES_BUSY       = 5,   // transient: lock, deadlock, serialization failure, cancel
+    DBRES_LOCKED     = 6,
     DBRES_NOMEM      = 7,
+    DBRES_READONLY   = 8,
+    DBRES_INTERRUPT  = 9,
     DBRES_IOERR      = 10,
+    DBRES_FULL       = 13,
     DBRES_CONSTRAINT = 19,
+    DBRES_AUTH       = 23,
     DBRES_MISUSE     = 21,
     DBRES_ROW        = 100,
     DBRES_DONE       = 101,
@@ -92,6 +99,7 @@ int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_
 bool database_in_transaction (cloudsync_context *data);
 int database_errcode (cloudsync_context *data);
 const char *database_errmsg (cloudsync_context *data);
+void database_log_warning (cloudsync_context *data, const char *message);
 
 // VM
 int  databasevm_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, int flags);
@@ -100,6 +108,7 @@ void databasevm_finalize (dbvm_t *vm);
 void databasevm_reset (dbvm_t *vm);
 void databasevm_clear_bindings (dbvm_t *vm);
 const char *databasevm_sql (dbvm_t *vm);
+int64_t databasevm_changes (dbvm_t *vm);   // rows changed by the last completed INSERT/UPDATE/DELETE step
 
 // BINDING
 int databasevm_bind_blob (dbvm_t *vm, int index, const void *value, uint64_t size);
