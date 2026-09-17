@@ -4,6 +4,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 #include "sqlite3.h"
 #include "cloudsync.h"
 #include "cloudsync_sqlite.h"
@@ -63,6 +68,36 @@ static void test_best_index(void) {
     CHECK(strcmp(info.idxStr, " ORDER BY db_version, seq ASC") == 0);
     sqlite3_free(info.idxStr);
 }
+// A private directory for this run's on-disk databases, removed with its content at the
+// end; a failed run leaves nothing behind in a shared temporary directory.
+static char scratch_dir[256];
+static bool scratch_create(void) {
+#ifdef _WIN32
+    char base[MAX_PATH];
+    DWORD n = GetTempPathA(sizeof(base), base);
+    if (!n || n >= sizeof(base)) return false;
+    int len = snprintf(scratch_dir, sizeof(scratch_dir), "%scloudsync-rr-%lu-%llu", base,
+                       (unsigned long)GetCurrentProcessId(), (unsigned long long)GetTickCount64());
+    return len > 0 && (size_t)len < sizeof(scratch_dir) && CreateDirectoryA(scratch_dir, NULL);
+#else
+    const char *base = getenv("TMPDIR");
+    if (!base || !*base) base = ".";
+    int len = snprintf(scratch_dir, sizeof(scratch_dir), "%s/cloudsync-rr-XXXXXX", base);
+    return len > 0 && (size_t)len < sizeof(scratch_dir) && mkdtemp(scratch_dir) != NULL;
+#endif
+}
+static void scratch_remove(const char *const *names, int count) {
+    char path[512];
+    for (int i = 0; i < count; i++) {
+        snprintf(path, sizeof(path), "%s/%s", scratch_dir, names[i]);
+        remove(path);
+    }
+#ifdef _WIN32
+    RemoveDirectoryA(scratch_dir);
+#else
+    rmdir(scratch_dir);
+#endif
+}
 static int skipped_warnings;
 static int skipped_changes;   // sum of N over "skipped N received change(s) that failed to apply"
 static void log_callback(void *arg, int code, const char *message) {
@@ -112,10 +147,8 @@ static void test_payload_errors(void) {
     // on a retry, so it must fail the apply and leave the cursor in place.
     {
         char path[512];
-        const char *dir = getenv("TMPDIR");
-        unsigned int nonce = 0;
-        sqlite3_randomness(sizeof(nonce), &nonce);
-        snprintf(path, sizeof(path), "%s/cloudsync-rr-busy-%08x.db", (dir && *dir) ? dir : ".", nonce);
+        CHECK(scratch_create());
+        snprintf(path, sizeof(path), "%s/busy.db", scratch_dir);
         sqlite3 *source = open_db(), *target = NULL, *locker = NULL;
         CHECK(sqlite3_open(path, &target) == SQLITE_OK);
         CHECK(sqlite3_cloudsync_init(target, NULL, NULL) == SQLITE_OK);
@@ -136,10 +169,8 @@ static void test_payload_errors(void) {
         CHECK(scalar(target, "SELECT count(*) FROM t") == 2);
         CHECK(close_db(source) == SQLITE_OK);
         CHECK(close_db(target) == SQLITE_OK);
-        char aux[600];
-        remove(path);
-        snprintf(aux, sizeof(aux), "%s-journal", path);
-        remove(aux);
+        const char *const files[] = {"busy.db", "busy.db-journal"};
+        scratch_remove(files, 2);
     }
 
     sqlite3 *db = open_db();

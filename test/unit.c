@@ -4131,7 +4131,7 @@ static bool create_test_directory(void) {
     if (!n || n >= sizeof(base)) return false;
     int len = snprintf(test_directory, sizeof(test_directory), "%scloudsync-%lu-%llu", base,
                        (unsigned long)GetCurrentProcessId(), (unsigned long long)GetTickCount64());
-    return len > 0 && len < sizeof(test_directory) && CreateDirectoryA(test_directory, NULL);
+    return len > 0 && (size_t)len < sizeof(test_directory) && CreateDirectoryA(test_directory, NULL);
 #else
     const char *base = getenv("TMPDIR");
     if (!base || !*base) {
@@ -4146,31 +4146,42 @@ static bool create_test_directory(void) {
 #endif
 }
 
+// Removes the private test directory and everything the tests left in it. The directory
+// is created by this run alone (mkdtemp), so every entry is ours to delete whatever its
+// name. An entry that cannot be deleted (a database still open on Windows, say) is named,
+// so a failed cleanup says what was left behind.
 static bool remove_test_directory(void) {
     char path[512];
+    bool removed_all = true;
 #ifdef _WIN32
     WIN32_FIND_DATAA entry;
     snprintf(path, sizeof(path), "%s\\*", test_directory);
     HANDLE handle = FindFirstFileA(path, &entry);
     if (handle == INVALID_HANDLE_VALUE) return false;
     do {
-        if (strncmp(entry.cFileName, "cloudsync-test-", 15) != 0) continue;
+        if (strcmp(entry.cFileName, ".") == 0 || strcmp(entry.cFileName, "..") == 0) continue;
         snprintf(path, sizeof(path), "%s\\%s", test_directory, entry.cFileName);
-        DeleteFileA(path);
+        if (!DeleteFileA(path)) {
+            fprintf(stderr, "\tunable to delete test file %s\n", path);
+            removed_all = false;
+        }
     } while (FindNextFileA(handle, &entry));
     FindClose(handle);
-    return RemoveDirectoryA(test_directory) != 0;
+    return RemoveDirectoryA(test_directory) != 0 && removed_all;
 #else
     DIR *dir = opendir(test_directory);
     if (!dir) return false;
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
-        if (strncmp(entry->d_name, "cloudsync-test-", 15) != 0) continue;
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
         snprintf(path, sizeof(path), "%s/%s", test_directory, entry->d_name);
-        unlink(path);
+        if (unlink(path) != 0) {
+            fprintf(stderr, "\tunable to delete test file %s\n", path);
+            removed_all = false;
+        }
     }
     closedir(dir);
-    return rmdir(test_directory) == 0;
+    return rmdir(test_directory) == 0 && removed_all;
 #endif
 }
 
@@ -13627,7 +13638,13 @@ finalize:
         result++;
     }
 
-    if (cleanup_databases) result += test_report("Temporary Directory Cleanup:", remove_test_directory());
+    if (cleanup_databases) {
+        bool cleaned = remove_test_directory();
+        result += test_report("Temporary Directory Cleanup:", cleaned);
+        if (!cleaned) printf("\tTest databases kept in %s\n", test_directory);
+    } else {
+        printf("Test databases kept in %s\n", test_directory);
+    }
     
     return result;
 }
