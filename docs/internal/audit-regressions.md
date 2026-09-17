@@ -4,7 +4,11 @@ The previously reported `MAX_PARAMS` issue is outside this change.
 
 ## Compatibility and limits
 
-- PK doubles retain their deployed little-endian IEEE754 bytes. The old code
+- PK doubles retain their deployed little-endian IEEE754 bytes. `make unittest-s390x`
+  runs the SQLite suites on s390x (Docker + QEMU): the golden-byte checks fail there with
+  the pre-1.1.4 host-dependent encoding, which a little-endian host cannot detect.
+  No migration is provided for data written by earlier versions on big-endian hosts:
+  no such deployment exists. The old code
   combined host conversion with manual big-endian serialization; unconditional
   byte swapping now makes the historical format explicit on every architecture.
   Integers keep their existing encoding. No migration is needed for supported
@@ -63,7 +67,7 @@ The previously reported `MAX_PARAMS` issue is outside this change.
 | Area | Focused coverage |
 | --- | --- |
 | 64-bit clocks | Incoming column/database versions, causal length and sequence above UINT32_MAX |
-| Double encoding | Golden bytes, decoding a deployed fixture, negative-value roundtrip; forced big-endian conversion build |
+| Double encoding | Golden bytes, decoding a deployed fixture, negative-value roundtrip; forced big-endian conversion build; the unit and regression suites on a real big-endian host (`make unittest-s390x`, s390x under QEMU) |
 | Virtual-table planner | Unusable/unsupported constraints before an accepted constraint; no accepted constraints |
 | RLS denials | Block-column and GOS denials skipped; every column of a permitted block/GOS row written; a column hidden from UPDATE not recorded as applied; order-dependent denials applied on retry in both the batched and trigger paths; permanently denied rows skipped with checkpoint advanced |
 | Block materialization errors | Write failure via cloudsync_text_materialize keeps cause, code/SQLSTATE and names stage, column, table; single-shot allocation failure at every allocation never yields a blank error |
@@ -79,7 +83,7 @@ The previously reported `MAX_PARAMS` issue is outside this change.
 | Fractional indexing | 4096-byte common prefix plus the existing module suite |
 | Test harness | Temporary directory cleanup, memory accounting and sanitizer-safe RowID generation |
 
-Run `make unittest`, `make endian-unittest`, `make network-unittest`, and
+Run `make unittest`, `make unittest-s390x`, `make endian-unittest`, `make network-unittest`, and
 `make -C modules/fractional-indexing/test run`. The network test needs permission
 to bind a loopback socket; it does not contact an external service. Run Node
 checks from `packages/node` with `npm test -- --run`, `npm run typecheck`, and
