@@ -61,7 +61,7 @@ typedef struct {
 } block_diff_t;
 
 // Initialize the fractional-indexing library to use cloudsync's allocator.
-// Must be called once before any block_position_between / block_initial_positions calls.
+// Must be called once before any block_position_between call.
 void block_init_allocator(void);
 
 // Check if a col_name is a block entry (contains BLOCK_SEPARATOR)
@@ -84,10 +84,6 @@ block_list_t *block_split(const char *text, const char *delimiter);
 
 // Free a block list
 void block_list_free(block_list_t *list);
-
-// Generate fractional index position IDs for N initial blocks
-// Returns array of N strings (caller must free each + the array)
-char **block_initial_positions(int count);
 
 // Generate a position ID that sorts between 'before' and 'after'
 // Either can be NULL (meaning beginning/end of sequence)

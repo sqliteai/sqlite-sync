@@ -162,11 +162,6 @@ char *block_position_between(const char *before, const char *after) {
     return generate_key_between(before, after);
 }
 
-char **block_initial_positions(int count) {
-    if (count <= 0) return NULL;
-    return generate_n_keys_between(NULL, NULL, count);
-}
-
 // MARK: - Block diff -
 
 static block_diff_t *block_diff_create(void) {

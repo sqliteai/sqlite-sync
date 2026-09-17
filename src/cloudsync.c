@@ -2149,7 +2149,6 @@ const char *table_col_delimiter (cloudsync_table_context *table, int index) {
 // Block column struct accessors (for use outside cloudsync.c where struct is opaque)
 dbvm_t *table_block_value_read_stmt (cloudsync_table_context *table) { return table ? table->block_value_read_stmt : NULL; }
 dbvm_t *table_block_value_write_stmt (cloudsync_table_context *table) { return table ? table->block_value_write_stmt : NULL; }
-dbvm_t *table_block_list_stmt (cloudsync_table_context *table) { return table ? table->block_list_stmt : NULL; }
 const char *table_blocks_ref (cloudsync_table_context *table) { return table ? table->blocks_ref : NULL; }
 
 void table_set_col_delimiter (cloudsync_table_context *table, int col_idx, const char *delimiter) {
