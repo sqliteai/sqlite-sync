@@ -4159,10 +4159,14 @@ static int cloudsync_payload_apply_fragment_row (cloudsync_context *data, clouds
     cloudsync_stream_value *seen = track ? cloudsync_stream_value_find(data, value_id) : NULL;
     if (seen && seen->applied) return DBRES_OK;
 
+    // concurrent transactions applying pieces of this value wait for each other
+    int rc = database_fragment_lock(data, value_id);
+    if (rc != DBRES_OK) return rc;
+
     // Stage the piece, then reassemble, apply and remove the value's pieces as one
     // unit: a failure rolls back only this call and leaves the pieces staged by
     // earlier calls, so the value stays retryable.
-    int rc = database_begin_savepoint(data, "cloudsync_fragment");
+    rc = database_begin_savepoint(data, "cloudsync_fragment");
     if (rc != DBRES_OK) return rc;
 
     // the fragments table is guaranteed by dbutils_settings_init; no DDL here

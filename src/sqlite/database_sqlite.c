@@ -598,6 +598,11 @@ bool database_in_transaction (cloudsync_context *data) {
     return in_transaction;
 }
 
+int database_fragment_lock (cloudsync_context *data, const char *value_id) {
+    // writers are already serialized
+    return DBRES_OK;
+}
+
 bool database_table_exists (cloudsync_context *data, const char *name, const char *schema) {
     UNUSED_PARAMETER(schema);
     return database_system_exists(data, name, "table");

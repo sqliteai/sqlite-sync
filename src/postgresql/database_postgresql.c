@@ -1189,6 +1189,29 @@ bool database_in_transaction (cloudsync_context *data) {
     return IsTransactionState();
 }
 
+// Pieces of one value can be applied by concurrent transactions (the server runs one
+// apply job per uploaded chunk), each seeing only its own piece and leaving the value
+// unapplied. Under READ COMMITTED they are serialized per value until commit: the
+// statements after the wait take a new snapshot, so the last one sees every piece.
+// SERIALIZABLE needs no lock: that outcome matches no serial order, so one of the
+// transactions fails with a retryable serialization failure. REPEATABLE READ gets
+// neither guarantee (a waiter would keep its old snapshot), so it is refused.
+// The stale cleanup (SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE) uses the same lock key.
+int database_fragment_lock (cloudsync_context *data, const char *value_id) {
+    if (IsolationIsSerializable()) return DBRES_OK;
+    if (IsolationUsesXactSnapshot()) {
+        int rc = cloudsync_set_error(data, "cloudsync_payload_apply: a fragmented value cannot be applied under REPEATABLE READ, use READ COMMITTED or SERIALIZABLE", DBRES_MISUSE);
+        cloudsync_set_sqlstate(data, ERRCODE_FEATURE_NOT_SUPPORTED);
+        return rc;
+    }
+    dbvm_t *vm = NULL;
+    int rc = databasevm_prepare(data, "SELECT pg_advisory_xact_lock(1129530962, hashtext($1));", &vm, 0);
+    if (rc == DBRES_OK) rc = databasevm_bind_text(vm, 1, value_id, -1);
+    if (rc == DBRES_OK) rc = databasevm_step(vm);
+    if (vm) databasevm_finalize(vm);
+    return (rc == DBRES_ROW) ? DBRES_OK : cloudsync_set_error(data, "cloudsync_payload_apply: unable to lock a fragmented value", rc);
+}
+
 bool database_table_exists (cloudsync_context *data, const char *name, const char *schema) {
     return database_system_exists(data, name, "table", false, schema);
 }

@@ -67,6 +67,7 @@
 \ir 57_audit_regressions.sql
 \ir 58_v3_denied_checkpoint.sql
 \ir 59_rls_denial_retry.sql
+\ir 60_fragment_concurrency.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

@@ -141,8 +141,10 @@ const char * const SQL_PAYLOAD_FRAGMENTS_DELETE =
 
 const char * const SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE =
     "DELETE FROM cloudsync_payload_fragments WHERE value_id IN ("
-    "SELECT value_id FROM cloudsync_payload_fragments GROUP BY value_id "
-    "HAVING MAX(created_at) < $1 AND COUNT(*) < MAX(part_count));";
+    "SELECT value_id FROM (SELECT value_id FROM cloudsync_payload_fragments GROUP BY value_id "
+    "HAVING MAX(created_at) < $1 AND COUNT(*) < MAX(part_count)) stale "
+    // skip a value another transaction is applying (see database_fragment_lock)
+    "WHERE pg_try_advisory_xact_lock(1129530962, hashtext(value_id)));";
 
 // MARK: Additional SQL constants for PostgreSQL
 
