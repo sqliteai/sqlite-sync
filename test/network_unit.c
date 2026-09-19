@@ -572,9 +572,23 @@ static bool test_stream_no_watermark(void) {
     return ok;
 }
 
+#ifndef CLOUDSYNC_OMIT_CURL
+#include <curl/curl.h>
+// With the synchronous resolver and CURLOPT_NOSIGNAL, curl cannot time out a name
+// lookup, so a hung DNS server would outlast every deadline. The build must link a
+// libcurl that resolves names asynchronously (the threaded resolver).
+static bool test_curl_async_dns(void) {
+    const curl_version_info_data *info = curl_version_info(CURLVERSION_NOW);
+    return info && (info->features & CURL_VERSION_ASYNCHDNS);
+}
+#endif
+
 int main(void) {
 #if !defined(_WIN32) && !defined(CLOUDSYNC_OMIT_CURL)
     check("HTTP deadlines: API elapsed cap and artifact stall cap:", test_stalled_http_timeout());
+#endif
+#ifndef CLOUDSYNC_OMIT_CURL
+    check("libcurl resolves names asynchronously (DNS honors deadlines):", test_curl_async_dns());
 #endif
     check("JSON keys only match root object members:", test_json_scope());
     check("Gateway data envelope is unwrapped before scoped lookups:", test_json_envelope());

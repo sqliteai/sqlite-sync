@@ -410,9 +410,8 @@ endif
 	--disable-ntlm-wb \
 	--disable-progress-meter \
 	--disable-proxy \
-	--disable-pthreads \
 	--disable-socketpair \
-	--disable-threaded-resolver \
+	--enable-threaded-resolver \
 	--disable-tls-srp \
 	--disable-verbose \
 	--disable-versioned-symbols \
