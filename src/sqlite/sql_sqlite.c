@@ -310,10 +310,9 @@ const char * const SQL_PAYLOAD_FRAGMENTS_DELETE =
     "DELETE FROM cloudsync_payload_fragments WHERE value_id=?;";
 
 const char * const SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE =
-    "DELETE FROM cloudsync_payload_fragments "
-    "WHERE created_at < ? AND value_id IN ("
+    "DELETE FROM cloudsync_payload_fragments WHERE value_id IN ("
     "SELECT value_id FROM cloudsync_payload_fragments GROUP BY value_id "
-    "HAVING COUNT(*) < MAX(part_count));";
+    "HAVING MAX(created_at) < ? AND COUNT(*) < MAX(part_count));";
 
 // MARK: Blocks (block-level LWW)
 

@@ -3892,6 +3892,8 @@ static int cloudsync_payload_fragments_cleanup_stale (cloudsync_context *data) {
     // every applied fragment would be O(n^2) for a heavily-fragmented value, since
     // each fragment arrives as its own apply call. Throttle it to at most once per
     // CLOUDSYNC_PAYLOAD_FRAGMENT_CLEANUP_MIN_INTERVAL per connection.
+    // Its own savepoint keeps a failed cleanup from failing the piece being applied:
+    // it is rolled back and logged. Only a savepoint that cannot be managed is an error.
     int64_t now = (int64_t)time(NULL);
     if (data->last_fragment_cleanup != 0 &&
         now - data->last_fragment_cleanup < CLOUDSYNC_PAYLOAD_FRAGMENT_CLEANUP_MIN_INTERVAL) {
@@ -3899,14 +3901,22 @@ static int cloudsync_payload_fragments_cleanup_stale (cloudsync_context *data) {
     }
     data->last_fragment_cleanup = now;
 
-    dbvm_t *vm = NULL;
-    int rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE, &vm, 0);
+    int rc = database_begin_savepoint(data, "cloudsync_fragment_cleanup");
     if (rc != DBRES_OK) return rc;
-    int64_t cutoff = now - CLOUDSYNC_PAYLOAD_FRAGMENT_STALE_SECONDS;
-    rc = databasevm_bind_int(vm, 1, cutoff);
+    dbvm_t *vm = NULL;
+    rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE, &vm, 0);
+    if (rc == DBRES_OK) rc = databasevm_bind_int(vm, 1, now - CLOUDSYNC_PAYLOAD_FRAGMENT_STALE_SECONDS);
     if (rc == DBRES_OK) rc = databasevm_step(vm);
-    databasevm_finalize(vm);
-    return (rc == DBRES_DONE) ? DBRES_OK : rc;
+    if (vm) databasevm_finalize(vm);
+    if (rc == DBRES_DONE) return database_commit_savepoint(data, "cloudsync_fragment_cleanup");
+
+    char warning[1100];
+    snprintf(warning, sizeof(warning), "stale fragment cleanup failed: %s", cloudsync_errmsg(data));
+    rc = database_rollback_savepoint(data, "cloudsync_fragment_cleanup");
+    if (rc != DBRES_OK) return rc;
+    cloudsync_reset_error(data);
+    database_log_warning(data, warning);
+    return DBRES_OK;
 }
 
 static int cloudsync_payload_apply_single_decoded_row (cloudsync_context *data,
@@ -3920,7 +3930,6 @@ static int cloudsync_payload_apply_single_decoded_row (cloudsync_context *data,
                                                        int *pnrows) {
     int rc = DBRES_OK;
     dbvm_t *vm = NULL;
-    bool in_savepoint = false;
     merge_pending_batch batch = {0};
 
     rc = databasevm_prepare(data, SQL_CHANGES_INSERT_ROW, &vm, 0);
@@ -3946,12 +3955,6 @@ static int cloudsync_payload_apply_single_decoded_row (cloudsync_context *data,
     if (rc == DBRES_OK) rc = databasevm_bind_int(vm, 9, seq);
     if (rc != DBRES_OK) goto cleanup;
 
-    if (!database_in_transaction(data)) {
-        rc = database_begin_savepoint(data, "cloudsync_payload_apply");
-        if (rc != DBRES_OK) goto cleanup;
-        in_savepoint = true;
-    }
-
     data->pending_batch = &batch;
     rc = databasevm_step(vm);
     if (rc == DBRES_DONE) rc = DBRES_OK;
@@ -3963,12 +3966,6 @@ static int cloudsync_payload_apply_single_decoded_row (cloudsync_context *data,
     rc = merge_flush_pending(data);
     if (rc != DBRES_OK) goto cleanup;
     data->pending_batch = NULL;
-
-    if (in_savepoint) {
-        rc = database_commit_savepoint(data, "cloudsync_payload_apply");
-        in_savepoint = false;
-        if (rc != DBRES_OK) goto cleanup;
-    }
 
     // Do NOT advance the receive cursor here: a v3 value carries a single
     // (db_version, seq) that can be in the middle of its source db_version, and a
@@ -3986,7 +3983,6 @@ static int cloudsync_payload_apply_single_decoded_row (cloudsync_context *data,
     if (pnrows) *pnrows += 1;
 
 cleanup:
-    if (rc != DBRES_OK && in_savepoint) database_rollback_savepoint(data, "cloudsync_payload_apply");
     data->pending_batch = NULL;
     merge_pending_free_entries(&batch);
     if (batch.cached_vm) databasevm_finalize(batch.cached_vm);
@@ -4011,7 +4007,11 @@ static int cloudsync_payload_apply_reassembled_fragment (cloudsync_context *data
     rc = databasevm_bind_text(vm, 1, value_id, -1);
     if (rc != DBRES_OK) { databasevm_finalize(vm); return rc; }
     rc = databasevm_step(vm);
-    if (rc != DBRES_ROW) { databasevm_finalize(vm); return DBRES_OK; }
+    if (rc != DBRES_ROW) {
+        cloudsync_set_dberror(data);
+        databasevm_finalize(vm);
+        return (rc == DBRES_DONE) ? DBRES_OK : rc;
+    }
     int64_t have = database_column_int(vm, 0);
     int64_t part_count_min = database_column_int(vm, 1);
     int64_t part_count_max = database_column_int(vm, 2);
@@ -4106,23 +4106,14 @@ static int cloudsync_payload_apply_reassembled_fragment (cloudsync_context *data
     rc = cloudsync_payload_apply_single_decoded_row(data, tbl, tbl_len, pk, pk_len, col_name, col_name_len,
                                                     value, (size_t)total_size, col_version, db_version,
                                                     site_id, site_id_len, cl, seq, pnrows);
-    // A denial leaves the transaction unusable until the caller's savepoint rolls it
-    // back, so the staged fragments cannot be dropped here. They are bounded by the
-    // stale-fragment cleanup instead.
     if (rc != DBRES_OK) goto cleanup;
 
+    // the caller's savepoint makes applying the value and removing its pieces one unit
     rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_DELETE, &vm, 0);
-    if (rc == DBRES_OK) {
-        databasevm_bind_text(vm, 1, value_id, -1);
-        // A failed delete is deliberately tolerated rather than propagated: the value
-        // is already applied, so failing here would stall the cursor and re-deliver
-        // it, and a delete that fails once fails again on every retry. The leftover
-        // rows are bounded by the stale-fragment cleanup.
-        // (The former `if (step_rc == DBRES_DONE) rc = DBRES_OK;` only looked like a
-        // check: rc was already DBRES_OK from the prepare.)
-        databasevm_step(vm);
-    }
-
+    if (rc == DBRES_OK) rc = databasevm_bind_text(vm, 1, value_id, -1);
+    if (rc == DBRES_OK) rc = databasevm_step(vm);
+    if (rc == DBRES_DONE) rc = DBRES_OK;
+    else cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to remove applied fragments", rc);
 
 cleanup:
     if (vm) databasevm_finalize(vm);
@@ -4168,37 +4159,54 @@ static int cloudsync_payload_apply_fragment_row (cloudsync_context *data, clouds
     cloudsync_stream_value *seen = track ? cloudsync_stream_value_find(data, value_id) : NULL;
     if (seen && seen->applied) return DBRES_OK;
 
+    // Stage the piece, then reassemble, apply and remove the value's pieces as one
+    // unit: a failure rolls back only this call and leaves the pieces staged by
+    // earlier calls, so the value stays retryable.
+    int rc = database_begin_savepoint(data, "cloudsync_fragment");
+    if (rc != DBRES_OK) return rc;
+
     // the fragments table is guaranteed by dbutils_settings_init; no DDL here
     // because the apply path runs under sync-only credentials on server nodes
-    int rc = cloudsync_payload_fragments_cleanup_stale(data);
-    if (rc != DBRES_OK) return rc;
-
     dbvm_t *vm = NULL;
     rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_UPSERT, &vm, 0);
-    if (rc != DBRES_OK) return rc;
-    databasevm_bind_text(vm, 1, value_id, -1);
-    databasevm_bind_int(vm, 2, part_index);
-    databasevm_bind_int(vm, 3, part_count);
-    databasevm_bind_int(vm, 4, total_size);
-    databasevm_bind_text(vm, 5, checksum_hex, -1);
-    databasevm_bind_int(vm, 6, (int64_t)time(NULL));
-    databasevm_bind_text(vm, 7, row->tbl, (int)row->tbl_len);
-    databasevm_bind_blob(vm, 8, row->pk, (uint64_t)row->pk_len);
-    databasevm_bind_text(vm, 9, base_col, (int)base_col_len);
-    databasevm_bind_int(vm, 10, row->col_version);
-    databasevm_bind_int(vm, 11, row->db_version);
-    databasevm_bind_blob(vm, 12, row->site_id, (uint64_t)row->site_id_len);
-    databasevm_bind_int(vm, 13, row->cl);
-    databasevm_bind_int(vm, 14, row->seq);
-    databasevm_bind_blob(vm, 15, row->col_value, (uint64_t)row->col_value_len);
-    rc = databasevm_step(vm);
-    databasevm_finalize(vm);
-    if (rc == DBRES_DONE) rc = DBRES_OK;
-    if (rc != DBRES_OK) return rc;
+    if (rc == DBRES_OK) {
+        databasevm_bind_text(vm, 1, value_id, -1);
+        databasevm_bind_int(vm, 2, part_index);
+        databasevm_bind_int(vm, 3, part_count);
+        databasevm_bind_int(vm, 4, total_size);
+        databasevm_bind_text(vm, 5, checksum_hex, -1);
+        databasevm_bind_int(vm, 6, (int64_t)time(NULL));
+        databasevm_bind_text(vm, 7, row->tbl, (int)row->tbl_len);
+        databasevm_bind_blob(vm, 8, row->pk, (uint64_t)row->pk_len);
+        databasevm_bind_text(vm, 9, base_col, (int)base_col_len);
+        databasevm_bind_int(vm, 10, row->col_version);
+        databasevm_bind_int(vm, 11, row->db_version);
+        databasevm_bind_blob(vm, 12, row->site_id, (uint64_t)row->site_id_len);
+        databasevm_bind_int(vm, 13, row->cl);
+        databasevm_bind_int(vm, 14, row->seq);
+        databasevm_bind_blob(vm, 15, row->col_value, (uint64_t)row->col_value_len);
+        rc = databasevm_step(vm);
+        if (rc == DBRES_DONE) rc = DBRES_OK;
+        else cloudsync_set_dberror(data);
+    }
+    if (vm) databasevm_finalize(vm);
+
+    // After staging, so a group resumed after a long pause is recent again and is kept.
+    if (rc == DBRES_OK) rc = cloudsync_payload_fragments_cleanup_stale(data);
 
     int applied = 0;
-    rc = cloudsync_payload_apply_reassembled_fragment(data, value_id, checksum_hex, &applied);
-    if (rc != DBRES_OK) return rc;
+    if (rc == DBRES_OK) rc = cloudsync_payload_apply_reassembled_fragment(data, value_id, checksum_hex, &applied);
+    if (rc == DBRES_OK) rc = database_commit_savepoint(data, "cloudsync_fragment");
+    if (rc != DBRES_OK) {
+        char message[1024];
+        snprintf(message, sizeof(message), "%s", cloudsync_errmsg(data));
+        int sqlstate = cloudsync_sqlstate(data);
+        database_rollback_savepoint(data, "cloudsync_fragment");
+        cloudsync_reset_error(data);
+        cloudsync_set_error(data, message[0] ? message : "Unable to apply a fragment", rc);
+        cloudsync_set_sqlstate(data, sqlstate);
+        return rc;
+    }
     if (pnrows) *pnrows += applied;
     return track ? cloudsync_stream_value_track(data, value_id, applied > 0) : DBRES_OK;
 }

@@ -260,6 +260,110 @@ static void test_batched_update_missing_row(void) {
     CHECK(close_db(source) == SQLITE_OK);
     CHECK(close_db(target) == SQLITE_OK);
 }
+// The v3 fragments of one value too large for a chunk, read from a source database.
+#define MAX_FRAGS 8
+static int frag_count;
+static void *frag_data[MAX_FRAGS];
+static int frag_size[MAX_FRAGS];
+static const char *frag_schema = "CREATE TABLE f(id TEXT PRIMARY KEY NOT NULL, v BLOB); SELECT cloudsync_init('f');";
+static void frags_load(void) {
+    sqlite3 *src = open_db();
+    sqlite3_stmt *vm = NULL;
+    CHECK(sql(src, frag_schema) == SQLITE_OK);
+    CHECK(sql(src, "SELECT cloudsync_set('payload_max_chunk_size','262144'); INSERT INTO f VALUES('big', randomblob(700000));") == SQLITE_OK);
+    CHECK(sqlite3_prepare_v2(src, "SELECT payload FROM cloudsync_payload_chunks() WHERE substr(payload,5,1)=x'03' ORDER BY chunk_index", -1, &vm, NULL) == SQLITE_OK);
+    while (frag_count < MAX_FRAGS && vm && sqlite3_step(vm) == SQLITE_ROW) {
+        frag_size[frag_count] = sqlite3_column_bytes(vm, 0);
+        frag_data[frag_count] = malloc((size_t)frag_size[frag_count]);
+        memcpy(frag_data[frag_count], sqlite3_column_blob(vm, 0), (size_t)frag_size[frag_count]);
+        frag_count++;
+    }
+    sqlite3_finalize(vm);
+    CHECK(frag_count >= 3);
+    CHECK(close_db(src) == SQLITE_OK);
+}
+static int frag_apply(sqlite3 *db, int i) {
+    sqlite3_stmt *vm = NULL;
+    CHECK(sqlite3_prepare_v2(db, "SELECT cloudsync_payload_apply(?1)", -1, &vm, NULL) == SQLITE_OK);
+    sqlite3_bind_blob(vm, 1, frag_data[i], frag_size[i], SQLITE_STATIC);
+    int rc = sqlite3_step(vm);
+    sqlite3_finalize(vm);
+    return rc;
+}
+static sqlite3 *frag_target(const char *path) {
+    sqlite3 *db = NULL;
+    CHECK(sqlite3_open(path ? path : ":memory:", &db) == SQLITE_OK);
+    CHECK(sqlite3_cloudsync_init(db, NULL, NULL) == SQLITE_OK);
+    CHECK(sql(db, "CREATE TABLE IF NOT EXISTS f(id TEXT PRIMARY KEY NOT NULL, v BLOB); SELECT cloudsync_init('f');") == SQLITE_OK);
+    return db;
+}
+// an incomplete group whose only piece is two days old
+static const char *stale_group = "INSERT INTO cloudsync_payload_fragments (value_id, part_index, part_count, total_size, checksum, created_at, tbl, pk, col_name, col_version, db_version, site_id, cl, seq, fragment) "
+                                 "VALUES ('00000000000000000000000000000000', 0, 2, 2, '0000000000000000', strftime('%s','now') - 172800, 'f', x'00', 'v', 1, 1, x'00', 1, 0, x'00')";
+static void test_fragment_retention(void) {
+    frags_load();
+    const char *big = "SELECT count(*) FROM f WHERE id='big' AND length(v)=700000";
+    char path[512];
+    CHECK(scratch_create());
+    snprintf(path, sizeof(path), "%s/frags.db", scratch_dir);
+
+    // A group resumed after two days keeps its old pieces: the cleanup runs after the
+    // new piece is staged, when the group is recent again. A fully stale group goes.
+    sqlite3 *db = frag_target(path);
+    CHECK(frag_apply(db, 0) == SQLITE_ROW);
+    CHECK(sql(db, "UPDATE cloudsync_payload_fragments SET created_at = created_at - 172800") == SQLITE_OK);
+    CHECK(sql(db, stale_group) == SQLITE_OK);
+    CHECK(close_db(db) == SQLITE_OK);
+    db = frag_target(path);   // a new connection: its first fragment runs the cleanup
+    CHECK(frag_apply(db, 1) == SQLITE_ROW);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_payload_fragments WHERE value_id <> '00000000000000000000000000000000'") == 2);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_payload_fragments WHERE value_id = '00000000000000000000000000000000'") == 0);
+    for (int i = 2; i < frag_count; i++) CHECK(frag_apply(db, i) == SQLITE_ROW);
+    CHECK(scalar(db, big) == 1);
+    CHECK(close_db(db) == SQLITE_OK);
+    const char *const files[] = {"frags.db", "frags.db-journal"};
+    scratch_remove(files, 2);
+
+    // A cleanup that fails is rolled back and logged; the value still applies.
+    db = frag_target(NULL);
+    CHECK(sql(db, stale_group) == SQLITE_OK);
+    CHECK(sql(db, "CREATE TRIGGER no_cleanup BEFORE DELETE ON cloudsync_payload_fragments WHEN OLD.tbl='f' AND OLD.pk=x'00' BEGIN SELECT RAISE(ABORT,'cleanup denied'); END") == SQLITE_OK);
+    for (int i = 0; i < frag_count; i++) CHECK(frag_apply(db, i) == SQLITE_ROW);
+    CHECK(scalar(db, big) == 1);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_payload_fragments") == 1);
+    CHECK(close_db(db) == SQLITE_OK);
+
+    // A value whose write fails keeps the pieces staged by earlier calls, and applies
+    // once the last piece is delivered again.
+    db = frag_target(NULL);
+    CHECK(sql(db, "CREATE TRIGGER deny BEFORE INSERT ON f WHEN NEW.id='big' BEGIN SELECT RAISE(ABORT,'big denied'); END") == SQLITE_OK);
+    for (int i = 0; i < frag_count - 1; i++) CHECK(frag_apply(db, i) == SQLITE_ROW);
+    CHECK(frag_apply(db, frag_count - 1) != SQLITE_ROW);
+    CHECK(strstr(sqlite3_errmsg(db), "big denied") != NULL);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_payload_fragments") == frag_count - 1);
+    CHECK(sql(db, "DROP TRIGGER deny") == SQLITE_OK);
+    CHECK(frag_apply(db, frag_count - 1) == SQLITE_ROW);
+    CHECK(scalar(db, big) == 1);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_payload_fragments") == 0);
+    CHECK(close_db(db) == SQLITE_OK);
+
+    // Applying the value and removing its pieces is one unit: when the pieces cannot be
+    // removed, the value is not applied either, and the call fails.
+    db = frag_target(NULL);
+    CHECK(sql(db, "CREATE TRIGGER keep BEFORE DELETE ON cloudsync_payload_fragments BEGIN SELECT RAISE(ABORT,'delete denied'); END") == SQLITE_OK);
+    for (int i = 0; i < frag_count - 1; i++) CHECK(frag_apply(db, i) == SQLITE_ROW);
+    CHECK(frag_apply(db, frag_count - 1) != SQLITE_ROW);
+    CHECK(strstr(sqlite3_errmsg(db), "delete denied") != NULL);
+    CHECK(scalar(db, "SELECT count(*) FROM f") == 0);
+    CHECK(scalar(db, "SELECT count(*) FROM f_cloudsync") == 0);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_payload_fragments") == frag_count - 1);
+    CHECK(sql(db, "DROP TRIGGER keep") == SQLITE_OK);
+    CHECK(frag_apply(db, frag_count - 1) == SQLITE_ROW);
+    CHECK(scalar(db, big) == 1);
+    CHECK(close_db(db) == SQLITE_OK);
+
+    for (int i = 0; i < frag_count; i++) free(frag_data[i]);
+}
 static void test_block_write_errors(void) {
     for (int update = 0; update < 2; update++) {
         sqlite3 *db = open_db();
@@ -412,6 +516,7 @@ int main(void) {
     test_payload_high_compression();
     test_resurrected_group_rollback();
     test_batched_update_missing_row();
+    test_fragment_retention();
     test_block_write_errors();
     test_block_materialize_errors();
     test_block_migration_orphan();
