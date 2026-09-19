@@ -9045,8 +9045,26 @@ finalize:
     return result;
 }
 
-// Test that BEFORE triggers with RAISE(ABORT) simulate RLS denial:
-// per-PK savepoints isolate failures so allowed rows commit and denied rows roll back.
+// Sends every change of source to target in one payload; returns the apply's step code.
+static int rls_merge_step (sqlite3 *source, sqlite3 *target, bool only_locals) {
+    sqlite3_stmt *sel = NULL, *ins = NULL;
+    const char *sel_sql = only_locals
+        ? "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes WHERE site_id=cloudsync_siteid();"
+        : "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes;";
+    int rc = sqlite3_prepare_v2(source, sel_sql, -1, &sel, NULL);
+    if (rc == SQLITE_OK) rc = sqlite3_prepare_v2(target, "SELECT cloudsync_payload_decode(?);", -1, &ins, NULL);
+    if (rc == SQLITE_OK && sqlite3_step(sel) == SQLITE_ROW) {
+        sqlite3_bind_value(ins, 1, sqlite3_column_value(sel, 0));
+        rc = sqlite3_step(ins);
+    }
+    sqlite3_finalize(sel);
+    sqlite3_finalize(ins);
+    return rc;
+}
+
+// Test that BEFORE triggers with RAISE(ABORT) simulate RLS denial: the apply stops at the
+// denied row, the rows before it are kept, the denied PK rolls back, and redelivering
+// after the policy allows it applies the rest.
 bool do_test_rls_trigger_denial (int nclients, bool print_result, bool cleanup_databases, bool only_locals) {
     sqlite3 *db[MAX_SIMULATED_CLIENTS] = {NULL};
     bool result = false;
@@ -9116,27 +9134,10 @@ bool do_test_rls_trigger_denial (int nclients, bool print_result, bool cleanup_d
     rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES ('t5', 'user2', 'Task 5', 7);", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
 
-    // Merge with partial-failure tolerance: cloudsync_payload_decode returns error
-    // when any PK is denied, but allowed PKs are already committed via per-PK savepoints.
-    {
-        sqlite3_stmt *sel = NULL, *ins = NULL;
-        const char *sel_sql = only_locals
-            ? "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes WHERE site_id=cloudsync_siteid();"
-            : "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes;";
-        rc = sqlite3_prepare_v2(db[0], sel_sql, -1, &sel, NULL);
-        if (rc != SQLITE_OK) { sqlite3_finalize(sel); goto finalize; }
-        rc = sqlite3_prepare_v2(db[1], "SELECT cloudsync_payload_decode(?);", -1, &ins, NULL);
-        if (rc != SQLITE_OK) { sqlite3_finalize(sel); sqlite3_finalize(ins); goto finalize; }
-
-        while (sqlite3_step(sel) == SQLITE_ROW) {
-            sqlite3_value *v = sqlite3_column_value(sel, 0);
-            if (sqlite3_value_type(v) == SQLITE_NULL) continue;
-            sqlite3_bind_value(ins, 1, v);
-            sqlite3_step(ins); // partial failure expected — ignore rc
-            sqlite3_reset(ins);
-        }
-        sqlite3_finalize(sel);
-        sqlite3_finalize(ins);
+    // The payload stops at the denied row (t5, last): t4 before it is kept.
+    if (rls_merge_step(db[0], db[1], only_locals) == SQLITE_ROW) {
+        printf("Phase 2: the denied insert must fail the apply\n");
+        goto finalize;
     }
 
     // Verify: t4 present (user1 → allowed)
@@ -9187,26 +9188,44 @@ bool do_test_rls_trigger_denial (int nclients, bool print_result, bool cleanup_d
     rc = sqlite3_exec(db[0], "UPDATE tasks SET title='Task 2 Hacked', priority=99 WHERE id='t2';", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
 
-    // Merge with partial-failure tolerance (same pattern as phase 2)
+    // The payload still carries the denied t5 insert ahead of the updates: the apply
+    // stops there again and t1's update is not applied.
+    if (rls_merge_step(db[0], db[1], only_locals) == SQLITE_ROW) {
+        printf("Phase 3: the denied insert must fail the apply again\n");
+        goto finalize;
+    }
     {
-        sqlite3_stmt *sel = NULL, *ins = NULL;
-        const char *sel_sql = only_locals
-            ? "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes WHERE site_id=cloudsync_siteid();"
-            : "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes;";
-        rc = sqlite3_prepare_v2(db[0], sel_sql, -1, &sel, NULL);
-        if (rc != SQLITE_OK) { sqlite3_finalize(sel); goto finalize; }
-        rc = sqlite3_prepare_v2(db[1], "SELECT cloudsync_payload_decode(?);", -1, &ins, NULL);
-        if (rc != SQLITE_OK) { sqlite3_finalize(sel); sqlite3_finalize(ins); goto finalize; }
-
-        while (sqlite3_step(sel) == SQLITE_ROW) {
-            sqlite3_value *v = sqlite3_column_value(sel, 0);
-            if (sqlite3_value_type(v) == SQLITE_NULL) continue;
-            sqlite3_bind_value(ins, 1, v);
-            sqlite3_step(ins); // partial failure expected — ignore rc
-            sqlite3_reset(ins);
+        sqlite3_stmt *stmt = NULL;
+        rc = sqlite3_prepare_v2(db[1], "SELECT priority FROM tasks WHERE id='t1';", -1, &stmt, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); goto finalize; }
+        int priority = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+        if (priority != 3) {
+            printf("Phase 3: t1 must not be updated past the failure (priority=%d)\n", priority);
+            goto finalize;
         }
-        sqlite3_finalize(sel);
-        sqlite3_finalize(ins);
+    }
+
+    // Allow inserts again and redeliver: t5 and t1's update apply, and the apply stops
+    // at t2's denied update (the last change).
+    rc = sqlite3_exec(db[1], "DROP TRIGGER rls_deny_insert;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    if (rls_merge_step(db[0], db[1], only_locals) == SQLITE_ROW) {
+        printf("Phase 3: the denied update must fail the apply\n");
+        goto finalize;
+    }
+    {
+        sqlite3_stmt *stmt = NULL;
+        rc = sqlite3_prepare_v2(db[1], "SELECT COUNT(*) FROM tasks WHERE id='t5';", -1, &stmt, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); goto finalize; }
+        int count = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+        if (count != 1) {
+            printf("Phase 3: t5 expected once inserts are allowed, got %d\n", count);
+            goto finalize;
+        }
     }
 
     // Verify: t1 updated (user1 → allowed)
@@ -9215,7 +9234,8 @@ bool do_test_rls_trigger_denial (int nclients, bool print_result, bool cleanup_d
         rc = sqlite3_prepare_v2(db[1], "SELECT title, priority FROM tasks WHERE id='t1';", -1, &stmt, NULL);
         if (rc != SQLITE_OK) goto finalize;
         if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); goto finalize; }
-        const char *title = (const char *)sqlite3_column_text(stmt, 0);
+        char title[64];
+        snprintf(title, sizeof(title), "%s", (const char *)sqlite3_column_text(stmt, 0));
         int priority = sqlite3_column_int(stmt, 1);
         bool ok = (strcmp(title, "Task 1 Updated") == 0) && (priority == 10);
         sqlite3_finalize(stmt);
@@ -9231,7 +9251,8 @@ bool do_test_rls_trigger_denial (int nclients, bool print_result, bool cleanup_d
         rc = sqlite3_prepare_v2(db[1], "SELECT title, priority FROM tasks WHERE id='t2';", -1, &stmt, NULL);
         if (rc != SQLITE_OK) goto finalize;
         if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); goto finalize; }
-        const char *title = (const char *)sqlite3_column_text(stmt, 0);
+        char title[64];
+        snprintf(title, sizeof(title), "%s", (const char *)sqlite3_column_text(stmt, 0));
         int priority = sqlite3_column_int(stmt, 1);
         bool ok = (strcmp(title, "Task 2") == 0) && (priority == 5);
         sqlite3_finalize(stmt);

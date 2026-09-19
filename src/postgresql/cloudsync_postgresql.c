@@ -3476,9 +3476,8 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
             rc = merge_insert (data, table, VARDATA_ANY(insert_pk), insert_pk_len, insert_cl, insert_name, col_value, insert_col_version, insert_db_version, VARDATA_ANY(insert_site_id), insert_site_id_len, insert_seq, &rowid);
         }
         if (rc == DBRES_POLICY_DENIED) {
-            // Keep a row-level security denial recognizable to the caller that inserted
-            // into cloudsync_changes (cloudsync_payload_apply): it is skipped and
-            // counted, unlike other merge failures.
+            // Keep a row-level security denial's SQLSTATE: cloudsync_payload_apply stops
+            // on it, as on every other failed write, and raises it to the caller.
             ereport(ERROR, (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
                             errmsg("Error during merge_insert: %s", database_errmsg(data))));
         }

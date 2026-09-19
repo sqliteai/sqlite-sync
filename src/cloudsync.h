@@ -117,16 +117,11 @@ void cloudsync_reset_error (cloudsync_context *data);
 void cloudsync_set_sqlstate (cloudsync_context *data, int sqlstate);
 int cloudsync_sqlstate (cloudsync_context *data);
 
-// Entries applied and entries skipped because their write failed. Both counts accumulate
-// across a receive drain (reset once before it) so an early chunk is still reported by
-// the call that finishes the drain. The applied count is tracked here rather than
-// derived from the apply return value, which reports the payload's entry count (skipped
-// ones included) as part of the SQL surface. cloudsync_apply_failure_message returns the
-// first skipped failure's message since the last reset, or NULL.
+// Entries applied, accumulated across a receive drain (reset once before it) so an early
+// chunk is still reported by the call that finishes the drain. A payload that fails
+// still counts the changes it applied before its error, when they were kept.
 void cloudsync_apply_stats_reset (cloudsync_context *data);
 int cloudsync_apply_rows_count (cloudsync_context *data);
-int cloudsync_apply_failed_count (cloudsync_context *data);
-const char *cloudsync_apply_failure_message (cloudsync_context *data);
 int cloudsync_commit_hook (void *ctx);
 void cloudsync_rollback_hook (void *ctx);
 void cloudsync_set_schema (cloudsync_context *data, const char *schema);

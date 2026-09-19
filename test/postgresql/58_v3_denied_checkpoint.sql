@@ -1,18 +1,7 @@
--- A denied v3 (fragmented) value is a hard error, NOT a skipped entry.
---
--- The row path treats a row-level security denial as permanent and skippable: it is
--- counted, skipped, and the receive cursor advances past it. The v3 path cannot do
--- the same today. Continuing past a denial leaves PostgreSQL's transaction unusable,
--- and the next statement — the checkpoint write — fails with "buffer pin is not owned
--- by resource owner TopTransaction". Neither a savepoint around the per-value apply
--- nor skipping the staged-fragment delete recovers it.
---
--- So this test pins the behaviour that actually holds: the denial surfaces as an
--- error and the cursor does not move. That is a known gap, not a desired outcome —
--- a denied oversize value is re-delivered on every drain. Closing it needs the v3
--- apply to leave a recoverable transaction state.
---
--- Test 27 covers the skip-and-advance guarantee for the v2 row path.
+-- A denied v3 (fragmented) value fails the apply like any other denied change: the
+-- statement that completes the value raises the error, the receive checkpoint does not
+-- move, and the pieces staged by the earlier statements stay, so redelivering after the
+-- policy allows the row applies the value.
 
 \set testid '58-v3-denied'
 \ir helper_test_init.sql
@@ -99,14 +88,35 @@ SELECT (:applied_count::int = 0) AS denied_ok \gset
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
--- Known gap: the cursor does not advance, so this value is re-delivered every drain.
--- Change this to expect an advance once the v3 apply leaves a recoverable state.
 SELECT coalesce((SELECT value::BIGINT FROM cloudsync_settings WHERE key='check_dbversion'), 0) AS ckpt_after \gset
 SELECT (:ckpt_after::bigint = :ckpt_before::bigint) AS ckpt_pinned \gset
 \if :ckpt_pinned
-\echo [PASS] (:testid) known gap: a denied fragmented value leaves the checkpoint pinned at :ckpt_after
+\echo [PASS] (:testid) a denied fragmented value leaves the checkpoint at :ckpt_after
 \else
-\echo [FAIL] (:testid) checkpoint moved to :ckpt_after — the v3 denial gap may be closed; update this test
+\echo [FAIL] (:testid) checkpoint moved to :ckpt_after after a denied fragmented value
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+SELECT (SELECT count(*) FROM cloudsync_payload_fragments) > 0 AS staged_kept \gset
+\if :staged_kept
+\echo [PASS] (:testid) the pieces staged before the denial are kept for a retry
+\else
+\echo [FAIL] (:testid) the staged pieces were discarded by the denial
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- Once the policy allows the row, redelivering the chunks applies the value.
+ALTER POLICY frag_ins ON frag_rls WITH CHECK (true);
+SET ROLE v3_denied_user;
+SELECT format('SELECT cloudsync_payload_apply(payload) FROM chunk_transport WHERE ord = %s;', ord)
+FROM chunk_transport ORDER BY ord \gexec
+RESET ROLE;
+SELECT (SELECT length(note) FROM frag_rls WHERE id = 'big') = 655360
+   AND NOT EXISTS (SELECT FROM cloudsync_payload_fragments) AS redelivered_ok \gset
+\if :redelivered_ok
+\echo [PASS] (:testid) redelivery after the policy change applies the value and clears its pieces
+\else
+\echo [FAIL] (:testid) redelivery did not apply the fragmented value
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 

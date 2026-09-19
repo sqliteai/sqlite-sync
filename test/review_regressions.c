@@ -98,16 +98,6 @@ static void scratch_remove(const char *const *names, int count) {
     rmdir(scratch_dir);
 #endif
 }
-static int skipped_warnings;
-static int skipped_changes;   // sum of N over "skipped N received change(s) that failed to apply"
-static void log_callback(void *arg, int code, const char *message) {
-    (void)arg;
-    if (code == SQLITE_WARNING && message && strstr(message, "failed to apply")) {
-        skipped_warnings++;
-        const char *n = strstr(message, "skipped ");
-        if (n) skipped_changes += atoi(n + 8);
-    }
-}
 static int apply_payload(sqlite3 *source, sqlite3 *target) {
     sqlite3_stmt *read = NULL, *write = NULL;
     CHECK(sqlite3_prepare_v2(source, "SELECT cloudsync_payload_encode(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) FROM cloudsync_changes", -1, &read, NULL) == SQLITE_OK);
@@ -120,8 +110,10 @@ static int apply_payload(sqlite3 *source, sqlite3 *target) {
     return rc;
 }
 static void test_payload_errors(void) {
-    // A write that fails on its data fails the same way on every retry: it is skipped
-    // and reported, and the cursor still advances past it.
+    // The apply stops at the first failed write (first, middle or last row) with the
+    // database's own error. The rows before it are kept, the failed row leaves neither
+    // data nor metadata, and the cursor does not move: once the cause is fixed, the same
+    // payload applies in full.
     for (int denied = 1; denied <= 3; denied++) {
         sqlite3 *source = open_db(), *target = open_db();
         const char *schema = "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL,value TEXT); SELECT cloudsync_init('t');";
@@ -130,21 +122,27 @@ static void test_payload_errors(void) {
         char trigger[256];
         snprintf(trigger, sizeof(trigger), "CREATE TRIGGER deny BEFORE INSERT ON t WHEN NEW.id='%d' BEGIN SELECT RAISE(ABORT,'denied'); END", denied);
         CHECK(sql(target, trigger) == SQLITE_OK);
-        skipped_warnings = 0;
-        CHECK(apply_payload(source, target) == SQLITE_ROW);
-        CHECK(skipped_warnings == 1);
-        CHECK(scalar(target, "SELECT count(*) FROM t") == 2);
-        char query[128];
-        snprintf(query, sizeof(query), "SELECT count(*) FROM t WHERE id='%d'", denied);
+        CHECK(apply_payload(source, target) != SQLITE_ROW);
+        CHECK(strstr(sqlite3_errmsg(target), "denied") != NULL);
+        CHECK((sqlite3_extended_errcode(target) & 0xFF) == SQLITE_CONSTRAINT);
+        char query[160];
+        snprintf(query, sizeof(query), "SELECT count(*) FROM t WHERE id<'%d'", denied);
+        CHECK(scalar(target, query) == denied - 1);
+        CHECK(scalar(target, "SELECT count(*) FROM t") == denied - 1);
+        snprintf(query, sizeof(query), "SELECT count(*) FROM t_cloudsync WHERE pk=cloudsync_pk_encode('%d')", denied);
         CHECK(scalar(target, query) == 0);
-        CHECK(scalar(target, "SELECT coalesce((SELECT value FROM cloudsync_settings WHERE key='check_dbversion'),0)") > 0);
+        CHECK(scalar(target, "SELECT coalesce((SELECT value FROM cloudsync_settings WHERE key='check_dbversion'),0)") == 0);
         CHECK(sqlite3_get_autocommit(target));
+        CHECK(sql(target, "DROP TRIGGER deny") == SQLITE_OK);
+        CHECK(apply_payload(source, target) == SQLITE_ROW);
+        CHECK(scalar(target, "SELECT count(*) FROM t") == 3);
+        CHECK(scalar(target, "SELECT coalesce((SELECT value FROM cloudsync_settings WHERE key='check_dbversion'),0)") > 0);
         CHECK(close_db(source) == SQLITE_OK);
         CHECK(close_db(target) == SQLITE_OK);
     }
 
-    // A transient failure (the database is locked by another connection) could succeed
-    // on a retry, so it must fail the apply and leave the cursor in place.
+    // A transient failure (the database is locked by another connection) fails the apply
+    // the same way and leaves the cursor in place.
     {
         char path[512];
         CHECK(scratch_create());
@@ -157,9 +155,7 @@ static void test_payload_errors(void) {
         CHECK(sql(source, "INSERT INTO t VALUES('1','a'),('2','b');") == SQLITE_OK);
         CHECK(sqlite3_open(path, &locker) == SQLITE_OK);
         CHECK(sql(locker, "BEGIN IMMEDIATE") == SQLITE_OK);
-        skipped_warnings = 0;
         CHECK(apply_payload(source, target) != SQLITE_ROW);
-        CHECK(skipped_warnings == 0);
         CHECK(sql(locker, "ROLLBACK") == SQLITE_OK);
         CHECK(sqlite3_close(locker) == SQLITE_OK);
         CHECK(scalar(target, "SELECT coalesce((SELECT value FROM cloudsync_settings WHERE key='check_dbversion'),0)") == 0);
@@ -212,8 +208,8 @@ static void test_resurrected_group_rollback(void) {
     const char *schema = "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, a TEXT, b TEXT); SELECT cloudsync_init('t');";
 
     // A resurrected row arrives as a sentinel plus its columns. When its write fails the
-    // whole group is skipped and counted (3 changes, not 2), and nothing it wrote remains:
-    // delivered again once the cause is gone, the row is created.
+    // apply stops and nothing the group wrote remains: delivered again once the cause is
+    // gone, the row is created.
     for (int transient = 0; transient < 2; transient++) {
         sqlite3 *source = open_db(), *target = open_db();
         CHECK(sql(source, schema) == SQLITE_OK && sql(target, schema) == SQLITE_OK);
@@ -222,16 +218,8 @@ static void test_resurrected_group_rollback(void) {
         CHECK(sql(target, transient
             ? "CREATE TRIGGER rej BEFORE INSERT ON t WHEN NEW.id='r1' BEGIN SELECT fail_busy(); END"
             : "CREATE TRIGGER rej BEFORE INSERT ON t WHEN NEW.id='r1' BEGIN SELECT RAISE(ABORT,'rejected r1'); END") == SQLITE_OK);
-        skipped_warnings = 0; skipped_changes = 0;
-        int rc = apply_payload(source, target);
-        if (transient) {
-            CHECK(rc != SQLITE_ROW);               // transient: the apply fails and is retried
-            CHECK(skipped_warnings == 0);
-        } else {
-            CHECK(rc == SQLITE_ROW);               // data failure: skipped and reported
-            CHECK(skipped_warnings == 1);
-            CHECK(skipped_changes == 3);
-        }
+        CHECK(apply_payload(source, target) != SQLITE_ROW);
+        CHECK(strstr(sqlite3_errmsg(target), transient ? "simulated busy" : "rejected r1") != NULL);
         CHECK(scalar(target, "SELECT count(*) FROM t_cloudsync") == 0);
         CHECK(sql(target, "DROP TRIGGER rej") == SQLITE_OK);
         CHECK(apply_payload(source, target) == SQLITE_ROW);
@@ -250,11 +238,25 @@ static void test_resurrected_group_rollback(void) {
     CHECK(sql(target, "CREATE TRIGGER rej BEFORE UPDATE ON t BEGIN SELECT RAISE(ABORT,'rejected update'); END;"
                       "CREATE TRIGGER rej2 BEFORE INSERT ON t BEGIN SELECT RAISE(ABORT,'rejected insert'); END;") == SQLITE_OK);
     CHECK(sql(target, "CREATE TEMP TABLE before_clocks AS SELECT col_name, col_version FROM t_cloudsync") == SQLITE_OK);
-    skipped_warnings = 0;
-    CHECK(apply_payload(source, target) == SQLITE_ROW);
-    CHECK(skipped_warnings >= 1);   // the resurrection was attempted and failed
+    CHECK(apply_payload(source, target) != SQLITE_ROW);   // the resurrection was attempted and failed
     CHECK(scalar(target, "SELECT count(*) FROM (SELECT col_name, col_version FROM t_cloudsync EXCEPT SELECT col_name, col_version FROM before_clocks)") == 0);
     CHECK(scalar(target, "SELECT count(*) FROM t WHERE id='r1' AND a='x' AND b='y'") == 1);
+    CHECK(close_db(source) == SQLITE_OK);
+    CHECK(close_db(target) == SQLITE_OK);
+}
+static void test_batched_update_missing_row(void) {
+    // Metadata says the row exists but the base row is gone (deleted while sync was
+    // disabled). A received multi-column update must write the row, not record winner
+    // clocks for an UPDATE that changed nothing.
+    const char *schema = "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, a TEXT, b TEXT); SELECT cloudsync_init('t');";
+    sqlite3 *source = open_db(), *target = open_db();
+    CHECK(sql(source, schema) == SQLITE_OK && sql(target, schema) == SQLITE_OK);
+    CHECK(sql(source, "INSERT INTO t VALUES('r1','x','y')") == SQLITE_OK);
+    CHECK(apply_payload(source, target) == SQLITE_ROW);
+    CHECK(sql(target, "SELECT cloudsync_disable('t'); DELETE FROM t WHERE id='r1'; SELECT cloudsync_enable('t');") == SQLITE_OK);
+    CHECK(sql(source, "UPDATE t SET a='x2', b='y2' WHERE id='r1'") == SQLITE_OK);
+    CHECK(apply_payload(source, target) == SQLITE_ROW);
+    CHECK(scalar(target, "SELECT count(*) FROM t WHERE id='r1' AND a='x2' AND b='y2'") == 1);
     CHECK(close_db(source) == SQLITE_OK);
     CHECK(close_db(target) == SQLITE_OK);
 }
@@ -299,9 +301,7 @@ static void test_block_not_null_payload(void) {
     CHECK(sql(source, schema) == SQLITE_OK && sql(target, schema) == SQLITE_OK);
     CHECK(sql(target, "CREATE TRIGGER no_null_owner BEFORE INSERT ON docs WHEN NEW.owner = 'x' BEGIN SELECT RAISE(ABORT,'owner required'); END") == SQLITE_OK);
     CHECK(sql(source, "INSERT INTO docs VALUES('1','alice','line 1' || char(10) || 'line 2')") == SQLITE_OK);
-    skipped_warnings = 0;
     CHECK(apply_payload(source, target) == SQLITE_ROW);
-    CHECK(skipped_warnings == 0);
     CHECK(scalar(target, "SELECT count(*) FROM docs WHERE id='1' AND owner='alice' AND body='line 1' || char(10) || 'line 2'") == 1);
     CHECK(close_db(source) == SQLITE_OK);
     CHECK(close_db(target) == SQLITE_OK);
@@ -405,13 +405,13 @@ int main(void) {
     faults.xMalloc = fault_malloc;
     faults.xRealloc = fault_realloc;
     CHECK(sqlite3_config(SQLITE_CONFIG_MALLOC, &faults) == SQLITE_OK);
-    CHECK(sqlite3_config(SQLITE_CONFIG_LOG, log_callback, NULL) == SQLITE_OK);
     CHECK(sqlite3_initialize() == SQLITE_OK);
     test_clocks_and_double();
     test_best_index();
     test_payload_errors();
     test_payload_high_compression();
     test_resurrected_group_rollback();
+    test_batched_update_missing_row();
     test_block_write_errors();
     test_block_materialize_errors();
     test_block_migration_orphan();

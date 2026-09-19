@@ -1,6 +1,6 @@
--- Audit: a change whose write fails on its data is skipped and reported, never
--- silently dropped and never allowed to stall the cursor; transient failures are
--- covered by 39_concurrent_write_apply.sql.
+-- Audit: a change whose write fails stops the apply with its own SQLSTATE; nothing is
+-- dropped silently and the checkpoint stays where it was until the same payload applies;
+-- transient failures are covered by 39_concurrent_write_apply.sql.
 \set ON_ERROR_STOP on
 \connect postgres
 DROP DATABASE IF EXISTS cloudsync_audit_source;
@@ -38,31 +38,38 @@ BEGIN
     RETURN NEW;
 END $$;
 CREATE TRIGGER deny_audit BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION deny_audit_row();
-SET client_min_messages = error;  -- each skipped change raises a WARNING by design
 -- The payload is read from a table on purpose: the apply's internal savepoints must
 -- not disturb the resource owner of the scan feeding it.
 DO $$
-DECLARE denied INTEGER;
+DECLARE denied INTEGER; state TEXT; msg TEXT;
 BEGIN
     FOR denied IN 1..3 LOOP
         DELETE FROM t;
         DELETE FROM t_cloudsync;
         DELETE FROM cloudsync_settings WHERE key IN ('check_dbversion','check_seq');
         PERFORM set_config('audit.denied_id', denied::TEXT, false);
+        state := NULL;
+        BEGIN PERFORM cloudsync_payload_apply(data) FROM audit_payload;
+        EXCEPTION WHEN OTHERS THEN GET STACKED DIAGNOSTICS state = RETURNED_SQLSTATE, msg = MESSAGE_TEXT; END;
+        IF state IS DISTINCT FROM 'P0001' OR msg NOT LIKE '%audit write denied%' THEN
+            RAISE EXCEPTION 'Row % failing surfaced as SQLSTATE % (%)', denied, coalesce(state, 'none'), msg;
+        END IF;
+        -- the failed statement is rolled back whole, metadata and checkpoint included
+        IF EXISTS (SELECT FROM t) OR EXISTS (SELECT FROM t_cloudsync) THEN
+            RAISE EXCEPTION 'Row % failing left rows or metadata behind', denied;
+        END IF;
+        IF coalesce((SELECT value::BIGINT FROM cloudsync_settings WHERE key='check_dbversion'),0) <> 0 THEN
+            RAISE EXCEPTION 'Row % failing moved the checkpoint', denied;
+        END IF;
+        -- once the write can succeed, the same payload applies in full
+        PERFORM set_config('audit.denied_id', '', false);
         PERFORM cloudsync_payload_apply(data) FROM audit_payload;
-        IF (SELECT count(*) FROM t) <> 2 THEN
-            RAISE EXCEPTION 'Row % failing must not discard the other rows (found %)', denied, (SELECT count(*) FROM t);
-        END IF;
-        IF EXISTS (SELECT FROM t WHERE id = denied::TEXT) THEN
-            RAISE EXCEPTION 'Failed row % was written', denied;
-        END IF;
-        IF coalesce((SELECT value::BIGINT FROM cloudsync_settings WHERE key='check_dbversion'),0) = 0 THEN
-            RAISE EXCEPTION 'A skipped failure at row % must still advance the checkpoint', denied;
+        IF (SELECT count(*) FROM t) <> 3 OR coalesce((SELECT value::BIGINT FROM cloudsync_settings WHERE key='check_dbversion'),0) = 0 THEN
+            RAISE EXCEPTION 'Row % redelivered: expected 3 rows and an advanced checkpoint', denied;
         END IF;
     END LOOP;
 END $$;
-SET client_min_messages = warning;
-\echo [PASS] (57-audit) first, middle and final write failures are skipped without discarding the rest or stalling the checkpoint
+\echo [PASS] (57-audit) first, middle and final write failures stop the apply with their error and apply when redelivered
 
 CREATE FUNCTION raise_sqlstate() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION USING ERRCODE = TG_ARGV[0], MESSAGE = 'simulated ' || TG_ARGV[0]; END $$;
@@ -71,9 +78,8 @@ SELECT cloudsync_init('plain_audit') \gset
 CREATE TABLE revived(id TEXT PRIMARY KEY NOT NULL, a TEXT, b TEXT);
 SELECT cloudsync_init('revived') \gset
 
--- A payload apply keeps the SQLSTATE too, and does not skip these failures: a serialization
--- failure is transient and a missing privilege is fixed by a GRANT, so both fail the
--- apply and leave the checkpoint where it was.
+-- A payload apply keeps the SQLSTATE of transient and privilege failures too, and leaves
+-- the checkpoint where it was.
 CREATE TRIGGER fail_apply BEFORE INSERT ON plain_audit FOR EACH ROW EXECUTE FUNCTION raise_sqlstate('40001');
 CREATE TEMP TABLE plain_payload(data BYTEA);
 INSERT INTO plain_payload VALUES (decode(:'plain_payload_hex','hex'));
@@ -88,7 +94,7 @@ BEGIN
         BEGIN PERFORM cloudsync_payload_apply(data) FROM plain_payload;
         EXCEPTION WHEN OTHERS THEN GET STACKED DIAGNOSTICS state = RETURNED_SQLSTATE, msg = MESSAGE_TEXT; END;
         IF state IS DISTINCT FROM code THEN
-            RAISE EXCEPTION 'Apply failing with % surfaced as SQLSTATE % (%)', code, coalesce(state, 'none: the failure was skipped'), msg;
+            RAISE EXCEPTION 'Apply failing with % surfaced as SQLSTATE % (%)', code, coalesce(state, 'none'), msg;
         END IF;
         IF EXISTS (SELECT FROM plain_audit) OR coalesce((SELECT value::BIGINT FROM cloudsync_settings WHERE key='check_dbversion'),0) <> 0 THEN
             RAISE EXCEPTION 'Apply failing with % wrote rows or moved the checkpoint', code;
@@ -96,16 +102,20 @@ BEGIN
     END LOOP;
 END $$;
 DROP TRIGGER fail_apply ON plain_audit;
-\echo [PASS] (57-audit) apply keeps the SQLSTATE of transient and privilege failures and does not skip them
+\echo [PASS] (57-audit) apply keeps the SQLSTATE of transient and privilege failures
 
 -- A resurrected row (sentinel plus columns) whose write fails leaves nothing behind —
 -- no sentinel, no zeroed clocks — so once the cause is gone the same payload creates it.
 CREATE TRIGGER fail_revived BEFORE INSERT ON revived FOR EACH ROW EXECUTE FUNCTION raise_sqlstate('23514');
 CREATE TEMP TABLE revived_payload(data BYTEA);
 INSERT INTO revived_payload VALUES (decode(:'revived_payload_hex','hex'));
-SET client_min_messages = error;
-SELECT cloudsync_payload_apply(data) FROM revived_payload \gset
-SET client_min_messages = warning;
+DO $$
+DECLARE state TEXT;
+BEGIN
+    BEGIN PERFORM cloudsync_payload_apply(data) FROM revived_payload;
+    EXCEPTION WHEN OTHERS THEN GET STACKED DIAGNOSTICS state = RETURNED_SQLSTATE; END;
+    IF state IS DISTINCT FROM '23514' THEN RAISE EXCEPTION 'Rejected resurrected row surfaced as SQLSTATE %', coalesce(state, 'none'); END IF;
+END $$;
 DROP TRIGGER fail_revived ON revived;
 DO $$ BEGIN
     IF EXISTS (SELECT FROM revived) THEN RAISE EXCEPTION 'Rejected resurrected row was written'; END IF;
@@ -119,28 +129,28 @@ DO $$ BEGIN
 END $$;
 \echo [PASS] (57-audit) a failed resurrected row leaves no metadata and applies when delivered again
 
--- Savepoints opened by the apply must leave the caller's snapshots intact, including
--- when a group is rolled back and when the caller's own subtransaction is then aborted:
--- statements after the apply keep running (an unbalanced active-snapshot stack trips an
--- assertion in EnsurePortalSnapshotExists and takes the backend down).
+-- Savepoints opened by the apply must leave the caller's snapshots intact when a group is
+-- rolled back and the caller's own subtransaction then catches the error: statements
+-- after the apply keep running (an unbalanced active-snapshot stack trips an assertion in
+-- EnsurePortalSnapshotExists and takes the backend down).
 DELETE FROM revived; DELETE FROM revived_cloudsync;
 CREATE TRIGGER fail_revived BEFORE INSERT ON revived FOR EACH ROW EXECUTE FUNCTION raise_sqlstate('23514');
-SET client_min_messages = error;
 DO $$
 DECLARE n INTEGER;
 BEGIN
     BEGIN
         PERFORM cloudsync_payload_apply(data) FROM revived_payload;
-        PERFORM count(*) FROM revived;
-        RAISE EXCEPTION 'abort the caller subtransaction';
-    EXCEPTION WHEN raise_exception THEN NULL;
+        RAISE EXCEPTION 'the apply must fail';
+    EXCEPTION WHEN check_violation THEN NULL;
     END;
     SELECT count(*) INTO n FROM revived_payload;
-    PERFORM cloudsync_payload_apply(data) FROM revived_payload;
+    BEGIN
+        PERFORM cloudsync_payload_apply(data) FROM revived_payload;
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
     SELECT count(*) INTO n FROM revived;
     IF n <> 0 THEN RAISE EXCEPTION 'Rejected resurrected row was written'; END IF;
 END $$;
-SET client_min_messages = warning;
 DROP TRIGGER fail_revived ON revived;
 \echo [PASS] (57-audit) apply savepoints leave the snapshots of the caller intact across rollbacks
 

@@ -198,7 +198,7 @@ static bool test_json_envelope(void) {
     cloudsync_memory_free(url);
     return ok;
 }
-extern char *network_test_receive_json(int, int, const char *, bool, const char *, const char *);
+extern char *network_test_receive_json(int, bool, const char *, const char *);
 static bool receive_json_is(char *json, const char *expected) {
     bool ok = json && strcmp(json, expected) == 0;
     if (!ok) printf("\n    got:      %s\n    expected: %s\n", json ? json : "(null)", expected);
@@ -206,12 +206,11 @@ static bool receive_json_is(char *json, const char *expected) {
     return ok;
 }
 static bool test_receive_json(void) {
-    bool ok = receive_json_is(network_test_receive_json(3, 0, NULL, true, NULL, NULL),
-        "\"receive\":{\"rows\":3,\"failed\":0,\"tables\":[\"t\"],\"chunks\":1,\"bytes\":10,\"complete\":true}");
-    ok = receive_json_is(network_test_receive_json(2, 1, "rejected \"here\"", true, NULL, NULL),
-        "\"receive\":{\"rows\":2,\"failed\":1,\"failedError\":\"rejected \\\"here\\\"\",\"tables\":[\"t\"],\"chunks\":1,\"bytes\":10,\"complete\":true}") && ok;
-    ok = receive_json_is(network_test_receive_json(0, 0, NULL, false, "boom", "{\"code\":\"x\"}"),
-        "\"receive\":{\"rows\":0,\"failed\":0,\"tables\":[\"t\"],\"chunks\":1,\"bytes\":10,\"complete\":false,\"error\":\"boom\",\"lastFailure\":{\"code\":\"x\"}}") && ok;
+    bool ok = receive_json_is(network_test_receive_json(3, true, NULL, NULL),
+        "\"receive\":{\"rows\":3,\"tables\":[\"t\"],\"chunks\":1,\"bytes\":10,\"complete\":true}");
+    // a failed receive still reports the changes applied before the error
+    ok = receive_json_is(network_test_receive_json(2, false, "rejected \"here\"", "{\"code\":\"x\"}"),
+        "\"receive\":{\"rows\":2,\"tables\":[\"t\"],\"chunks\":1,\"bytes\":10,\"complete\":false,\"error\":\"rejected \\\"here\\\"\",\"lastFailure\":{\"code\":\"x\"}}") && ok;
     return ok;
 }
 static bool test_unicode(void) {
@@ -260,7 +259,7 @@ int main(void) {
     check("JSON keys only match root object members:", test_json_scope());
     check("Gateway data envelope is unwrapped before scoped lookups:", test_json_envelope());
     check("JSON Unicode, surrogate pairs and malformed escapes:", test_unicode());
-    check("receive JSON members (failed, failedError, error, lastFailure):", test_receive_json());
+    check("receive JSON members (rows, error, lastFailure):", test_receive_json());
     printf("\nNetwork unit tests\n");
     check("optimistic/confirmed version folds latest-valid (allows rollback):", test_optimistic_version_rollback());
     check("non-buffer response is a no-op:", test_non_buffer_is_noop());

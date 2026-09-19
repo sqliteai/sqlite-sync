@@ -667,11 +667,11 @@ SELECT cloudsync_payload_apply(:payload);
 
 #### Failed writes
 
-A change whose write fails on its data — a constraint, a trigger that raises, a type error — fails the same way every time it is delivered, so it is skipped: the rest of the payload is applied and the receive checkpoint still advances. Each skipped change is logged as a warning (`sqlite3_log` on SQLite, a `WARNING` on PostgreSQL) and counted in `receive.failed` by the network functions. A transient or configuration failure — a locked or busy database, a deadlock or serialization failure, a cancel, running out of memory or disk, an I/O error, a missing privilege, a read-only database — is never skipped: the function fails and the checkpoint stays where it was, so the change is retried.
+The apply stops at the first change whose write fails and returns that error: a constraint, a trigger that raises, a type error, a row-level security policy, a missing privilege, a lock or serialization failure. On PostgreSQL the error keeps its original SQLSTATE. No later change in the payload is applied, the change that failed leaves neither data nor sync metadata behind, and the receive checkpoint does not move.
 
-#### Row-level security denials
+On SQLite the changes applied before the failure are kept (inside the caller's transaction, if there is one). On PostgreSQL the failing statement is rolled back as a whole.
 
-On PostgreSQL, a change rejected by a row-level security `WITH CHECK` policy is skipped as well, and the checkpoint advances. Because a policy can depend on rows that arrive later in the same payload — a membership row that grants access to the rows before it — denied changes are retried once the rest of the payload has been applied, repeating while a retry lets more changes through. A change still denied after that is skipped for good, and the function raises one `WARNING` with the number of changes skipped. A change that only a later payload would authorize is not retried. The return value still counts denied changes as payload rows.
+Fix the cause and deliver the payload again: the changes already applied merge again as no-ops. A row-level security policy that depends on rows later in the same payload is not retried within the payload; the apply fails until the rows it depends on have been applied.
 
 ---
 
@@ -821,33 +821,31 @@ If the network is misconfigured or the remote server is unreachable, the functio
 **Returns:** A JSON string with the receive result:
 
 ```json
-{"receive": {"rows": N, "failed": F, "failedError": "...", "tables": ["table1", "table2"], "chunks": C, "bytes": B, "complete": true, "error": "...", "lastFailure": {...}}}
+{"receive": {"rows": N, "tables": ["table1", "table2"], "chunks": C, "bytes": B, "complete": true, "error": "...", "lastFailure": {...}}}
 ```
 
-- `receive.rows`: The total number of rows received and applied to the local database, summed across all chunks drained this call. `0` when the receive phase failed, when nothing was available, or when only intermediate fragments were staged without completing a value.
-- `receive.failed`: The number of entries skipped because their write failed on the data itself — a constraint, a trigger that raised, a type error — summed across all chunks drained this call. Such a failure repeats identically on every retry, so the entry is skipped and the receive cursor still advances past it instead of stalling every later change; each skip is also logged as a warning. Not counted in `receive.rows`. Row-level security denials are not part of this count: they can only occur where the changes are applied under a PostgreSQL policy (see [Row-level security](#row-level-security-denials) below). A transient or configuration failure (a lock or busy database, a deadlock or serialization failure, a cancel, out of memory or disk, an I/O error, a missing privilege, a read-only database) is never skipped: it is reported in `receive.error` and the cursor stays in place so the next call retries it.
-- `receive.failedError` (optional): The error message of the first entry counted in `receive.failed`, present only when `failed` is non-zero.
-- `receive.tables`: An array of table names that received changes (the union across all drained chunks). Empty (`[]`) if no changes were applied or the receive phase failed.
-- `receive.chunks`: The number of payload chunks applied by this call. `0` when nothing was ready, `1` for a single monolithic/inline page, and `N` for a drained `N`-chunk stream (bounded by `max_chunks` if given).
+- `receive.rows`: The total number of rows received and applied to the local database, summed across all chunks drained this call, including the rows applied before an error. `0` when nothing was available, or when only intermediate fragments were staged without completing a value.
+- `receive.tables`: An array of table names that received changes (the union across all drained chunks, including changes applied before an error). Empty (`[]`) if no changes were applied.
+- `receive.chunks`: The number of payload chunks fully applied by this call. `0` when nothing was ready, `1` for a single monolithic/inline page, and `N` for a drained `N`-chunk stream (bounded by `max_chunks` if given).
 - `receive.bytes`: The total serialized payload bytes received this call (uncompressed cloudsync payload size, summed across chunks; transport-independent, not the compressed wire size). Useful for byte-budgeted draining together with `max_chunks`.
 - `receive.complete` (boolean): `true` when the receive stream is fully drained (nothing pending), `false` when more chunks remain — because `max_chunks` capped the drain, or it stopped early. When `false`, call this function again to continue.
-- `receive.error` (optional, string): Present when client-side `cloudsync_payload_apply` failed. Contains a human-readable error message describing why the received payload could not be applied.
+- `receive.error` (optional, string): Present when client-side `cloudsync_payload_apply` failed. Contains the error of the first change that could not be applied (see [Failed writes](#failed-writes)); `receive.complete` is then `false`, and the next call receives the changes again from the same checkpoint.
 - `receive.lastFailure` (optional, object): Present only when the server reports a failed check job. Forwarded verbatim from the server's `failures.check` and typically includes `jobId`, `dbVersion`, `seq`, `code`, `stage`, `message`, `retryable`, and `failedAt`. Distinct from `receive.error`: `receive.error` describes a client-side apply failure (string), while `receive.lastFailure` describes a server-side check-job failure (object). Both can coexist in the same response. This function is **check-scoped**: server-reported apply-job failures (`failures.apply`) are not surfaced here — see [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes) and [`cloudsync_network_sync()`](#cloudsync_network_syncwait_ms-max_retries).
 
 **Example:**
 
 ```sql
 SELECT cloudsync_network_receive_changes();
--- '{"receive":{"rows":3,"failed":0,"tables":["tasks"],"chunks":1,"bytes":820,"complete":true}}'
+-- '{"receive":{"rows":3,"tables":["tasks"],"chunks":1,"bytes":820,"complete":true}}'
 
 -- Capped drain with more pending (call again to continue):
--- '{"receive":{"rows":40,"failed":0,"tables":["docs"],"chunks":5,"bytes":1310720,"complete":false}}'
+-- '{"receive":{"rows":40,"tables":["docs"],"chunks":5,"bytes":1310720,"complete":false}}'
 
 -- With a client-side apply error:
--- '{"receive":{"rows":0,"failed":0,"tables":[],"chunks":0,"bytes":0,"complete":true,"error":"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."}}'
+-- '{"receive":{"rows":0,"tables":[],"chunks":0,"bytes":0,"complete":false,"error":"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."}}'
 
 -- With a server-reported check-job failure:
--- '{"receive":{"rows":0,"failed":0,"tables":[],"chunks":0,"bytes":0,"complete":true,"lastFailure":{"jobId":456,"dbVersion":15,"seq":1,"code":"tenant_unreachable","stage":"encode_changes","message":"tenant check failed","retryable":true,"failedAt":"2026-04-24T10:22:00Z"}}}'
+-- '{"receive":{"rows":0,"tables":[],"chunks":0,"bytes":0,"complete":true,"lastFailure":{"jobId":456,"dbVersion":15,"seq":1,"code":"tenant_unreachable","stage":"encode_changes","message":"tenant check failed","retryable":true,"failedAt":"2026-04-24T10:22:00Z"}}}'
 ```
 
 ---
@@ -877,7 +875,7 @@ When the server delivers changes as a stream of chunks, this function drains the
 ```json
 {
   "send": {"status": "synced|syncing|out-of-sync|error", "localVersion": N, "serverVersion": N, "chunks": C, "bytes": B, "lastFailure": {...}},
-  "receive": {"rows": N, "failed": F, "failedError": "...", "tables": ["table1", "table2"], "chunks": C, "bytes": B, "complete": true, "error": "...", "lastFailure": {...}}
+  "receive": {"rows": N, "tables": ["table1", "table2"], "chunks": C, "bytes": B, "complete": true, "error": "...", "lastFailure": {...}}
 }
 ```
 
@@ -886,9 +884,8 @@ When the server delivers changes as a stream of chunks, this function drains the
 - `send.serverVersion`: The latest version confirmed by the server.
 - `send.chunks` / `send.bytes`: Number of payload chunks sent and total serialized payload bytes sent during the send phase. Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes).
 - `send.lastFailure` (optional): Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes) — forwarded verbatim from the server's `failures.apply` whenever a failed apply job is reported, regardless of `status`.
-- `receive.rows`: The **total** number of rows received and applied during the receive phase, summed across **all** chunks drained in this call. `0` when the receive phase failed.
-- `receive.failed` / `receive.failedError`: The **total** number of entries skipped because their write failed, and the first such error — see [Receive Changes](#receive-changes).
-- `receive.tables`: An array of table names that received changes (the union across all drained chunks). Empty (`[]`) if no changes were applied or the receive phase failed.
+- `receive.rows`: The **total** number of rows received and applied during the receive phase, summed across **all** chunks drained in this call, including the rows applied before an error.
+- `receive.tables`: An array of table names that received changes (the union across all drained chunks, including changes applied before an error). Empty (`[]`) if no changes were applied.
 - `receive.chunks`: The number of payload chunks applied in this call. `0` when nothing was ready, `1` for a single monolithic/inline page, and `N` for a fully drained `N`-chunk stream. `cloudsync_network_sync()` always drains the whole stream (it does not cap chunks).
 - `receive.bytes`: The total serialized payload bytes received this call (uncompressed cloudsync payload size, summed across chunks; not the compressed wire size). Same semantics as in [`cloudsync_network_receive_changes()`](#cloudsync_network_receive_changesmax_chunks).
 - `receive.complete` (boolean): `true` when the server stream was fully drained, `false` when the download stopped before the final chunk (an error occurred, or an internal safety bound was reached). When `false`, call `cloudsync_network_sync()` again to resume; re-delivered rows are idempotent.
@@ -900,15 +897,15 @@ When the server delivers changes as a stream of chunks, this function drains the
 ```sql
 -- Perform a single synchronization cycle
 SELECT cloudsync_network_sync();
--- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":2048},"receive":{"rows":3,"failed":0,"tables":["tasks"],"chunks":1,"bytes":820,"complete":true}}'
+-- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":2048},"receive":{"rows":3,"tables":["tasks"],"chunks":1,"bytes":820,"complete":true}}'
 
 -- Perform a synchronization cycle with custom retry settings
 SELECT cloudsync_network_sync(500, 3);
 -- A large download drained as a multi-chunk stream in a single call:
--- '{"send":{"status":"synced","localVersion":42,"serverVersion":42,"chunks":0,"bytes":0},"receive":{"rows":1200,"failed":0,"tables":["docs"],"chunks":7,"bytes":1835008,"complete":true}}'
+-- '{"send":{"status":"synced","localVersion":42,"serverVersion":42,"chunks":0,"bytes":0},"receive":{"rows":1200,"tables":["docs"],"chunks":7,"bytes":1835008,"complete":true}}'
 
 -- Receive phase failed but send phase completed — the error is surfaced in JSON, not as a SQL error:
--- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":512},"receive":{"rows":0,"failed":0,"tables":[],"chunks":0,"bytes":0,"complete":false,"error":"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."}}'
+-- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":512},"receive":{"rows":0,"tables":[],"chunks":0,"bytes":0,"complete":false,"error":"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."}}'
 ```
 
 ---

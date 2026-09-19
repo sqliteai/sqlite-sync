@@ -562,10 +562,8 @@ char *sql_build_insert_missing_pks_query(const char *schema, const char *table_n
 
 // MARK: - HELPER FUNCTIONS -
 
-// Map a PostgreSQL SQLSTATE to DBRES. Only the distinction between a transient failure
-// (worth retrying later) and a failure of the data itself matters to callers: a payload
-// apply skips a change whose write fails, but must never skip one that failed only
-// because of a lock, a deadlock, a cancel or a resource shortage.
+// Map a PostgreSQL SQLSTATE to the closest DBRES code. The SQLSTATE itself is kept
+// separately (cloudsync_set_sqlstate) and is what the caller sees.
 static int map_sqlerrcode (int sqlerrcode) {
     switch (sqlerrcode) {
         case ERRCODE_INSUFFICIENT_PRIVILEGE:        // a policy denial is recognized by the caller
