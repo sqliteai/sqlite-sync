@@ -267,7 +267,7 @@ extern char *network_test_base64_encode(const unsigned char *, size_t);
 #define SPOOL_MAX 16
 static const char *spool[SPOOL_MAX];
 static int spool_pages;
-static int64_t spool_watermark;
+static int64_t spool_watermark;   // < 0: chunks carry no watermark (an older server)
 static int64_t req_cursor[64], req_since[64];
 static int nreq;
 
@@ -289,8 +289,10 @@ static NETWORK_RESULT spool_responder(const char *endpoint, const char *request)
     size_t len = (size_t)snprintf(json, cap, "{\"data\":{\"chunks\":[");
     int64_t k = cursor;
     for (; k < spool_pages && k < cursor + max; k++) {
-        len += (size_t)snprintf(json + len, cap - len, "%s{\"cursor\":%lld,\"payload\":\"%s\",\"watermark\":%lld}",
-                                k > cursor ? "," : "", (long long)k, spool[k], (long long)spool_watermark);
+        char watermark[48] = "";
+        if (spool_watermark >= 0) snprintf(watermark, sizeof(watermark), ",\"watermark\":%lld", (long long)spool_watermark);
+        len += (size_t)snprintf(json + len, cap - len, "%s{\"cursor\":%lld,\"payload\":\"%s\"%s}",
+                                k > cursor ? "," : "", (long long)k, spool[k], watermark);
     }
     bool final = k >= spool_pages;
     snprintf(json + len, cap - len, "],\"final\":%s,\"nextCursor\":%lld}}", final ? "true" : "false", (long long)(final ? -1 : k));
@@ -531,6 +533,45 @@ static bool test_stream_fragments(void) {
     return ok;
 }
 
+// A server that sends no watermark: a monolithic final chunk still advances to its last
+// applied change, while a stream ending in a fragment fails instead of leaving the
+// checkpoint in place and replaying the same window forever.
+static bool test_stream_no_watermark(void) {
+    bool ok = true;
+    sqlite3 *src = stream_db(false), *dst = stream_db(true);
+    char *pages[SPOOL_MAX] = {0};
+    ok = ok && src && dst;
+    ok = ok && db_exec(src, "INSERT INTO t VALUES('k1',x'01'); INSERT INTO t VALUES('k2',x'02');") == SQLITE_OK;
+    int n = ok ? stream_payloads(src, "SELECT cloudsync_payload_encode(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) FROM cloudsync_changes GROUP BY pk ORDER BY pk", pages, SPOOL_MAX) : 0;
+    ok = ok && expect(n == 2, "two pages", NULL);
+    for (int i = 0; i < n; i++) spool[i] = pages[i];
+    spool_pages = n;
+    spool_watermark = -1;
+    network_test_set_responder(spool_responder);
+    char *json = ok ? stream_receive(dst, 0) : "";
+    ok = ok && expect(strstr(json, "\"complete\":true") && db_checkpoint(dst) == db_int(src, "SELECT max(db_version) FROM cloudsync_changes"), "monolithic stream without watermark", json);
+
+    stream_close(dst);
+    dst = stream_db(true);
+    int nf = 0;
+    ok = ok && db_exec(src, "SELECT cloudsync_set('payload_max_chunk_size','262144'); INSERT INTO t VALUES('big', randomblob(700000));") == SQLITE_OK;
+    char query[256];
+    snprintf(query, sizeof(query), "SELECT payload FROM cloudsync_payload_chunks(%lld) WHERE substr(payload,5,1)=x'03' ORDER BY chunk_index", (long long)db_int(src, "SELECT max(db_version) FROM cloudsync_changes") - 1);
+    nf = ok ? stream_payloads(src, query, pages + n, SPOOL_MAX - n) : 0;
+    ok = ok && expect(nf >= 2, "fragments", NULL);
+    for (int i = 0; i < nf; i++) spool[i] = pages[n + i];
+    spool_pages = nf;
+    json = ok ? stream_receive(dst, 0) : "";
+    ok = ok && expect(strstr(json, "has no watermark") && strstr(json, "\"complete\":false") && db_checkpoint(dst) == 0, "fragmented stream without watermark fails", json);
+    ok = ok && expect(db_int(dst, "SELECT count(*) FROM t WHERE id='big'") == 0, "the value is not applied", NULL);
+
+    network_test_set_responder(NULL);
+    for (int i = 0; i < n + nf; i++) cloudsync_memory_free(pages[i]);
+    stream_close(src);
+    stream_close(dst);
+    return ok;
+}
+
 int main(void) {
 #if !defined(_WIN32) && !defined(CLOUDSYNC_OMIT_CURL)
     check("HTTP deadlines: API elapsed cap and artifact stall cap:", test_stalled_http_timeout());
@@ -546,6 +587,7 @@ int main(void) {
     check("network_compute_status:", test_compute_status());
     check("receive stream: capped paging, failure replay, checkpoint errors:", test_stream_paging());
     check("receive stream: fragmented values:", test_stream_fragments());
+    check("receive stream: server without watermark:", test_stream_no_watermark());
     if (failures) { printf("\n%d test(s) FAILED\n", failures); return 1; }
     printf("\nAll network unit tests passed\n");
     return 0;

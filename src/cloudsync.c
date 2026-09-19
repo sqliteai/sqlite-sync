@@ -4217,6 +4217,30 @@ static int cloudsync_payload_apply_fragment_row (cloudsync_context *data, clouds
 
 // #ifndef CLOUDSYNC_OMIT_RLS_VALIDATION
 
+// Called when a receive stream's final chunk has applied. A fragmented value the stream
+// delivered must be complete by now: its pieces are removed when it is applied, here or
+// by another connection. Only values this stream staged are checked. Staging left by
+// other streams or direct calls is ignored on purpose: a value_id identifies a value,
+// not the stream that delivered it, and a replay can legitimately omit an old value
+// (replaced, lost a conflict, filtered out, untracked), so requiring the whole staging
+// table to be empty could stop the cursor for good. The age cleanup bounds such
+// leftovers. A value another connection completes while this stream is still
+// delivering it leaves this stream's later pieces staged again: the check fails once,
+// and the replay from the first page applies the value again as a no-op and passes.
+static int cloudsync_receive_stream_check_complete (cloudsync_context *data) {
+    for (int i = 0; i < data->stream_values_count; i++) {
+        if (data->stream_values[i].applied) continue;
+        dbvm_t *vm = NULL;
+        int rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_EXISTS, &vm, 0);
+        if (rc == DBRES_OK) rc = databasevm_bind_text(vm, 1, data->stream_values[i].value_id, -1);
+        if (rc == DBRES_OK) rc = databasevm_step(vm);
+        if (vm) databasevm_finalize(vm);
+        if (rc == DBRES_ROW) return cloudsync_set_error(data, "Error on cloudsync_payload_apply: the receive stream ended with an incomplete fragmented value", DBRES_ERROR);
+        if (rc != DBRES_DONE) return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to check staged fragments", rc);
+    }
+    return DBRES_OK;
+}
+
 // Advance the durable receive cursor (check_dbversion/check_seq) after a payload
 // (or a fully-applied chunk stream) has been applied. See the checkpoint-mode
 // documentation on cloudsync_payload_apply in cloudsync.h. The advance is
@@ -4226,33 +4250,20 @@ static int cloudsync_payload_apply_checkpoint (cloudsync_context *data, int64_t 
     int64_t target_seq;
 
     if (checkpoint_db_version == CLOUDSYNC_CHECKPOINT_NONE) return DBRES_OK;
-    if (checkpoint_db_version == CLOUDSYNC_CHECKPOINT_LAST_APPLIED) {
+    bool stream_end = (checkpoint_db_version >= 0 || checkpoint_db_version == CLOUDSYNC_CHECKPOINT_STREAM_LEGACY);
+    if (stream_end) {
+        int rc = cloudsync_receive_stream_check_complete(data);
+        if (rc != DBRES_OK) return rc;
+    }
+    if (checkpoint_db_version < 0) {
         // Nothing applied -> nothing to checkpoint.
-        if (data->apply_last_db_version < 0) return DBRES_OK;
+        if (data->apply_last_db_version < 0) {
+            if (stream_end) cloudsync_receive_stream_reset(data);
+            return DBRES_OK;
+        }
         target_db_version = data->apply_last_db_version;
         target_seq = data->apply_last_seq;
     } else {
-        // The final chunk of a receive stream. A fragmented value the stream delivered
-        // must be complete by now: its pieces are removed when it is applied, here or
-        // by another connection. Only values this stream staged are checked. Staging
-        // left by other streams or direct calls is ignored on purpose: a value_id
-        // identifies a value, not the stream that delivered it, and a replay can
-        // legitimately omit an old value (replaced, lost a conflict, filtered out,
-        // untracked), so requiring the whole staging table to be empty could stop the
-        // cursor for good. The age cleanup bounds such leftovers. A value another
-        // connection completes while this stream is still delivering it leaves this
-        // stream's later pieces staged again: the check fails once, and the replay
-        // from the first page applies the value again as a no-op and passes.
-        for (int i = 0; i < data->stream_values_count; i++) {
-            if (data->stream_values[i].applied) continue;
-            dbvm_t *vm = NULL;
-            int rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_EXISTS, &vm, 0);
-            if (rc == DBRES_OK) rc = databasevm_bind_text(vm, 1, data->stream_values[i].value_id, -1);
-            if (rc == DBRES_OK) rc = databasevm_step(vm);
-            if (vm) databasevm_finalize(vm);
-            if (rc == DBRES_ROW) return cloudsync_set_error(data, "Error on cloudsync_payload_apply: the receive stream ended with an incomplete fragmented value", DBRES_ERROR);
-            if (rc != DBRES_DONE) return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to check staged fragments", rc);
-        }
         target_db_version = checkpoint_db_version;
         target_seq = checkpoint_seq;
     }
@@ -4273,7 +4284,7 @@ static int cloudsync_payload_apply_checkpoint (cloudsync_context *data, int64_t 
         }
         if (rc != DBRES_OK) return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to write the receive checkpoint", rc);
     }
-    if (checkpoint_db_version >= 0) cloudsync_receive_stream_reset(data);
+    if (stream_end) cloudsync_receive_stream_reset(data);
     return DBRES_OK;
 }
 
@@ -4454,6 +4465,14 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         if (header.ncols != CLOUDSYNC_CHANGES_NCOLS) {
             if (clone) cloudsync_memory_free(clone);
             return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid v3 column count", DBRES_MISUSE);
+        }
+        // Without a watermark the stream end falls back to the last applied position,
+        // but a fragment's final chunk may apply nothing new (its pieces belong to a
+        // value this stream already applied), which leaves no position to checkpoint:
+        // fail instead of leaving the cursor in place and replaying the same window.
+        if (checkpoint_db_version == CLOUDSYNC_CHECKPOINT_STREAM_LEGACY) {
+            if (clone) cloudsync_memory_free(clone);
+            return cloudsync_set_error(data, "Error on cloudsync_payload_apply: the final chunk of a fragmented stream has no watermark", DBRES_MISUSE);
         }
         for (uint32_t i = 0; i < header.nrows; ++i) {
             size_t seek = 0;

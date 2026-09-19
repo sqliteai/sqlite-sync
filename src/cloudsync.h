@@ -146,13 +146,20 @@ const char *cloudsync_table_schema (cloudsync_context *data, const char *table_n
 //   CLOUDSYNC_CHECKPOINT_LAST_APPLIED advance to this artifact's last applied
 //                                     (db_version, seq). Legacy/monolithic
 //                                     behavior: safe only for a complete payload
-//                                     that ends on a db_version boundary. A v3
-//                                     fragment never moves the cursor this way.
-// NONE and an explicit watermark mark the call as part of a receive stream: the
+//                                     that ends on a db_version boundary. Used by
+//                                     direct SQL calls; a v3 fragment never moves
+//                                     the cursor this way.
+//   CLOUDSYNC_CHECKPOINT_STREAM_LEGACY the final chunk of a stream from a server
+//                                     that sends no watermark: LAST_APPLIED plus the
+//                                     stream's completeness check. A v3 fragment
+//                                     fails: its final chunk may apply nothing new,
+//                                     leaving no position to checkpoint.
+// Every mode but LAST_APPLIED marks the call as part of a receive stream: the
 // fragmented values it stages are tracked until applied. Reset that tracking with
 // cloudsync_receive_stream_reset whenever a stream starts from its first page.
-#define CLOUDSYNC_CHECKPOINT_NONE          (-1)
-#define CLOUDSYNC_CHECKPOINT_LAST_APPLIED  (-2)
+#define CLOUDSYNC_CHECKPOINT_NONE           (-1)
+#define CLOUDSYNC_CHECKPOINT_LAST_APPLIED   (-2)
+#define CLOUDSYNC_CHECKPOINT_STREAM_LEGACY  (-3)
 void   cloudsync_receive_stream_reset (cloudsync_context *data);
 int    cloudsync_payload_apply (cloudsync_context *data, const char *payload, int blen, int *nrows, int64_t checkpoint_db_version, int64_t checkpoint_seq);
 int    cloudsync_payload_encode_step (cloudsync_payload_context *payload, cloudsync_context *data, int argc, dbvalue_t **argv);

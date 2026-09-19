@@ -1580,13 +1580,13 @@ static int network_apply_check_chunk(sqlite3_context *context, const char *chunk
     // A non-final chunk must never advance the receive cursor (see cloudsync.h):
     // landing mid-db_version would let the next /check skip the unapplied
     // remainder. Only the final chunk advances -- to the explicit watermark, or
-    // the legacy last-applied fallback when it is absent.
+    // the legacy last-applied fallback when it is absent (a fragment then fails).
     int64_t watermark = json_extract_int(chunk_json, chunk_json_len, "watermark", -1);
     int64_t checkpoint_db_version;
     if (!final_chunk) {
         checkpoint_db_version = CLOUDSYNC_CHECKPOINT_NONE;
     } else {
-        checkpoint_db_version = (watermark < 0) ? CLOUDSYNC_CHECKPOINT_LAST_APPLIED : watermark;
+        checkpoint_db_version = (watermark < 0) ? CLOUDSYNC_CHECKPOINT_STREAM_LEGACY : watermark;
     }
     int64_t checkpoint_seq = 0;
 
