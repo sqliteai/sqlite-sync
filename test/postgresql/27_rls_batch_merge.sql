@@ -281,8 +281,11 @@ SELECT COALESCE(max(db_version), 0) AS max_dbv_5 FROM cloudsync_changes \gset
 SELECT coalesce((SELECT value::BIGINT FROM cloudsync_settings WHERE key='check_dbversion'), 0) AS ckpt_before_denied \gset
 SET app.current_user_id = :'USER1';
 SET ROLE test_rls_user;
+-- the denial is expected to raise
+\set ON_ERROR_STOP off
 SELECT cloudsync_payload_apply(decode(:'payload_hex_5', 'hex')) AS apply_5 \gset
 \set apply_5_state :SQLSTATE
+\set ON_ERROR_STOP on
 
 -- Reconnect for clean state after expected RLS denial
 \connect cloudsync_test_27_b

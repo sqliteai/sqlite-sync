@@ -72,7 +72,9 @@ SELECT dblink_exec('locker', 'BEGIN') AS _begin \gset
 -- Try to acquire EXCLUSIVE lock — if this fails (e.g. permission denied on
 -- Supabase), _lock won't be set and we skip the lock-contention test
 \unset _lock
+\set ON_ERROR_STOP off
 SELECT dblink_exec('locker', 'LOCK TABLE concurrent_tbl IN EXCLUSIVE MODE') AS _lock \gset
+\set ON_ERROR_STOP on
 
 \if :{?_lock}
 -- ===== Lock acquired — run lock-contention test =====

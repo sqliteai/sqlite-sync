@@ -228,8 +228,11 @@ SELECT COALESCE(max(db_version), 0) AS max_dbv_4 FROM cloudsync_changes \gset
 \ir helper_psql_conn_setup.sql
 SET app.current_user_id = :'USER1';
 SET ROLE test_rls_user;
+-- the denial is expected to raise
+\set ON_ERROR_STOP off
 SELECT cloudsync_payload_apply(decode(:'payload_hex_4', 'hex')) AS apply_4 \gset
 \set apply_4_state :SQLSTATE
+\set ON_ERROR_STOP on
 
 -- Reconnect for clean state after expected RLS denial
 \connect cloudsync_test_29_b
@@ -314,8 +317,11 @@ SELECT COALESCE(max(db_version), 0) AS max_dbv_6 FROM cloudsync_changes \gset
 \ir helper_psql_conn_setup.sql
 SET app.current_user_id = :'USER1';
 SET ROLE test_rls_user;
+-- the denial is expected to raise
+\set ON_ERROR_STOP off
 SELECT cloudsync_payload_apply(decode(:'payload_hex_6', 'hex')) AS apply_6 \gset
 \set apply_6_state :SQLSTATE
+\set ON_ERROR_STOP on
 
 -- Reconnect for clean state after expected RLS denial
 \connect cloudsync_test_29_b
@@ -361,8 +367,11 @@ SELECT COALESCE(max(db_version), 0) AS max_dbv_7 FROM cloudsync_changes \gset
 \ir helper_psql_conn_setup.sql
 SET app.current_user_id = :'USER1';
 SET ROLE test_rls_user;
+-- the denial is expected to raise
+\set ON_ERROR_STOP off
 SELECT cloudsync_payload_apply(decode(:'payload_hex_7', 'hex')) AS apply_7 \gset
 \set apply_7_state :SQLSTATE
+\set ON_ERROR_STOP on
 
 -- Reconnect for clean verification as superuser
 \connect cloudsync_test_29_b
