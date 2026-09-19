@@ -232,6 +232,37 @@ int db_select_receive (sqlite3 *db, const char *sql, int *chunks, int *complete,
     return sqlite3_finalize(stmt);
 }
 
+// A fresh site's first check may return HTTP 202 while its download is prepared.
+// Require actual received rows AND the expected data, allowing bounded empty polls.
+// Materialize the scalar result so JSON projections cannot invoke sync repeatedly.
+int db_sync_await(sqlite3 *db, const char *expected_sql, int max_attempts, int delay_ms) {
+    bool received = false;
+    for (int attempt = 0; attempt < max_attempts; attempt++) {
+        int rows = 0, valid = 0;
+        char error[512];
+        int rc = db_select_receive(db,
+            "WITH result AS MATERIALIZED (SELECT cloudsync_network_sync(250,10) AS j) "
+            "SELECT j ->> '$.receive.rows', "
+            "coalesce((j ->> '$.send.status') <> 'error' AND "
+            "json_type(j,'$.receive.rows') = 'integer', 0), "
+            "coalesce(j ->> '$.receive.error', j ->> '$.send.lastFailure', j ->> '$.receive.lastFailure') "
+            "FROM result;", &rows, &valid, error, sizeof(error));
+        if (rc != SQLITE_OK) return rc;
+        if (!valid || rows < 0 || error[0]) {
+            printf("Error: bootstrap sync failed: %s\n", error[0] ? error : "invalid sync status");
+            return SQLITE_ERROR;
+        }
+        received = received || rows > 0;
+        int ready = 0;
+        rc = db_select_int(db, expected_sql, &ready);
+        if (rc != SQLITE_OK) return rc;
+        if (received && ready) return SQLITE_OK;
+        if (attempt + 1 < max_attempts) sqlite3_sleep(delay_ms);
+    }
+    printf("Error: bootstrap sync did not deliver the expected data after %d attempts\n", max_attempts);
+    return SQLITE_ERROR;
+}
+
 int db_expect_min (sqlite3 *db, const char *sql, int expect_min) {
     int value = 0;
     int rc = db_select_int(db, sql, &value);
@@ -587,7 +618,7 @@ int test_init (const char *db_path, int init) {
     snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s', '%s');", value, value);
     rc = db_exec(db, sql); RCHECK
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM users;", 1); RCHECK
-    rc = db_expect_gt0(db, "SELECT cloudsync_network_sync(250,10) ->> '$.receive.rows';"); RCHECK
+    rc = db_sync_await(db, "SELECT count(*) > 0 FROM activities;", 120, 250); RCHECK
     rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM users;"); RCHECK
     rc = db_expect_gt0(db, "SELECT COUNT(*) as count FROM activities;"); RCHECK
     rc = db_expect_int(db, "SELECT COUNT(*) as count FROM workouts;", 0); RCHECK
@@ -689,7 +720,8 @@ int test_enable_disable(const char *db_path) {
         rc = db_exec(db2, set_apikey2); RCHECK
     }
 
-    rc = db_expect_gt0(db2, "SELECT cloudsync_network_sync(250,10) ->> '$.receive.rows';"); RCHECK
+    snprintf(sql, sizeof(sql), "SELECT COUNT(*) = 1 FROM users WHERE name='%s-should-sync';", value);
+    rc = db_sync_await(db2, sql, 120, 250); RCHECK
 
     snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM users WHERE name='%s';", value);
     rc = db_expect_int(db2, sql, 0); RCHECK
@@ -799,7 +831,7 @@ int test_token_auth (void) {
     char sql[256];
     snprintf(sql, sizeof(sql), "INSERT INTO users (id, name) VALUES ('%s', '%s');", value, value);
     rc = db_exec(db, sql); RCHECK
-    rc = db_expect_gt0(db, "SELECT cloudsync_network_sync(250,10) ->> '$.receive.rows';"); RCHECK
+    rc = db_sync_await(db, "SELECT count(*) > 0 FROM activities;", 120, 250); RCHECK
     rc = db_exec(db, "SELECT cloudsync_terminate();");
 
 ABORT_TEST
