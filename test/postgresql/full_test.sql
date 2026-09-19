@@ -68,6 +68,7 @@
 \ir 58_v3_denied_checkpoint.sql
 \ir 59_rls_denial_retry.sql
 \ir 60_fragment_concurrency.sql
+\ir 61_fragment_cleanup_backlog.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

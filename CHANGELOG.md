@@ -17,6 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **PostgreSQL stale-fragment cleanup makes bounded progress through large backlogs.** Each pass considers at most 64 groups before acquiring advisory locks, so a large backlog no longer exhausts the shared lock table and rolls back all cleanup. Values being applied concurrently remain protected.
+
 - **A received change whose write fails is no longer dropped silently.** Previously the error was discarded and the change was lost without a trace. The apply now fails with that error (see Changed), and the network functions report it as `receive.error`, together with the rows applied before it.
 - **A received update to a row that is not there is no longer recorded as applied.** Several columns of an existing row are written with one UPDATE; when it changed nothing (the row was deleted while sync was disabled, or a policy's USING clause hides it), the changes were recorded as applied without being stored. The row is now written with the upsert instead, which inserts it or reports the policy.
 - **A receive stream no longer checkpoints past a fragmented value it delivered incompletely.** When the stream's final chunk arrives while a value it delivered is still missing pieces, the call now fails with an error and the checkpoint stays in place. Pieces staged by other streams or direct calls are ignored, so they never block a receive. After any failed receive, the next call downloads the stream again from its first page, which re-checks every value against the whole stream; the checkpoint still moves only when the stream completes.

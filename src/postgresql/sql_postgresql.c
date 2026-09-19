@@ -140,9 +140,17 @@ const char * const SQL_PAYLOAD_FRAGMENTS_DELETE =
     "DELETE FROM cloudsync_payload_fragments WHERE value_id=$1;";
 
 const char * const SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE =
+    // Materialize the bounded candidate set BEFORE trying advisory locks. These locks
+    // live until transaction end; locking every stale value can exhaust PostgreSQL's
+    // shared lock table and roll back the entire cleanup, leaving a large backlog
+    // permanently stuck. Later cleanup calls drain another batch. Do not loop over
+    // batches here: releasing a savepoint does not release transaction-level locks.
+    "WITH stale AS MATERIALIZED ("
+    "SELECT value_id FROM cloudsync_payload_fragments GROUP BY value_id "
+    "HAVING MAX(created_at) < $1 AND COUNT(*) < MAX(part_count) "
+    "ORDER BY value_id LIMIT 64) "
     "DELETE FROM cloudsync_payload_fragments WHERE value_id IN ("
-    "SELECT value_id FROM (SELECT value_id FROM cloudsync_payload_fragments GROUP BY value_id "
-    "HAVING MAX(created_at) < $1 AND COUNT(*) < MAX(part_count)) stale "
+    "SELECT value_id FROM stale "
     // skip a value another transaction is applying (see database_fragment_lock)
     "WHERE pg_try_advisory_xact_lock(1129530962, hashtext(value_id)));";
 
