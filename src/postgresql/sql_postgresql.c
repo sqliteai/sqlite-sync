@@ -133,6 +133,9 @@ const char * const SQL_PAYLOAD_FRAGMENTS_SELECT =
     "SELECT fragment, tbl, pk, col_name, col_version, db_version, site_id, cl, seq, checksum "
     "FROM cloudsync_payload_fragments WHERE value_id=$1 ORDER BY part_index ASC;";
 
+const char * const SQL_PAYLOAD_FRAGMENTS_EXISTS =
+    "SELECT 1 FROM cloudsync_payload_fragments WHERE value_id=$1 LIMIT 1;";
+
 const char * const SQL_PAYLOAD_FRAGMENTS_DELETE =
     "DELETE FROM cloudsync_payload_fragments WHERE value_id=$1;";
 

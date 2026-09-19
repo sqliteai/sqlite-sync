@@ -71,6 +71,7 @@ extern const char * const SQL_PAYLOAD_FRAGMENTS_CREATE_TABLE;
 extern const char * const SQL_PAYLOAD_FRAGMENTS_UPSERT;
 extern const char * const SQL_PAYLOAD_FRAGMENTS_COUNT;
 extern const char * const SQL_PAYLOAD_FRAGMENTS_SELECT;
+extern const char * const SQL_PAYLOAD_FRAGMENTS_EXISTS;
 extern const char * const SQL_PAYLOAD_FRAGMENTS_DELETE;
 extern const char * const SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE;
 

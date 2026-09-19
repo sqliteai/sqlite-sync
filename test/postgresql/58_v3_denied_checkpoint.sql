@@ -111,8 +111,10 @@ SET ROLE v3_denied_user;
 SELECT format('SELECT cloudsync_payload_apply(payload) FROM chunk_transport WHERE ord = %s;', ord)
 FROM chunk_transport ORDER BY ord \gexec
 RESET ROLE;
+-- a direct fragment call has no end-of-stream marker: it never moves the checkpoint
 SELECT (SELECT length(note) FROM frag_rls WHERE id = 'big') = 655360
-   AND NOT EXISTS (SELECT FROM cloudsync_payload_fragments) AS redelivered_ok \gset
+   AND NOT EXISTS (SELECT FROM cloudsync_payload_fragments)
+   AND coalesce((SELECT value::BIGINT FROM cloudsync_settings WHERE key='check_dbversion'), 0) = :ckpt_before::bigint AS redelivered_ok \gset
 \if :redelivered_ok
 \echo [PASS] (:testid) redelivery after the policy change applies the value and clears its pieces
 \else

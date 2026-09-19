@@ -252,6 +252,285 @@ static bool test_stalled_http_timeout(void) {
 }
 #endif
 
+
+// MARK: - Receive stream (canned /check responses, real apply)
+
+#include <stdlib.h>
+#include "sqlite3.h"
+#include "cloudsync.h"
+#include "cloudsync_sqlite.h"
+extern void network_test_set_responder(NETWORK_RESULT (*)(const char *, const char *));
+extern char *network_test_base64_encode(const unsigned char *, size_t);
+
+// The server spool of one receive window: its pages, and the watermark every chunk
+// announces. Each request records the page cursor and the dbVersion it was sent with.
+#define SPOOL_MAX 16
+static const char *spool[SPOOL_MAX];
+static int spool_pages;
+static int64_t spool_watermark;
+static int64_t req_cursor[64], req_since[64];
+static int nreq;
+
+static int64_t json_int_after(const char *json, const char *key, int64_t fallback) {
+    const char *p = strstr(json, key);
+    return p ? strtoll(p + strlen(key), NULL, 10) : fallback;
+}
+
+static NETWORK_RESULT spool_responder(const char *endpoint, const char *request) {
+    NETWORK_RESULT r = {0};
+    size_t n = endpoint ? strlen(endpoint) : 0;
+    if (n < 6 || strcmp(endpoint + n - 6, "/check") != 0 || !request) { r.code = CLOUDSYNC_NETWORK_ERROR; return r; }
+    int64_t cursor = json_int_after(request, "\"cursor\":", 0);
+    if (nreq < 64) { req_cursor[nreq] = cursor; req_since[nreq] = json_int_after(request, "\"dbVersion\":", -1); nreq++; }
+    int64_t max = json_int_after(request, "\"maxChunks\":", 1);
+    size_t cap = 256;
+    for (int i = 0; i < spool_pages; i++) cap += strlen(spool[i]) + 96;
+    char *json = cloudsync_memory_alloc(cap);
+    size_t len = (size_t)snprintf(json, cap, "{\"data\":{\"chunks\":[");
+    int64_t k = cursor;
+    for (; k < spool_pages && k < cursor + max; k++) {
+        len += (size_t)snprintf(json + len, cap - len, "%s{\"cursor\":%lld,\"payload\":\"%s\",\"watermark\":%lld}",
+                                k > cursor ? "," : "", (long long)k, spool[k], (long long)spool_watermark);
+    }
+    bool final = k >= spool_pages;
+    snprintf(json + len, cap - len, "],\"final\":%s,\"nextCursor\":%lld}}", final ? "true" : "false", (long long)(final ? -1 : k));
+    r.code = CLOUDSYNC_NETWORK_BUFFER;
+    r.buffer = json;
+    r.blen = strlen(json);
+    return r;
+}
+
+static int db_exec(sqlite3 *db, const char *sql) { return sqlite3_exec(db, sql, NULL, NULL, NULL); }
+
+static int64_t db_int(sqlite3 *db, const char *sql) {
+    sqlite3_stmt *vm = NULL;
+    int64_t v = INT64_MIN;
+    if (sqlite3_prepare_v2(db, sql, -1, &vm, NULL) == SQLITE_OK && sqlite3_step(vm) == SQLITE_ROW) v = sqlite3_column_int64(vm, 0);
+    sqlite3_finalize(vm);
+    return v;
+}
+
+static int64_t db_checkpoint(sqlite3 *db) {
+    return db_int(db, "SELECT coalesce((SELECT value FROM cloudsync_settings WHERE key='check_dbversion'),0)");
+}
+
+static sqlite3 *stream_db(bool network) {
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK || sqlite3_cloudsync_init(db, NULL, NULL) != SQLITE_OK) return NULL;
+    if (db_exec(db, "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, v BLOB); SELECT cloudsync_init('t');") != SQLITE_OK) return NULL;
+    if (network && db_exec(db, "SELECT cloudsync_network_init('test-managed-database-id');") != SQLITE_OK) return NULL;
+    return db;
+}
+
+static void stream_close(sqlite3 *db) {
+    if (!db) return;
+    db_exec(db, "SELECT cloudsync_terminate();");
+    sqlite3_close(db);
+}
+
+// Base64 payloads of every row of src matching where (one monolithic payload each),
+// or of the chunks cloudsync_payload_chunks produces. The caller frees them.
+static int stream_payloads(sqlite3 *src, const char *query, char **out, int max) {
+    sqlite3_stmt *vm = NULL;
+    int n = 0;
+    if (sqlite3_prepare_v2(src, query, -1, &vm, NULL) != SQLITE_OK) return 0;
+    while (n < max && sqlite3_step(vm) == SQLITE_ROW) {
+        out[n++] = network_test_base64_encode(sqlite3_column_blob(vm, 0), (size_t)sqlite3_column_bytes(vm, 0));
+    }
+    sqlite3_finalize(vm);
+    return n;
+}
+
+// Applies every payload the query returns on src directly to dst, as a SQL caller would.
+static bool direct_apply(sqlite3 *dst, sqlite3 *src, const char *query) {
+    sqlite3_stmt *read = NULL, *write = NULL;
+    bool ok = sqlite3_prepare_v2(src, query, -1, &read, NULL) == SQLITE_OK &&
+              sqlite3_prepare_v2(dst, "SELECT cloudsync_payload_apply(?1)", -1, &write, NULL) == SQLITE_OK;
+    while (ok && sqlite3_step(read) == SQLITE_ROW) {
+        sqlite3_bind_value(write, 1, sqlite3_column_value(read, 0));
+        ok = sqlite3_step(write) == SQLITE_ROW;
+        sqlite3_reset(write);
+    }
+    sqlite3_finalize(read);
+    sqlite3_finalize(write);
+    return ok;
+}
+
+// Runs cloudsync_network_receive_changes(max_chunks); returns its JSON or "ERROR: ...".
+static char *stream_receive(sqlite3 *db, int max_chunks) {
+    static char result[1024];
+    sqlite3_stmt *vm = NULL;
+    snprintf(result, sizeof(result), "ERROR: prepare");
+    if (sqlite3_prepare_v2(db, "SELECT cloudsync_network_receive_changes(?1)", -1, &vm, NULL) != SQLITE_OK) return result;
+    sqlite3_bind_int(vm, 1, max_chunks);
+    if (sqlite3_step(vm) == SQLITE_ROW) snprintf(result, sizeof(result), "%s", (const char *)sqlite3_column_text(vm, 0));
+    else snprintf(result, sizeof(result), "ERROR: %s", sqlite3_errmsg(db));
+    sqlite3_finalize(vm);
+    return result;
+}
+
+static bool expect(bool ok, const char *what, const char *detail) {
+    if (!ok) printf("\n    %s%s%s\n", what, detail ? ": " : "", detail ? detail : "");
+    return ok;
+}
+
+// Three monolithic pages. A call capped by max_chunks keeps the same window (dbVersion)
+// and asks for the next page; the checkpoint moves only when the final page applied.
+// A failed page restarts the next call from page 0, keeping the rows applied before it.
+static bool test_stream_paging(void) {
+    bool ok = true;
+    sqlite3 *src = stream_db(false), *dst = stream_db(true);
+    char *pages[SPOOL_MAX] = {0};
+    ok = ok && src && dst;
+    ok = ok && db_exec(src, "INSERT INTO t VALUES('k1',x'01'); INSERT INTO t VALUES('k2',x'02'); INSERT INTO t VALUES('k3',x'03');") == SQLITE_OK;
+    int n = ok ? stream_payloads(src, "SELECT cloudsync_payload_encode(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) FROM cloudsync_changes GROUP BY pk ORDER BY pk", pages, SPOOL_MAX) : 0;
+    ok = ok && expect(n == 3, "three pages", NULL);
+    for (int i = 0; i < n; i++) spool[i] = pages[i];
+    spool_pages = n;
+    spool_watermark = ok ? db_int(src, "SELECT max(db_version) FROM cloudsync_changes") : 0;
+    nreq = 0;
+    network_test_set_responder(spool_responder);
+
+    for (int call = 0; ok && call < 3; call++) {
+        char *json = stream_receive(dst, 1);
+        bool last = call == 2;
+        ok = expect(strstr(json, last ? "\"complete\":true" : "\"complete\":false") != NULL, "capped call", json) && ok;
+        ok = expect(nreq == call + 1 && req_cursor[call] == call && req_since[call] == 0, "capped call requests the next page of the same window", NULL) && ok;
+        ok = expect(db_checkpoint(dst) == (last ? spool_watermark : 0), "checkpoint moves only after the final page", json) && ok;
+    }
+    ok = ok && expect(db_int(dst, "SELECT count(*) FROM t") == 3, "all rows applied", NULL);
+
+    // failure in the middle page: the first row stays, nothing is checkpointed, and the
+    // next call starts again from page 0 of the same window
+    stream_close(dst);
+    dst = stream_db(true);
+    ok = ok && dst && db_exec(dst, "CREATE TRIGGER deny BEFORE INSERT ON t WHEN NEW.id='k2' BEGIN SELECT RAISE(ABORT,'k2 denied'); END") == SQLITE_OK;
+    nreq = 0;
+    char *json = ok ? stream_receive(dst, 0) : "";
+    ok = ok && expect(strstr(json, "k2 denied") && strstr(json, "\"complete\":false") && strstr(json, "\"rows\":1,\"tables\":[\"t\"]"), "failure reports the error and the rows applied before it", json);
+    ok = ok && expect(db_checkpoint(dst) == 0, "no checkpoint after a failure", NULL);
+    ok = ok && db_exec(dst, "DROP TRIGGER deny") == SQLITE_OK;
+    int before = nreq;
+    json = ok ? stream_receive(dst, 0) : "";
+    ok = ok && expect(nreq > before && req_cursor[before] == 0 && req_since[before] == 0, "the call after a failure starts from page 0", NULL);
+    ok = ok && expect(strstr(json, "\"complete\":true") && db_checkpoint(dst) == spool_watermark, "replay completes the window", json);
+    ok = ok && expect(db_int(dst, "SELECT count(*) FROM t") == 3, "all rows applied after the replay", NULL);
+
+    // a checkpoint that cannot be written is reported, not hidden
+    stream_close(dst);
+    dst = stream_db(true);
+    ok = ok && dst && db_exec(dst, "CREATE TRIGGER deny_ckpt BEFORE INSERT ON cloudsync_settings WHEN NEW.key='check_dbversion' BEGIN SELECT RAISE(ABORT,'checkpoint denied'); END") == SQLITE_OK;
+    json = ok ? stream_receive(dst, 0) : "";
+    ok = ok && expect(strstr(json, "receive checkpoint") && strstr(json, "\"complete\":false") && db_checkpoint(dst) == 0, "checkpoint write failure is reported", json);
+
+    network_test_set_responder(NULL);
+    for (int i = 0; i < n; i++) cloudsync_memory_free(pages[i]);
+    stream_close(src);
+    stream_close(dst);
+    return ok;
+}
+
+// One value too large for a chunk, sent as fragments.
+#define FRAGMENT_CHUNKS "SELECT payload FROM cloudsync_payload_chunks() WHERE substr(payload,5,1)=x'03' ORDER BY chunk_index"
+static bool test_stream_fragments(void) {
+    bool ok = true;
+    sqlite3 *src = stream_db(false), *dst = NULL;
+    char *frags[SPOOL_MAX] = {0}, *other[1] = {0};
+    ok = ok && src && db_exec(src, "SELECT cloudsync_set('payload_max_chunk_size','262144'); INSERT INTO t VALUES('big', randomblob(700000));") == SQLITE_OK;
+    int nf = ok ? stream_payloads(src, "SELECT payload FROM cloudsync_payload_chunks() ORDER BY chunk_index", frags, SPOOL_MAX) : 0;
+    ok = ok && expect(nf >= 3, "value split into three or more fragments", NULL);
+    ok = ok && db_exec(src, "INSERT INTO t VALUES('small', x'05')") == SQLITE_OK;
+    int no = ok ? stream_payloads(src, "SELECT cloudsync_payload_encode(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) FROM cloudsync_changes WHERE pk=cloudsync_pk_encode('small')", other, 1) : 0;
+    ok = ok && expect(no == 1, "monolithic page", NULL);
+    spool_watermark = ok ? db_int(src, "SELECT max(db_version) FROM cloudsync_changes") : 0;
+    network_test_set_responder(spool_responder);
+    const char *big_ok = "SELECT count(*) FROM t WHERE id='big' AND length(v)=700000";
+    char *json = "";
+
+    // a stream that ends with a delivered value incomplete fails before checkpointing;
+    // the fresh replay from page 0 then completes it
+    dst = stream_db(true);
+    spool_pages = 0;
+    for (int i = 0; i < nf; i++) if (i != 1) spool[spool_pages++] = frags[i];
+    json = ok ? stream_receive(dst, 0) : "";
+    ok = ok && expect(strstr(json, "incomplete fragmented value") && strstr(json, "\"complete\":false") && db_checkpoint(dst) == 0, "incomplete value at the final chunk", json);
+    spool_pages = 0;
+    for (int i = 0; i < nf; i++) spool[spool_pages++] = frags[i];
+    json = ok ? stream_receive(dst, 0) : "";
+    ok = ok && expect(strstr(json, "\"complete\":true") && db_checkpoint(dst) == spool_watermark && db_int(dst, big_ok) == 1, "fresh replay completes the value", json);
+    ok = ok && expect(db_int(dst, "SELECT count(*) FROM cloudsync_payload_fragments") == 0, "pieces removed once applied", NULL);
+    stream_close(dst);
+
+    // out-of-order and duplicate pieces, across calls capped to one page
+    dst = stream_db(true);
+    spool_pages = 0;
+    spool[spool_pages++] = frags[nf - 1];
+    spool[spool_pages++] = frags[0];
+    spool[spool_pages++] = frags[0];
+    for (int i = 1; i < nf - 1; i++) spool[spool_pages++] = frags[i];
+    for (int call = 0; ok && call < spool_pages; call++) json = stream_receive(dst, 1);
+    ok = ok && expect(strstr(json, "\"complete\":true") && db_checkpoint(dst) == spool_watermark && db_int(dst, big_ok) == 1, "out-of-order and duplicate pieces", json);
+    stream_close(dst);
+
+    // a direct fragment call never moves the checkpoint, and the staging it leaves blocks
+    // neither a direct monolithic call nor a stream that does not deliver that value
+    dst = stream_db(true);
+    ok = ok && expect(direct_apply(dst, src, FRAGMENT_CHUNKS " LIMIT 1") && db_checkpoint(dst) == 0, "direct fragment call does not checkpoint", NULL);
+    ok = ok && expect(direct_apply(dst, src, "SELECT cloudsync_payload_encode(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) FROM cloudsync_changes WHERE pk=cloudsync_pk_encode('small')") && db_checkpoint(dst) == spool_watermark, "staged fragments do not block a direct monolithic call", NULL);
+    stream_close(dst);
+    dst = stream_db(true);
+    ok = ok && direct_apply(dst, src, FRAGMENT_CHUNKS " LIMIT 1");
+    spool[0] = other[0];
+    spool_pages = 1;
+    json = ok ? stream_receive(dst, 0) : "";
+    ok = ok && expect(strstr(json, "\"complete\":true") && db_checkpoint(dst) == spool_watermark && db_int(dst, "SELECT count(*) FROM cloudsync_payload_fragments") > 0, "staging from a direct call does not block a stream", json);
+    stream_close(dst);
+
+    // a value abandoned by an interrupted stream: the replay after the failure no longer
+    // delivers it (replaced upstream), and completes
+    dst = stream_db(true);
+    spool[0] = frags[0];
+    spool[1] = other[0];
+    spool_pages = 2;
+    json = ok ? stream_receive(dst, 1) : "";
+    ok = ok && db_exec(dst, "CREATE TRIGGER deny BEFORE INSERT ON t WHEN NEW.id='small' BEGIN SELECT RAISE(ABORT,'small denied'); END") == SQLITE_OK;
+    json = ok ? stream_receive(dst, 1) : "";
+    ok = ok && expect(strstr(json, "small denied") != NULL, "interrupting failure", json);
+    ok = ok && db_exec(dst, "DROP TRIGGER deny") == SQLITE_OK;
+    spool[0] = other[0];
+    spool_pages = 1;
+    json = ok ? stream_receive(dst, 0) : "";
+    ok = ok && expect(strstr(json, "\"complete\":true") && db_checkpoint(dst) == spool_watermark, "abandoned group does not block the replay", json);
+    stream_close(dst);
+
+    // completed by another caller before the stream delivers it: the stream stages the
+    // pieces again and re-applies the value as a no-op
+    dst = stream_db(true);
+    ok = ok && direct_apply(dst, src, FRAGMENT_CHUNKS) && db_int(dst, big_ok) == 1;
+    spool_pages = 0;
+    for (int i = 0; i < nf; i++) spool[spool_pages++] = frags[i];
+    json = ok ? stream_receive(dst, 0) : "";
+    ok = ok && expect(strstr(json, "\"complete\":true") && db_checkpoint(dst) == spool_watermark, "value completed by another caller first", json);
+    stream_close(dst);
+
+    // completed by another caller while the stream is delivering it: the stream's later
+    // pieces are staged again, the final check fails once, and the replay passes
+    dst = stream_db(true);
+    json = ok ? stream_receive(dst, 1) : "";
+    ok = ok && direct_apply(dst, src, FRAGMENT_CHUNKS) && db_int(dst, big_ok) == 1;
+    json = ok ? stream_receive(dst, 0) : "";
+    ok = ok && expect(strstr(json, "incomplete fragmented value") && db_checkpoint(dst) == 0, "value completed by another caller mid-stream fails once", json);
+    json = ok ? stream_receive(dst, 0) : "";
+    ok = ok && expect(strstr(json, "\"complete\":true") && db_checkpoint(dst) == spool_watermark && db_int(dst, "SELECT count(*) FROM cloudsync_payload_fragments") == 0, "the replay passes", json);
+    stream_close(dst);
+
+    network_test_set_responder(NULL);
+    for (int i = 0; i < nf; i++) cloudsync_memory_free(frags[i]);
+    if (other[0]) cloudsync_memory_free(other[0]);
+    stream_close(src);
+    return ok;
+}
+
 int main(void) {
 #if !defined(_WIN32) && !defined(CLOUDSYNC_OMIT_CURL)
     check("HTTP deadlines: API elapsed cap and artifact stall cap:", test_stalled_http_timeout());
@@ -265,6 +544,8 @@ int main(void) {
     check("non-buffer response is a no-op:", test_non_buffer_is_noop());
     check("send batch /apply payload (window / batchId / chunkIndex / isFinal):", test_apply_json_payload_batch());
     check("network_compute_status:", test_compute_status());
+    check("receive stream: capped paging, failure replay, checkpoint errors:", test_stream_paging());
+    check("receive stream: fragmented values:", test_stream_fragments());
     if (failures) { printf("\n%d test(s) FAILED\n", failures); return 1; }
     printf("\nAll network unit tests passed\n");
     return 0;

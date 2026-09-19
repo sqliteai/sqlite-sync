@@ -134,17 +134,26 @@ const char *cloudsync_table_schema (cloudsync_context *data, const char *table_n
 // on a complete db_version boundary, otherwise a stop between chunks of a single
 // source db_version silently skips the unapplied rows on the next /check (the
 // server's cloudsync_payload_chunks uses db_version > since with no seq cursor).
+// The cursor also identifies the server's prepared pages, so it stays fixed for a
+// whole receive stream and moves once, when the stream's final chunk has applied.
 //   >= 0                              advance the cursor to exactly this
 //                                     (watermark_db_version), with checkpoint_seq.
-//                                     Used once a chunk stream is fully applied.
+//                                     Used for the final chunk of a stream: fails
+//                                     if a fragmented value the stream delivered
+//                                     is still incomplete.
 //   CLOUDSYNC_CHECKPOINT_NONE         do not advance the cursor. Used for a
-//                                     non-final chunk of a multi-chunk stream.
+//                                     non-final chunk of a stream.
 //   CLOUDSYNC_CHECKPOINT_LAST_APPLIED advance to this artifact's last applied
 //                                     (db_version, seq). Legacy/monolithic
 //                                     behavior: safe only for a complete payload
-//                                     that ends on a db_version boundary.
+//                                     that ends on a db_version boundary. A v3
+//                                     fragment never moves the cursor this way.
+// NONE and an explicit watermark mark the call as part of a receive stream: the
+// fragmented values it stages are tracked until applied. Reset that tracking with
+// cloudsync_receive_stream_reset whenever a stream starts from its first page.
 #define CLOUDSYNC_CHECKPOINT_NONE          (-1)
 #define CLOUDSYNC_CHECKPOINT_LAST_APPLIED  (-2)
+void   cloudsync_receive_stream_reset (cloudsync_context *data);
 int    cloudsync_payload_apply (cloudsync_context *data, const char *payload, int blen, int *nrows, int64_t checkpoint_db_version, int64_t checkpoint_seq);
 int    cloudsync_payload_encode_step (cloudsync_payload_context *payload, cloudsync_context *data, int argc, dbvalue_t **argv);
 int    cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsync_context *data);

@@ -95,6 +95,7 @@ struct network_data {
     // drain, so the server (which is stateless across /check calls) needs the client
     // to echo which spool page to serve next. In-memory only: losing it just
     // restarts the drain from page 0, which is safe because apply is idempotent.
+    // A failed chunk also restarts from page 0 on the next call.
     int64_t     check_cursor;        // next page index to request (0 = fresh drain)
     int64_t     check_cursor_since;  // the check_dbversion check_cursor belongs to
 #ifndef CLOUDSYNC_OMIT_CURL
@@ -519,7 +520,17 @@ static size_t network_header_callback(char *buffer, size_t size, size_t nitems, 
     return len;
 }
 
+#ifdef CLOUDSYNC_UNITTEST
+static NETWORK_RESULT (*network_test_responder)(const char *endpoint, const char *json_payload);
+void network_test_set_responder (NETWORK_RESULT (*responder)(const char *, const char *)) {
+    network_test_responder = responder;
+}
+#endif
+
 NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char **extra_headers, int nextra_headers) {
+#ifdef CLOUDSYNC_UNITTEST
+    if (network_test_responder) return network_test_responder(endpoint, json_payload);
+#endif
     char *buffer = NULL;
     size_t blen = 0;
     struct curl_slist* headers = NULL;
@@ -1478,6 +1489,12 @@ static char *network_base64_encode(const unsigned char *src, size_t len) {
     return out;
 }
 
+#ifdef CLOUDSYNC_UNITTEST
+char *network_test_base64_encode (const unsigned char *src, size_t len) {
+    return network_base64_encode(src, len);
+}
+#endif
+
 static int network_base64_value(char c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
     if (c >= 'a' && c <= 'z') return c - 'a' + 26;
@@ -2018,6 +2035,8 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
         netdata->check_cursor = 0;
         netdata->check_cursor_since = db_version;
     }
+    // Page 0 starts a fresh stream: forget what an earlier stream staged.
+    if (netdata->check_cursor == 0) cloudsync_receive_stream_reset(data);
 
     // Capture local db_version before download so we can query cloudsync_changes afterwards
     int64_t prev_dbv = cloudsync_dbversion(data);
@@ -2158,10 +2177,12 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
 
         if (tokens) cloudsync_memory_free(tokens);
 
-        if (rc == SQLITE_OK && delivered) {
+        if (rc != SQLITE_OK) {
+            // The next call replays the window from its first page, as a fresh stream.
+            netdata->check_cursor = 0;
+            if (pnrows) *pnrows = 0;
+        } else if (delivered) {
             // Finalize cursor state after the returned batch is applied/staged.
-            // Batched responses advance the in-memory spool cursor after each
-            // successful chunk, so a later failure retries from the failed chunk.
             netdata->check_cursor = more_pending ? next_cursor : 0;
             if (pnrows) *pnrows = rows_total;
             if (out) {

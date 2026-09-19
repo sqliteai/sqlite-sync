@@ -145,6 +145,11 @@ struct cloudsync_pk_decode_bind_context {
     int64_t     seq;
 };
 
+typedef struct {
+    char        value_id[33];
+    bool        applied;        // applied by this stream: later pieces are redundant
+} cloudsync_stream_value;
+
 struct cloudsync_context {
     void        *db;
     char        errmsg[1024];
@@ -204,6 +209,12 @@ struct cloudsync_context {
     // visible when a later chunk reports, including the changes a failing payload
     // applied before its error. Reset with cloudsync_apply_stats_reset.
     int        apply_rows;
+
+    // v3 values the current receive stream delivered: pending ones are checked before
+    // the stream's final checkpoint. See cloudsync_receive_stream_reset.
+    cloudsync_stream_value *stream_values;
+    int        stream_values_count;
+    int        stream_values_cap;
 };
 
 struct cloudsync_table_context {
@@ -640,6 +651,35 @@ void cloudsync_apply_stats_reset (cloudsync_context *data) {
 // accumulates for the life of the connection and signed overflow would be undefined.
 static void cloudsync_apply_stats_add (cloudsync_context *data, int rows) {
     if (rows > 0) data->apply_rows = (data->apply_rows > INT_MAX - rows) ? INT_MAX : data->apply_rows + rows;
+}
+
+void cloudsync_receive_stream_reset (cloudsync_context *data) {
+    if (data) data->stream_values_count = 0;
+}
+
+static cloudsync_stream_value *cloudsync_stream_value_find (cloudsync_context *data, const char *value_id) {
+    for (int i = 0; i < data->stream_values_count; i++) {
+        if (strcmp(data->stream_values[i].value_id, value_id) == 0) return &data->stream_values[i];
+    }
+    return NULL;
+}
+
+// Records whether the current receive stream has applied value_id or still has it pending.
+static int cloudsync_stream_value_track (cloudsync_context *data, const char *value_id, bool applied) {
+    cloudsync_stream_value *v = cloudsync_stream_value_find(data, value_id);
+    if (!v) {
+        if (data->stream_values_count == data->stream_values_cap) {
+            int cap = data->stream_values_cap ? data->stream_values_cap * 2 : 8;
+            cloudsync_stream_value *values = cloudsync_memory_realloc(data->stream_values, (uint64_t)cap * sizeof(*values));
+            if (!values) return cloudsync_set_error(data, "Error on cloudsync_payload_apply: out of memory", DBRES_NOMEM);
+            data->stream_values = values;
+            data->stream_values_cap = cap;
+        }
+        v = &data->stream_values[data->stream_values_count++];
+        snprintf(v->value_id, sizeof(v->value_id), "%s", value_id);
+    }
+    v->applied = applied;
+    return DBRES_OK;
 }
 
 int cloudsync_apply_rows_count (cloudsync_context *data) {
@@ -2551,6 +2591,7 @@ void cloudsync_context_free (void *ctx) {
     cloudsync_terminate(data);
 
     cloudsync_memory_free(data->tables);
+    cloudsync_memory_free(data->stream_values);
     cloudsync_memory_free(data);
 }
 
@@ -4093,7 +4134,7 @@ cleanup:
     return rc;
 }
 
-static int cloudsync_payload_apply_fragment_row (cloudsync_context *data, cloudsync_payload_fragment_row *row, int *pnrows) {
+static int cloudsync_payload_apply_fragment_row (cloudsync_context *data, cloudsync_payload_fragment_row *row, bool track, int *pnrows) {
     char value_id[64];
     char checksum_hex[17];
     int part_index = 0, part_count = 0;
@@ -4120,6 +4161,12 @@ static int cloudsync_payload_apply_fragment_row (cloudsync_context *data, clouds
     if (strcmp(value_id, expected_value_id) != 0) {
         return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid v3 fragment identity", DBRES_MISUSE);
     }
+
+    // A piece of a value this stream already applied is redundant: staging it again
+    // would leave it behind as an incomplete group. It happens when pieces left by an
+    // interrupted attempt complete the value before the replay delivers its last piece.
+    cloudsync_stream_value *seen = track ? cloudsync_stream_value_find(data, value_id) : NULL;
+    if (seen && seen->applied) return DBRES_OK;
 
     // the fragments table is guaranteed by dbutils_settings_init; no DDL here
     // because the apply path runs under sync-only credentials on server nodes
@@ -4149,7 +4196,11 @@ static int cloudsync_payload_apply_fragment_row (cloudsync_context *data, clouds
     if (rc == DBRES_DONE) rc = DBRES_OK;
     if (rc != DBRES_OK) return rc;
 
-    return cloudsync_payload_apply_reassembled_fragment(data, value_id, checksum_hex, pnrows);
+    int applied = 0;
+    rc = cloudsync_payload_apply_reassembled_fragment(data, value_id, checksum_hex, &applied);
+    if (rc != DBRES_OK) return rc;
+    if (pnrows) *pnrows += applied;
+    return track ? cloudsync_stream_value_track(data, value_id, applied > 0) : DBRES_OK;
 }
 
 // #ifndef CLOUDSYNC_OMIT_RLS_VALIDATION
@@ -4158,17 +4209,38 @@ static int cloudsync_payload_apply_fragment_row (cloudsync_context *data, clouds
 // (or a fully-applied chunk stream) has been applied. See the checkpoint-mode
 // documentation on cloudsync_payload_apply in cloudsync.h. The advance is
 // strictly monotonic so re-delivered rows never regress the cursor.
-static void cloudsync_payload_apply_checkpoint (cloudsync_context *data, int64_t checkpoint_db_version, int64_t checkpoint_seq) {
+static int cloudsync_payload_apply_checkpoint (cloudsync_context *data, int64_t checkpoint_db_version, int64_t checkpoint_seq) {
     int64_t target_db_version;
     int64_t target_seq;
 
-    if (checkpoint_db_version == CLOUDSYNC_CHECKPOINT_NONE) return;
+    if (checkpoint_db_version == CLOUDSYNC_CHECKPOINT_NONE) return DBRES_OK;
     if (checkpoint_db_version == CLOUDSYNC_CHECKPOINT_LAST_APPLIED) {
         // Nothing applied -> nothing to checkpoint.
-        if (data->apply_last_db_version < 0) return;
+        if (data->apply_last_db_version < 0) return DBRES_OK;
         target_db_version = data->apply_last_db_version;
         target_seq = data->apply_last_seq;
     } else {
+        // The final chunk of a receive stream. A fragmented value the stream delivered
+        // must be complete by now: its pieces are removed when it is applied, here or
+        // by another connection. Only values this stream staged are checked. Staging
+        // left by other streams or direct calls is ignored on purpose: a value_id
+        // identifies a value, not the stream that delivered it, and a replay can
+        // legitimately omit an old value (replaced, lost a conflict, filtered out,
+        // untracked), so requiring the whole staging table to be empty could stop the
+        // cursor for good. The age cleanup bounds such leftovers. A value another
+        // connection completes while this stream is still delivering it leaves this
+        // stream's later pieces staged again: the check fails once, and the replay
+        // from the first page applies the value again as a no-op and passes.
+        for (int i = 0; i < data->stream_values_count; i++) {
+            if (data->stream_values[i].applied) continue;
+            dbvm_t *vm = NULL;
+            int rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_EXISTS, &vm, 0);
+            if (rc == DBRES_OK) rc = databasevm_bind_text(vm, 1, data->stream_values[i].value_id, -1);
+            if (rc == DBRES_OK) rc = databasevm_step(vm);
+            if (vm) databasevm_finalize(vm);
+            if (rc == DBRES_ROW) return cloudsync_set_error(data, "Error on cloudsync_payload_apply: the receive stream ended with an incomplete fragmented value", DBRES_ERROR);
+            if (rc != DBRES_DONE) return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to check staged fragments", rc);
+        }
         target_db_version = checkpoint_db_version;
         target_seq = checkpoint_seq;
     }
@@ -4177,16 +4249,20 @@ static void cloudsync_payload_apply_checkpoint (cloudsync_context *data, int64_t
     int64_t cur_seq = dbutils_settings_get_int64_value(data, CLOUDSYNC_KEY_CHECK_SEQ);
 
     // monotonic guard: never move the cursor backwards
-    if (target_db_version < cur_db_version) return;
-    if (target_db_version == cur_db_version && target_seq <= cur_seq) return;
-
-    char buf[256];
-    snprintf(buf, sizeof(buf), "%" PRId64, target_db_version);
-    dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
-    if (target_seq != cur_seq) {
-        snprintf(buf, sizeof(buf), "%" PRId64, target_seq);
-        dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_SEQ, buf);
+    if (target_db_version > cur_db_version || (target_db_version == cur_db_version && target_seq > cur_seq)) {
+        // db_version first: failing between the two writes then re-delivers rows
+        // instead of skipping them
+        char buf[256];
+        snprintf(buf, sizeof(buf), "%" PRId64, target_db_version);
+        int rc = dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_DBVERSION, buf);
+        if (rc == DBRES_OK && target_seq != cur_seq) {
+            snprintf(buf, sizeof(buf), "%" PRId64, target_seq);
+            rc = dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_CHECK_SEQ, buf);
+        }
+        if (rc != DBRES_OK) return cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to write the receive checkpoint", rc);
     }
+    if (checkpoint_db_version >= 0) cloudsync_receive_stream_reset(data);
+    return DBRES_OK;
 }
 
 // Steps one decoded payload row (an INSERT into cloudsync_changes). On PostgreSQL the merge
@@ -4377,7 +4453,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
                 break;
             }
             int n = 0;
-            rc = cloudsync_payload_apply_fragment_row(data, &row, &n);
+            rc = cloudsync_payload_apply_fragment_row(data, &row, checkpoint_db_version != CLOUDSYNC_CHECKPOINT_LAST_APPLIED, &n);
             // stop at the first error, as the row path does
             if (rc != DBRES_OK) break;
             applied_rows += n;
@@ -4389,8 +4465,12 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         if (pnrows) *pnrows = applied_rows;
         // Advance the receive cursor only after the whole payload is applied,
         // gated on the caller-supplied checkpoint (a non-final chunk passes
-        // CLOUDSYNC_CHECKPOINT_NONE and leaves the cursor untouched).
-        if (rc == DBRES_OK) cloudsync_payload_apply_checkpoint(data, checkpoint_db_version, checkpoint_seq);
+        // CLOUDSYNC_CHECKPOINT_NONE and leaves the cursor untouched). A fragment
+        // carries no end-of-stream marker, so LAST_APPLIED (a direct call) never
+        // moves the cursor.
+        if (rc == DBRES_OK && checkpoint_db_version != CLOUDSYNC_CHECKPOINT_LAST_APPLIED) {
+            rc = cloudsync_payload_apply_checkpoint(data, checkpoint_db_version, checkpoint_seq);
+        }
         return rc;
     }
 
@@ -4557,7 +4637,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
             data->apply_last_db_version = decoded_context.db_version;
             data->apply_last_seq = decoded_context.seq;
         }
-        cloudsync_payload_apply_checkpoint(data, checkpoint_db_version, checkpoint_seq);
+        rc = cloudsync_payload_apply_checkpoint(data, checkpoint_db_version, checkpoint_seq);
     }
 
 cleanup:
