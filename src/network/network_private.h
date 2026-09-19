@@ -21,7 +21,7 @@
 // Artifact transfers are bulk, so they are bounded by lack of progress rather than
 // by elapsed time: a large payload on a slow link would otherwise be killed
 // mid-flight. The absolute value is only a backstop against a transfer that
-// trickles just fast enough to stay alive, since nothing can cancel one in flight.
+// trickles just fast enough to stay alive; sqlite3_interrupt() also cancels one.
 #ifndef CLOUDSYNC_ARTIFACT_TIMEOUT_SECONDS
 #define CLOUDSYNC_ARTIFACT_TIMEOUT_SECONDS 3600L
 #endif

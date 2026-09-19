@@ -230,7 +230,9 @@ static bool test_unicode(void) {
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include "sqlite3.h"
 extern bool network_test_curl_timeout(const char *, bool, bool);
+extern bool network_test_curl_interrupt(const char *, sqlite3 *);
 static bool test_stalled_http_timeout(void) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return false;
@@ -247,6 +249,12 @@ static bool test_stalled_http_timeout(void) {
     // Both shapes must abort against a server that accepts and then sends nothing.
     if (ok) ok = network_test_curl_timeout(url, false, true) && network_test_curl_timeout(url, true, true);
     if (ok) ok = network_test_curl_timeout(url, false, false) && network_test_curl_timeout(url, true, false);
+    // sqlite3_interrupt() cancels a transfer in flight: with no statement running the
+    // flag stays set, so the transfer sees it from its first progress callback.
+    sqlite3 *db = NULL;
+    if (ok) ok = sqlite3_open(":memory:", &db) == SQLITE_OK;
+    if (ok) { sqlite3_interrupt(db); ok = network_test_curl_interrupt(url, db); }
+    if (db) sqlite3_close(db);
     close(fd);
     return ok;
 }
@@ -585,7 +593,7 @@ static bool test_curl_async_dns(void) {
 
 int main(void) {
 #if !defined(_WIN32) && !defined(CLOUDSYNC_OMIT_CURL)
-    check("HTTP deadlines: API elapsed cap and artifact stall cap:", test_stalled_http_timeout());
+    check("HTTP deadlines and interrupt: API cap, artifact stall, cancel:", test_stalled_http_timeout());
 #endif
 #ifndef CLOUDSYNC_OMIT_CURL
     check("libcurl resolves names asynchronously (DNS honors deadlines):", test_curl_async_dns());

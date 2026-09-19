@@ -98,6 +98,7 @@ struct network_data {
     // A failed chunk also restarts from page 0 on the next call.
     int64_t     check_cursor;        // next page index to request (0 = fresh drain)
     int64_t     check_cursor_since;  // the check_dbversion check_cursor belongs to
+    sqlite3     *db;                 // interrupting it cancels a transfer in flight (NULL: never)
 #ifndef CLOUDSYNC_OMIT_CURL
     CURL        *api_curl;
     CURL        *artifact_curl;
@@ -310,6 +311,18 @@ void network_data_free (network_data *data) {
 
 // MARK: - Utils -
 
+// sqlite3_is_interrupted exists from SQLite 3.41: on an older host library an
+// interrupt does not cancel a transfer, which then ends on its deadline.
+static bool network_db_interrupted (sqlite3 *db) {
+    return db && sqlite3_libversion_number() >= 3041000 && sqlite3_is_interrupted(db);
+}
+
+// A network call cancelled with sqlite3_interrupt() reports SQLITE_INTERRUPT, so the
+// caller can tell a deliberate stop from a failure worth retrying.
+static int network_error_code (sqlite3_context *context) {
+    return network_db_interrupted(sqlite3_context_db_handle(context)) ? SQLITE_INTERRUPT : SQLITE_ERROR;
+}
+
 static bool network_endpoint_is_api(network_data *data, const char *endpoint) {
     if (!data || !endpoint) return false;
     return (data->check_endpoint && strcmp(endpoint, data->check_endpoint) == 0) ||
@@ -372,13 +385,22 @@ static bool network_curl_pool_enabled(network_data *data) {
     return data->curl_pool_enabled > 0;
 }
 
+// Called by libcurl while a transfer runs, idle included: a non-zero return aborts it,
+// so sqlite3_interrupt() on the connection cancels a network call in flight.
+static int network_curl_progress (void *xdata, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+    return network_db_interrupted(((network_data *)xdata)->db) ? 1 : 0;
+}
+
 // API calls carry small JSON, so a cap on elapsed time is the right shape for them.
 // Artifact transfers are bulk and are bounded on progress instead: a large payload
 // inside a 300s cap would demand a sustained transfer rate, killing a healthy transfer
 // on a slow link. Low-speed also detects a genuine stall sooner than the absolute cap does.
-static void network_curl_apply_deadlines(CURL *handle, bool is_api) {
+static void network_curl_apply_deadlines(CURL *handle, network_data *data, bool is_api) {
     curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, CLOUDSYNC_CONNECT_TIMEOUT_SECONDS);
     curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, network_curl_progress);
+    curl_easy_setopt(handle, CURLOPT_XFERINFODATA, data);
     if (is_api) {
         curl_easy_setopt(handle, CURLOPT_TIMEOUT, CLOUDSYNC_REQUEST_TIMEOUT_SECONDS);
         return;
@@ -394,7 +416,7 @@ static CURL *network_curl_for_endpoint(network_data *data, const char *endpoint,
     if (!network_curl_pool_enabled(data)) {
         CURL *handle = curl_easy_init();
         if (!handle) return NULL;
-        network_curl_apply_deadlines(handle, is_api);
+        network_curl_apply_deadlines(handle, data, is_api);
         return handle;
     }
 
@@ -405,7 +427,7 @@ static CURL *network_curl_for_endpoint(network_data *data, const char *endpoint,
         curl_easy_reset(*slot);
     }
     if (!*slot) return NULL;
-    network_curl_apply_deadlines(*slot, is_api);
+    network_curl_apply_deadlines(*slot, data, is_api);
 
     curl_easy_setopt(*slot, CURLOPT_MAXCONNECTS, CLOUDSYNC_CURL_MAXCONNECTS);
     curl_easy_setopt(*slot, CURLOPT_MAXAGE_CONN, CLOUDSYNC_CURL_MAXAGE_CONN_SECONDS);
@@ -441,6 +463,23 @@ bool network_test_curl_timeout(const char *url, bool use_pool, bool as_api) {
     if (data.api_curl) curl_easy_cleanup(data.api_curl);
     if (data.artifact_curl) curl_easy_cleanup(data.artifact_curl);
     return ok;
+}
+
+// A transfer against a server that never answers, on a connection already interrupted:
+// the progress callback must abort it at once instead of waiting for a deadline.
+bool network_test_curl_interrupt(const char *url, sqlite3 *db) {
+    network_data data = {0};
+    data.curl_pool_enabled = -1;
+    data.db = db;
+    CURL *handle = network_curl_for_endpoint(&data, url, NULL);
+    if (!handle) return false;
+    curl_easy_setopt(handle, CURLOPT_URL, url);
+    curl_easy_setopt(handle, CURLOPT_PROXY, "");
+    CURLcode rc = curl_easy_perform(handle);
+    double seconds = 0;
+    curl_easy_getinfo(handle, CURLINFO_TOTAL_TIME, &seconds);
+    curl_easy_cleanup(handle);
+    return rc == CURLE_ABORTED_BY_CALLBACK && seconds < CLOUDSYNC_ARTIFACT_LOW_SPEED_TIME;
 }
 #endif
 
@@ -784,7 +823,7 @@ int network_set_sqlite_result (sqlite3_context *context, NETWORK_RESULT *result)
             
         case CLOUDSYNC_NETWORK_ERROR:
             sqlite3_result_error(context, (result->buffer) ? result->buffer : "Memory error.", -1);
-            sqlite3_result_error_code(context, SQLITE_ERROR);
+            sqlite3_result_error_code(context, network_error_code(context));
             rc = -1;
             break;
             
@@ -1248,7 +1287,7 @@ static bool network_compute_endpoints_with_address (sqlite3_context *context, ne
 
 void network_result_to_sqlite_error (sqlite3_context *context, NETWORK_RESULT res, const char *default_error_message) {
     sqlite3_result_error(context, ((res.code == CLOUDSYNC_NETWORK_ERROR) && (res.buffer)) ? res.buffer : default_error_message, -1);
-    sqlite3_result_error_code(context, SQLITE_ERROR);
+    sqlite3_result_error_code(context, network_error_code(context));
 }
 
 // MARK: - Init / Cleanup -
@@ -1259,7 +1298,10 @@ network_data *cloudsync_network_data (sqlite3_context *context) {
     if (netdata) return netdata;
     
     netdata = (network_data *)cloudsync_memory_zeroalloc(sizeof(network_data));
-    if (netdata) cloudsync_set_auxdata(data, netdata);
+    if (netdata) {
+        netdata->db = sqlite3_context_db_handle(context);
+        cloudsync_set_auxdata(data, netdata);
+    }
     return netdata;
 }
 

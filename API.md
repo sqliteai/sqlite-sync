@@ -677,6 +677,8 @@ Fix the cause and deliver the payload again: the changes already applied merge a
 
 ## Network Functions
 
+Every network request has a deadline, so a stalled server cannot hold the connection indefinitely. A network call in progress can also be cancelled with `sqlite3_interrupt()` on its connection: it stops within about a second and fails with `SQLITE_INTERRUPT` (SQLite 3.41 or later), so a deliberate stop can be told apart from a failure worth retrying.
+
 ### `cloudsync_network_init(managedDatabaseId)`
 
 **Description:** Initializes the `sqlite-sync` network component. This function configures the endpoints for the CloudSync service and initializes the cURL library.
