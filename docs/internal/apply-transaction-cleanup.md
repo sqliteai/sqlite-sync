@@ -26,7 +26,7 @@ To reproduce the diagnostic on macOS after building `dist/review_regressions`:
 cc -g -O1 -Isrc -Isrc/sqlite -Isrc/network -Isqlite -Imodules/fractional-indexing \
   -DSQLITE_CORE -DCLOUDSYNC_UNITTEST -DCLOUDSYNC_OMIT_NETWORK \
   test/stress/payload_oom.c \
-  $(find build/test -name '*.o' ! -name 'unit.o' ! -name '*bench.o' ! -name 'integration.o' ! -name 'review_regressions.o') \
+  $(find build/test -name '*.o' ! -name 'unit.o' ! -name '*bench.o' ! -name 'integration.o' ! -name 'integration_bootstrap.o' ! -name 'review_regressions.o') \
   -framework Security -o /tmp/payload-oom
 /tmp/payload-oom
 ```
