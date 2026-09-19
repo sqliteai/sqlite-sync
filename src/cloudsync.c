@@ -4595,9 +4595,11 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         last_tbl_len = decoded_context.tbl_len;
 
         if (batch.count > 0 && cloudsync_payload_row_is_block(&decoded_context)) {
-            fail_rc = cloudsync_payload_group_flush(data, &batch);
+            // Materialization needs the ordinary columns to exist, but they and
+            // every block still belong to the same atomic PK group. Keep its
+            // savepoint open until the actual PK/table/db_version boundary.
+            fail_rc = merge_flush_pending(data);
             if (fail_rc != DBRES_OK) break;
-            applied = (int)i;
         }
 
         fail_rc = cloudsync_payload_group_open(data, &batch);
