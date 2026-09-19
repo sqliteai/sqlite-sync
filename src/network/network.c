@@ -99,6 +99,7 @@ struct network_data {
     int64_t     check_cursor;        // next page index to request (0 = fresh drain)
     int64_t     check_cursor_since;  // the check_dbversion check_cursor belongs to
     sqlite3     *db;                 // interrupting it cancels a transfer in flight (NULL: never)
+    cloudsync_context *cloudsync;    // runtime deadline settings (NULL: compiled defaults)
 #ifndef CLOUDSYNC_OMIT_CURL
     CURL        *api_curl;
     CURL        *artifact_curl;
@@ -391,23 +392,35 @@ static int network_curl_progress (void *xdata, curl_off_t dltotal, curl_off_t dl
     return network_db_interrupted(((network_data *)xdata)->db) ? 1 : 0;
 }
 
+// A deadline from cloudsync_settings, read for every request so cloudsync_set applies to
+// the next one. A missing or non-positive value keeps the compiled default.
+static long network_deadline_setting (network_data *data, const char *key, long fallback, long ceiling) {
+    int64_t value = (data && data->cloudsync) ? dbutils_settings_get_int64_value(data->cloudsync, key) : 0;
+    if (value <= 0) return fallback;
+    return (value > ceiling) ? ceiling : (long)value;
+}
+
 // API calls carry small JSON, so a cap on elapsed time is the right shape for them.
 // Artifact transfers are bulk and are bounded on progress instead: a large payload
 // inside a 300s cap would demand a sustained transfer rate, killing a healthy transfer
 // on a slow link. Low-speed also detects a genuine stall sooner than the absolute cap does.
 static void network_curl_apply_deadlines(CURL *handle, network_data *data, bool is_api) {
-    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, CLOUDSYNC_CONNECT_TIMEOUT_SECONDS);
+    long total = is_api
+        ? network_deadline_setting(data, CLOUDSYNC_KEY_NETWORK_REQUEST_TIMEOUT, CLOUDSYNC_REQUEST_TIMEOUT_SECONDS, CLOUDSYNC_NETWORK_MAX_SECONDS)
+        : network_deadline_setting(data, CLOUDSYNC_KEY_NETWORK_ARTIFACT_TIMEOUT, CLOUDSYNC_ARTIFACT_TIMEOUT_SECONDS, CLOUDSYNC_NETWORK_MAX_SECONDS);
+    // connecting is part of the request, so it cannot take longer than the whole of it
+    long connect = network_deadline_setting(data, CLOUDSYNC_KEY_NETWORK_CONNECT_TIMEOUT, CLOUDSYNC_CONNECT_TIMEOUT_SECONDS, CLOUDSYNC_NETWORK_MAX_SECONDS);
+    if (connect > total) connect = total;
+
+    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, connect);
+    curl_easy_setopt(handle, CURLOPT_TIMEOUT, total);
     curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, network_curl_progress);
     curl_easy_setopt(handle, CURLOPT_XFERINFODATA, data);
-    if (is_api) {
-        curl_easy_setopt(handle, CURLOPT_TIMEOUT, CLOUDSYNC_REQUEST_TIMEOUT_SECONDS);
-        return;
-    }
-    curl_easy_setopt(handle, CURLOPT_TIMEOUT, CLOUDSYNC_ARTIFACT_TIMEOUT_SECONDS);
-    curl_easy_setopt(handle, CURLOPT_LOW_SPEED_LIMIT, CLOUDSYNC_ARTIFACT_LOW_SPEED_LIMIT);
-    curl_easy_setopt(handle, CURLOPT_LOW_SPEED_TIME, CLOUDSYNC_ARTIFACT_LOW_SPEED_TIME);
+    if (is_api) return;
+    curl_easy_setopt(handle, CURLOPT_LOW_SPEED_LIMIT, network_deadline_setting(data, CLOUDSYNC_KEY_NETWORK_ARTIFACT_LOW_SPEED_LIMIT, CLOUDSYNC_ARTIFACT_LOW_SPEED_LIMIT, CLOUDSYNC_NETWORK_MAX_LOW_SPEED_LIMIT));
+    curl_easy_setopt(handle, CURLOPT_LOW_SPEED_TIME, network_deadline_setting(data, CLOUDSYNC_KEY_NETWORK_ARTIFACT_LOW_SPEED_TIME, CLOUDSYNC_ARTIFACT_LOW_SPEED_TIME, CLOUDSYNC_NETWORK_MAX_SECONDS));
 }
 
 static CURL *network_curl_for_endpoint(network_data *data, const char *endpoint, bool *pooled) {
@@ -1300,6 +1313,7 @@ network_data *cloudsync_network_data (sqlite3_context *context) {
     netdata = (network_data *)cloudsync_memory_zeroalloc(sizeof(network_data));
     if (netdata) {
         netdata->db = sqlite3_context_db_handle(context);
+        netdata->cloudsync = data;
         cloudsync_set_auxdata(data, netdata);
     }
     return netdata;

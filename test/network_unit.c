@@ -580,6 +580,77 @@ static bool test_stream_no_watermark(void) {
     return ok;
 }
 
+#if !defined(_WIN32) && !defined(CLOUDSYNC_OMIT_CURL)
+#include <pthread.h>
+#include <time.h>
+static double monotonic_seconds(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+static void *interrupt_after_300ms(void *db) {
+    struct timespec delay = {0, 300000000};
+    nanosleep(&delay, NULL);
+    sqlite3_interrupt((sqlite3 *)db);
+    return NULL;
+}
+// Runs cloudsync_network_receive_changes() and returns its result code and duration.
+static int timed_receive(sqlite3 *db, double *seconds) {
+    sqlite3_stmt *vm = NULL;
+    double start = monotonic_seconds();
+    int rc = sqlite3_prepare_v2(db, "SELECT cloudsync_network_receive_changes()", -1, &vm, NULL);
+    if (rc == SQLITE_OK) rc = sqlite3_step(vm);
+    if (rc != SQLITE_ROW) rc = sqlite3_errcode(db);
+    sqlite3_finalize(vm);
+    *seconds = monotonic_seconds() - start;
+    return rc;
+}
+// The deadlines can be tuned at runtime with cloudsync_set, in both directions, and a
+// call in flight is cancelled by sqlite3_interrupt() with SQLITE_INTERRUPT. The server is
+// a listening socket that never answers; this build compiles a 1 s request deadline.
+static bool test_runtime_deadlines(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+    struct sockaddr_in address = {0};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    bool ok = bind(fd, (struct sockaddr *)&address, sizeof(address)) == 0 && listen(fd, 8) == 0;
+    socklen_t len = sizeof(address);
+    ok = ok && getsockname(fd, (struct sockaddr *)&address, &len) == 0;
+    char init[160];
+    snprintf(init, sizeof(init), "SELECT cloudsync_network_init_custom('http://127.0.0.1:%u', 'test-managed-database-id');", ntohs(address.sin_port));
+    sqlite3 *db = ok ? stream_db(false) : NULL;
+    ok = ok && db && db_exec(db, init) == SQLITE_OK;
+    double seconds = 0;
+    char detail[96];
+
+    // raised above the compiled default: the call waits for the longer deadline
+    ok = ok && db_exec(db, "SELECT cloudsync_set('network_request_timeout', '3');") == SQLITE_OK;
+    int rc = ok ? timed_receive(db, &seconds) : SQLITE_OK;
+    snprintf(detail, sizeof(detail), "rc=%d after %.2fs", rc, seconds);
+    ok = ok && expect(rc != SQLITE_ROW && rc != SQLITE_INTERRUPT && seconds > 2.5 && seconds < 6, "a raised request deadline takes effect", detail);
+
+    // a non-positive value keeps the compiled default
+    ok = ok && db_exec(db, "SELECT cloudsync_set('network_request_timeout', '0');") == SQLITE_OK;
+    rc = ok ? timed_receive(db, &seconds) : SQLITE_OK;
+    snprintf(detail, sizeof(detail), "rc=%d after %.2fs", rc, seconds);
+    ok = ok && expect(rc != SQLITE_ROW && seconds < 2.5, "a non-positive setting keeps the default", detail);
+
+    // cancelled from another thread well before a 30 s deadline
+    ok = ok && db_exec(db, "SELECT cloudsync_set('network_request_timeout', '30');") == SQLITE_OK;
+    pthread_t thread;
+    bool started = ok && pthread_create(&thread, NULL, interrupt_after_300ms, db) == 0;
+    rc = started ? timed_receive(db, &seconds) : SQLITE_OK;
+    if (started) pthread_join(thread, NULL);
+    snprintf(detail, sizeof(detail), "rc=%d after %.2fs", rc, seconds);
+    ok = ok && expect(started && (rc & 0xFF) == SQLITE_INTERRUPT && seconds < 5, "sqlite3_interrupt cancels the call with SQLITE_INTERRUPT", detail);
+
+    stream_close(db);
+    close(fd);
+    return ok;
+}
+#endif
+
 #ifndef CLOUDSYNC_OMIT_CURL
 #include <curl/curl.h>
 // With the synchronous resolver and CURLOPT_NOSIGNAL, curl cannot time out a name
@@ -610,6 +681,9 @@ int main(void) {
     check("receive stream: capped paging, failure replay, checkpoint errors:", test_stream_paging());
     check("receive stream: fragmented values:", test_stream_fragments());
     check("receive stream: server without watermark:", test_stream_no_watermark());
+#if !defined(_WIN32) && !defined(CLOUDSYNC_OMIT_CURL)
+    check("runtime deadlines (cloudsync_set) and interrupt of a call:", test_runtime_deadlines());
+#endif
     if (failures) { printf("\n%d test(s) FAILED\n", failures); return 1; }
     printf("\nAll network unit tests passed\n");
     return 0;
