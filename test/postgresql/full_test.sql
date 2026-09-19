@@ -70,6 +70,7 @@
 \ir 60_fragment_concurrency.sql
 \ir 61_fragment_cleanup_backlog.sql
 \ir 62_deferred_fk_caller_commit.sql
+\ir 62_deep_savepoints.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'
