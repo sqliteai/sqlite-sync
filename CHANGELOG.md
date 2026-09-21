@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **SQLite: a payload whose commit fails no longer leaves its transaction open.** When `cloudsync_payload_apply` started the transaction itself and the commit then failed — a deferred foreign key violated at commit, or `SQLITE_BUSY` because a reader held the database — the transaction stayed open: the uncommitted rows remained visible on the connection and the next `BEGIN` failed. The failed transaction is now rolled back and the original error is returned. Changes from earlier source versions that were already committed are kept, the receive checkpoint does not move, and the rolled-back rows are no longer counted as applied, so delivering the payload again applies it. A transaction or savepoint opened by the caller is still left to the caller.
 
-## [1.1.4] - 2026-09-11
+## [1.1.4] - 2026-09-21
 
 ### Added
 
