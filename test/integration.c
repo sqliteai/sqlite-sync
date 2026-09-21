@@ -232,6 +232,27 @@ int db_select_receive (sqlite3 *db, const char *sql, int *chunks, int *complete,
     return sqlite3_finalize(stmt);
 }
 
+// Runs one receive call. A client-side apply error is reported in receive.error, not as
+// a SQL error: fail on it instead of polling until the timeout. last_failure keeps the
+// latest server-side receive.lastFailure for the timeout message.
+int db_receive_poll (sqlite3 *db, const char *call, int *rows, char *last_failure, size_t last_failure_len) {
+    char sql[512];
+    char error[1024] = {0};
+    int has_error = 0;
+    snprintf(sql, sizeof(sql),
+        "SELECT j ->> '$.receive.rows', j ->> '$.receive.error' IS NOT NULL, "
+        "coalesce(j ->> '$.receive.error', j ->> '$.receive.lastFailure') "
+        "FROM (SELECT %s AS j);", call);
+    int rc = db_select_receive(db, sql, rows, &has_error, error, sizeof(error));
+    if (rc != SQLITE_OK) return rc;
+    if (has_error) {
+        printf("Error: %s reported receive.error: %s\n", call, error);
+        return SQLITE_ERROR;
+    }
+    if (error[0]) snprintf(last_failure, last_failure_len, "%s", error);
+    return SQLITE_OK;
+}
+
 // A fresh site's first check may return HTTP 202 while its download is prepared.
 // Require actual received rows AND the expected data, allowing bounded empty polls.
 // Materialize the scalar result so JSON projections cannot invoke sync repeatedly.
@@ -865,14 +886,20 @@ int test_chunked_payload_paths(void) {
     rc = db_send_ok(sender); if (rc != SQLITE_OK) goto cleanup;
     cleanup_remote_row = true;
 
-    for (int attempt = 0; attempt < 30; ++attempt) {
-        int matches = 0;
+    int received = 0;
+    char last_failure[1024] = {0};
+    time_t started = time(NULL);
+    // A fresh receiver first downloads the whole tenant history, which the server
+    // may take tens of seconds to prepare.
+    for (int attempt = 0; attempt < 120; ++attempt) {
+        int matches = 0, rows = 0;
 
         // Exercises the deprecated cloudsync_network_check_changes() alias on purpose
         // (backward-compatibility coverage); cloudsync_network_receive_changes() is the
         // canonical name and is covered by the rowset and capped-drain tests.
-        rc = db_exec(receiver, "SELECT cloudsync_network_check_changes();");
+        rc = db_receive_poll(receiver, "cloudsync_network_check_changes()", &rows, last_failure, sizeof(last_failure));
         if (rc != SQLITE_OK) goto cleanup;
+        received += rows;
 
         snprintf(sql, sizeof(sql),
             "SELECT COUNT(*) FROM chunked_payload_items "
@@ -891,7 +918,8 @@ int test_chunked_payload_paths(void) {
     }
 
     if (!found) {
-        printf("Error: chunked e2e row %s was not received.\n", row_id);
+        printf("Error: chunked e2e row %s was not received (%d rows received in %.0fs, last failure: %s).\n",
+               row_id, received, difftime(time(NULL), started), last_failure[0] ? last_failure : "none");
         rc = SQLITE_ERROR;
         goto cleanup;
     }
@@ -938,11 +966,17 @@ int test_chunked_payload_rowset_path(void) {
     rc = db_send_ok(sender); if (rc != SQLITE_OK) goto cleanup;
     cleanup_remote_rows = true;
 
-    for (int attempt = 0; attempt < 30; ++attempt) {
-        int matches = 0;
+    int matches = 0, received = 0;
+    char last_failure[1024] = {0};
+    time_t started = time(NULL);
+    // A fresh receiver first downloads the whole tenant history, which the server
+    // may take tens of seconds to prepare.
+    for (int attempt = 0; attempt < 120; ++attempt) {
+        int rows = 0;
 
-        rc = db_exec(receiver, "SELECT cloudsync_network_receive_changes();");
+        rc = db_receive_poll(receiver, "cloudsync_network_receive_changes()", &rows, last_failure, sizeof(last_failure));
         if (rc != SQLITE_OK) goto cleanup;
+        received += rows;
 
         snprintf(sql, sizeof(sql),
             "SELECT COUNT(*) FROM chunked_payload_items "
@@ -961,7 +995,8 @@ int test_chunked_payload_rowset_path(void) {
     }
 
     if (!found) {
-        printf("Error: chunked rowset e2e batch %s was not received.\n", batch_id);
+        printf("Error: chunked rowset e2e batch %s was not received (%d/%d batch rows present, %d rows received in %.0fs, last failure: %s).\n",
+               batch_id, matches, row_count, received, difftime(time(NULL), started), last_failure[0] ? last_failure : "none");
         rc = SQLITE_ERROR;
         goto cleanup;
     }
