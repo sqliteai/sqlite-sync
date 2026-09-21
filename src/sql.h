@@ -71,6 +71,7 @@ extern const char * const SQL_PAYLOAD_FRAGMENTS_CREATE_TABLE;
 extern const char * const SQL_PAYLOAD_FRAGMENTS_UPSERT;
 extern const char * const SQL_PAYLOAD_FRAGMENTS_COUNT;
 extern const char * const SQL_PAYLOAD_FRAGMENTS_SELECT;
+extern const char * const SQL_PAYLOAD_FRAGMENTS_EXISTS;
 extern const char * const SQL_PAYLOAD_FRAGMENTS_DELETE;
 extern const char * const SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE;
 
@@ -80,8 +81,6 @@ extern const char * const SQL_BLOCKS_UPSERT;
 extern const char * const SQL_BLOCKS_SELECT;
 extern const char * const SQL_BLOCKS_DELETE;
 extern const char * const SQL_BLOCKS_LIST_ALIVE;
-extern const char * const SQL_BLOCKS_INSERT_IGNORE;
 extern const char * const SQL_META_SCAN_COL_FOR_MIGRATION;
-extern const char * const SQL_META_INSERT_BLOCK_IGNORE;
 
 #endif

@@ -14,6 +14,11 @@
   #include <stdlib.h>   // _byteswap_uint64
 #endif
 
+// Only an unconditional byte swap is provided. Wire formats are defined on byte values,
+// never on the host's byte order, so the same bytes are produced on every architecture;
+// host-order conversions are deliberately absent. `make unittest-s390x` checks this on a
+// big-endian host.
+
 // =======================================================
 //  bswap64 - portable
 // =======================================================
@@ -49,50 +54,6 @@ static inline uint64_t bswap64_u64(uint64_t v) {
            ((v & 0x00FF000000000000ull) >> 40) |
            ((v & 0xFF00000000000000ull) >> 56);
 #endif
-}
-
-// =======================================================
-//  Compile-time endianness detection
-// =======================================================
-
-#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && defined(__ORDER_BIG_ENDIAN__)
-  #if (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
-    #define HOST_IS_LITTLE_ENDIAN 1
-  #elif (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
-    #define HOST_IS_LITTLE_ENDIAN 0
-  #endif
-#endif
-
-// WebAssembly is currently defined as little-endian in all major toolchains
-#if !defined(HOST_IS_LITTLE_ENDIAN) && (defined(__wasm__) || defined(__EMSCRIPTEN__))
-  #define HOST_IS_LITTLE_ENDIAN 1
-#endif
-
-// Runtime fallback if unknown at compile-time
-static inline int host_is_little_endian_runtime (void) {
-    const uint16_t x = 1;
-    return *((const uint8_t*)&x) == 1;
-}
-
-// =======================================================
-//  Public API
-// =======================================================
-
-static inline uint64_t host_to_be64 (uint64_t v) {
-#if defined(HOST_IS_LITTLE_ENDIAN)
-  #if HOST_IS_LITTLE_ENDIAN
-    return bswap64_u64(v);
-  #else
-    return v;
-  #endif
-#else
-    return host_is_little_endian_runtime() ? bswap64_u64(v) : v;
-#endif
-}
-
-static inline uint64_t be64_to_host (uint64_t v) {
-    // same operation (bswap if little-endian)
-    return host_to_be64(v);
 }
 
 #endif

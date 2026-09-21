@@ -12,6 +12,35 @@
 #include <stddef.h>
 
 #define CLOUDSYNC_DEFAULT_ADDRESS           "https://cloudsync.sqlite.ai"
+#ifndef CLOUDSYNC_CONNECT_TIMEOUT_SECONDS
+#define CLOUDSYNC_CONNECT_TIMEOUT_SECONDS 30L
+#endif
+#ifndef CLOUDSYNC_REQUEST_TIMEOUT_SECONDS
+#define CLOUDSYNC_REQUEST_TIMEOUT_SECONDS 300L
+#endif
+// Artifact transfers are bulk, so they are bounded by lack of progress rather than
+// by elapsed time: a large payload on a slow link would otherwise be killed
+// mid-flight. The absolute value is only a backstop against a transfer that
+// trickles just fast enough to stay alive; sqlite3_interrupt() also cancels one.
+#ifndef CLOUDSYNC_ARTIFACT_TIMEOUT_SECONDS
+#define CLOUDSYNC_ARTIFACT_TIMEOUT_SECONDS 3600L
+#endif
+#ifndef CLOUDSYNC_ARTIFACT_LOW_SPEED_LIMIT
+#define CLOUDSYNC_ARTIFACT_LOW_SPEED_LIMIT 1024L
+#endif
+#ifndef CLOUDSYNC_ARTIFACT_LOW_SPEED_TIME
+#define CLOUDSYNC_ARTIFACT_LOW_SPEED_TIME 60L
+#endif
+// cloudsync_set keys overriding the deadlines above at runtime (seconds, and bytes per
+// second for the low-speed limit). A missing or non-positive value keeps the default;
+// larger values are clamped to the ceilings below.
+#define CLOUDSYNC_KEY_NETWORK_CONNECT_TIMEOUT           "network_connect_timeout"
+#define CLOUDSYNC_KEY_NETWORK_REQUEST_TIMEOUT           "network_request_timeout"
+#define CLOUDSYNC_KEY_NETWORK_ARTIFACT_TIMEOUT          "network_artifact_timeout"
+#define CLOUDSYNC_KEY_NETWORK_ARTIFACT_LOW_SPEED_LIMIT  "network_artifact_low_speed_limit"
+#define CLOUDSYNC_KEY_NETWORK_ARTIFACT_LOW_SPEED_TIME   "network_artifact_low_speed_time"
+#define CLOUDSYNC_NETWORK_MAX_SECONDS                   86400L
+#define CLOUDSYNC_NETWORK_MAX_LOW_SPEED_LIMIT           1073741824L
 #define CLOUDSYNC_ENDPOINT_PREFIX           "v2/cloudsync/databases"
 #define CLOUDSYNC_ENDPOINT_UPLOAD           "upload"
 #define CLOUDSYNC_ENDPOINT_CHECK            "check"

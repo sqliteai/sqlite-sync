@@ -64,6 +64,11 @@
 \ir 54_payload_chunks_fragment_state.sql
 \ir 55_payload_chunks_positional_resume.sql
 \ir 56_many_columns.sql
+\ir 57_audit_regressions.sql
+\ir 58_v3_denied_checkpoint.sql
+\ir 59_rls_denial_retry.sql
+\ir 60_fragment_concurrency.sql
+\ir 61_fragment_cleanup_backlog.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

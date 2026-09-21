@@ -93,10 +93,9 @@ TEST_TARGET = $(patsubst %.c,$(DIST_DIR)/%$(EXE), $(notdir $(TEST_SRC)))
 # tested directly on in-memory buffers. NT_LDFLAGS reuses the platform LDFLAGS
 # (which carries -lcurl) minus the shared-library-only flags (-shared on Linux,
 # -dynamiclib on macOS) so it links as an executable, plus the test link libs.
-# -undefined dynamic_lookup is kept: the test never opens a connection, so curl's
-# transport symbols are linked but never invoked.
+# The deadline regression uses a loopback socket; no external service is needed.
 BUILD_NETTEST = build/nettest
-NT_CFLAGS = $(filter-out -DCLOUDSYNC_OMIT_NETWORK,$(T_CFLAGS))
+NT_CFLAGS = $(filter-out -DCLOUDSYNC_OMIT_NETWORK,$(T_CFLAGS)) -DCLOUDSYNC_REQUEST_TIMEOUT_SECONDS=1L -DCLOUDSYNC_CONNECT_TIMEOUT_SECONDS=1L -DCLOUDSYNC_ARTIFACT_LOW_SPEED_TIME=1L -DCLOUDSYNC_ARTIFACT_TIMEOUT_SECONDS=30L
 NT_LDFLAGS = $(filter-out -shared -dynamiclib -headerpad_max_install_names,$(LDFLAGS)) $(T_LDFLAGS)
 NT_SRC = $(SRC_FILES) $(SQLITE_DIR)/sqlite3.c $(TEST_DIR)/network_unit.c
 NT_OBJ = $(patsubst %.c,$(BUILD_NETTEST)/%.o,$(notdir $(NT_SRC)))
@@ -298,8 +297,25 @@ ifneq ($(COVERAGE),false)
 endif
 
 # Run only unit tests
-unittest: $(TARGET) $(DIST_DIR)/unit$(EXE)
+unittest: $(TARGET) $(DIST_DIR)/unit$(EXE) $(DIST_DIR)/review_regressions$(EXE)
 	@./$(DIST_DIR)/unit$(EXE)
+	@./$(DIST_DIR)/review_regressions$(EXE)
+
+# Run the SQLite unit and regression suites on a real big-endian host (s390x) under QEMU
+# emulation. The payload and primary-key encodings are byte-order sensitive; this is the
+# only build that executes them on big-endian hardware semantics. Needs Docker with
+# linux/s390x emulation. Objects go to separate directories so the host build is untouched.
+S390X_IMAGE ?= sqlite-sync-s390x-test
+.PHONY: unittest-s390x
+unittest-s390x:
+	docker build --platform linux/s390x -t $(S390X_IMAGE) docker/s390x
+	docker run --rm --platform linux/s390x -v "$(CURDIR)":/src -w /src $(S390X_IMAGE) sh -ec '\
+		test "$$(uname -m)" = s390x; \
+		test "$$(printf "\001\000" | od -An -tu2 | tr -d " ")" = 256; \
+		echo "Host: $$(uname -m), big-endian"; \
+		make BUILD_TEST=build/s390x/test DIST_DIR=dist/s390x dist/s390x/unit dist/s390x/review_regressions; \
+		./dist/s390x/unit; \
+		./dist/s390x/review_regressions'
 
 # Network-enabled unit test binary. Link it via a file rule (like dist/unit), not in
 # the run recipe below: on Android `make test` runs binaries on the emulator from a
@@ -308,7 +324,7 @@ unittest: $(TARGET) $(DIST_DIR)/unit$(EXE)
 $(DIST_DIR)/network_unit$(EXE): $(CURL_LIB) $(NT_OBJ)
 	$(CC) $(NT_OBJ) -o $@ $(NT_LDFLAGS)
 
-# Run the network-layer unit tests (networking compiled in, no server)
+# Run the network-layer unit tests (networking compiled in, loopback only)
 network-unittest: $(DIST_DIR)/network_unit$(EXE)
 	@./$(DIST_DIR)/network_unit$(EXE)
 
@@ -394,9 +410,8 @@ endif
 	--disable-ntlm-wb \
 	--disable-progress-meter \
 	--disable-proxy \
-	--disable-pthreads \
 	--disable-socketpair \
-	--disable-threaded-resolver \
+	--enable-threaded-resolver \
 	--disable-tls-srp \
 	--disable-verbose \
 	--disable-versioned-symbols \

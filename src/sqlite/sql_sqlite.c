@@ -303,14 +303,16 @@ const char * const SQL_PAYLOAD_FRAGMENTS_SELECT =
     "SELECT fragment, tbl, pk, col_name, col_version, db_version, site_id, cl, seq, checksum "
     "FROM cloudsync_payload_fragments WHERE value_id=? ORDER BY part_index ASC;";
 
+const char * const SQL_PAYLOAD_FRAGMENTS_EXISTS =
+    "SELECT 1 FROM cloudsync_payload_fragments WHERE value_id=? LIMIT 1;";
+
 const char * const SQL_PAYLOAD_FRAGMENTS_DELETE =
     "DELETE FROM cloudsync_payload_fragments WHERE value_id=?;";
 
 const char * const SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE =
-    "DELETE FROM cloudsync_payload_fragments "
-    "WHERE created_at < ? AND value_id IN ("
+    "DELETE FROM cloudsync_payload_fragments WHERE value_id IN ("
     "SELECT value_id FROM cloudsync_payload_fragments GROUP BY value_id "
-    "HAVING COUNT(*) < MAX(part_count));";
+    "HAVING MAX(created_at) < ? AND COUNT(*) < MAX(part_count));";
 
 // MARK: Blocks (block-level LWW)
 
@@ -337,14 +339,7 @@ const char * const SQL_BLOCKS_LIST_ALIVE =
     "AND m.pk = ?3 AND m.col_name LIKE ?4 AND m.col_version %% 2 = 1 "
     "ORDER BY b.col_name";
 
-const char * const SQL_BLOCKS_INSERT_IGNORE =
-    "INSERT OR IGNORE INTO %s (pk, col_name, col_value) VALUES (?1, ?2, ?3)";
-
 const char * const SQL_META_SCAN_COL_FOR_MIGRATION =
     "SELECT DISTINCT m.pk FROM %s m "
     "WHERE m.col_name = ?1 AND m.col_version %% 2 = 1 "
     "AND NOT EXISTS (SELECT 1 FROM %s b WHERE b.pk = m.pk AND b.col_name LIKE ?2)";
-
-const char * const SQL_META_INSERT_BLOCK_IGNORE =
-    "INSERT OR IGNORE INTO %s (pk, col_name, col_version, db_version, seq, site_id) "
-    "VALUES (?1, ?2, ?3, ?4, ?5, 0)";

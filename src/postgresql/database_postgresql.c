@@ -30,6 +30,7 @@
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/resowner.h"
 #include "utils/snapmgr.h"
 
 #include "pgvalue.h"
@@ -75,6 +76,7 @@ typedef struct {
     Datum          *values;
     char           *nulls;
     bool            executed_nonselect; // non-select executed already
+    uint64          changes;            // rows processed by the last non-select execution
 
     // Memory
     MemoryContext   stmt_mcxt;          // lifetime = pg_stmt_t
@@ -560,6 +562,37 @@ char *sql_build_insert_missing_pks_query(const char *schema, const char *table_n
 
 // MARK: - HELPER FUNCTIONS -
 
+// Map a PostgreSQL SQLSTATE to the closest DBRES code. The SQLSTATE itself is kept
+// separately (cloudsync_set_sqlstate) and is what the caller sees.
+static int map_sqlerrcode (int sqlerrcode) {
+    switch (sqlerrcode) {
+        case ERRCODE_INSUFFICIENT_PRIVILEGE:        // a policy denial is recognized by the caller
+            return DBRES_PERM;
+        case ERRCODE_READ_ONLY_SQL_TRANSACTION:
+            return DBRES_READONLY;
+        case ERRCODE_LOCK_NOT_AVAILABLE:
+        case ERRCODE_OBJECT_IN_USE:
+            return DBRES_BUSY;
+        case ERRCODE_QUERY_CANCELED:
+            return DBRES_INTERRUPT;
+        case ERRCODE_OUT_OF_MEMORY:
+            return DBRES_NOMEM;
+        case ERRCODE_DISK_FULL:
+            return DBRES_FULL;
+    }
+    switch (ERRCODE_TO_CATEGORY(sqlerrcode)) {
+        case ERRCODE_TRANSACTION_ROLLBACK:          // 40: serialization failure, deadlock
+        case ERRCODE_OPERATOR_INTERVENTION:         // 57: cancel, shutdown
+        case ERRCODE_CONNECTION_EXCEPTION:          // 08
+            return DBRES_BUSY;
+        case ERRCODE_INSUFFICIENT_RESOURCES:        // 53
+            return DBRES_NOMEM;
+        case ERRCODE_SYSTEM_ERROR:                  // 58: I/O
+            return DBRES_IOERR;
+    }
+    return DBRES_ERROR;
+}
+
 // Map SPI result codes to DBRES
 static int map_spi_result (int rc) {
     switch (rc) {
@@ -581,6 +614,7 @@ static int map_spi_result (int rc) {
 static void clear_fetch_batch (pg_stmt_t *stmt) {
     if (!stmt) return;
     if (stmt->last_tuptable) {
+        if (SPI_tuptable == stmt->last_tuptable) SPI_tuptable = NULL;
         SPI_freetuptable(stmt->last_tuptable);
         stmt->last_tuptable = NULL;
     }
@@ -854,7 +888,8 @@ static bool database_system_exists (cloudsync_context *data, const char *name, c
       {
           MemoryContextSwitchTo(oldcontext);
           ErrorData *edata = CopyErrorData();
-          cloudsync_set_error(data, edata->message, DBRES_ERROR);
+          cloudsync_set_error(data, edata->message, map_sqlerrcode(edata->sqlerrcode));
+          cloudsync_set_sqlstate(data, edata->sqlerrcode);
           FreeErrorData(edata);
           FlushErrorState();
           exists = false;
@@ -888,7 +923,8 @@ int database_exec (cloudsync_context *data, const char *sql) {
     {
         MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
-        rc = cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        rc = cloudsync_set_error(data, edata->message, map_sqlerrcode(edata->sqlerrcode));
+        cloudsync_set_sqlstate(data, edata->sqlerrcode);
         FreeErrorData(edata);
         FlushErrorState();
         if (SPI_tuptable) {
@@ -924,7 +960,8 @@ int database_exec_callback (cloudsync_context *data, const char *sql, int (*call
     {
         MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
-        rc = cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        rc = cloudsync_set_error(data, edata->message, map_sqlerrcode(edata->sqlerrcode));
+        cloudsync_set_sqlstate(data, edata->sqlerrcode);
         FreeErrorData(edata);
         FlushErrorState();
         is_error = true;
@@ -1143,9 +1180,36 @@ const char *database_errmsg (cloudsync_context *data) {
     return cloudsync_errmsg(data);
 }
 
+void database_log_warning (cloudsync_context *data, const char *message) {
+    ereport(WARNING, (errmsg("cloudsync: %s", message ? message : "")));
+}
+
 bool database_in_transaction (cloudsync_context *data) {
     // In SPI context, we're always in a transaction
     return IsTransactionState();
+}
+
+// Pieces of one value can be applied by concurrent transactions (the server runs one
+// apply job per uploaded chunk), each seeing only its own piece and leaving the value
+// unapplied. Under READ COMMITTED they are serialized per value until commit: the
+// statements after the wait take a new snapshot, so the last one sees every piece.
+// SERIALIZABLE needs no lock: that outcome matches no serial order, so one of the
+// transactions fails with a retryable serialization failure. REPEATABLE READ gets
+// neither guarantee (a waiter would keep its old snapshot), so it is refused.
+// The stale cleanup (SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE) uses the same lock key.
+int database_fragment_lock (cloudsync_context *data, const char *value_id) {
+    if (IsolationIsSerializable()) return DBRES_OK;
+    if (IsolationUsesXactSnapshot()) {
+        int rc = cloudsync_set_error(data, "cloudsync_payload_apply: a fragmented value cannot be applied under REPEATABLE READ, use READ COMMITTED or SERIALIZABLE", DBRES_MISUSE);
+        cloudsync_set_sqlstate(data, ERRCODE_FEATURE_NOT_SUPPORTED);
+        return rc;
+    }
+    dbvm_t *vm = NULL;
+    int rc = databasevm_prepare(data, "SELECT pg_advisory_xact_lock(1129530962, hashtext($1));", &vm, 0);
+    if (rc == DBRES_OK) rc = databasevm_bind_text(vm, 1, value_id, -1);
+    if (rc == DBRES_OK) rc = databasevm_step(vm);
+    if (vm) databasevm_finalize(vm);
+    return (rc == DBRES_ROW) ? DBRES_OK : cloudsync_set_error(data, "cloudsync_payload_apply: unable to lock a fragmented value", rc);
 }
 
 bool database_table_exists (cloudsync_context *data, const char *name, const char *schema) {
@@ -2082,7 +2146,8 @@ int databasevm_prepare (cloudsync_context *data, const char *sql, dbvm_t **vm, i
     {
         MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
-        rc = cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        rc = cloudsync_set_error(data, edata->message, map_sqlerrcode(edata->sqlerrcode));
+        cloudsync_set_sqlstate(data, edata->sqlerrcode);
         FreeErrorData(edata);
         FlushErrorState();
         if (stmt->stmt_mcxt) MemoryContextDelete(stmt->stmt_mcxt);
@@ -2132,7 +2197,8 @@ int databasevm_step0 (pg_stmt_t *stmt) {
         // Switch to safe context for CopyErrorData (can't be ErrorContext)
         MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
-        rc = cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        rc = cloudsync_set_error(data, edata->message, map_sqlerrcode(edata->sqlerrcode));
+        cloudsync_set_sqlstate(data, edata->sqlerrcode);
         FreeErrorData(edata);
         FlushErrorState();
 
@@ -2199,6 +2265,7 @@ int databasevm_step (dbvm_t *vm) {
                 clear_fetch_batch(stmt);
                 
                 SPI_cursor_fetch(stmt->portal, true, 1);
+                stmt->last_tuptable = SPI_tuptable;
                 
                 if (SPI_processed == 0) {
                     clear_fetch_batch(stmt);
@@ -2218,6 +2285,7 @@ int databasevm_step (dbvm_t *vm) {
                 MemoryContextReset(stmt->row_mcxt);
                 
                 stmt->last_tuptable = SPI_tuptable;
+                SPI_tuptable = NULL;
                 stmt->current_tupdesc = stmt->last_tuptable->tupdesc;
                 stmt->current_tuple = stmt->last_tuptable->vals[0];
                 rc = DBRES_ROW;
@@ -2242,6 +2310,7 @@ int databasevm_step (dbvm_t *vm) {
                         // fetch first row
                         clear_fetch_batch(stmt);
                         SPI_cursor_fetch(stmt->portal, true, 1);
+                        stmt->last_tuptable = SPI_tuptable;
                         
                         if (SPI_processed == 0) {
                             // No rows - close portal, don't set portal_open
@@ -2262,6 +2331,7 @@ int databasevm_step (dbvm_t *vm) {
                         MemoryContextReset(stmt->row_mcxt);
                         
                         stmt->last_tuptable = SPI_tuptable;
+                        SPI_tuptable = NULL;
                         stmt->current_tupdesc = stmt->last_tuptable->tupdesc;
                         stmt->current_tuple = stmt->last_tuptable->vals[0];
                         
@@ -2281,6 +2351,7 @@ int databasevm_step (dbvm_t *vm) {
                     rc = cloudsync_set_error(data, "SPI_execute_plan failed", DBRES_ERROR);
                     break;
                 }
+                stmt->changes = SPI_processed;
                 if (SPI_tuptable) {
                     SPI_freetuptable(SPI_tuptable);
                     SPI_tuptable = NULL;
@@ -2298,7 +2369,17 @@ int databasevm_step (dbvm_t *vm) {
     {
         MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
-        int err = cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        // PostgreSQL uses 42501 for both missing privileges and RLS. Only the
+        // executor's WITH CHECK policy rejection is safe to skip during merge — raised
+        // directly, or re-raised by the cloudsync_changes trigger around the merge.
+        // The trigger re-raises every merge error with its original SQLSTATE, so a 42501
+        // from it is a policy denial only when the merge itself reported one.
+        bool policy_denied = edata->sqlerrcode == ERRCODE_INSUFFICIENT_PRIVILEGE && edata->funcname &&
+                             (strcmp(edata->funcname, "ExecWithCheckOptions") == 0 ||
+                              (strcmp(edata->funcname, "cloudsync_changes_insert_trigger") == 0 &&
+                               cloudsync_errcode(data) == DBRES_POLICY_DENIED));
+        int err = cloudsync_set_error(data, edata->message, policy_denied ? DBRES_POLICY_DENIED : map_sqlerrcode(edata->sqlerrcode));
+        cloudsync_set_sqlstate(data, edata->sqlerrcode);
         FreeErrorData(edata);
         FlushErrorState();
         
@@ -2320,10 +2401,7 @@ void databasevm_finalize (dbvm_t *vm) {
     {
         clear_fetch_batch(stmt);
         close_portal(stmt);
-        if (SPI_tuptable) {
-            SPI_freetuptable(SPI_tuptable);
-            SPI_tuptable = NULL;
-        }
+        // Only free this statement's tuple table, never another active cursor's.
         
         if (stmt->plan_is_prepared && stmt->plan) {
             SPI_freeplan(stmt->plan);
@@ -2350,14 +2428,11 @@ void databasevm_reset (dbvm_t *vm) {
     clear_fetch_batch(stmt);
     close_portal(stmt);
 
-    // Clear global SPI tuple table if any
-    if (SPI_tuptable) {
-        SPI_freetuptable(SPI_tuptable);
-        SPI_tuptable = NULL;
-    }
+    // Non-row results are freed by step(); cursor results belong to last_tuptable.
 
     // Reset execution state
     stmt->executed_nonselect = false;
+    stmt->changes = 0;
 
     // Reset parameter values but keep the plan, types, and nparams intact.
     // The prepared plan can be reused with new values of the same types,
@@ -2385,6 +2460,10 @@ void databasevm_clear_bindings (dbvm_t *vm) {
         stmt->values[i] = (Datum) 0;
         stmt->nulls[i] = 'n';   // default NULL
     }
+}
+
+int64_t databasevm_changes (dbvm_t *vm) {
+    return vm ? (int64_t)((pg_stmt_t *)vm)->changes : 0;
 }
 
 const char *databasevm_sql (dbvm_t *vm) {
@@ -2976,20 +3055,65 @@ static int database_refresh_snapshot (void) {
     return DBRES_OK;
 }
 
+// BeginInternalSubTransaction leaves CurrentResourceOwner and CurrentMemoryContext
+// pointing at the subtransaction, and releasing or rolling it back leaves them at the
+// parent *transaction's* owner and context — not at the ones the caller was running
+// with. Any resource the calling statement acquires or releases afterwards (a buffer
+// pin of the scan feeding cloudsync_payload_apply, say) is then charged to the wrong
+// owner: "buffer pin ... is not owned by resource owner TopTransaction". So, as the
+// procedural languages do, remember both at the start of each subtransaction and
+// restore them when it ends. Indexed by nesting level so an owner never leaks across
+// a subtransaction that was aborted elsewhere.
+#define CLOUDSYNC_SAVEPOINT_MAX_DEPTH 128
+static ResourceOwner savepoint_owner[CLOUDSYNC_SAVEPOINT_MAX_DEPTH];
+static MemoryContext savepoint_context[CLOUDSYNC_SAVEPOINT_MAX_DEPTH];
+
+// Only the outermost savepoint opened here may swap the active snapshot when it ends: a
+// snapshot pushed while an enclosing savepoint is still open belongs to that
+// subtransaction, and rolling the enclosing one back pops it — in place of the caller's
+// snapshot the swap popped, leaving the caller's portal without one (an assertion
+// failure in EnsurePortalSnapshotExists). Nested, advancing the command counter is
+// enough to make the changes visible: every SPI statement takes a fresh snapshot.
+// True when the subtransaction at level is nested inside another savepoint opened here.
+static bool savepoint_is_nested (int level) {
+    for (int k = 2; k < level && k < CLOUDSYNC_SAVEPOINT_MAX_DEPTH; k++) {
+        if (savepoint_owner[k]) return true;
+    }
+    return false;
+}
+
+static void savepoint_restore_caller (int level) {
+    if (level <= 0 || level >= CLOUDSYNC_SAVEPOINT_MAX_DEPTH || !savepoint_owner[level]) return;
+    MemoryContextSwitchTo(savepoint_context[level]);
+    CurrentResourceOwner = savepoint_owner[level];
+    savepoint_owner[level] = NULL;
+    savepoint_context[level] = NULL;
+}
+
 int database_begin_savepoint (cloudsync_context *data, const char *savepoint_name) {
     cloudsync_reset_error(data);
     int rc = DBRES_OK;
 
     MemoryContext oldcontext = CurrentMemoryContext;
+    ResourceOwner oldowner = CurrentResourceOwner;
     PG_TRY();
     {
         BeginInternalSubTransaction(NULL);
+        int level = GetCurrentTransactionNestLevel();
+        if (level > 0 && level < CLOUDSYNC_SAVEPOINT_MAX_DEPTH) {
+            savepoint_owner[level] = oldowner;
+            savepoint_context[level] = oldcontext;
+        }
+        // Keep allocating in the caller's context; the subtransaction's resource owner
+        // stays current so what the savepoint acquires is released with it.
+        MemoryContextSwitchTo(oldcontext);
     }
     PG_CATCH();
     {
         MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
-        rc = cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        rc = cloudsync_set_error(data, edata->message, map_sqlerrcode(edata->sqlerrcode));
+        cloudsync_set_sqlstate(data, edata->sqlerrcode);
         FreeErrorData(edata);
         FlushErrorState();
     }
@@ -3004,19 +3128,23 @@ int database_commit_savepoint (cloudsync_context *data, const char *savepoint_na
     int rc = DBRES_OK;
 
     MemoryContext oldcontext = CurrentMemoryContext;
+    int level = GetCurrentTransactionNestLevel();
     PG_TRY();
     {
         ReleaseCurrentSubTransaction();
-        database_refresh_snapshot();
+        bool nested = savepoint_is_nested(level);
+        savepoint_restore_caller(level);
+        if (nested) CommandCounterIncrement();
+        else database_refresh_snapshot();
     }
     PG_CATCH();
     {
         MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
-        cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        rc = cloudsync_set_error(data, edata->message, map_sqlerrcode(edata->sqlerrcode));
+        cloudsync_set_sqlstate(data, edata->sqlerrcode);
         FreeErrorData(edata);
         FlushErrorState();
-        rc = DBRES_ERROR;
     }
     PG_END_TRY();
 
@@ -3029,19 +3157,23 @@ int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_
     int rc = DBRES_OK;
 
     MemoryContext oldcontext = CurrentMemoryContext;
+    int level = GetCurrentTransactionNestLevel();
     PG_TRY();
     {
         RollbackAndReleaseCurrentSubTransaction();
-        database_refresh_snapshot();
+        bool nested = savepoint_is_nested(level);
+        savepoint_restore_caller(level);
+        if (nested) CommandCounterIncrement();
+        else database_refresh_snapshot();
     }
     PG_CATCH();
     {
         MemoryContextSwitchTo(oldcontext);
         ErrorData *edata = CopyErrorData();
-        cloudsync_set_error(data, edata->message, DBRES_ERROR);
+        rc = cloudsync_set_error(data, edata->message, map_sqlerrcode(edata->sqlerrcode));
+        cloudsync_set_sqlstate(data, edata->sqlerrcode);
         FreeErrorData(edata);
         FlushErrorState();
-        rc = DBRES_ERROR;
     }
     PG_END_TRY();
     

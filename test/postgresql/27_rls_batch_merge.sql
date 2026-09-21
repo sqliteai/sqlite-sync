@@ -277,20 +277,37 @@ SELECT COALESCE(max(db_version), 0) AS max_dbv_5 FROM cloudsync_changes \gset
 -- Apply as test_rls_user with USER1 identity — should be denied (doc4 owned by USER2)
 \connect cloudsync_test_27_b
 \ir helper_psql_conn_setup.sql
+-- read the receive cursor on the target, as superuser, before dropping to the RLS role
+SELECT coalesce((SELECT value::BIGINT FROM cloudsync_settings WHERE key='check_dbversion'), 0) AS ckpt_before_denied \gset
 SET app.current_user_id = :'USER1';
 SET ROLE test_rls_user;
+-- the denial is expected to raise
+\set ON_ERROR_STOP off
 SELECT cloudsync_payload_apply(decode(:'payload_hex_5', 'hex')) AS apply_5 \gset
+\set apply_5_state :SQLSTATE
+\set ON_ERROR_STOP on
 
 -- Reconnect for clean state after expected RLS denial
 \connect cloudsync_test_27_b
 \ir helper_psql_conn_setup.sql
 
--- 1 row × 3 non-PK columns = 3 entries (returned even if denied)
-SELECT (:apply_5::int = 3) AS apply_5_ok \gset
+-- the denial raises 42501 and rolls the statement back
+SELECT (:'apply_5_state' = '42501') AS apply_5_ok \gset
 \if :apply_5_ok
-\echo [PASS] (:testid) RLS auth: denied apply returned :apply_5
+\echo [PASS] (:testid) RLS auth: denied apply raised 42501
 \else
-\echo [FAIL] (:testid) RLS auth: denied apply returned :apply_5 (expected 3)
+\echo [FAIL] (:testid) RLS auth: denied apply ended with SQLSTATE :apply_5_state (expected 42501)
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- The denied rows were never applied, so the cursor must not move past them: a
+-- redelivery once the policy allows them applies them.
+SELECT coalesce((SELECT value::BIGINT FROM cloudsync_settings WHERE key='check_dbversion'), 0) AS ckpt_after_denied \gset
+SELECT (:ckpt_after_denied::bigint = :ckpt_before_denied::bigint) AS ckpt_ok \gset
+\if :ckpt_ok
+\echo [PASS] (:testid) RLS auth: denied apply left the receive checkpoint in place
+\else
+\echo [FAIL] (:testid) RLS auth: denied apply moved the checkpoint to :ckpt_after_denied (expected :ckpt_before_denied)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 

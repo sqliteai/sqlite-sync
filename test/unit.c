@@ -18,6 +18,7 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+#include <dirent.h>
 #endif
 
 #include "pk.h"
@@ -30,6 +31,7 @@
 extern char *OUT_OF_MEMORY_BUFFER;
 extern bool force_vtab_filter_abort;
 extern bool force_uncompressed_blob;
+static char test_directory[192];
 
 void dbvm_reset (dbvm_t *stmt);
 int dbvm_count (dbvm_t *stmt, const char *value, size_t len, int type);
@@ -1130,7 +1132,7 @@ bool do_alter_tables (int table_mask, sqlite3 *db, int alter_version) {
     }
     
     if (table_mask & TEST_NOCOLS) {
-        const char *sql;
+        const char *sql = NULL;
         switch (alter_version) {
             case 1:
                 sql = "SELECT cloudsync_begin_alter('" CUSTOMERS_NOCOLS_TABLE "'); "
@@ -1168,7 +1170,7 @@ bool do_alter_tables (int table_mask, sqlite3 *db, int alter_version) {
     
     if (table_mask & TEST_NOPRIKEYS) {
         // TEST a table with implicit rowid primary key
-        const char *sql;
+        const char *sql = NULL;
         switch (alter_version) {
             case 1:
                 sql = "SELECT cloudsync_begin_alter('customers_noprikey'); "
@@ -1735,7 +1737,7 @@ bool do_test_rowid (int ntest, bool print_result) {
         // for an explanation see https://github.com/sqliteai/sqlite-sync/blob/main/docs/RowID.md
         int64_t db_version = random_int64_range(1, 17179869183);
         int64_t seq = random_int64_range(1, 1073741823);
-        int64_t rowid = (db_version << 30) | seq;
+        int64_t rowid = (int64_t)(((uint64_t)db_version << 30) | (uint64_t)seq);
         
         int64_t value1;
         int64_t value2;
@@ -1747,7 +1749,7 @@ bool do_test_rowid (int ntest, bool print_result) {
     // special case that failed in an old version
     int64_t db_version = 14963874252;
     int64_t seq = 172784902;
-    int64_t rowid = (db_version << 30) | seq;
+    int64_t rowid = (int64_t)(((uint64_t)db_version << 30) | (uint64_t)seq);
     
     int64_t value1;
     int64_t value2;
@@ -2346,11 +2348,7 @@ bool do_test_stale_table_settings(bool cleanup_databases) {
     char dbpath[256];
     time_t timestamp = time(NULL);
 
-    #ifdef __ANDROID__
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-%ld.sqlite", ".", timestamp);
-    #else
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-%ld.sqlite", getenv("HOME"), timestamp);
-    #endif
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-%ld.sqlite", test_directory, timestamp);
 
     // Phase 1: create database, table, and init cloudsync
     sqlite3 *db = NULL;
@@ -2417,11 +2415,7 @@ bool do_test_stale_table_settings_dropped_meta(bool cleanup_databases) {
     char dbpath[256];
     time_t timestamp = time(NULL);
 
-    #ifdef __ANDROID__
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-meta-%ld.sqlite", ".", timestamp);
-    #else
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-meta-%ld.sqlite", getenv("HOME"), timestamp);
-    #endif
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-stale-meta-%ld.sqlite", test_directory, timestamp);
 
     // Phase 1: create database, table, and init cloudsync
     sqlite3 *db = NULL;
@@ -4130,18 +4124,75 @@ sqlite3 *do_create_database (void) {
     return db;
 }
 
+static bool create_test_directory(void) {
+#ifdef _WIN32
+    char base[MAX_PATH];
+    DWORD n = GetTempPathA(sizeof(base), base);
+    if (!n || n >= sizeof(base)) return false;
+    int len = snprintf(test_directory, sizeof(test_directory), "%scloudsync-%lu-%llu", base,
+                       (unsigned long)GetCurrentProcessId(), (unsigned long long)GetTickCount64());
+    return len > 0 && (size_t)len < sizeof(test_directory) && CreateDirectoryA(test_directory, NULL);
+#else
+    const char *base = getenv("TMPDIR");
+    if (!base || !*base) {
+#ifdef __ANDROID__
+        base = "."; // Android test runners execute from /data/local/tmp.
+#else
+        base = "/tmp";
+#endif
+    }
+    int len = snprintf(test_directory, sizeof(test_directory), "%s/cloudsync-test-XXXXXX", base);
+    return len > 0 && (size_t)len < sizeof(test_directory) && mkdtemp(test_directory) != NULL;
+#endif
+}
+
+// Removes the private test directory and everything the tests left in it. The directory
+// is created by this run alone (mkdtemp), so every entry is ours to delete whatever its
+// name. An entry that cannot be deleted (a database still open on Windows, say) is named,
+// so a failed cleanup says what was left behind.
+static bool remove_test_directory(void) {
+    char path[512];
+    bool removed_all = true;
+#ifdef _WIN32
+    WIN32_FIND_DATAA entry;
+    snprintf(path, sizeof(path), "%s\\*", test_directory);
+    HANDLE handle = FindFirstFileA(path, &entry);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    do {
+        if (strcmp(entry.cFileName, ".") == 0 || strcmp(entry.cFileName, "..") == 0) continue;
+        snprintf(path, sizeof(path), "%s\\%s", test_directory, entry.cFileName);
+        if (!DeleteFileA(path)) {
+            fprintf(stderr, "\tunable to delete test file %s\n", path);
+            removed_all = false;
+        }
+    } while (FindNextFileA(handle, &entry));
+    FindClose(handle);
+    return RemoveDirectoryA(test_directory) != 0 && removed_all;
+#else
+    DIR *dir = opendir(test_directory);
+    if (!dir) return false;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        snprintf(path, sizeof(path), "%s/%s", test_directory, entry->d_name);
+        if (unlink(path) != 0) {
+            fprintf(stderr, "\tunable to delete test file %s\n", path);
+            removed_all = false;
+        }
+    }
+    closedir(dir);
+    return rmdir(test_directory) == 0 && removed_all;
+#endif
+}
+
 void do_build_database_path (char buf[256], int i, time_t timestamp, int ntest) {
-    #ifdef __ANDROID__
-    snprintf(buf, 256, "%s/cloudsync-test-%ld-%d-%d.sqlite", ".", timestamp, ntest, i);
-    #else
-    snprintf(buf, 256, "%s/cloudsync-test-%ld-%d-%d.sqlite", getenv("HOME"), timestamp, ntest, i);
-    #endif
+    snprintf(buf, 256, "%s/cloudsync-test-%ld-%d-%d.sqlite", test_directory, timestamp, ntest, i);
 }
 
 sqlite3 *do_create_database_file_v2 (int i, time_t timestamp, int ntest) {
     sqlite3 *db = NULL;
 
-    // open database in home dir
+    // Open database in the private per-run temporary directory.
     char buf[256];
     do_build_database_path(buf, i, timestamp, ntest);
     int rc = sqlite3_open(buf, &db);
@@ -8994,8 +9045,26 @@ finalize:
     return result;
 }
 
-// Test that BEFORE triggers with RAISE(ABORT) simulate RLS denial:
-// per-PK savepoints isolate failures so allowed rows commit and denied rows roll back.
+// Sends every change of source to target in one payload; returns the apply's step code.
+static int rls_merge_step (sqlite3 *source, sqlite3 *target, bool only_locals) {
+    sqlite3_stmt *sel = NULL, *ins = NULL;
+    const char *sel_sql = only_locals
+        ? "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes WHERE site_id=cloudsync_siteid();"
+        : "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes;";
+    int rc = sqlite3_prepare_v2(source, sel_sql, -1, &sel, NULL);
+    if (rc == SQLITE_OK) rc = sqlite3_prepare_v2(target, "SELECT cloudsync_payload_decode(?);", -1, &ins, NULL);
+    if (rc == SQLITE_OK && sqlite3_step(sel) == SQLITE_ROW) {
+        sqlite3_bind_value(ins, 1, sqlite3_column_value(sel, 0));
+        rc = sqlite3_step(ins);
+    }
+    sqlite3_finalize(sel);
+    sqlite3_finalize(ins);
+    return rc;
+}
+
+// Test that BEFORE triggers with RAISE(ABORT) simulate RLS denial: the apply stops at the
+// denied row, the rows before it are kept, the denied PK rolls back, and redelivering
+// after the policy allows it applies the rest.
 bool do_test_rls_trigger_denial (int nclients, bool print_result, bool cleanup_databases, bool only_locals) {
     sqlite3 *db[MAX_SIMULATED_CLIENTS] = {NULL};
     bool result = false;
@@ -9065,27 +9134,10 @@ bool do_test_rls_trigger_denial (int nclients, bool print_result, bool cleanup_d
     rc = sqlite3_exec(db[0], "INSERT INTO tasks VALUES ('t5', 'user2', 'Task 5', 7);", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
 
-    // Merge with partial-failure tolerance: cloudsync_payload_decode returns error
-    // when any PK is denied, but allowed PKs are already committed via per-PK savepoints.
-    {
-        sqlite3_stmt *sel = NULL, *ins = NULL;
-        const char *sel_sql = only_locals
-            ? "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes WHERE site_id=cloudsync_siteid();"
-            : "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes;";
-        rc = sqlite3_prepare_v2(db[0], sel_sql, -1, &sel, NULL);
-        if (rc != SQLITE_OK) { sqlite3_finalize(sel); goto finalize; }
-        rc = sqlite3_prepare_v2(db[1], "SELECT cloudsync_payload_decode(?);", -1, &ins, NULL);
-        if (rc != SQLITE_OK) { sqlite3_finalize(sel); sqlite3_finalize(ins); goto finalize; }
-
-        while (sqlite3_step(sel) == SQLITE_ROW) {
-            sqlite3_value *v = sqlite3_column_value(sel, 0);
-            if (sqlite3_value_type(v) == SQLITE_NULL) continue;
-            sqlite3_bind_value(ins, 1, v);
-            sqlite3_step(ins); // partial failure expected — ignore rc
-            sqlite3_reset(ins);
-        }
-        sqlite3_finalize(sel);
-        sqlite3_finalize(ins);
+    // The payload stops at the denied row (t5, last): t4 before it is kept.
+    if (rls_merge_step(db[0], db[1], only_locals) == SQLITE_ROW) {
+        printf("Phase 2: the denied insert must fail the apply\n");
+        goto finalize;
     }
 
     // Verify: t4 present (user1 → allowed)
@@ -9136,26 +9188,44 @@ bool do_test_rls_trigger_denial (int nclients, bool print_result, bool cleanup_d
     rc = sqlite3_exec(db[0], "UPDATE tasks SET title='Task 2 Hacked', priority=99 WHERE id='t2';", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
 
-    // Merge with partial-failure tolerance (same pattern as phase 2)
+    // The payload still carries the denied t5 insert ahead of the updates: the apply
+    // stops there again and t1's update is not applied.
+    if (rls_merge_step(db[0], db[1], only_locals) == SQLITE_ROW) {
+        printf("Phase 3: the denied insert must fail the apply again\n");
+        goto finalize;
+    }
     {
-        sqlite3_stmt *sel = NULL, *ins = NULL;
-        const char *sel_sql = only_locals
-            ? "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes WHERE site_id=cloudsync_siteid();"
-            : "SELECT cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) FROM cloudsync_changes;";
-        rc = sqlite3_prepare_v2(db[0], sel_sql, -1, &sel, NULL);
-        if (rc != SQLITE_OK) { sqlite3_finalize(sel); goto finalize; }
-        rc = sqlite3_prepare_v2(db[1], "SELECT cloudsync_payload_decode(?);", -1, &ins, NULL);
-        if (rc != SQLITE_OK) { sqlite3_finalize(sel); sqlite3_finalize(ins); goto finalize; }
-
-        while (sqlite3_step(sel) == SQLITE_ROW) {
-            sqlite3_value *v = sqlite3_column_value(sel, 0);
-            if (sqlite3_value_type(v) == SQLITE_NULL) continue;
-            sqlite3_bind_value(ins, 1, v);
-            sqlite3_step(ins); // partial failure expected — ignore rc
-            sqlite3_reset(ins);
+        sqlite3_stmt *stmt = NULL;
+        rc = sqlite3_prepare_v2(db[1], "SELECT priority FROM tasks WHERE id='t1';", -1, &stmt, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); goto finalize; }
+        int priority = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+        if (priority != 3) {
+            printf("Phase 3: t1 must not be updated past the failure (priority=%d)\n", priority);
+            goto finalize;
         }
-        sqlite3_finalize(sel);
-        sqlite3_finalize(ins);
+    }
+
+    // Allow inserts again and redeliver: t5 and t1's update apply, and the apply stops
+    // at t2's denied update (the last change).
+    rc = sqlite3_exec(db[1], "DROP TRIGGER rls_deny_insert;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    if (rls_merge_step(db[0], db[1], only_locals) == SQLITE_ROW) {
+        printf("Phase 3: the denied update must fail the apply\n");
+        goto finalize;
+    }
+    {
+        sqlite3_stmt *stmt = NULL;
+        rc = sqlite3_prepare_v2(db[1], "SELECT COUNT(*) FROM tasks WHERE id='t5';", -1, &stmt, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); goto finalize; }
+        int count = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+        if (count != 1) {
+            printf("Phase 3: t5 expected once inserts are allowed, got %d\n", count);
+            goto finalize;
+        }
     }
 
     // Verify: t1 updated (user1 → allowed)
@@ -9164,7 +9234,8 @@ bool do_test_rls_trigger_denial (int nclients, bool print_result, bool cleanup_d
         rc = sqlite3_prepare_v2(db[1], "SELECT title, priority FROM tasks WHERE id='t1';", -1, &stmt, NULL);
         if (rc != SQLITE_OK) goto finalize;
         if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); goto finalize; }
-        const char *title = (const char *)sqlite3_column_text(stmt, 0);
+        char title[64];
+        snprintf(title, sizeof(title), "%s", (const char *)sqlite3_column_text(stmt, 0));
         int priority = sqlite3_column_int(stmt, 1);
         bool ok = (strcmp(title, "Task 1 Updated") == 0) && (priority == 10);
         sqlite3_finalize(stmt);
@@ -9180,7 +9251,8 @@ bool do_test_rls_trigger_denial (int nclients, bool print_result, bool cleanup_d
         rc = sqlite3_prepare_v2(db[1], "SELECT title, priority FROM tasks WHERE id='t2';", -1, &stmt, NULL);
         if (rc != SQLITE_OK) goto finalize;
         if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); goto finalize; }
-        const char *title = (const char *)sqlite3_column_text(stmt, 0);
+        char title[64];
+        snprintf(title, sizeof(title), "%s", (const char *)sqlite3_column_text(stmt, 0));
         int priority = sqlite3_column_int(stmt, 1);
         bool ok = (strcmp(title, "Task 2") == 0) && (priority == 5);
         sqlite3_finalize(stmt);
@@ -9241,11 +9313,7 @@ bool do_test_block_column_reload(bool cleanup_databases) {
     char dbpath[256];
     time_t timestamp = time(NULL);
 
-    #ifdef __ANDROID__
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blockreload-%ld.sqlite", ".", timestamp);
-    #else
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blockreload-%ld.sqlite", getenv("HOME"), timestamp);
-    #endif
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blockreload-%ld.sqlite", test_directory, timestamp);
 
     // Phase 1: create database, table, init cloudsync, mark a column as block algo.
     // Use a custom delimiter so both "algo" and "delimiter" rows get persisted.
@@ -9346,11 +9414,7 @@ bool do_test_block_lww_existing_data(bool cleanup_databases) {
     char dbpath[256];
     time_t timestamp = time(NULL);
 
-    #ifdef __ANDROID__
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blockexist-%ld.sqlite", ".", timestamp);
-    #else
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blockexist-%ld.sqlite", getenv("HOME"), timestamp);
-    #endif
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blockexist-%ld.sqlite", test_directory, timestamp);
 
     int rc = sqlite3_open(dbpath, &db);
     if (rc != SQLITE_OK) return false;
@@ -13389,6 +13453,10 @@ int test_report(const char *description, bool result){
 }
 
 int main (int argc, const char * argv[]) {
+    if (!create_test_directory()) {
+        fprintf(stderr, "Unable to create private test directory\n");
+        return 1;
+    }
     sqlite3 *db = NULL;
     int result = 0;
     bool print_result = false;
@@ -13589,6 +13657,14 @@ finalize:
     if (memory_used > 0) {
         printf("\tleaked: %" PRId64 " B\n", memory_used);
         result++;
+    }
+
+    if (cleanup_databases) {
+        bool cleaned = remove_test_directory();
+        result += test_report("Temporary Directory Cleanup:", cleaned);
+        if (!cleaned) printf("\tTest databases kept in %s\n", test_directory);
+    } else {
+        printf("Test databases kept in %s\n", test_directory);
     }
     
     return result;

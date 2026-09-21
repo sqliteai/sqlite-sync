@@ -228,18 +228,22 @@ SELECT COALESCE(max(db_version), 0) AS max_dbv_4 FROM cloudsync_changes \gset
 \ir helper_psql_conn_setup.sql
 SET app.current_user_id = :'USER1';
 SET ROLE test_rls_user;
+-- the denial is expected to raise
+\set ON_ERROR_STOP off
 SELECT cloudsync_payload_apply(decode(:'payload_hex_4', 'hex')) AS apply_4 \gset
+\set apply_4_state :SQLSTATE
+\set ON_ERROR_STOP on
 
 -- Reconnect for clean state after expected RLS denial
 \connect cloudsync_test_29_b
 \ir helper_psql_conn_setup.sql
 
--- 1 row × 5 columns = 5 entries in payload (returned even if denied)
-SELECT (:apply_4::int = 5) AS apply_4_ok \gset
+-- the denial raises 42501 and rolls the statement back
+SELECT (:'apply_4_state' = '42501') AS apply_4_ok \gset
 \if :apply_4_ok
-\echo [PASS] (:testid) RLS multicol auth: denied insert apply returned :apply_4
+\echo [PASS] (:testid) RLS multicol auth: denied insert apply raised 42501
 \else
-\echo [FAIL] (:testid) RLS multicol auth: denied insert apply returned :apply_4 (expected 5)
+\echo [FAIL] (:testid) RLS multicol auth: denied insert apply ended with SQLSTATE :apply_4_state (expected 42501)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -313,18 +317,22 @@ SELECT COALESCE(max(db_version), 0) AS max_dbv_6 FROM cloudsync_changes \gset
 \ir helper_psql_conn_setup.sql
 SET app.current_user_id = :'USER1';
 SET ROLE test_rls_user;
+-- the denial is expected to raise
+\set ON_ERROR_STOP off
 SELECT cloudsync_payload_apply(decode(:'payload_hex_6', 'hex')) AS apply_6 \gset
+\set apply_6_state :SQLSTATE
+\set ON_ERROR_STOP on
 
 -- Reconnect for clean state after expected RLS denial
 \connect cloudsync_test_29_b
 \ir helper_psql_conn_setup.sql
 
--- 1 row × 2 changed columns (title, priority) = 2 entries in payload
-SELECT (:apply_6::int = 2) AS apply_6_ok \gset
+-- the denial raises 42501 and rolls the statement back
+SELECT (:'apply_6_state' = '42501') AS apply_6_ok \gset
 \if :apply_6_ok
-\echo [PASS] (:testid) RLS multicol auth: denied update apply returned :apply_6
+\echo [PASS] (:testid) RLS multicol auth: denied update apply raised 42501
 \else
-\echo [FAIL] (:testid) RLS multicol auth: denied update apply returned :apply_6 (expected 2)
+\echo [FAIL] (:testid) RLS multicol auth: denied update apply ended with SQLSTATE :apply_6_state (expected 42501)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -339,7 +347,7 @@ SELECT (:fail::int + 1) AS fail \gset
 \endif
 
 -- ============================================================
--- Test 7: Mixed payload — own + other user's rows (per-PK savepoint)
+-- Test 7: Mixed payload — own + other user's rows (stops at the denied row)
 -- ============================================================
 \connect cloudsync_test_29_a
 \ir helper_psql_conn_setup.sql
@@ -353,35 +361,39 @@ WHERE site_id = cloudsync_siteid()
 
 SELECT COALESCE(max(db_version), 0) AS max_dbv_7 FROM cloudsync_changes \gset
 
--- Apply as test_rls_user with USER1 identity
--- Per-PK savepoint: t6 (USER1) should succeed, t7 (USER2) should be denied
+-- Apply as test_rls_user with USER1 identity: t7 (USER2) is denied, which fails the
+-- statement, so t6 (USER1) before it is rolled back with it
 \connect cloudsync_test_29_b
 \ir helper_psql_conn_setup.sql
 SET app.current_user_id = :'USER1';
 SET ROLE test_rls_user;
+-- the denial is expected to raise
+\set ON_ERROR_STOP off
 SELECT cloudsync_payload_apply(decode(:'payload_hex_7', 'hex')) AS apply_7 \gset
+\set apply_7_state :SQLSTATE
+\set ON_ERROR_STOP on
 
 -- Reconnect for clean verification as superuser
 \connect cloudsync_test_29_b
 \ir helper_psql_conn_setup.sql
 
--- 2 rows × 5 columns = 10 entries in payload
-SELECT (:apply_7::int = 10) AS apply_7_ok \gset
+-- the denial raises 42501 and rolls the statement back
+SELECT (:'apply_7_state' = '42501') AS apply_7_ok \gset
 \if :apply_7_ok
-\echo [PASS] (:testid) RLS multicol auth: mixed payload apply returned :apply_7
+\echo [PASS] (:testid) RLS multicol auth: mixed payload apply raised 42501
 \else
-\echo [FAIL] (:testid) RLS multicol auth: mixed payload apply returned :apply_7 (expected 10)
+\echo [FAIL] (:testid) RLS multicol auth: mixed payload apply ended with SQLSTATE :apply_7_state (expected 42501)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
--- t6 (own row) should exist, t7 (other's row) should NOT
-SELECT COUNT(*) AS t6_exists FROM tasks WHERE id = 't6' AND user_id = :'USER1'::UUID AND title = 'Task 6' \gset
+-- neither row is kept: the failed statement rolled back as a whole
+SELECT COUNT(*) AS t6_exists FROM tasks WHERE id = 't6' \gset
 SELECT COUNT(*) AS t7_exists FROM tasks WHERE id = 't7' \gset
-SELECT (:t6_exists::int = 1 AND :t7_exists::int = 0) AS test7_ok \gset
+SELECT (:t6_exists::int = 0 AND :t7_exists::int = 0) AS test7_ok \gset
 \if :test7_ok
-\echo [PASS] (:testid) RLS multicol auth: mixed payload — per-PK savepoint isolation
+\echo [PASS] (:testid) RLS multicol auth: mixed payload — failed statement kept nothing
 \else
-\echo [FAIL] (:testid) RLS multicol auth: mixed payload — t6=:t6_exists (expect 1) t7=:t7_exists (expect 0)
+\echo [FAIL] (:testid) RLS multicol auth: mixed payload — t6=:t6_exists (expect 0) t7=:t7_exists (expect 0)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 

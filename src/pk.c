@@ -195,13 +195,14 @@ static int pk_decode_data (const uint8_t *buffer, size_t blen, size_t *bseek, si
 }
 
 int pk_decode_double (const uint8_t *buffer, size_t blen, size_t *bseek, double *out) {
-    // Doubles are encoded as IEEE754 64-bit, big-endian.
-    // Convert back to host order before memcpy into double.
+    // Doubles travel as little-endian IEEE754 bytes on every host, unlike integer
+    // fields: pk_decode_uint64 reads the bytes as a big-endian integer, and swapping it
+    // yields the IEEE754 bit pattern whatever the host's byte order.
     
     uint64_t bits_be = 0;
     if (!pk_decode_uint64(buffer, blen, bseek, sizeof(uint64_t), &bits_be)) return 0;
     
-    uint64_t bits = be64_to_host(bits_be);
+    uint64_t bits = bswap64_u64(bits_be);
     double value = 0.0;
     memcpy(&value, &bits, sizeof(bits));
     *out = value;
@@ -527,12 +528,14 @@ char *pk_encode (dbvalue_t **argv, int argc, char *b, bool is_prikey, size_t *bs
             }
                 break;
             case DBTYPE_FLOAT: {
-                // Encode doubles as IEEE754 64-bit, big-endian
+                // Encode doubles as IEEE754 64-bit little-endian bytes on every host.
                 double value = database_value_double(argv[i]);
                 if (value < 0) {value = -value; type = DATABASE_TYPE_NEGATIVE_FLOAT;}
                 uint64_t bits;
                 memcpy(&bits, &value, sizeof(bits));
-                bits = host_to_be64(bits);
+                // pk_encode_uint64 writes big-endian bytes, so the swapped value lands as
+                // the little-endian bytes of the bit pattern, independent of the host.
+                bits = bswap64_u64(bits);
                 bseek = pk_encode_u8(buffer, bseek, (uint8_t)type);
                 bseek = pk_encode_uint64(buffer, bseek, bits, sizeof(bits));
             }

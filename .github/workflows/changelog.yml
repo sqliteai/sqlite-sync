@@ -3,8 +3,12 @@ name: Release and Update Website Changelog
 on:
   push:
     tags:
-      # main.yml creates release tags without a "v" prefix (e.g. 1.1.3)
-      - "*.*.*"
+      # NOTE: this never matches. main.yml creates release tags without a "v"
+      # prefix (e.g. 1.1.3), so the changelog is published by running this
+      # workflow manually. Widening the filter is not enough on its own: the
+      # called workflow derives the version with ${GITHUB_REF#refs/tags/v} and
+      # rejects an unprefixed tag. Fixing it needs a change in changelog-action.
+      - "v*.*.*"
   workflow_dispatch:
     inputs:
       test_version:

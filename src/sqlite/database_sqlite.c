@@ -588,10 +588,19 @@ int database_errcode (cloudsync_context *data) {
     return sqlite3_errcode((sqlite3 *)cloudsync_db(data));
 }
 
+void database_log_warning (cloudsync_context *data, const char *message) {
+    sqlite3_log(SQLITE_WARNING, "cloudsync: %s", message ? message : "");
+}
+
 bool database_in_transaction (cloudsync_context *data) {
     sqlite3 *db = (sqlite3 *)cloudsync_db(data);
     bool in_transaction = (sqlite3_get_autocommit(db) != true);
     return in_transaction;
+}
+
+int database_fragment_lock (cloudsync_context *data, const char *value_id) {
+    // writers are already serialized
+    return DBRES_OK;
 }
 
 bool database_table_exists (cloudsync_context *data, const char *name, const char *schema) {
@@ -1145,6 +1154,10 @@ void databasevm_reset (dbvm_t *vm) {
 
 void databasevm_clear_bindings (dbvm_t *vm) {
     sqlite3_clear_bindings((sqlite3_stmt *)vm);
+}
+
+int64_t databasevm_changes (dbvm_t *vm) {
+    return (int64_t)sqlite3_changes64(sqlite3_db_handle((sqlite3_stmt *)vm));
 }
 
 const char *databasevm_sql (dbvm_t *vm) {

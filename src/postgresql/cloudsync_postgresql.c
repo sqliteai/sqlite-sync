@@ -154,6 +154,14 @@ void _PG_fini (void) {
 // MARK: - Public SQL Functions -
 
 // cloudsync_version() - Returns extension version
+// SQLSTATE for an error raised from the cloudsync context: the database error's own
+// SQLSTATE when there is one, so callers can still react to a serialization failure,
+// a deadlock or a constraint violation; internal_error for cloudsync's own failures.
+static int cloudsync_error_sqlstate (cloudsync_context *data) {
+    int sqlstate = cloudsync_sqlstate(data);
+    return sqlstate ? sqlstate : ERRCODE_INTERNAL_ERROR;
+}
+
 PG_FUNCTION_INFO_V1(cloudsync_version);
 Datum cloudsync_version (PG_FUNCTION_ARGS) {
     UNUSED_PARAMETER(fcinfo);
@@ -258,7 +266,7 @@ Datum cloudsync_db_version (PG_FUNCTION_ARGS) {
                 ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                     errmsg("cloudsync is not initialized: call SELECT cloudsync_init('<table_name>') to enable sync on a table before calling cloudsync_db_version().")));
             }
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to retrieve db_version (%s)", database_errmsg(data))));
+            ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("Unable to retrieve db_version (%s)", database_errmsg(data))));
         }
 
         version = cloudsync_dbversion(data);
@@ -305,7 +313,7 @@ Datum cloudsync_db_version_next (PG_FUNCTION_ARGS) {
                 ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                     errmsg("cloudsync is not initialized: call SELECT cloudsync_init('<table_name>') to enable sync on a table before calling cloudsync_db_version_next().")));
             }
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+            ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)),
                 errmsg("Unable to retrieve next_db_version (%s)", database_errmsg(data))));
         }
     }
@@ -338,7 +346,7 @@ static bytea *cloudsync_init_internal (cloudsync_context *data, const char *tabl
         // Begin savepoint for transactional init
         int rc = database_begin_savepoint(data, "cloudsync_init");
         if (rc != DBRES_OK) {
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to create cloudsync_init savepoint: %s", database_errmsg(data))));
+            ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("Unable to create cloudsync_init savepoint: %s", database_errmsg(data))));
         }
 
         // Initialize table for sync
@@ -348,7 +356,7 @@ static bytea *cloudsync_init_internal (cloudsync_context *data, const char *tabl
         if (rc == DBRES_OK) {
             rc = database_commit_savepoint(data, "cloudsync_init");
             if (rc != DBRES_OK) {
-                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to release cloudsync_init savepoint: %s", database_errmsg(data))));
+                ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("Unable to release cloudsync_init savepoint: %s", database_errmsg(data))));
             }
 
             // Persist schema to settings now that the settings table exists
@@ -510,7 +518,7 @@ Datum pg_cloudsync_cleanup (PG_FUNCTION_ARGS) {
     }
     if (spi_connected) SPI_finish();
     if (rc != DBRES_OK) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+        ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
     }
 
     PG_RETURN_BOOL(true);
@@ -671,7 +679,7 @@ Datum cloudsync_set_column (PG_FUNCTION_ARGS) {
         if (key && value && strcmp(key, "algo") == 0 && strcmp(value, "block") == 0) {
             int rc = cloudsync_setup_block_column(data, tbl, col, NULL, true);
             if (rc != DBRES_OK) {
-                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+                ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
             }
         } else {
             // Handle delimiter setting: cloudsync_set_column('tbl', 'col', 'delimiter', '\n\n')
@@ -884,7 +892,7 @@ Datum pg_cloudsync_begin_alter (PG_FUNCTION_ARGS) {
     SPI_finish();
     if (rc != DBRES_OK) {
         ereport(ERROR,
-                (errcode(ERRCODE_INTERNAL_ERROR),
+                (errcode(cloudsync_error_sqlstate(data)),
                  errmsg("%s", cloudsync_errmsg(data))));
     }
     PG_RETURN_BOOL(true);
@@ -931,13 +939,13 @@ Datum pg_cloudsync_commit_alter (PG_FUNCTION_ARGS) {
     if (rc != DBRES_OK) {
         // Rollback savepoint (SPI disconnected, no warning)
         database_rollback_savepoint(data, "cloudsync_alter");
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+        ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
     }
 
     // Release savepoint (SPI disconnected, no warning)
     rc = database_commit_savepoint(data, "cloudsync_alter");
     if (rc != DBRES_OK) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("Unable to release cloudsync_alter savepoint: %s", database_errmsg(data))));
+        ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("Unable to release cloudsync_alter savepoint: %s", database_errmsg(data))));
     }
 
     // Phase 2: reconnect SPI for post-commit work
@@ -989,7 +997,7 @@ Datum cloudsync_payload_encode_transfn (PG_FUNCTION_ARGS) {
     if (argc > 0) {
         int rc = cloudsync_payload_encode_step(payload, data, argc, (dbvalue_t **)argv);
         if (rc != DBRES_OK) {
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+            ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
         }
     }
 
@@ -1014,7 +1022,7 @@ Datum cloudsync_payload_encode_finalfn (PG_FUNCTION_ARGS) {
 
     int rc = cloudsync_payload_encode_final(payload, data);
     if (rc != DBRES_OK) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+        ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
     }
 
     int64_t blob_size = 0;
@@ -1191,9 +1199,9 @@ static bytea *payload_chunks_emit_pg_fragment(PayloadChunksState *st, cloudsync_
         VARDATA_ANY(st->site_id), VARSIZE_ANY_EXHDR(st->site_id),
         st->cl, st->seq,
         st->frag_checksum, st->frag_total, st->frag_part, st->frag_count);
-    if (rc != DBRES_OK) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+    if (rc != DBRES_OK) ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
     rc = cloudsync_payload_encode_final(payload, data);
-    if (rc != DBRES_OK) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+    if (rc != DBRES_OK) ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
     int64 blob_size = 0;
     char *blob = cloudsync_payload_blob(payload, &blob_size, rows);
     bytea *result = (bytea *)palloc(VARHDRSZ + blob_size);
@@ -1289,7 +1297,7 @@ static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_con
         payload_chunks_make_pgvalues(st, vals, owned_texts);
         int rc = cloudsync_payload_encode_step(payload, data, 9, (dbvalue_t **)vals);
         payload_chunks_free_pgvalues(vals, owned_texts);
-        if (rc != DBRES_OK) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+        if (rc != DBRES_OK) ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
 
         if (cloudsync_payload_context_nrows(payload) == 1) *dbv_min = st->db_version;
         *dbv_max = st->db_version;
@@ -1301,7 +1309,7 @@ static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_con
         return NULL;
     }
     int rc = cloudsync_payload_encode_final(payload, data);
-    if (rc != DBRES_OK) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+    if (rc != DBRES_OK) ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
     int64 blob_size = 0;
     char *blob = cloudsync_payload_blob(payload, &blob_size, rows);
     bytea *result = (bytea *)palloc(VARHDRSZ + blob_size);
@@ -1650,7 +1658,7 @@ Datum cloudsync_payload_blob_checked(PG_FUNCTION_ARGS) {
             int rc = cloudsync_payload_encode_step(payload, data, 9, (dbvalue_t **)vals);
             payload_chunks_free_pgvalues(vals, owned_texts);
             if (rc != DBRES_OK) {
-                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+                ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
             }
             payload_chunks_free_current(&encode_st);
         }
@@ -1659,7 +1667,7 @@ Datum cloudsync_payload_blob_checked(PG_FUNCTION_ARGS) {
         encode_st.portal = NULL;
 
         int rc = cloudsync_payload_encode_final(payload, data);
-        if (rc != DBRES_OK) ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+        if (rc != DBRES_OK) ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
         int64 blob_size = 0;
         char *blob = cloudsync_payload_blob(payload, &blob_size, NULL);
         if (spi_connected) {
@@ -1741,7 +1749,7 @@ Datum cloudsync_payload_decode (PG_FUNCTION_ARGS) {
     if (spi_connected) SPI_finish();
     if (rc != DBRES_OK) {
         if (payload_data) pfree(payload_data);
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", cloudsync_errmsg(data))));
+        ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
     }
     if (payload_data) pfree(payload_data);
     PG_RETURN_INT32(nrows);
@@ -2125,50 +2133,7 @@ Datum cloudsync_insert (PG_FUNCTION_ARGS) {
             // Process each non-primary key column for insert or update
             for (int i = 0; i < table_count_cols(table); i++) {
                 if (table_col_algo(table, i) == col_algo_block) {
-                    // Block column: read value from base table, split into blocks, store each block
-                    dbvm_t *val_vm = table_column_lookup(table, table_colname(table, i), false, NULL);
-                    if (!val_vm) { rc = DBRES_ERROR; break; }
-
-                    int bind_rc = pk_decode_prikey(cleanup.pk, pklen, pk_decode_bind_callback, (void *)val_vm);
-                    if (bind_rc < 0) { databasevm_reset(val_vm); rc = DBRES_ERROR; break; }
-
-                    int step_rc = databasevm_step(val_vm);
-                    if (step_rc == DBRES_ROW) {
-                        const char *text = database_column_text(val_vm, 0);
-                        const char *delim = table_col_delimiter(table, i);
-                        const char *col = table_colname(table, i);
-
-                        block_list_t *blocks = block_split(text ? text : "", delim);
-                        if (blocks) {
-                            char **positions = block_initial_positions(blocks->count);
-                            if (positions) {
-                                for (int b = 0; b < blocks->count; b++) {
-                                    char *block_cn = block_build_colname(col, positions[b]);
-                                    if (block_cn) {
-                                        rc = local_mark_insert_or_update_meta(table, cleanup.pk, pklen, block_cn, db_version, cloudsync_bumpseq(data));
-
-                                        // Store block value in blocks table
-                                        dbvm_t *wvm = table_block_value_write_stmt(table);
-                                        if (wvm && rc == DBRES_OK) {
-                                            databasevm_bind_blob(wvm, 1, cleanup.pk, (int)pklen);
-                                            databasevm_bind_text(wvm, 2, block_cn, -1);
-                                            databasevm_bind_text(wvm, 3, blocks->entries[b].content, -1);
-                                            databasevm_step(wvm);
-                                            databasevm_reset(wvm);
-                                        }
-
-                                        cloudsync_memory_free(block_cn);
-                                    }
-                                    cloudsync_memory_free(positions[b]);
-                                    if (rc != DBRES_OK) break;
-                                }
-                                cloudsync_memory_free(positions);
-                            }
-                            block_list_free(blocks);
-                        }
-                    }
-                    databasevm_reset(val_vm);
-                    if (step_rc == DBRES_ROW || step_rc == DBRES_DONE) { if (rc == DBRES_OK) continue; }
+                    rc = local_block_insert(data, table, cleanup.pk, pklen, i, db_version);
                     if (rc != DBRES_OK) break;
                 } else {
                     rc = local_mark_insert_or_update_meta(table, cleanup.pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
@@ -2178,7 +2143,7 @@ Datum cloudsync_insert (PG_FUNCTION_ARGS) {
         }
 
         if (rc != DBRES_OK) {
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", database_errmsg(data))));
+            ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", database_errmsg(data))));
         }
     }
     PG_END_ENSURE_ERROR_CLEANUP(cloudsync_pg_cleanup, PointerGetDatum(&cleanup));
@@ -2257,7 +2222,7 @@ Datum cloudsync_delete (PG_FUNCTION_ARGS) {
         }
 
         if (rc != DBRES_OK) {
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", database_errmsg(data))));
+            ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", database_errmsg(data))));
         }
     }
     PG_END_ENSURE_ERROR_CLEANUP(cloudsync_pg_cleanup, PointerGetDatum(&cleanup));
@@ -2476,93 +2441,8 @@ Datum cloudsync_update_finalfn (PG_FUNCTION_ARGS) {
 
             if (dbutils_value_compare((dbvalue_t *)payload->old_values[col_index], (dbvalue_t *)payload->new_values[col_index]) != 0) {
                 if (table_col_algo(table, i) == col_algo_block) {
-                    // Block column: diff old and new text, emit per-block metadata changes
-                    const char *new_text = (const char *)database_value_text(payload->new_values[col_index]);
-                    const char *delim = table_col_delimiter(table, i);
-                    const char *col = table_colname(table, i);
-
-                    // Read existing blocks from blocks table
-                    block_list_t *old_blocks = block_list_create_empty();
-                    char *like_pattern = block_build_colname(col, "%");
-                    if (like_pattern && old_blocks) {
-                        char *list_sql = cloudsync_memory_mprintf(
-                            "SELECT col_name, col_value FROM %s WHERE pk = $1 AND col_name LIKE $2 ORDER BY col_name COLLATE \"C\"",
-                            table_blocks_ref(table));
-                        if (list_sql) {
-                            dbvm_t *list_vm = NULL;
-                            if (databasevm_prepare(data, list_sql, &list_vm, 0) == DBRES_OK) {
-                                databasevm_bind_blob(list_vm, 1, pk, (int)pklen);
-                                databasevm_bind_text(list_vm, 2, like_pattern, -1);
-                                while (databasevm_step(list_vm) == DBRES_ROW) {
-                                    const char *bcn = database_column_text(list_vm, 0);
-                                    const char *bval = database_column_text(list_vm, 1);
-                                    const char *pos = block_extract_position_id(bcn);
-                                    if (pos && old_blocks) {
-                                        block_list_add(old_blocks, bval ? bval : "", pos);
-                                    }
-                                }
-                                databasevm_finalize(list_vm);
-                            }
-                            cloudsync_memory_free(list_sql);
-                        }
-                    }
-
-                    // Split new text into parts (NULL text = all blocks removed)
-                    block_list_t *new_blocks = new_text ? block_split(new_text, delim) : block_list_create_empty();
-                    if (new_blocks && old_blocks) {
-                        // Build array of new content strings (NULL when count is 0)
-                        const char **new_parts = NULL;
-                        if (new_blocks->count > 0) {
-                            new_parts = (const char **)cloudsync_memory_alloc(
-                                (uint64_t)(new_blocks->count * sizeof(char *)));
-                            if (new_parts) {
-                                for (int b = 0; b < new_blocks->count; b++) {
-                                    new_parts[b] = new_blocks->entries[b].content;
-                                }
-                            }
-                        }
-
-                        if (new_parts || new_blocks->count == 0) {
-                            block_diff_t *diff = block_diff(old_blocks->entries, old_blocks->count,
-                                                             new_parts, new_blocks->count);
-                            if (diff) {
-                                for (int d = 0; d < diff->count; d++) {
-                                    block_diff_entry_t *de = &diff->entries[d];
-                                    char *block_cn = block_build_colname(col, de->position_id);
-                                    if (!block_cn) continue;
-
-                                    if (de->type == BLOCK_DIFF_ADDED || de->type == BLOCK_DIFF_MODIFIED) {
-                                        rc = local_mark_insert_or_update_meta(table, pk, pklen, block_cn,
-                                                                              db_version, cloudsync_bumpseq(data));
-                                        // Store block value
-                                        if (rc == DBRES_OK && table_block_value_write_stmt(table)) {
-                                            dbvm_t *wvm = table_block_value_write_stmt(table);
-                                            databasevm_bind_blob(wvm, 1, pk, (int)pklen);
-                                            databasevm_bind_text(wvm, 2, block_cn, -1);
-                                            databasevm_bind_text(wvm, 3, de->content, -1);
-                                            databasevm_step(wvm);
-                                            databasevm_reset(wvm);
-                                        }
-                                    } else if (de->type == BLOCK_DIFF_REMOVED) {
-                                        // Mark block as deleted in metadata (even col_version)
-                                        rc = local_mark_delete_block_meta(table, pk, pklen, block_cn,
-                                                                          db_version, cloudsync_bumpseq(data));
-                                        // Remove from blocks table
-                                        if (rc == DBRES_OK) {
-                                            block_delete_value_external(data, table, pk, pklen, block_cn);
-                                        }
-                                    }
-                                    cloudsync_memory_free(block_cn);
-                                    if (rc != DBRES_OK) break;
-                                }
-                                block_diff_free(diff);
-                            }
-                            if (new_parts) cloudsync_memory_free((void *)new_parts);
-                        }
-                    }
-                    if (new_blocks) block_list_free(new_blocks);
-                    if (old_blocks) block_list_free(old_blocks);
-                    if (like_pattern) cloudsync_memory_free(like_pattern);
+                    rc = local_block_update(data, table, pk, pklen, i,
+                        (const char *)database_value_text(payload->new_values[col_index]), db_version, false);
                     if (rc != DBRES_OK) goto cleanup;
                 } else {
                     rc = local_mark_insert_or_update_meta(table, pk, pklen, table_colname(table, i), db_version, cloudsync_bumpseq(data));
@@ -2591,7 +2471,7 @@ cleanup:
     if (spi_connected) SPI_finish();
 
     if (rc != DBRES_OK) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("%s", database_errmsg(data))));
+        ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", database_errmsg(data))));
     }
 
     PG_RETURN_BOOL(true);
@@ -3004,7 +2884,7 @@ Datum cloudsync_col_value(PG_FUNCTION_ARGS) {
     }
 
     databasevm_reset(vm);
-    ereport(ERROR, (errmsg("cloudsync_col_value error: %s", cloudsync_errmsg(data))));
+    ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("cloudsync_col_value error: %s", cloudsync_errmsg(data))));
     PG_RETURN_NULL(); // unreachable, silences compiler
 }
 
@@ -3065,7 +2945,7 @@ Datum cloudsync_text_materialize (PG_FUNCTION_ARGS) {
 
         int rc = block_materialize_column(data, table, cleanup.pk, (int)pklen, col_name);
         if (rc != DBRES_OK) {
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+            ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)),
                             errmsg("%s", cloudsync_errmsg(data))));
         }
     }
@@ -3595,8 +3475,15 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
         } else {
             rc = merge_insert (data, table, VARDATA_ANY(insert_pk), insert_pk_len, insert_cl, insert_name, col_value, insert_col_version, insert_db_version, VARDATA_ANY(insert_site_id), insert_site_id_len, insert_seq, &rowid);
         }
+        if (rc == DBRES_POLICY_DENIED) {
+            // Keep a row-level security denial's SQLSTATE: cloudsync_payload_apply stops
+            // on it, as on every other failed write, and raises it to the caller.
+            ereport(ERROR, (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+                            errmsg("Error during merge_insert: %s", database_errmsg(data))));
+        }
         if (rc != DBRES_OK) {
-            ereport(ERROR, (errmsg("Error during merge_insert: %s", database_errmsg(data))));
+            ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)),
+                            errmsg("Error during merge_insert: %s", database_errmsg(data))));
         }
 
         pgvalue_free(col_value);

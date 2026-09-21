@@ -133,14 +133,26 @@ const char * const SQL_PAYLOAD_FRAGMENTS_SELECT =
     "SELECT fragment, tbl, pk, col_name, col_version, db_version, site_id, cl, seq, checksum "
     "FROM cloudsync_payload_fragments WHERE value_id=$1 ORDER BY part_index ASC;";
 
+const char * const SQL_PAYLOAD_FRAGMENTS_EXISTS =
+    "SELECT 1 FROM cloudsync_payload_fragments WHERE value_id=$1 LIMIT 1;";
+
 const char * const SQL_PAYLOAD_FRAGMENTS_DELETE =
     "DELETE FROM cloudsync_payload_fragments WHERE value_id=$1;";
 
 const char * const SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE =
-    "DELETE FROM cloudsync_payload_fragments "
-    "WHERE created_at < $1 AND value_id IN ("
+    // Materialize the bounded candidate set BEFORE trying advisory locks. These locks
+    // live until transaction end; locking every stale value can exhaust PostgreSQL's
+    // shared lock table and roll back the entire cleanup, leaving a large backlog
+    // permanently stuck. Later cleanup calls drain another batch. Do not loop over
+    // batches here: releasing a savepoint does not release transaction-level locks.
+    "WITH stale AS MATERIALIZED ("
     "SELECT value_id FROM cloudsync_payload_fragments GROUP BY value_id "
-    "HAVING COUNT(*) < MAX(part_count));";
+    "HAVING MAX(created_at) < $1 AND COUNT(*) < MAX(part_count) "
+    "ORDER BY value_id LIMIT 64) "
+    "DELETE FROM cloudsync_payload_fragments WHERE value_id IN ("
+    "SELECT value_id FROM stale "
+    // skip a value another transaction is applying (see database_fragment_lock)
+    "WHERE pg_try_advisory_xact_lock(1129530962, hashtext(value_id)));";
 
 // MARK: Additional SQL constants for PostgreSQL
 
@@ -475,14 +487,7 @@ const char * const SQL_BLOCKS_LIST_ALIVE =
     "AND m.pk = $3 AND m.col_name LIKE $4 AND m.col_version %% 2 = 1 "
     "ORDER BY b.col_name COLLATE \"C\"";
 
-const char * const SQL_BLOCKS_INSERT_IGNORE =
-    "INSERT INTO %s (pk, col_name, col_value) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING";
-
 const char * const SQL_META_SCAN_COL_FOR_MIGRATION =
     "SELECT DISTINCT m.pk FROM %s m "
     "WHERE m.col_name = $1 AND m.col_version %% 2 = 1 "
     "AND NOT EXISTS (SELECT 1 FROM %s b WHERE b.pk = m.pk AND b.col_name LIKE $2)";
-
-const char * const SQL_META_INSERT_BLOCK_IGNORE =
-    "INSERT INTO %s (pk, col_name, col_version, db_version, seq, site_id) "
-    "VALUES ($1, $2, $3, $4, $5, 0) ON CONFLICT DO NOTHING";

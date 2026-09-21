@@ -15,15 +15,11 @@ When flushing a batch, CloudSync chooses the statement type based on whether the
 - **New row**: `INSERT ... ON CONFLICT DO UPDATE` — all columns are present (including the ownership column), so the INSERT `WITH CHECK` policy can evaluate correctly.
 - **Existing row**: `UPDATE ... SET ... WHERE pk = ...` — only the changed columns are set. The UPDATE `USING` policy checks the existing row, which already has the correct ownership column value.
 
-### Per-PK savepoint isolation
+### Denied writes
 
-Each primary key's flush is wrapped in its own savepoint. When RLS denies a write:
+When RLS denies a write, `cloudsync_payload_apply` stops at that change and raises the policy's error (SQLSTATE `42501`). No later change in the payload is applied, and the failed statement is rolled back, so the payload leaves no rows or sync metadata behind and the receive checkpoint does not move.
 
-1. The database raises an error inside the savepoint
-2. CloudSync rolls back that savepoint, releasing all resources acquired during the failed statement
-3. Processing continues with the next primary key
-
-This means a single payload can contain a mix of allowed and denied rows — allowed rows commit normally, denied rows are silently skipped. The caller receives the total number of column changes processed (including denied ones) rather than an error.
+Once the policy allows the rows (or the rows it depends on have been applied), deliver the same payload again: it applies in full. A policy that depends on rows later in the same payload, such as a membership row that grants access to the rows before it, is not retried within the payload.
 
 ## Quick Setup
 
@@ -119,7 +115,7 @@ SET ROLE authenticated;
 SELECT cloudsync_payload_apply(decode(:payload_hex, 'hex'));
 ```
 
-The insert is denied by RLS. The row does not appear in DB B. No error is raised to the caller — CloudSync isolates the failure via a per-PK savepoint and continues processing the remaining payload.
+The insert is denied by RLS: `cloudsync_payload_apply` raises `42501` and the row does not appear in DB B.
 
 ### Partial update sync
 
@@ -140,7 +136,7 @@ The UPDATE policy checks the existing row (which has the correct `user_id`), so 
 
 ### Mixed payload
 
-When a single payload contains rows for multiple users, CloudSync handles each primary key independently:
+When a single payload contains rows for multiple users, the first denied row fails the whole apply:
 
 ```sql
 -- On DB A
@@ -151,7 +147,7 @@ INSERT INTO documents VALUES ('doc4', 'user2-uuid', 'Theirs', '...');
 ```sql
 -- On DB B (running as user1)
 SELECT cloudsync_payload_apply(decode(:payload_hex, 'hex'));
--- doc3 is inserted (allowed), doc4 is silently skipped (denied)
+-- ERROR: doc4 is denied (42501); doc3 is rolled back with the statement
 ```
 
 ## Supabase Notes

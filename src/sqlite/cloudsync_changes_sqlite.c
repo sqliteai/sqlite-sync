@@ -275,7 +275,7 @@ int cloudsync_changesvtab_best_index (sqlite3_vtab *vtab, sqlite3_index_info *id
     // +512 for the extra space and for the WHERE and ORDER BY literals
     
     // memory internally manager by SQLite, so I cannot use memory_alloc here
-    size_t slen = (count1 * (11 + 1 + 11 + 1 + 5)) + (count2 * 11 + 1 + 5) + 512;
+    size_t slen = ((size_t)count1 * 32) + ((size_t)count2 * 20) + 512;
     char *s = (char *)sqlite3_malloc64((sqlite3_uint64)slen);
     if (!s) return SQLITE_NOMEM;
     size_t sindex= 0;
@@ -285,7 +285,7 @@ int cloudsync_changesvtab_best_index (sqlite3_vtab *vtab, sqlite3_index_info *id
     int orderconsumed = 1;
     
     // is there a WHERE clause ?
-    if (count1 > 0) sindex += snprintf(s+sindex, slen-sindex, "WHERE ");
+    int accepted = 0;
     
     // check constraints
     for (int i=0; i < count1; ++i) {
@@ -301,7 +301,7 @@ int cloudsync_changesvtab_best_index (sqlite3_vtab *vtab, sqlite3_index_info *id
         if (!opname) continue;
         
         // build next constraint
-        if (i > 0) sindex += snprintf(s+sindex, slen-sindex, " AND ");
+        sindex += snprintf(s+sindex, slen-sindex, accepted++ ? " AND " : "WHERE ");
         
         // handle special case where value is not needed
         if ((op == SQLITE_INDEX_CONSTRAINT_ISNULL) || (op == SQLITE_INDEX_CONSTRAINT_ISNOTNULL)) {
@@ -566,12 +566,12 @@ int cloudsync_changesvtab_insert (sqlite3_vtab *vtab, int argc, sqlite3_value **
     int insert_pk_len = sqlite3_value_bytes(argv[1]);
     const char *insert_name = (sqlite3_value_type(argv[2]) == SQLITE_NULL) ? CLOUDSYNC_TOMBSTONE_VALUE : (const char *)sqlite3_value_text(argv[2]);
     sqlite3_value *insert_value = argv[3];
-    int64_t insert_col_version = (int64_t)sqlite3_value_int(argv[4]);
-    int64_t insert_db_version = (int64_t)sqlite3_value_int(argv[5]);
+    int64_t insert_col_version = sqlite3_value_int64(argv[4]);
+    int64_t insert_db_version = sqlite3_value_int64(argv[5]);
     const char *insert_site_id = (const char *)sqlite3_value_blob(argv[6]);
     int insert_site_id_len = sqlite3_value_bytes(argv[6]);
-    int64_t insert_cl = (int64_t)sqlite3_value_int(argv[7]);
-    int64_t insert_seq = (int64_t)sqlite3_value_int(argv[8]);
+    int64_t insert_cl = sqlite3_value_int64(argv[7]);
+    int64_t insert_seq = sqlite3_value_int64(argv[8]);
     
     // perform different logic for each different table algorithm
     if (table_algo_isgos(table)) return cloudsync_changesvtab_insert_gos(vtab, data, table, insert_pk, insert_pk_len, insert_name, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, (int64_t *)rowid);
