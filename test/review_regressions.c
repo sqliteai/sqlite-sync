@@ -567,7 +567,6 @@ static void test_failed_apply_commit(void) {
     CHECK(close_db(source) == SQLITE_OK && close_db(target) == SQLITE_OK);
     const char *files[] = {"commit-busy.db", "commit-busy.db-journal"};
     scratch_remove(files, 2);
-
 }
 
 int main(void) {
