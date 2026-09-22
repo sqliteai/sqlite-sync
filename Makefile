@@ -270,6 +270,8 @@ $(TEST_TARGET): $(TEST_OBJ)
 # Object files
 $(BUILD_RELEASE)/%.o: %.c
 	$(CC) $(CFLAGS) -O3 -fPIC -c $< -o $@
+$(BUILD_TEST)/integration_bootstrap.o: $(TEST_DIR)/integration.c
+
 $(BUILD_TEST)/sqlite3.o: $(SQLITE_DIR)/sqlite3.c
 	$(CC) $(CFLAGS) -DSQLITE_DQS=0 -DSQLITE_CORE -c $< -o $@
 $(BUILD_TEST)/%.o: %.c
@@ -297,9 +299,10 @@ ifneq ($(COVERAGE),false)
 endif
 
 # Run only unit tests
-unittest: $(TARGET) $(DIST_DIR)/unit$(EXE) $(DIST_DIR)/review_regressions$(EXE)
+unittest: $(TARGET) $(DIST_DIR)/unit$(EXE) $(DIST_DIR)/review_regressions$(EXE) $(DIST_DIR)/integration_bootstrap$(EXE)
 	@./$(DIST_DIR)/unit$(EXE)
 	@./$(DIST_DIR)/review_regressions$(EXE)
+	@./$(DIST_DIR)/integration_bootstrap$(EXE)
 
 # Run the SQLite unit and regression suites on a real big-endian host (s390x) under QEMU
 # emulation. The payload and primary-key encodings are byte-order sensitive; this is the

@@ -503,6 +503,72 @@ static void test_block_materialize_errors(void) {
     CHECK(scalar(db, "SELECT body = 'a' || char(10) || 'b' FROM docs WHERE id='1'") == 1);
     CHECK(close_db(db) == SQLITE_OK);
 }
+static void test_failed_apply_commit(void) {
+    const char *schema = "PRAGMA foreign_keys=ON; CREATE TABLE parent(id TEXT PRIMARY KEY);"
+        "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, value TEXT REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);"
+        "SELECT cloudsync_init('t'); CREATE TABLE caller_work(value TEXT);";
+    for (int iteration = 0; iteration < 100; iteration++) {
+        sqlite3 *source = open_db(), *target = open_db();
+        CHECK(sql(source, schema) == SQLITE_OK);
+        CHECK(sql(target, schema) == SQLITE_OK);
+        CHECK(sql(source, "INSERT INTO parent VALUES('valid'),('missing'); INSERT INTO t VALUES('a','valid');"
+                          "INSERT INTO t VALUES('b','missing');") == SQLITE_OK);
+        if (iteration % 2) CHECK(sql(source, "INSERT INTO t VALUES('c','valid');") == SQLITE_OK);
+        CHECK(sql(target, "INSERT INTO parent VALUES('valid');") == SQLITE_OK);
+        CHECK(apply_payload(source, target) == SQLITE_CONSTRAINT);
+        CHECK(sqlite3_get_autocommit(target));
+        CHECK(scalar(target, "SELECT count(*) FROM t WHERE id='b'") == 0);
+        CHECK(scalar(target, "SELECT count(*) FROM t_cloudsync WHERE pk=cloudsync_pk_encode('b')") == 0);
+        CHECK(scalar(target, "SELECT count(*) FROM t WHERE id='a'") == 1);
+        CHECK(scalar(target, "SELECT coalesce((SELECT value FROM cloudsync_settings WHERE key='check_dbversion'),0)") == 0);
+        CHECK(sql(target, "BEGIN; INSERT INTO caller_work VALUES('kept'); COMMIT;") == SQLITE_OK);
+        CHECK(sql(target, "INSERT INTO parent VALUES('missing');") == SQLITE_OK);
+        CHECK(apply_payload(source, target) == SQLITE_ROW);
+        CHECK(scalar(target, "SELECT count(*) FROM t") == 2 + iteration % 2);
+        CHECK(close_db(source) == SQLITE_OK);
+        CHECK(close_db(target) == SQLITE_OK);
+    }
+    // A caller-owned transaction must survive a rejected group unchanged.
+    sqlite3 *source = open_db(), *target = open_db();
+    CHECK(sql(source, schema) == SQLITE_OK && sql(target, schema) == SQLITE_OK);
+    CHECK(sql(source, "INSERT INTO parent VALUES('valid'); INSERT INTO t VALUES('a','valid');") == SQLITE_OK);
+    CHECK(sql(target, "INSERT INTO parent VALUES('valid'); CREATE TRIGGER deny BEFORE INSERT ON t BEGIN SELECT RAISE(ABORT,'denied'); END;"
+                      "BEGIN; INSERT INTO caller_work VALUES('kept'); SAVEPOINT caller_sp;") == SQLITE_OK);
+    CHECK(apply_payload(source, target) == SQLITE_CONSTRAINT);
+    CHECK(!sqlite3_get_autocommit(target));
+    CHECK(scalar(target, "SELECT count(*) FROM caller_work") == 1);
+    CHECK(sql(target, "ROLLBACK TO caller_sp; RELEASE caller_sp; DROP TRIGGER deny;") == SQLITE_OK);
+    CHECK(apply_payload(source, target) == SQLITE_ROW);
+    CHECK(sql(target, "COMMIT") == SQLITE_OK);
+    CHECK(scalar(target, "SELECT count(*) FROM caller_work") == 1);
+    CHECK(close_db(source) == SQLITE_OK && close_db(target) == SQLITE_OK);
+    // A reader permits writes but prevents the outer RELEASE from committing.
+    CHECK(scratch_create());
+    char path[512];
+    snprintf(path, sizeof(path), "%s/commit-busy.db", scratch_dir);
+    source = open_db(); target = NULL;
+    sqlite3 *reader = NULL;
+    CHECK(sqlite3_open(path, &target) == SQLITE_OK);
+    CHECK(sqlite3_cloudsync_init(target, NULL, NULL) == SQLITE_OK);
+    CHECK(sql(source, schema) == SQLITE_OK && sql(target, schema) == SQLITE_OK);
+    CHECK(sql(source, "INSERT INTO parent VALUES('valid'); INSERT INTO t VALUES('a','valid');") == SQLITE_OK);
+    CHECK(sql(target, "INSERT INTO parent VALUES('valid');") == SQLITE_OK);
+    CHECK(sqlite3_open(path, &reader) == SQLITE_OK);
+    for (int i = 0; i < 30; i++) {
+        CHECK(sql(reader, "BEGIN; SELECT * FROM t;") == SQLITE_OK);
+        CHECK(apply_payload(source, target) == SQLITE_BUSY);
+        CHECK(sqlite3_get_autocommit(target));
+        CHECK(scalar(target, "SELECT count(*) FROM t") == 0);
+        CHECK(sql(reader, "ROLLBACK") == SQLITE_OK);
+    }
+    CHECK(apply_payload(source, target) == SQLITE_ROW);
+    CHECK(scalar(target, "SELECT count(*) FROM t") == 1);
+    CHECK(sqlite3_close(reader) == SQLITE_OK);
+    CHECK(close_db(source) == SQLITE_OK && close_db(target) == SQLITE_OK);
+    const char *files[] = {"commit-busy.db", "commit-busy.db-journal"};
+    scratch_remove(files, 2);
+}
+
 int main(void) {
     CHECK(sqlite3_config(SQLITE_CONFIG_GETMALLOC, &memory) == SQLITE_OK);
     sqlite3_mem_methods faults = memory;
@@ -513,6 +579,7 @@ int main(void) {
     test_clocks_and_double();
     test_best_index();
     test_payload_errors();
+    test_failed_apply_commit();
     test_payload_high_compression();
     test_resurrected_group_rollback();
     test_batched_update_missing_row();

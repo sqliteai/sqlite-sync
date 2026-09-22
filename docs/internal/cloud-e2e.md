@@ -18,9 +18,20 @@ gh run watch RUN_ID --repo sqliteai/sqlite-sync --exit-status
 
 A push already starts that workflow, so do not dispatch a second run for the same
 commit unnecessarily. The workflow cancels older runs of the same branch. Avoid
-running another branch or a local process against the shared chunked tenant at the
-same time: the negative-cache test requires an idle, exclusive tenant, and the
-workflow's concurrency group is per branch, not per tenant.
+running a local process or an older workflow against the shared chunked tenant at
+the same time: the negative-cache test requires an idle, exclusive tenant. The
+Linux x86_64 job now takes a shared job-level concurrency lock across branches.
+`queue: max` retains competing validations instead of replacing a pending run;
+other matrix jobs remain parallel. See [GitHub's concurrency documentation](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
+
+Fresh receivers use bounded polling: HTTP 202 while a download is prepared is not
+proof of failure or successful synchronization. Bootstrap checks require received
+rows and the expected fixture data, and reject SQL/protocol errors immediately.
+The negative-cache idle assertion remains strict: any unexpected rows still fail.
+`test/integration_bootstrap.c`, included in `make unittest`, exercises delayed and
+partial delivery, exhaustion of the retry budget, absent data, absent received
+rows, protocol failures, malformed JSON and SQL errors without a cloud connection.
+It also asserts one sync call per attempt and zero outstanding SQLite memory.
 
 Inspect the **linux-x86_64 build + test** job. Only that matrix leg receives
 `INTEGRATION_TEST_CHUNKED_DATABASE_ID`. A green job alone is insufficient: optional

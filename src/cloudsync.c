@@ -4324,12 +4324,13 @@ static bool cloudsync_payload_row_is_block (const cloudsync_pk_decode_bind_conte
            memchr(row->col_name, BLOCK_SEPARATOR, (size_t)row->col_name_len) != NULL;
 }
 
-// Opens the savepoint around a PK group of payload rows (see merge_pending_batch). If it
-// cannot be opened the group runs without one and the flush falls back to its own.
-static void cloudsync_payload_group_open (cloudsync_context *data, merge_pending_batch *batch) {
-    if (batch->group_savepoint) return;
-    batch->group_savepoint = (database_begin_savepoint(data, "cloudsync_merge_group") == DBRES_OK);
-    if (!batch->group_savepoint) cloudsync_reset_error(data);
+// Do not write group metadata unless its rollback boundary was established.
+static int cloudsync_payload_group_open (cloudsync_context *data, merge_pending_batch *batch) {
+    if (batch->group_savepoint) return DBRES_OK;
+    int rc = database_begin_savepoint(data, "cloudsync_merge_group");
+    batch->group_savepoint = (rc == DBRES_OK);
+    if (rc != DBRES_OK) cloudsync_set_error(data, "Unable to start a payload group", rc);
+    return rc;
 }
 
 // Flushes the pending PK group and closes its savepoint: released when the flush
@@ -4537,13 +4538,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         size_t seek = 0;
         int res = pk_decode((char *)buffer, buf_len, ncols, &seek, data->skip_decode_idx, cloudsync_payload_decode_callback, &decoded_context);
         if (res == -1) {
-            cloudsync_payload_group_abandon(data, &batch);
-            data->pending_batch = NULL;
-            if (batch.cached_vm) { databasevm_finalize(batch.cached_vm); batch.cached_vm = NULL; }
-            if (batch.cached_col_names) { cloudsync_memory_free(batch.cached_col_names); batch.cached_col_names = NULL; }
-            if (batch.entries) { cloudsync_memory_free(batch.entries); batch.entries = NULL; }
-            if (in_savepoint) database_rollback_savepoint(data, "cloudsync_payload_apply");
-            rc = DBRES_ERROR;
+            rc = cloudsync_set_error(data, "Unable to decode a payload row", DBRES_ERROR);
             goto cleanup;
         }
 
@@ -4572,8 +4567,6 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         if (in_savepoint && db_version_changed) {
             rc = database_commit_savepoint(data, "cloudsync_payload_apply");
             if (rc != DBRES_OK) {
-                merge_pending_free_entries(&batch);
-                data->pending_batch = NULL;
                 cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to release a savepoint", rc);
                 goto cleanup;
             }
@@ -4583,8 +4576,6 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         if (!in_savepoint && db_version_changed && !database_in_transaction(data)) {
             rc = database_begin_savepoint(data, "cloudsync_payload_apply");
             if (rc != DBRES_OK) {
-                merge_pending_free_entries(&batch);
-                data->pending_batch = NULL;
                 cloudsync_set_error(data, "Error on cloudsync_payload_apply: unable to start a transaction", rc);
                 goto cleanup;
             }
@@ -4609,7 +4600,8 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
             applied = (int)i;
         }
 
-        cloudsync_payload_group_open(data, &batch);
+        fail_rc = cloudsync_payload_group_open(data, &batch);
+        if (fail_rc != DBRES_OK) break;
         int step_rc = cloudsync_payload_apply_row(data, vm);
         buffer += seek;
         buf_len -= seek;
@@ -4648,9 +4640,10 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
                 snprintf(fail_message, sizeof(fail_message), "%s", cloudsync_errmsg(data));
                 fail_sqlstate = cloudsync_sqlstate(data);
             }
+        } else {
+            in_savepoint = false;
         }
     }
-    cloudsync_apply_stats_add(data, applied);
 
     rc = fail_rc;
     if (rc != DBRES_OK) {
@@ -4672,6 +4665,29 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
     }
 
 cleanup:
+    // A failed RELEASE may leave our transaction open. in_savepoint is only set
+    // when apply began the transaction from autocommit mode, so a full rollback
+    // here cannot discard a caller-owned transaction. ROLLBACK TO plus RELEASE
+    // is insufficient: RELEASE can still hit SQLITE_BUSY while ending the write
+    // transaction. Preserve the original error across cleanup.
+    if (rc != DBRES_OK) {
+        char message[1024];
+        snprintf(message, sizeof(message), "%s", cloudsync_errmsg(data));
+        int sqlstate = cloudsync_sqlstate(data);
+        cloudsync_payload_group_abandon(data, &batch);
+        if (in_savepoint) {
+            applied = applied_at_savepoint;
+            if (database_in_transaction(data))
+                database_exec(data, "ROLLBACK");
+        }
+        cloudsync_reset_error(data);
+        cloudsync_set_error(data, message[0] ? message : "Unable to apply payload changes", rc);
+        cloudsync_set_sqlstate(data, sqlstate);
+    }
+    data->pending_batch = NULL;
+    merge_pending_free_entries(&batch);
+    cloudsync_apply_stats_add(data, applied);
+
     // cleanup merge_pending_batch
     if (batch.cached_vm) { databasevm_finalize(batch.cached_vm); batch.cached_vm = NULL; }
     if (batch.cached_col_names) { cloudsync_memory_free(batch.cached_col_names); batch.cached_col_names = NULL; }

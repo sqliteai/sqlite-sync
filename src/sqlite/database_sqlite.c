@@ -1227,7 +1227,8 @@ int database_pk_names (cloudsync_context *data, const char *table_name, char ***
         if (!r[i]) { rc = SQLITE_NOMEM; goto cleanup_r;}
         i++;
     }
-    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    if (rc != SQLITE_DONE) goto cleanup_r;
+    rc = SQLITE_OK;
     
     *names = r;
     *count = rows;
