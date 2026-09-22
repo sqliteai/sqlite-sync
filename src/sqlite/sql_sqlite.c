@@ -189,8 +189,8 @@ const char * const SQL_CLOUDSYNC_UPSERT_RAW_COLVERSION =
     "WHERE 1 "
     "ON CONFLICT DO UPDATE SET "
     "col_version = CASE "
-    "WHEN (col_version %% 2) = (excluded.col_version %% 2) THEN col_version + 2 "
-    "ELSE col_version + 1 END, "
+    "WHEN (\"%w\".col_version %% 2) = (excluded.col_version %% 2) THEN \"%w\".col_version + 2 "
+    "ELSE \"%w\".col_version + 1 END, "
     "db_version = ?, seq = ?, site_id = 0;";
 
 const char * const SQL_CLOUDSYNC_DELETE_PK_EXCEPT_COL =
