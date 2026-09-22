@@ -8,6 +8,6 @@ This removes Cloudsync's fixed depth cap; PostgreSQL's own resource limits still
 
 ## Validation
 
-`test/postgresql/62_deep_savepoints.sql` is included in `full_test.sql`. It exercises depths 1, 125, 126, 127, 128, 256, 1024 and 2048, reads payloads from a heap table, checks rollback, reapplies in the same transaction and commits. It also catches 100 trigger failures at depth 256 and verifies a subsequent successful apply in the same backend.
+`test/postgresql/63_deep_savepoints.sql` is included in `full_test.sql`. It exercises depths 1, 125, 126, 127, 128, 256, 1024 and 2048, reads payloads from a heap table, checks rollback, reapplies in the same transaction and commits. It also catches 100 trigger failures at depth 256 and verifies a subsequent successful apply in the same backend.
 
 The full suite passes all 546 checks on PostgreSQL 15.19, 17.11 and 18.6. Restoring the old implementation reproduces the buffer-owner error at depth 126. These are local database tests, not tests of a deployed cloud server.

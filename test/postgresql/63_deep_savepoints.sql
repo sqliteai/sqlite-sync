@@ -1,20 +1,20 @@
 -- Exercise caller-owned buffers across internal subtransactions at deep nesting.
-\set testid '62-deep-savepoints'
+\set testid '63-deep-savepoints'
 \ir helper_test_init.sql
 \connect postgres
 \ir helper_psql_conn_setup.sql
-DROP DATABASE IF EXISTS cloudsync_test_62_source;
-DROP DATABASE IF EXISTS cloudsync_test_62_target;
-CREATE DATABASE cloudsync_test_62_source;
-CREATE DATABASE cloudsync_test_62_target;
-\connect cloudsync_test_62_source
+DROP DATABASE IF EXISTS cloudsync_test_63_source;
+DROP DATABASE IF EXISTS cloudsync_test_63_target;
+CREATE DATABASE cloudsync_test_63_source;
+CREATE DATABASE cloudsync_test_63_target;
+\connect cloudsync_test_63_source
 \ir helper_psql_conn_setup.sql
 CREATE EXTENSION cloudsync;
 CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, value TEXT);
 SELECT cloudsync_init('t');
 INSERT INTO t SELECT i::text, repeat('value', 50) FROM generate_series(1, 20) i;
 SELECT encode(cloudsync_payload_encode(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq),'hex') AS payload FROM cloudsync_changes \gset
-\connect cloudsync_test_62_target
+\connect cloudsync_test_63_target
 \ir helper_psql_conn_setup.sql
 CREATE EXTENSION cloudsync;
 CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, value TEXT);
@@ -290,5 +290,5 @@ SELECT (:fail::int + 1) AS fail \gset
 \echo [FAIL] (:testid) error recovery
 \endif
 \connect postgres
-DROP DATABASE cloudsync_test_62_source;
-DROP DATABASE cloudsync_test_62_target;
+DROP DATABASE cloudsync_test_63_source;
+DROP DATABASE cloudsync_test_63_target;
