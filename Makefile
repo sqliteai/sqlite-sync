@@ -357,6 +357,17 @@ sync-bench: $(TARGET) $(DIST_DIR)/sync_bench$(EXE)
 sync-bench-debug:
 	$(MAKE) NETWORK_TRACE=1 sync-bench
 
+# Time the positional /check drain on a locally generated window. Separate from
+# the test targets because timings are machine-dependent; it needs no network.
+chunk-bench: $(TARGET) $(DIST_DIR)/chunk_bench$(EXE)
+	@if [ -n "$(CHUNK_BENCH_ROWS)" ]; then export CHUNK_BENCH_ROWS="$(CHUNK_BENCH_ROWS)"; fi; \
+	if [ -n "$(CHUNK_BENCH_ROW_BYTES)" ]; then export CHUNK_BENCH_ROW_BYTES="$(CHUNK_BENCH_ROW_BYTES)"; fi; \
+	if [ -n "$(CHUNK_BENCH_TXNS)" ]; then export CHUNK_BENCH_TXNS="$(CHUNK_BENCH_TXNS)"; fi; \
+	if [ -n "$(CHUNK_BENCH_REPEATS)" ]; then export CHUNK_BENCH_REPEATS="$(CHUNK_BENCH_REPEATS)"; fi; \
+	if [ -n "$(CHUNK_BENCH_CHUNK_SIZE)" ]; then export CHUNK_BENCH_CHUNK_SIZE="$(CHUNK_BENCH_CHUNK_SIZE)"; fi; \
+	if [ -n "$(CHUNK_BENCH_VERBOSE)" ]; then export CHUNK_BENCH_VERBOSE="$(CHUNK_BENCH_VERBOSE)"; fi; \
+	./$(DIST_DIR)/chunk_bench$(EXE)
+
 OPENSSL_TARBALL = $(OPENSSL_DIR)/$(OPENSSL_VERSION).tar.gz
 
 $(OPENSSL_TARBALL):
