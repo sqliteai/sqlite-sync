@@ -4,6 +4,7 @@ services:
       context: ../..
       dockerfile: docker/postgresql/Dockerfile.debug-no-optimization
     container_name: cloudsync-postgres
+    command: postgres -c listen_addresses=*
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
