@@ -11482,6 +11482,60 @@ fail:
 }
 
 // Test: Payload-based sync for block columns (vs row-by-row do_merge_values)
+// REPLACE skips delete triggers by default: removed blocks must not survive.
+bool do_test_block_lww_replace(void) {
+    const char *values[] = {"ZZZ", "", NULL, "one\ntwo\nthree\nfour", "same\nsame", "last\n"};
+    for (int recursive = 0; recursive <= 1; recursive++) {
+        sqlite3 *db[2] = {do_create_database(), do_create_database()};
+        bool ok = false;
+        for (int i = 0; i < 2; i++) {
+            if (!db[i]) goto cleanup;
+            const char *ddl = "CREATE TABLE docs(id TEXT PRIMARY KEY NOT NULL, body TEXT, other TEXT);"
+                "SELECT cloudsync_init('docs');"
+                "SELECT cloudsync_set_column('docs','body','algo','block');"
+                "SELECT cloudsync_set_column('docs','other','algo','block');"
+                "INSERT INTO docs VALUES('untouched','keep','also keep');";
+            if (sqlite3_exec(db[i], ddl, NULL, NULL, NULL) != SQLITE_OK) goto cleanup;
+            if (recursive && sqlite3_exec(db[i], "PRAGMA recursive_triggers=ON", NULL, NULL, NULL) != SQLITE_OK) goto cleanup;
+        }
+        for (int round = 0; round < 60; round++) {
+            // An UPDATE introduces fractional positions not present in initial inserts.
+            const char *seed = "INSERT OR REPLACE INTO docs VALUES('a','AAA\nBBB\nCCC','side\ncolumn');"
+                "UPDATE docs SET body='AAA\ninserted\nBBB\nCCC' WHERE id='a';";
+            if (sqlite3_exec(db[0], seed, NULL, NULL, NULL) != SQLITE_OK) goto cleanup;
+            if (!do_merge_using_payload(db[0], db[1], false, true)) goto cleanup;
+            const char *value = values[round % 6];
+            char *query = sqlite3_mprintf("INSERT OR REPLACE INTO docs VALUES('a',%Q,'side\ncolumn')", value);
+            int rc = sqlite3_exec(db[0], query, NULL, NULL, NULL);
+            sqlite3_free(query);
+            if (rc != SQLITE_OK) goto cleanup;
+            for (int delivery = 0; delivery < 2; delivery++) {
+                if (!do_merge_using_payload(db[0], db[1], false, true)) goto cleanup;
+            }
+            for (int i = 0; i < 2; i++) {
+                if (sqlite3_exec(db[i], "SELECT cloudsync_text_materialize('docs','body','a');", NULL, NULL, NULL) != SQLITE_OK) goto cleanup;
+                query = sqlite3_mprintf("SELECT body IS %Q AND other='side\ncolumn' FROM docs WHERE id='a'", value ? value : "");
+                int64_t match = do_select_int(db[i], query);
+                sqlite3_free(query);
+                if (match != 1 || do_select_int(db[i], "SELECT body='keep' AND other='also keep' FROM docs WHERE id='untouched'") != 1) {
+                    printf("replace: recursive=%d round=%d replica=%d mismatch\n", recursive, round, i);
+                    goto cleanup;
+                }
+            }
+        }
+        // A failed block write must roll back the base row and retired blocks.
+        if (sqlite3_exec(db[0], "CREATE TRIGGER reject_block BEFORE INSERT ON docs_cloudsync_blocks BEGIN SELECT RAISE(ABORT,'injected block failure'); END;", NULL, NULL, NULL) != SQLITE_OK) goto cleanup;
+        if (sqlite3_exec(db[0], "INSERT OR REPLACE INTO docs VALUES('a','rejected','other')", NULL, NULL, NULL) == SQLITE_OK) goto cleanup;
+        if (sqlite3_exec(db[0], "DROP TRIGGER reject_block; SELECT cloudsync_text_materialize('docs','body','a');", NULL, NULL, NULL) != SQLITE_OK) goto cleanup;
+        if (do_select_int(db[0], "SELECT body='last\n' AND other='side\ncolumn' FROM docs WHERE id='a'") != 1) goto cleanup;
+        ok = true;
+cleanup:
+        for (int i = 0; i < 2; i++) if (db[i]) close_db(db[i]);
+        if (!ok) return false;
+    }
+    return true;
+}
+
 bool do_test_block_lww_payload_sync(int nclients, bool print_result, bool cleanup_databases) {
     sqlite3 *db[2] = {NULL, NULL};
     time_t timestamp = time(NULL);
@@ -14137,6 +14191,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Test Block LWW Del vs Edit:", do_test_block_lww_delete_vs_edit(2, print_result, cleanup_databases));
     result += test_report("Test Block LWW TwoBlockCols:", do_test_block_lww_two_block_cols(2, print_result, cleanup_databases));
     result += test_report("Test Block LWW Text->NULL:", do_test_block_lww_text_to_null(2, print_result, cleanup_databases));
+    result += test_report("Test Block LWW Replace:", do_test_block_lww_replace());
     result += test_report("Test Block LWW PayloadSync:", do_test_block_lww_payload_sync(2, print_result, cleanup_databases));
     result += test_report("Test Block LWW Idempotent:", do_test_block_lww_idempotent(2, print_result, cleanup_databases));
     result += test_report("Test Block LWW Ordering:", do_test_block_lww_ordering(2, print_result, cleanup_databases));
