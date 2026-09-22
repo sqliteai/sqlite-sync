@@ -13689,6 +13689,67 @@ finalize:
     return result;
 }
 
+bool do_test_block_replace_sync (int nclients, bool print_result, bool cleanup_databases) {
+    sqlite3 *db[2] = {NULL, NULL};
+    bool result = false;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter;
+
+    for (int i = 0; i < 2; i++) {
+        db[i] = do_create_database_file(i, timestamp, test_counter++);
+        if (!db[i]) return false;
+
+        int rc = sqlite3_exec(db[i], "CREATE TABLE docs (id TEXT NOT NULL PRIMARY KEY, body TEXT);", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_init('docs');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        rc = sqlite3_exec(db[i], "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    if (sqlite3_exec(db[0], "INSERT INTO docs VALUES ('d1', 'L1' || char(10) || 'L2');", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+    if (!do_merge_using_payload(db[0], db[1], false, true)) goto finalize;
+
+    // INSERT OR REPLACE rewrites every block of the row while its metadata still
+    // exists. Each rewrite must keep the block live (odd col_version): an
+    // unconditional bump tombstoned them, and the peer then dropped the row.
+    if (sqlite3_exec(db[0], "INSERT OR REPLACE INTO docs VALUES ('d1', 'N1' || char(10) || 'N2');", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+
+    int64_t tombstoned = do_select_int(db[0],
+        "SELECT COUNT(*) FROM docs_cloudsync_blocks b "
+        "JOIN docs_cloudsync m ON b.pk = m.pk AND b.col_name = m.col_name "
+        "WHERE m.col_version % 2 = 0;");
+    if (tombstoned != 0) {
+        printf("block_replace_sync: %" PRId64 " stored block(s) marked as deleted after INSERT OR REPLACE\n", tombstoned);
+        goto finalize;
+    }
+
+    if (!do_merge_using_payload(db[0], db[1], false, true)) goto finalize;
+
+    const char *query = "SELECT id, body FROM docs ORDER BY id;";
+    result = do_compare_queries(db[0], query, db[1], query, -1, -1, print_result);
+
+    if (result) {
+        int64_t count = do_select_int(db[1], "SELECT COUNT(*) FROM docs WHERE id = 'd1' AND body = 'N1' || char(10) || 'N2';");
+        if (count != 1) {
+            printf("block_replace_sync: expected the replaced body on the peer, count=%" PRId64 "\n", count);
+            result = false;
+        }
+    }
+
+finalize:
+    for (int i = 0; i < 2; i++) {
+        if (db[i]) close_db(db[i]);
+        if (cleanup_databases) {
+            char buf[256];
+            do_build_database_path(buf, i, timestamp, saved_counter++);
+            file_delete_internal(buf);
+        }
+    }
+    return result;
+}
+
 bool do_test_delete_resurrect_multi_cycle (int nclients, bool print_result, bool cleanup_databases) {
     sqlite3 *db[3] = {NULL, NULL, NULL};
     bool result = false;
@@ -14095,6 +14156,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("CL Tiebreak Test:", do_test_causal_length_tiebreak(3, print_result, cleanup_databases));
     result += test_report("Delete/Resurrect Order:", do_test_delete_resurrect_ordering(3, print_result, cleanup_databases));
     result += test_report("Delete/Resurrect Multi-Cycle:", do_test_delete_resurrect_multi_cycle(3, print_result, cleanup_databases));
+    result += test_report("Block Replace Sync:", do_test_block_replace_sync(2, print_result, cleanup_databases));
     result += test_report("Large Composite PK Test:", do_test_large_composite_pk(2, print_result, cleanup_databases));
     result += test_report("Schema Hash Mismatch:", do_test_schema_hash_mismatch(2, print_result, cleanup_databases));
     result += test_report("Stale Table Settings:", do_test_stale_table_settings(cleanup_databases));
