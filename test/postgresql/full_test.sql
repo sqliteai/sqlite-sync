@@ -71,6 +71,7 @@
 \ir 61_fragment_cleanup_backlog.sql
 \ir 62_deferred_fk_caller_commit.sql
 \ir 63_deep_savepoints.sql
+\ir 64_block_rewrite_leftovers.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

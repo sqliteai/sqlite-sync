@@ -4719,35 +4719,39 @@ int local_block_update(cloudsync_context *data, cloudsync_table_context *table,
     const char *col = table_colname(table, column);
     block_list_t *old = block_list_create_empty();
     block_list_t *next = (text || initial) ? block_split(text ? text : "", table_col_delimiter(table, column)) : block_list_create_empty();
+    // Blocks already stored for this column. An update diffs against them; a write of a
+    // whole row keeps them out of the diff — it rewrites the column from its first
+    // position — and retires below whatever the new value does not cover. A row can hold
+    // them at that point because deleting a row keeps its block values, and SQLite's
+    // INSERT OR REPLACE skips the delete trigger altogether.
+    block_list_t *stored = block_list_create_empty();
     block_diff_t *diff = NULL;
     const char **parts = NULL;
     dbvm_t *vm = NULL;
     char *sql = NULL;
-    if (!old || !next) goto done;
-    if (!initial) {
+    if (!old || !next || !stored) goto done;
 #ifdef CLOUDSYNC_POSTGRESQL_BUILD
-        sql = cloudsync_memory_mprintf("SELECT col_name, col_value FROM %s WHERE pk=$1 ORDER BY col_name COLLATE \"C\"", table_blocks_ref(table));
+    sql = cloudsync_memory_mprintf("SELECT col_name, col_value FROM %s WHERE pk=$1 ORDER BY col_name COLLATE \"C\"", table_blocks_ref(table));
 #else
-        sql = cloudsync_memory_mprintf("SELECT col_name, col_value FROM %s WHERE pk=?1 ORDER BY col_name COLLATE BINARY", table_blocks_ref(table));
+    sql = cloudsync_memory_mprintf("SELECT col_name, col_value FROM %s WHERE pk=?1 ORDER BY col_name COLLATE BINARY", table_blocks_ref(table));
 #endif
-        if (!sql) goto done;
-        rc = databasevm_prepare(data, sql, &vm, 0);
-        if (rc != DBRES_OK) goto done;
-        rc = databasevm_bind_blob(vm, 1, pk, (int)pklen);
-        if (rc != DBRES_OK) goto done;
-        while ((rc = databasevm_step(vm)) == DBRES_ROW) {
-            const char *name = database_column_text(vm, 0);
-            const char *value = database_column_text(vm, 1);
-            const char *pos = block_extract_position_id(name);
-            /* Literal prefix comparison: SQL LIKE would mix columns containing % or _. */
-            if (pos && (size_t)(pos - name - 1) == strlen(col) && memcmp(name, col, strlen(col)) == 0) {
-                if (!block_list_add(old, value ? value : "", pos)) { rc = DBRES_NOMEM; goto done; }
-            }
+    if (!sql) goto done;
+    rc = databasevm_prepare(data, sql, &vm, 0);
+    if (rc != DBRES_OK) goto done;
+    rc = databasevm_bind_blob(vm, 1, pk, (int)pklen);
+    if (rc != DBRES_OK) goto done;
+    while ((rc = databasevm_step(vm)) == DBRES_ROW) {
+        const char *name = database_column_text(vm, 0);
+        const char *value = database_column_text(vm, 1);
+        const char *pos = block_extract_position_id(name);
+        /* Literal prefix comparison: SQL LIKE would mix columns containing % or _. */
+        if (pos && (size_t)(pos - name - 1) == strlen(col) && memcmp(name, col, strlen(col)) == 0) {
+            if (!block_list_add(initial ? stored : old, value ? value : "", pos)) { rc = DBRES_NOMEM; goto done; }
         }
-        if (rc != DBRES_DONE) goto done;
-        databasevm_finalize(vm);
-        vm = NULL;
     }
+    if (rc != DBRES_DONE) goto done;
+    databasevm_finalize(vm);
+    vm = NULL;
     rc = DBRES_NOMEM;
     if (next->count) {
         parts = cloudsync_memory_alloc((uint64_t)next->count * sizeof(*parts));
@@ -4778,6 +4782,22 @@ int local_block_update(cloudsync_context *data, cloudsync_table_context *table,
         cloudsync_memory_free(name);
         if (rc != DBRES_OK) break;
     }
+    // Retire the stored blocks the new value left untouched: their positions were not
+    // rewritten above, so they would stay live here and reach the peers as content.
+    for (int i = 0; rc == DBRES_OK && i < stored->count; i++) {
+        const char *pos = stored->entries[i].position_id;
+        bool rewritten = false;
+        for (int j = 0; j < diff->count && !rewritten; j++) {
+            rewritten = (diff->entries[j].type != BLOCK_DIFF_REMOVED &&
+                         strcmp(diff->entries[j].position_id, pos) == 0);
+        }
+        if (rewritten) continue;
+        char *name = block_build_colname(col, pos);
+        if (!name) { rc = DBRES_NOMEM; break; }
+        rc = local_mark_delete_block_meta(table, pk, pklen, name, version, cloudsync_bumpseq(data));
+        if (rc == DBRES_OK) rc = block_delete_value_external(data, table, pk, pklen, name);
+        cloudsync_memory_free(name);
+    }
 done:
     if (vm) databasevm_finalize(vm);
     cloudsync_memory_free(sql);
@@ -4785,6 +4805,7 @@ done:
     block_diff_free(diff);
     block_list_free(old);
     block_list_free(next);
+    block_list_free(stored);
     if (rc != DBRES_OK) {
         char message[512];
         snprintf(message, sizeof(message), "Unable to write the blocks of column \"%s\" of table \"%s\"", col, table->name);
