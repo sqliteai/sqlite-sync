@@ -568,6 +568,67 @@ static void test_failed_apply_commit(void) {
     const char *files[] = {"commit-busy.db", "commit-busy.db-journal"};
     scratch_remove(files, 2);
 }
+static void test_block_group_atomicity(void) {
+    const char *schema = "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, owner TEXT, body TEXT);"
+        "SELECT cloudsync_init('t'); SELECT cloudsync_set_column('t','body','algo','block');"
+        "CREATE TABLE caller_work(value TEXT);";
+    // Insert, update and resurrection; every block position; caller and internal
+    // transactions. Repeat with varying payload sizes to exercise batch reuse.
+    for (int trial = 0; trial < 120; trial++) {
+        int mode = trial % 3, blocks = 3 + (trial / 3) % 8;
+        int denied = (trial * 7) % blocks;
+        bool caller = (trial / 24) % 2;
+        sqlite3 *source = open_db(), *target = open_db();
+        CHECK(sql(source, schema) == SQLITE_OK && sql(target, schema) == SQLITE_OK);
+        if (mode) {
+            CHECK(sql(source, "INSERT INTO t VALUES('a','old','old body');") == SQLITE_OK);
+            CHECK(apply_payload(source, target) == SQLITE_ROW);
+            if (mode == 2) {
+                CHECK(sql(source, "DELETE FROM t;") == SQLITE_OK);
+                CHECK(apply_payload(source, target) == SQLITE_ROW);
+            }
+        }
+        char body[1024] = {0}, stmt[2048];
+        for (int j = 0; j < blocks; j++) {
+            char part[64];
+            snprintf(part, sizeof(part), "%sblock-%d-trial-%d", j ? "\n" : "", j, trial);
+            strcat(body, part);
+        }
+        snprintf(stmt, sizeof(stmt), "INSERT INTO t VALUES('a','new','%s') ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,body=excluded.body;", body);
+        CHECK(sql(source, stmt) == SQLITE_OK);
+        CHECK(sql(target, "CREATE TEMP TABLE before_meta AS SELECT * FROM t_cloudsync;"
+                          "CREATE TEMP TABLE before_blocks AS SELECT * FROM t_cloudsync_blocks;"
+                          "CREATE TEMP TABLE before_data AS SELECT * FROM t;") == SQLITE_OK);
+        int64_t checkpoint = scalar(target, "SELECT coalesce((SELECT value FROM cloudsync_settings WHERE key='check_dbversion'),0)");
+        snprintf(stmt, sizeof(stmt), "CREATE TRIGGER deny_block BEFORE INSERT ON t_cloudsync_blocks "
+                 "WHEN NEW.col_value='block-%d-trial-%d' BEGIN SELECT RAISE(ABORT,'block rejected'); END", denied, trial);
+        CHECK(sql(target, stmt) == SQLITE_OK);
+        if (caller) CHECK(sql(target, "BEGIN; INSERT INTO caller_work VALUES('kept'); SAVEPOINT caller_sp;") == SQLITE_OK);
+        int rejected_rc = apply_payload(source, target);
+        CHECK(rejected_rc != SQLITE_ROW);
+        CHECK(strstr(sqlite3_errmsg(target), "block rejected") != NULL);
+        CHECK(sqlite3_get_autocommit(target) == !caller);
+        CHECK(scalar(target, "SELECT count(*) FROM (SELECT * FROM t EXCEPT SELECT * FROM before_data)") == 0);
+        CHECK(scalar(target, "SELECT count(*) FROM (SELECT * FROM before_data EXCEPT SELECT * FROM t)") == 0);
+        CHECK(scalar(target, "SELECT count(*) FROM (SELECT * FROM t_cloudsync EXCEPT SELECT * FROM before_meta)") == 0);
+        CHECK(scalar(target, "SELECT count(*) FROM (SELECT * FROM before_meta EXCEPT SELECT * FROM t_cloudsync)") == 0);
+        CHECK(scalar(target, "SELECT count(*) FROM (SELECT * FROM t_cloudsync_blocks EXCEPT SELECT * FROM before_blocks)") == 0);
+        CHECK(scalar(target, "SELECT count(*) FROM (SELECT * FROM before_blocks EXCEPT SELECT * FROM t_cloudsync_blocks)") == 0);
+        CHECK(scalar(target, "SELECT coalesce((SELECT value FROM cloudsync_settings WHERE key='check_dbversion'),0)") == checkpoint);
+        if (caller) {
+            CHECK(scalar(target, "SELECT count(*) FROM caller_work") == 1);
+            CHECK(sql(target, "RELEASE caller_sp;") == SQLITE_OK);
+        }
+        CHECK(sql(target, "DROP TRIGGER deny_block;") == SQLITE_OK);
+        CHECK(apply_payload(source, target) == SQLITE_ROW);
+        snprintf(stmt, sizeof(stmt), "SELECT count(*) FROM t WHERE owner='new' AND body='%s'", body);
+        CHECK(scalar(target, stmt) == 1);
+        CHECK(apply_payload(source, target) == SQLITE_ROW);
+        CHECK(scalar(target, stmt) == 1);
+        if (caller) CHECK(sql(target, "COMMIT") == SQLITE_OK);
+        CHECK(close_db(source) == SQLITE_OK && close_db(target) == SQLITE_OK);
+    }
+}
 
 int main(void) {
     CHECK(sqlite3_config(SQLITE_CONFIG_GETMALLOC, &memory) == SQLITE_OK);
@@ -588,6 +649,7 @@ int main(void) {
     test_block_materialize_errors();
     test_block_migration_orphan();
     test_block_not_null_payload();
+    test_block_group_atomicity();
     test_refill_error();
     test_block_oom();
     cloudsync_memory_finalize();
