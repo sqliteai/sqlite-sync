@@ -25,15 +25,20 @@ INSERT INTO transport SELECT decode(:'payload','hex') FROM generate_series(1, 10
 BEGIN;
 SELECT 'SAVEPOINT user_sp' FROM generate_series(1, 1) \gexec
 -- A heap scan owns the input buffer; an aggregate consumes every apply result.
+-- A failed apply aborts the transaction: report it and recover at user_sp.
+\set ok false
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
 SELECT count(*) = 20 AS ok FROM t \gset
+ROLLBACK TO user_sp;
+\set ON_ERROR_STOP on
 \if :ok
 \echo [PASS] (:testid) apply at depth 1
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) apply at depth 1
+\echo [FAIL] (:testid) apply at depth 1: SQLSTATE :apply_state
 \endif
-ROLLBACK TO user_sp;
 SELECT count(*) = 0 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) rollback at depth 1
@@ -41,29 +46,37 @@ SELECT count(*) = 0 AS ok FROM t \gset
 SELECT (:fail::int + 1) AS fail \gset
 \echo [FAIL] (:testid) rollback at depth 1
 \endif
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
+\set ON_ERROR_STOP on
 COMMIT;
 SELECT count(*) = 20 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) reuse and commit at depth 1
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) reuse and commit at depth 1
+\echo [FAIL] (:testid) reuse and commit at depth 1: SQLSTATE :apply_state
 \endif
 TRUNCATE t, t_cloudsync;
 
 BEGIN;
 SELECT 'SAVEPOINT user_sp' FROM generate_series(1, 125) \gexec
 -- A heap scan owns the input buffer; an aggregate consumes every apply result.
+-- A failed apply aborts the transaction: report it and recover at user_sp.
+\set ok false
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
 SELECT count(*) = 20 AS ok FROM t \gset
+ROLLBACK TO user_sp;
+\set ON_ERROR_STOP on
 \if :ok
 \echo [PASS] (:testid) apply at depth 125
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) apply at depth 125
+\echo [FAIL] (:testid) apply at depth 125: SQLSTATE :apply_state
 \endif
-ROLLBACK TO user_sp;
 SELECT count(*) = 0 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) rollback at depth 125
@@ -71,29 +84,37 @@ SELECT count(*) = 0 AS ok FROM t \gset
 SELECT (:fail::int + 1) AS fail \gset
 \echo [FAIL] (:testid) rollback at depth 125
 \endif
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
+\set ON_ERROR_STOP on
 COMMIT;
 SELECT count(*) = 20 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) reuse and commit at depth 125
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) reuse and commit at depth 125
+\echo [FAIL] (:testid) reuse and commit at depth 125: SQLSTATE :apply_state
 \endif
 TRUNCATE t, t_cloudsync;
 
 BEGIN;
 SELECT 'SAVEPOINT user_sp' FROM generate_series(1, 126) \gexec
 -- A heap scan owns the input buffer; an aggregate consumes every apply result.
+-- A failed apply aborts the transaction: report it and recover at user_sp.
+\set ok false
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
 SELECT count(*) = 20 AS ok FROM t \gset
+ROLLBACK TO user_sp;
+\set ON_ERROR_STOP on
 \if :ok
 \echo [PASS] (:testid) apply at depth 126
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) apply at depth 126
+\echo [FAIL] (:testid) apply at depth 126: SQLSTATE :apply_state
 \endif
-ROLLBACK TO user_sp;
 SELECT count(*) = 0 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) rollback at depth 126
@@ -101,29 +122,37 @@ SELECT count(*) = 0 AS ok FROM t \gset
 SELECT (:fail::int + 1) AS fail \gset
 \echo [FAIL] (:testid) rollback at depth 126
 \endif
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
+\set ON_ERROR_STOP on
 COMMIT;
 SELECT count(*) = 20 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) reuse and commit at depth 126
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) reuse and commit at depth 126
+\echo [FAIL] (:testid) reuse and commit at depth 126: SQLSTATE :apply_state
 \endif
 TRUNCATE t, t_cloudsync;
 
 BEGIN;
 SELECT 'SAVEPOINT user_sp' FROM generate_series(1, 127) \gexec
 -- A heap scan owns the input buffer; an aggregate consumes every apply result.
+-- A failed apply aborts the transaction: report it and recover at user_sp.
+\set ok false
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
 SELECT count(*) = 20 AS ok FROM t \gset
+ROLLBACK TO user_sp;
+\set ON_ERROR_STOP on
 \if :ok
 \echo [PASS] (:testid) apply at depth 127
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) apply at depth 127
+\echo [FAIL] (:testid) apply at depth 127: SQLSTATE :apply_state
 \endif
-ROLLBACK TO user_sp;
 SELECT count(*) = 0 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) rollback at depth 127
@@ -131,29 +160,37 @@ SELECT count(*) = 0 AS ok FROM t \gset
 SELECT (:fail::int + 1) AS fail \gset
 \echo [FAIL] (:testid) rollback at depth 127
 \endif
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
+\set ON_ERROR_STOP on
 COMMIT;
 SELECT count(*) = 20 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) reuse and commit at depth 127
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) reuse and commit at depth 127
+\echo [FAIL] (:testid) reuse and commit at depth 127: SQLSTATE :apply_state
 \endif
 TRUNCATE t, t_cloudsync;
 
 BEGIN;
 SELECT 'SAVEPOINT user_sp' FROM generate_series(1, 128) \gexec
 -- A heap scan owns the input buffer; an aggregate consumes every apply result.
+-- A failed apply aborts the transaction: report it and recover at user_sp.
+\set ok false
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
 SELECT count(*) = 20 AS ok FROM t \gset
+ROLLBACK TO user_sp;
+\set ON_ERROR_STOP on
 \if :ok
 \echo [PASS] (:testid) apply at depth 128
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) apply at depth 128
+\echo [FAIL] (:testid) apply at depth 128: SQLSTATE :apply_state
 \endif
-ROLLBACK TO user_sp;
 SELECT count(*) = 0 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) rollback at depth 128
@@ -161,29 +198,37 @@ SELECT count(*) = 0 AS ok FROM t \gset
 SELECT (:fail::int + 1) AS fail \gset
 \echo [FAIL] (:testid) rollback at depth 128
 \endif
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
+\set ON_ERROR_STOP on
 COMMIT;
 SELECT count(*) = 20 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) reuse and commit at depth 128
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) reuse and commit at depth 128
+\echo [FAIL] (:testid) reuse and commit at depth 128: SQLSTATE :apply_state
 \endif
 TRUNCATE t, t_cloudsync;
 
 BEGIN;
 SELECT 'SAVEPOINT user_sp' FROM generate_series(1, 256) \gexec
 -- A heap scan owns the input buffer; an aggregate consumes every apply result.
+-- A failed apply aborts the transaction: report it and recover at user_sp.
+\set ok false
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
 SELECT count(*) = 20 AS ok FROM t \gset
+ROLLBACK TO user_sp;
+\set ON_ERROR_STOP on
 \if :ok
 \echo [PASS] (:testid) apply at depth 256
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) apply at depth 256
+\echo [FAIL] (:testid) apply at depth 256: SQLSTATE :apply_state
 \endif
-ROLLBACK TO user_sp;
 SELECT count(*) = 0 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) rollback at depth 256
@@ -191,29 +236,37 @@ SELECT count(*) = 0 AS ok FROM t \gset
 SELECT (:fail::int + 1) AS fail \gset
 \echo [FAIL] (:testid) rollback at depth 256
 \endif
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
+\set ON_ERROR_STOP on
 COMMIT;
 SELECT count(*) = 20 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) reuse and commit at depth 256
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) reuse and commit at depth 256
+\echo [FAIL] (:testid) reuse and commit at depth 256: SQLSTATE :apply_state
 \endif
 TRUNCATE t, t_cloudsync;
 
 BEGIN;
 SELECT 'SAVEPOINT user_sp' FROM generate_series(1, 1024) \gexec
 -- A heap scan owns the input buffer; an aggregate consumes every apply result.
+-- A failed apply aborts the transaction: report it and recover at user_sp.
+\set ok false
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
 SELECT count(*) = 20 AS ok FROM t \gset
+ROLLBACK TO user_sp;
+\set ON_ERROR_STOP on
 \if :ok
 \echo [PASS] (:testid) apply at depth 1024
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) apply at depth 1024
+\echo [FAIL] (:testid) apply at depth 1024: SQLSTATE :apply_state
 \endif
-ROLLBACK TO user_sp;
 SELECT count(*) = 0 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) rollback at depth 1024
@@ -221,29 +274,37 @@ SELECT count(*) = 0 AS ok FROM t \gset
 SELECT (:fail::int + 1) AS fail \gset
 \echo [FAIL] (:testid) rollback at depth 1024
 \endif
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
+\set ON_ERROR_STOP on
 COMMIT;
 SELECT count(*) = 20 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) reuse and commit at depth 1024
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) reuse and commit at depth 1024
+\echo [FAIL] (:testid) reuse and commit at depth 1024: SQLSTATE :apply_state
 \endif
 TRUNCATE t, t_cloudsync;
 
 BEGIN;
 SELECT 'SAVEPOINT user_sp' FROM generate_series(1, 2048) \gexec
 -- A heap scan owns the input buffer; an aggregate consumes every apply result.
+-- A failed apply aborts the transaction: report it and recover at user_sp.
+\set ok false
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
 SELECT count(*) = 20 AS ok FROM t \gset
+ROLLBACK TO user_sp;
+\set ON_ERROR_STOP on
 \if :ok
 \echo [PASS] (:testid) apply at depth 2048
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) apply at depth 2048
+\echo [FAIL] (:testid) apply at depth 2048: SQLSTATE :apply_state
 \endif
-ROLLBACK TO user_sp;
 SELECT count(*) = 0 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) rollback at depth 2048
@@ -251,14 +312,17 @@ SELECT count(*) = 0 AS ok FROM t \gset
 SELECT (:fail::int + 1) AS fail \gset
 \echo [FAIL] (:testid) rollback at depth 2048
 \endif
+\set ON_ERROR_STOP off
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set apply_state :SQLSTATE
+\set ON_ERROR_STOP on
 COMMIT;
 SELECT count(*) = 20 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) reuse and commit at depth 2048
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) reuse and commit at depth 2048
+\echo [FAIL] (:testid) reuse and commit at depth 2048: SQLSTATE :apply_state
 \endif
 TRUNCATE t, t_cloudsync;
 
@@ -268,6 +332,7 @@ BEGIN RAISE EXCEPTION 'deep apply rejected'; END $$;
 CREATE TRIGGER reject_row BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION reject_row();
 BEGIN;
 SELECT 'SAVEPOINT user_sp' FROM generate_series(1, 256) \gexec
+\set ON_ERROR_STOP off
 DO $$
 BEGIN
   FOR i IN 1..100 LOOP
@@ -279,15 +344,18 @@ BEGIN
     END;
   END LOOP;
 END $$;
+\set recovery_state :SQLSTATE
 DROP TRIGGER reject_row ON t;
 SELECT sum(cloudsync_payload_apply(payload)) FROM transport;
+\set ON_ERROR_STOP on
 COMMIT;
 SELECT count(*) = 20 AS ok FROM t \gset
 \if :ok
 \echo [PASS] (:testid) 100 caught errors followed by successful apply
 \else
 SELECT (:fail::int + 1) AS fail \gset
-\echo [FAIL] (:testid) error recovery
+\echo [FAIL] (:testid) error recovery: caught-errors SQLSTATE :recovery_state
+DROP TRIGGER IF EXISTS reject_row ON t;
 \endif
 \connect postgres
 DROP DATABASE cloudsync_test_63_source;
