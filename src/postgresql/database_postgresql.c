@@ -3062,32 +3062,48 @@ static int database_refresh_snapshot (void) {
 // pin of the scan feeding cloudsync_payload_apply, say) is then charged to the wrong
 // owner: "buffer pin ... is not owned by resource owner TopTransaction". So, as the
 // procedural languages do, remember both at the start of each subtransaction and
-// restore them when it ends. Indexed by nesting level so an owner never leaks across
-// a subtransaction that was aborted elsewhere.
-#define CLOUDSYNC_SAVEPOINT_MAX_DEPTH 128
-static ResourceOwner savepoint_owner[CLOUDSYNC_SAVEPOINT_MAX_DEPTH];
-static MemoryContext savepoint_context[CLOUDSYNC_SAVEPOINT_MAX_DEPTH];
+// restore them when it ends. Frames live in TopTransactionContext and are removed
+// by transaction callbacks even when a caller aborts outside these wrappers.
+typedef struct cloudsync_savepoint_frame {
+    ResourceOwner owner;
+    MemoryContext context;
+    SubTransactionId subid;
+    struct cloudsync_savepoint_frame *previous;
+} cloudsync_savepoint_frame;
 
-// Only the outermost savepoint opened here may swap the active snapshot when it ends: a
-// snapshot pushed while an enclosing savepoint is still open belongs to that
-// subtransaction, and rolling the enclosing one back pops it — in place of the caller's
-// snapshot the swap popped, leaving the caller's portal without one (an assertion
-// failure in EnsurePortalSnapshotExists). Nested, advancing the command counter is
-// enough to make the changes visible: every SPI statement takes a fresh snapshot.
-// True when the subtransaction at level is nested inside another savepoint opened here.
-static bool savepoint_is_nested (int level) {
-    for (int k = 2; k < level && k < CLOUDSYNC_SAVEPOINT_MAX_DEPTH; k++) {
-        if (savepoint_owner[k]) return true;
-    }
-    return false;
+static cloudsync_savepoint_frame *savepoint_stack;
+static bool savepoint_callbacks_registered;
+
+static void savepoint_xact_callback (XactEvent event, void *arg) {
+    if (event == XACT_EVENT_COMMIT || event == XACT_EVENT_ABORT ||
+        event == XACT_EVENT_PARALLEL_COMMIT || event == XACT_EVENT_PARALLEL_ABORT ||
+        event == XACT_EVENT_PREPARE)
+        savepoint_stack = NULL; // TopTransactionContext owns the allocations.
 }
 
-static void savepoint_restore_caller (int level) {
-    if (level <= 0 || level >= CLOUDSYNC_SAVEPOINT_MAX_DEPTH || !savepoint_owner[level]) return;
-    MemoryContextSwitchTo(savepoint_context[level]);
-    CurrentResourceOwner = savepoint_owner[level];
-    savepoint_owner[level] = NULL;
-    savepoint_context[level] = NULL;
+static void savepoint_subxact_callback (SubXactEvent event, SubTransactionId subid,
+                                       SubTransactionId parent, void *arg) {
+    if (event != SUBXACT_EVENT_COMMIT_SUB && event != SUBXACT_EVENT_ABORT_SUB) return;
+    if (savepoint_stack && savepoint_stack->subid == subid) {
+        cloudsync_savepoint_frame *frame = savepoint_stack;
+        savepoint_stack = frame->previous;
+        pfree(frame);
+    }
+}
+
+// Only the outermost cloudsync savepoint may replace the caller's snapshot.
+// Copy the frame before ending the subtransaction: its callback frees the frame.
+static cloudsync_savepoint_frame savepoint_caller (void) {
+    cloudsync_savepoint_frame caller = {0};
+    if (savepoint_stack && savepoint_stack->subid == GetCurrentSubTransactionId())
+        caller = *savepoint_stack;
+    return caller;
+}
+
+static void savepoint_restore_caller (cloudsync_savepoint_frame caller) {
+    if (!caller.owner) return;
+    MemoryContextSwitchTo(caller.context);
+    CurrentResourceOwner = caller.owner;
 }
 
 int database_begin_savepoint (cloudsync_context *data, const char *savepoint_name) {
@@ -3098,12 +3114,20 @@ int database_begin_savepoint (cloudsync_context *data, const char *savepoint_nam
     ResourceOwner oldowner = CurrentResourceOwner;
     PG_TRY();
     {
-        BeginInternalSubTransaction(NULL);
-        int level = GetCurrentTransactionNestLevel();
-        if (level > 0 && level < CLOUDSYNC_SAVEPOINT_MAX_DEPTH) {
-            savepoint_owner[level] = oldowner;
-            savepoint_context[level] = oldcontext;
+        if (!savepoint_callbacks_registered) {
+            RegisterXactCallback(savepoint_xact_callback, NULL);
+            RegisterSubXactCallback(savepoint_subxact_callback, NULL);
+            savepoint_callbacks_registered = true;
         }
+        // Allocate before opening a subtransaction so an allocation error cannot
+        // leave an untracked rollback boundary behind.
+        cloudsync_savepoint_frame *frame = MemoryContextAlloc(TopTransactionContext, sizeof(*frame));
+        frame->owner = oldowner;
+        frame->context = oldcontext;
+        frame->previous = savepoint_stack;
+        BeginInternalSubTransaction(NULL);
+        frame->subid = GetCurrentSubTransactionId();
+        savepoint_stack = frame;
         // Keep allocating in the caller's context; the subtransaction's resource owner
         // stays current so what the savepoint acquires is released with it.
         MemoryContextSwitchTo(oldcontext);
@@ -3128,13 +3152,12 @@ int database_commit_savepoint (cloudsync_context *data, const char *savepoint_na
     int rc = DBRES_OK;
 
     MemoryContext oldcontext = CurrentMemoryContext;
-    int level = GetCurrentTransactionNestLevel();
+    cloudsync_savepoint_frame caller = savepoint_caller();
     PG_TRY();
     {
         ReleaseCurrentSubTransaction();
-        bool nested = savepoint_is_nested(level);
-        savepoint_restore_caller(level);
-        if (nested) CommandCounterIncrement();
+        savepoint_restore_caller(caller);
+        if (caller.previous) CommandCounterIncrement();
         else database_refresh_snapshot();
     }
     PG_CATCH();
@@ -3157,13 +3180,12 @@ int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_
     int rc = DBRES_OK;
 
     MemoryContext oldcontext = CurrentMemoryContext;
-    int level = GetCurrentTransactionNestLevel();
+    cloudsync_savepoint_frame caller = savepoint_caller();
     PG_TRY();
     {
         RollbackAndReleaseCurrentSubTransaction();
-        bool nested = savepoint_is_nested(level);
-        savepoint_restore_caller(level);
-        if (nested) CommandCounterIncrement();
+        savepoint_restore_caller(caller);
+        if (caller.previous) CommandCounterIncrement();
         else database_refresh_snapshot();
     }
     PG_CATCH();
