@@ -783,7 +783,17 @@ The send path streams payloads through [`cloudsync_payload_chunks()`](#cloudsync
 
 Chunk transport is transparent to the CloudSync backend. Each chunk is sent as a normal `/apply` payload, either inline as a base64 `blob` or through the upload `url` path. There is no separate chunk flag: old payloads, monolithic payloads, and v3 fragment payloads are distinguished by the payload format itself.
 
-**Parameters:** None.
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `max_db_versions` | INTEGER | Optional. Sends at most this many local database versions in this call, instead of the whole backlog. Must be greater than zero. |
+
+Without the argument the call sends every unsent change as a single all-or-nothing batch, which the server confirms only once every chunk has applied. On a large backlog — a long offline period, or a bulk import — that batch can be big enough to fail repeatedly and be re-sent whole each time. Passing `max_db_versions` splits the upload into several smaller batches, each confirmed independently, so a failure costs one bounded window instead of the entire backlog.
+
+The argument counts local database versions, not a version number: each version is one local transaction, so `cloudsync_network_send_changes(50)` uploads at most fifty transactions. Received changes share the same version counter, so versions holding no local change are skipped rather than consuming the budget — the call always makes progress while anything is pending.
+
+Call it repeatedly with the same value until `send.status` is no longer `"out-of-sync"`. `send.localVersion` always reports the newest local version and `send.serverVersion` what the server has confirmed, so the two can be compared to see what is left. When nothing is pending the call sends nothing and leaves the send checkpoint where it was.
 
 **Returns:** A JSON string with the send result:
 
@@ -803,6 +813,14 @@ Chunk transport is transparent to the CloudSync backend. Each chunk is sent as a
 ```sql
 SELECT cloudsync_network_send_changes();
 -- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":2048}}'
+
+-- Bounded: upload at most 2 local transactions per call, repeating until synced.
+SELECT cloudsync_network_send_changes(2);
+-- '{"send":{"status":"out-of-sync","localVersion":5,"serverVersion":2,"chunks":1,"bytes":900}}'
+SELECT cloudsync_network_send_changes(2);
+-- '{"send":{"status":"out-of-sync","localVersion":5,"serverVersion":4,"chunks":1,"bytes":880}}'
+SELECT cloudsync_network_send_changes(2);
+-- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":460}}'
 
 -- With a server-reported failure (e.g. unknown schema hash on the server side):
 -- '{"send":{"status":"out-of-sync","localVersion":1,"serverVersion":0,"chunks":1,"bytes":512,"lastFailure":{"jobId":44961,"code":"internal_error","stage":"apply_payload","message":"cloudsync operation failed: Cannot apply the received payload because the schema hash is unknown 4288148391734624266.","retryable":true,"failedAt":"2026-04-15T22:21:09.018606Z"}}}'

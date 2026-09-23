@@ -1889,10 +1889,86 @@ void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, s
     sqlite3_result_int(context, (last_optimistic_version >= 0 && last_optimistic_version < last_local_change));
 }
 
+// Window for a bounded send, in one pass over the metadata tables: the db_version of
+// the max_versions-th local change after the checkpoint (or the newest one when fewer
+// remain), plus the newest local db_version so the caller can report the backlog.
+//
+// Deliberately not a cloudsync_changes query: a site_id-only constraint puts that vtab
+// on its full-scan plan and materialises every value through cloudsync_col_value(),
+// which is the cost bounded sends exist to avoid. Local changes carry site_id 0 in the
+// metadata tables, and "db_version > since" seeks the (db_version) index, so the work
+// is proportional to the pending backlog rather than to the table.
+//
+// Counting local db_versions rather than taking a raw upper bound also keeps the window
+// non-empty whenever anything is pending: db_version is shared with merges, so a range
+// picked blindly can hold no local change at all and make no progress.
+static int network_send_window (sqlite3 *db, int64_t since, int64_t max_versions,
+                                int64_t *until_out, int64_t *max_local_out) {
+    *until_out = since;
+    *max_local_out = since;
+
+    const char *build_sql =
+        "SELECT group_concat('SELECT db_version FROM \"' || format('%w',tbl_name) || "
+        "'\" WHERE site_id=0 AND db_version>?1', ' UNION ') "
+        "FROM sqlite_master WHERE type='table' AND tbl_name LIKE '%_cloudsync'";
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, build_sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) return rc;
+    char *unions = NULL;
+    if (sqlite3_step(vm) == SQLITE_ROW && sqlite3_column_type(vm, 0) != SQLITE_NULL) {
+        unions = sqlite3_mprintf("%s", (const char *)sqlite3_column_text(vm, 0));
+    }
+    sqlite3_finalize(vm);
+    if (!unions) return SQLITE_OK;   // no synced tables: nothing local to send
+
+    char *sql = sqlite3_mprintf(
+        "WITH v(db_version) AS (%s) "
+        "SELECT (SELECT db_version FROM v ORDER BY db_version LIMIT 1 OFFSET ?2), (SELECT max(db_version) FROM v)",
+        unions);
+    sqlite3_free(unions);
+    if (!sql) return SQLITE_NOMEM;
+
+    vm = NULL;
+    rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) return rc;
+    sqlite3_bind_int64(vm, 1, since);
+    sqlite3_bind_int64(vm, 2, max_versions - 1);
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_ROW) {
+        int64_t max_local = (sqlite3_column_type(vm, 1) == SQLITE_NULL) ? since : sqlite3_column_int64(vm, 1);
+        // Fewer pending versions than requested: the window is the whole backlog.
+        int64_t until = (sqlite3_column_type(vm, 0) == SQLITE_NULL) ? max_local : sqlite3_column_int64(vm, 0);
+        *max_local_out = max_local;
+        *until_out = until;
+        rc = SQLITE_OK;
+    } else if (rc == SQLITE_DONE) {
+        rc = SQLITE_OK;
+    }
+    sqlite3_finalize(vm);
+    return rc;
+}
+
 int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc, sqlite3_value **argv, sync_result *out) {
     DEBUG_FUNCTION("cloudsync_network_send_changes");
-    UNUSED_PARAMETER(argc);
-    UNUSED_PARAMETER(argv);
+
+    // One optional argument caps this call at that many local db_versions, so a large
+    // backlog uploads as several bounded all-or-nothing batches instead of one unbounded
+    // batch that must succeed whole. Every chunk of a bounded batch announces the same
+    // window (the vtab reports watermark = until), so the batch stays coherent.
+    bool bounded = (argc == 1);
+    int64_t max_versions = 0;
+    if (bounded) {
+        if (sqlite3_value_type(argv[0]) != SQLITE_INTEGER) {
+            sqlite3_result_error(context, "cloudsync_network_send_changes: max_db_versions must be an integer.", -1);
+            return SQLITE_ERROR;
+        }
+        max_versions = sqlite3_value_int64(argv[0]);
+        if (max_versions <= 0) {
+            sqlite3_result_error(context, "cloudsync_network_send_changes: max_db_versions must be greater than zero.", -1);
+            return SQLITE_ERROR;
+        }
+    }
     
     // retrieve global context
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
@@ -1907,17 +1983,40 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     }
 
     sqlite3 *db = sqlite3_context_db_handle(context);
-    sqlite3_stmt *stmt = NULL;
-    const char *chunk_sql =
-        "SELECT payload, payload_size, watermark_db_version, is_final "
-        "FROM cloudsync_payload_chunks WHERE since_db_version = ?";
-    int rc = sqlite3_prepare_v2(db, chunk_sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        sqlite3_result_error(context, sqlite3_errmsg(db), -1);
-        sqlite3_result_error_code(context, rc);
-        return rc;
+
+    // Resolve the window, and the newest local db_version for the backlog status, in
+    // one pass. until == db_version means nothing local is pending.
+    int64_t until = db_version;
+    int64_t max_local = db_version;
+    if (bounded) {
+        int wrc = network_send_window(db, db_version, max_versions, &until, &max_local);
+        if (wrc != SQLITE_OK) {
+            sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+            sqlite3_result_error_code(context, wrc);
+            return wrc;
+        }
     }
-    sqlite3_bind_int64(stmt, 1, db_version);
+    // cloudsync_payload_chunks reads until_db_version = 0 as "no upper bound", so an
+    // empty window has to be recognised here instead of being passed down.
+    bool empty_window = bounded && (until == db_version);
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = SQLITE_OK;
+    if (!empty_window) {
+        const char *chunk_sql = bounded
+            ? "SELECT payload, payload_size, watermark_db_version, is_final "
+              "FROM cloudsync_payload_chunks WHERE since_db_version = ? AND until_db_version = ?"
+            : "SELECT payload, payload_size, watermark_db_version, is_final "
+              "FROM cloudsync_payload_chunks WHERE since_db_version = ?";
+        rc = sqlite3_prepare_v2(db, chunk_sql, -1, &stmt, NULL);
+        if (rc != SQLITE_OK) {
+            sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+            sqlite3_result_error_code(context, rc);
+            return rc;
+        }
+        sqlite3_bind_int64(stmt, 1, db_version);
+        if (bounded) sqlite3_bind_int64(stmt, 2, until);
+    }
 
     int64_t new_db_version = db_version;
     int64_t last_optimistic_version = -1;
@@ -1936,7 +2035,7 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     char batch_id[UUID_STR_MAXLEN];
     cloudsync_uuid_v7_string(batch_id, true);
 
-    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    while (stmt && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         const void *blob = sqlite3_column_blob(stmt, 0);
         int blob_size = sqlite3_column_bytes(stmt, 0);
         int64_t payload_size = sqlite3_column_int64(stmt, 1);
@@ -1971,17 +2070,21 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
         sent_bytes += payload_size;
         if (watermark > new_db_version) new_db_version = watermark;
     }
-    if (rc != SQLITE_DONE) {
-        sqlite3_result_error(context, sqlite3_errmsg(db), -1);
-        sqlite3_result_error_code(context, rc);
-        goto cleanup;
+    if (stmt) {
+        if (rc != SQLITE_DONE) {
+            sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+            sqlite3_result_error_code(context, rc);
+            goto cleanup;
+        }
+        sqlite3_finalize(stmt);
+        stmt = NULL;
     }
-    sqlite3_finalize(stmt);
-    stmt = NULL;
 
     if (!sent_any) {
         // Empty local db with no server state: preserve the previous fast no-op path.
-        if (db_version == 0) {
+        // A bounded call cannot take it: an empty window says nothing about changes
+        // beyond the bound, and reporting "synced" there would hide the backlog.
+        if (db_version == 0 && !bounded) {
             if (out) {
                 out->server_version = 0;
                 out->local_version = 0;
@@ -2018,11 +2121,18 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
         dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_SEND_DBVERSION, buf);
     }
 
+    // A bounded call sends a prefix of the backlog, so new_db_version stops at the bound
+    // and would read as "nothing left". Report the newest local version that
+    // network_send_window already found: network_compute_status then returns
+    // out-of-sync while changes remain, which is how a caller knows to call again.
+    int64_t local_version = new_db_version;
+    if (bounded && max_local > local_version) local_version = max_local;
+
     // populate sync result
     if (out) {
         out->server_version = last_optimistic_version;
-        out->local_version = new_db_version;
-        out->status = network_compute_status(last_optimistic_version, last_confirmed_version, gaps_size, new_db_version);
+        out->local_version = local_version;
+        out->status = network_compute_status(last_optimistic_version, last_confirmed_version, gaps_size, local_version);
         out->send_chunks = sent_chunks;
         out->send_bytes = sent_bytes;
         out->apply_failure_json = apply_failure_json;
@@ -2704,6 +2814,10 @@ int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
     if (rc != SQLITE_OK) return rc;
     
     rc = sqlite3_create_function(db, "cloudsync_network_send_changes", 0, DEFAULT_FLAGS, ctx, cloudsync_network_send_changes, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+    
+    // 1-argument form: cap this call's window at until_db_version.
+    rc = sqlite3_create_function(db, "cloudsync_network_send_changes", 1, DEFAULT_FLAGS, ctx, cloudsync_network_send_changes, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
     rc = sqlite3_create_function(db, "cloudsync_network_receive_changes", 0, DEFAULT_FLAGS, ctx, cloudsync_network_receive_changes, NULL, NULL);
