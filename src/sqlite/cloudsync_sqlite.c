@@ -1401,9 +1401,14 @@ static int payload_chunks_filter(sqlite3_vtab_cursor *cursor, int idxnum, const 
     // (db_version, seq) >= (resume_dbv, resume_seq).
     char *sql;
     if (positional) {
+        // The redundant db_version>=? is what makes the resume a seek, and it is
+        // load-bearing: SQLite derives a range from a disjunction only when both arms
+        // compare against the same value, and these two arms carry distinct
+        // parameters. Without it cloudsync_changes' xBestIndex is offered no lower
+        // bound at all and every call replays the window from the start.
         sql = sqlite3_mprintf(
             "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
-            "FROM cloudsync_changes WHERE db_version<=? AND site_id%s? AND "
+            "FROM cloudsync_changes WHERE db_version<=? AND site_id%s? AND db_version>=? AND "
             "(db_version>? OR (db_version=? AND seq>=?)) ORDER BY db_version, seq ASC",
             site_op);
     } else {
@@ -1421,7 +1426,8 @@ static int payload_chunks_filter(sqlite3_vtab_cursor *cursor, int idxnum, const 
         sqlite3_bind_blob(c->src, 2, site_id, site_id_len, SQLITE_TRANSIENT);
         sqlite3_bind_int64(c->src, 3, resume_dbv);
         sqlite3_bind_int64(c->src, 4, resume_dbv);
-        sqlite3_bind_int64(c->src, 5, resume_seq);
+        sqlite3_bind_int64(c->src, 5, resume_dbv);
+        sqlite3_bind_int64(c->src, 6, resume_seq);
     } else {
         sqlite3_bind_int64(c->src, 1, since);
         sqlite3_bind_blob(c->src, 2, site_id, site_id_len, SQLITE_TRANSIENT);
