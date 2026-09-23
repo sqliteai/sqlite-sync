@@ -26,6 +26,12 @@
 //       CHUNK_BENCH_REPEATS (default 3), CHUNK_BENCH_CHUNK_SIZE (default 262144),
 //       CHUNK_BENCH_VERBOSE (1 = print every chunk, not just deciles).
 //
+//  For a production-sized window, seed once and measure two builds against it:
+//       CHUNK_BENCH_DB (database path), CHUNK_BENCH_KEEP=1 (do not delete it),
+//       CHUNK_BENCH_REUSE=1 (skip seeding when it already exists),
+//       CHUNK_BENCH_EXT (which cloudsync to load), CHUNK_BENCH_PHASE2=0 (skip
+//         Phase 2, which is itself quadratic and dominates at that size).
+//
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +45,18 @@
 #define EXT_PATH "./dist/cloudsync"
 #define MAX_POINTS 20000
 #define BUCKETS 10
+
+static const char *env_str(const char *name, const char *dflt) {
+    const char *v = getenv(name);
+    return (v && *v) ? v : dflt;
+}
+
+static bool file_exists(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
 
 // Every shape binds ?1=until, ?2=site_id, ?3/?4/?6=resume_db_version, ?5=resume_seq,
 // and selects exactly the same rows. Only the spelling of the lower bound differs.
@@ -84,6 +102,14 @@ static int env_int(const char *name, int dflt) {
     long p = strtol(v, &end, 10);
     if (!end || *end != '\0' || p <= 0) return dflt;
     return (int)p;
+}
+
+// env_int treats 0 as "unset" so that a stray empty value cannot ask for zero rows.
+// Flags need the opposite, since 0 is how you turn one off.
+static bool env_flag(const char *name, bool dflt) {
+    const char *v = getenv(name);
+    if (!v || !*v) return dflt;
+    return !(strcmp(v, "0") == 0 || strcmp(v, "false") == 0 || strcmp(v, "no") == 0);
 }
 
 static int db_exec(sqlite3 *db, const char *sql) {
@@ -244,38 +270,58 @@ int main(void) {
     int repeats = env_int("CHUNK_BENCH_REPEATS", 3);
     int chunk_size = env_int("CHUNK_BENCH_CHUNK_SIZE", 262144);
     int txns = env_int("CHUNK_BENCH_TXNS", rows);
-    bool verbose = env_int("CHUNK_BENCH_VERBOSE", 0) == 1;
+    bool verbose = env_flag("CHUNK_BENCH_VERBOSE", false);
+    // A large window costs minutes to seed and the unfixed arm re-reads it on every
+    // call, so allow one seeded database to be reused across both builds and the
+    // quadratic Phase 2 to be skipped.
+    const char *db_path = env_str("CHUNK_BENCH_DB", DB_PATH);
+    const char *ext_path = env_str("CHUNK_BENCH_EXT", EXT_PATH);
+    bool keep = env_flag("CHUNK_BENCH_KEEP", false);
+    bool reuse = env_flag("CHUNK_BENCH_REUSE", false) && file_exists(db_path);
+    bool want_phase2 = env_flag("CHUNK_BENCH_PHASE2", true);
     if (txns > rows) txns = rows;
 
-    remove(DB_PATH);
+    if (!reuse) remove(db_path);
     sqlite3 *db = NULL;
-    if (sqlite3_open(DB_PATH, &db) != SQLITE_OK) { fprintf(stderr, "open failed\n"); return 1; }
+    if (sqlite3_open(db_path, &db) != SQLITE_OK) { fprintf(stderr, "open failed\n"); return 1; }
     if (sqlite3_enable_load_extension(db, 1) != SQLITE_OK) return 1;
-    if (db_exec(db, "SELECT load_extension('" EXT_PATH "');") != SQLITE_OK) return 1;
+    char load[512];
+    snprintf(load, sizeof(load), "SELECT load_extension('%s');", ext_path);
+    if (db_exec(db, load) != SQLITE_OK) return 1;
+    printf("extension: %s   database: %s%s\n", ext_path, db_path, reuse ? " (reused)" : "");
 
     char setup[256];
-    snprintf(setup, sizeof(setup),
-        "CREATE TABLE chunk_bench (id TEXT PRIMARY KEY, body BLOB);"
-        "SELECT cloudsync_init('chunk_bench');"
-        "SELECT cloudsync_set('payload_max_chunk_size', '%d');", chunk_size);
+    snprintf(setup, sizeof(setup), "SELECT cloudsync_set('payload_max_chunk_size', '%d');", chunk_size);
+    if (!reuse) {
+        char create[256];
+        snprintf(create, sizeof(create),
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF;"
+            "CREATE TABLE chunk_bench (id TEXT PRIMARY KEY, body BLOB);"
+            "SELECT cloudsync_init('chunk_bench');");
+        if (db_exec(db, create) != SQLITE_OK) return 1;
+    }
     if (db_exec(db, setup) != SQLITE_OK) return 1;
 
     // Each transaction is one db_version, so TXNS controls how many distinct
     // db_versions the window spans. That is the axis the proposed lower bound acts
     // on: with TXNS=1 every row shares one db_version and no bound on db_version can
     // narrow anything. Incompressible bodies keep the window many-chunked.
-    printf("seeding %d rows of %d bytes across %d transaction(s)...\n", rows, row_bytes, txns);
-    int idbase = 0;
-    for (int t = 0; t < txns; ++t) {
-        int n = rows / txns + (t < rows % txns ? 1 : 0);
-        if (n <= 0) continue;
-        char insert[256];
-        snprintf(insert, sizeof(insert),
-            "WITH RECURSIVE c(i) AS (SELECT %d UNION ALL SELECT i+1 FROM c WHERE i < %d) "
-            "INSERT INTO chunk_bench(id, body) SELECT printf('row-%%06d', i), randomblob(%d) FROM c;",
-            idbase + 1, idbase + n, row_bytes);
-        if (db_exec(db, insert) != SQLITE_OK) return 1;
-        idbase += n;
+    if (!reuse) {
+        printf("seeding %d rows of %d bytes across %d transaction(s)...\n", rows, row_bytes, txns);
+        double seed_t0 = monotonic_ms();
+        int idbase = 0;
+        for (int t = 0; t < txns; ++t) {
+            int n = rows / txns + (t < rows % txns ? 1 : 0);
+            if (n <= 0) continue;
+            char insert[256];
+            snprintf(insert, sizeof(insert),
+                "WITH RECURSIVE c(i) AS (SELECT %d UNION ALL SELECT i+1 FROM c WHERE i < %d) "
+                "INSERT INTO chunk_bench(id, body) SELECT printf('row-%%06d', i), randomblob(%d) FROM c;",
+                idbase + 1, idbase + n, row_bytes);
+            if (db_exec(db, insert) != SQLITE_OK) return 1;
+            idbase += n;
+        }
+        printf("seeded in %.1f s\n", (monotonic_ms() - seed_t0) / 1000.0);
     }
 
     double *per_chunk = calloc(MAX_POINTS, sizeof(double));
@@ -309,7 +355,7 @@ int main(void) {
 
     // ---- Phase 2: the same resume points, straight at cloudsync_changes ----
     // points[0] is unset (the first chunk carries no resume point), so start at 1.
-    int np = n > 1 ? n - 1 : 0;
+    int np = (want_phase2 && n > 1) ? n - 1 : 0;
     if (np > 0) {
         // Exclude a site_id that cannot exist, so the filter matches the real
         // query's shape without removing any row.
@@ -366,6 +412,6 @@ int main(void) {
 
     free(per_chunk); free(points);
     sqlite3_close(db);
-    remove(DB_PATH);
+    if (!keep) remove(db_path);
     return 0;
 }
