@@ -12,10 +12,10 @@
 //      the window, making the drain O(N^2); flat latency means the resume seeks.
 //
 //    Phase 2 — replay the same resume points straight against cloudsync_changes
-//      in two SQL shapes: the one the positional branch emits today, and the same
-//      clause plus the redundant AND-connected `db_version>=?` lower bound
-//      proposed in docs/internal/payload-chunks-resume-scan.md. Same rows, two
-//      plans, so the difference is the value of that proposal.
+//      in three SQL shapes: the lower bound as payload_chunks_filter() spelled it
+//      before the fix, the shape it uses now, and a variant. Same rows, different
+//      plans, so the difference is attributable to the spelling alone. Keeping the
+//      old shape here is what makes this a regression check rather than a one-off.
 //
 //  CI builds this with the other test binaries but never runs it: the timings are
 //  machine-dependent. Run it by hand with `make chunk-bench`.
@@ -61,17 +61,17 @@ static bool file_exists(const char *path) {
 // Every shape binds ?1=until, ?2=site_id, ?3/?4/?6=resume_db_version, ?5=resume_seq,
 // and selects exactly the same rows. Only the spelling of the lower bound differs.
 
-// What the positional branch emits today (cloudsync_sqlite.c:1403-1414): the resume
-// point lives entirely inside a disjunction whose two arms carry *distinct*
-// parameters. Distinct parameters are what defeats the planner here — see below.
-#define SHAPE_CURRENT \
+// What payload_chunks_filter() emitted before the fix: the resume point lived
+// entirely inside a disjunction whose two arms carry *distinct* parameters.
+// Distinct parameters are what defeats the planner here — see below.
+#define SHAPE_OLD \
     "SELECT db_version, seq FROM cloudsync_changes " \
     "WHERE db_version<=?1 AND site_id<>?2 AND (db_version>?3 OR (db_version=?4 AND seq>=?5)) " \
     "ORDER BY db_version, seq ASC LIMIT 1"
 
-// The doc's proposal: a redundant conjunct stating the lower bound where a virtual
+// What it emits now: a redundant conjunct stating the lower bound where a virtual
 // table's xBestIndex can see it, alongside the untouched disjunction.
-#define SHAPE_PROPOSED \
+#define SHAPE_FIXED \
     "SELECT db_version, seq FROM cloudsync_changes " \
     "WHERE db_version<=?1 AND site_id<>?2 AND db_version>=?6 AND (db_version>?3 OR (db_version=?4 AND seq>=?5)) " \
     "ORDER BY db_version, seq ASC LIMIT 1"
@@ -191,7 +191,15 @@ static int drain_positional(sqlite3 *db, double *per_chunk, resume_point *points
         t0 = monotonic_ms();
         rc = sqlite3_step(resume);
         dt = monotonic_ms() - t0;
-        if (rc != SQLITE_ROW) { if (rc == SQLITE_DONE) rc = SQLITE_OK; break; }
+        // A drain that stops early looks exactly like a fast one, so never report it
+        // as success. SQLITE_DONE here is a failure too: the loop only runs while the
+        // previous chunk said it was not final, so the stream owes us another chunk.
+        if (rc != SQLITE_ROW) {
+            fprintf(stderr, "resume failed at chunk %d: %s\n", chunks,
+                    (rc == SQLITE_DONE) ? "no chunk returned before is_final" : sqlite3_errmsg(db));
+            if (rc == SQLITE_DONE) rc = SQLITE_ERROR;
+            goto done;
+        }
         bytes += sqlite3_column_bytes(resume, 0);
         rdbv = sqlite3_column_int64(resume, 1);
         rseq = sqlite3_column_int64(resume, 2);
@@ -360,13 +368,13 @@ int main(void) {
         // Exclude a site_id that cannot exist, so the filter matches the real
         // query's shape without removing any row.
         static const unsigned char absent_site[16] = {0};
-        static const char *shape_sql[3] = { SHAPE_CURRENT, SHAPE_PROPOSED, SHAPE_REUSED_PARAM };
+        static const char *shape_sql[3] = { SHAPE_OLD, SHAPE_FIXED, SHAPE_REUSED_PARAM };
         static const char *shape_name[3] = {
-            "2a - current  (disjunction, distinct parameters)",
-            "2b - proposed (+ redundant AND db_version>=?)",
-            "2c - variant  (one parameter reused in both arms)",
+            "2a - old     (disjunction, distinct parameters)",
+            "2b - fixed   (+ redundant AND db_version>=?)",
+            "2c - variant (one parameter reused in both arms)",
         };
-        static const char *shape_tag[3] = { "current:", "proposed:", "reused:" };
+        static const char *shape_tag[3] = { "old:", "fixed:", "reused:" };
         double *t[3];
         resume_point *sel[3];
         for (int s = 0; s < 3; ++s) {
@@ -403,7 +411,7 @@ int main(void) {
             int mismatches = 0;
             for (int i = 0; i < np; ++i)
                 if (sel[0][i].dbv != sel[s][i].dbv || sel[0][i].seq != sel[s][i].seq) mismatches++;
-            printf("rows selected by %-9s differ from current at %d of %d resume points\n",
+            printf("rows selected by %-7s differ from the old shape at %d of %d resume points\n",
                    shape_tag[s], mismatches, np);
         }
 

@@ -1401,11 +1401,11 @@ static int payload_chunks_filter(sqlite3_vtab_cursor *cursor, int idxnum, const 
     // (db_version, seq) >= (resume_dbv, resume_seq).
     char *sql;
     if (positional) {
-        // The redundant db_version>=? is what makes the resume a seek. The
-        // disjunction alone states the same bound, but its two arms carry distinct
-        // parameters, so SQLite cannot derive a range from it and cloudsync_changes'
-        // xBestIndex is offered no lower bound at all — leaving every call to replay
-        // the window from the start. See docs/internal/payload-chunks-resume-scan.md.
+        // The redundant db_version>=? is what makes the resume a seek, and it is
+        // load-bearing: SQLite derives a range from a disjunction only when both arms
+        // compare against the same value, and these two arms carry distinct
+        // parameters. Without it cloudsync_changes' xBestIndex is offered no lower
+        // bound at all and every call replays the window from the start.
         sql = sqlite3_mprintf(
             "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
             "FROM cloudsync_changes WHERE db_version<=? AND site_id%s? AND db_version>=? AND "
