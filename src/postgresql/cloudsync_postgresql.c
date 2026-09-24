@@ -1323,6 +1323,13 @@ static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_con
         }
 
         if (cloudsync_payload_context_nrows(payload) > 0 && cloudsync_payload_context_bused(payload) + row_size > (size_t)st->max_size) break;
+        // Once the budget is spent, end the chunk at the first db_version boundary so
+        // the window can be capped there. Waiting for a chunk to happen to end on a
+        // boundary is not enough: when a transaction's rows and a chunk's capacity stay
+        // out of step, every chunk ends mid-version and the cap never fires at all.
+        if (st->max_window_bytes > 0 && cloudsync_payload_context_nrows(payload) > 0 &&
+            st->db_version != *dbv_max &&
+            st->window_bytes + (int64)cloudsync_payload_context_bused(payload) >= st->max_window_bytes) break;
 
         pgvalue_t *vals[9] = {0};
         text *owned_texts[2] = {0};
@@ -1340,6 +1347,9 @@ static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_con
         cloudsync_memory_free(payload);
         return NULL;
     }
+    // Measure the window in the unit max_size is expressed in -- encoded bytes before
+    // compression -- so a budget and a chunk size mean the same thing to a caller.
+    st->window_bytes += (int64)cloudsync_payload_context_bused(payload);
     int rc = cloudsync_payload_encode_final(payload, data);
     if (rc != DBRES_OK) ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
     int64 blob_size = 0;
@@ -1520,7 +1530,6 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
     // us, a db_version larger than the whole budget is still emitted in full --
     // otherwise a window could come out empty and the drain would never advance.
     if (st->max_window_bytes > 0) {
-        st->window_bytes += VARSIZE_ANY_EXHDR(payload);
         if (!is_final && !st->frag_active && st->window_bytes >= st->max_window_bytes && next_dbv != dbv_max) {
             st->window_capped = true;
             is_final = true;

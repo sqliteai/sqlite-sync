@@ -43,15 +43,22 @@ INSERT INTO items (id, v)
     FROM generate_series(1, 15) i;
 COMMIT;
 
+-- The shape that matters most: ~13 rows fill a 256 KB chunk, so transactions of 12 then
+-- 13 rows keep every chunk boundary one row inside a db_version. Waiting for a chunk to
+-- end on a boundary never succeeds here, so a cap that only checks after a chunk is
+-- built never fires and the whole history comes out in one window.
+SELECT format($f$INSERT INTO items (id, v) SELECT 'd%s_' || i, (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 1250) g) FROM generate_series(1, %s) i$f$, t, CASE WHEN t = 1 THEN 12 ELSE 13 END)
+  FROM generate_series(1, 20) t \gexec
+
 -- Baseline: the whole window, uncapped. Nothing is capped without a budget.
-SELECT count(*) AS base_chunks, sum(payload_size) AS base_bytes,
+SELECT sum(rows) AS base_rows, sum(payload_size) AS base_bytes,
        max(watermark_db_version) AS base_wm,
-       (count(*) > 1 AND sum(payload_size) > 0 AND bool_or(window_capped) IS FALSE) AS base_ok
+       (count(*) > 1 AND sum(rows) > 0 AND bool_or(window_capped) IS FALSE) AS base_ok
   FROM cloudsync_payload_chunks(0, NULL, NULL, false) \gset
 \if :base_ok
 \echo [PASS] (:testid) uncapped baseline spans several chunks and reports no cap
 \else
-\echo [FAIL] (:testid) baseline chunks=:base_chunks bytes=:base_bytes
+\echo [FAIL] (:testid) baseline rows=:base_rows bytes=:base_bytes
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
@@ -59,7 +66,7 @@ SELECT (:fail::int + 1) AS fail \gset
 -- and add up what the windows covered. A budget below one chunk also proves the drain
 -- still advances: a db_version larger than the whole budget must be emitted in full.
 CREATE FUNCTION pg_temp.drain_capped(cap bigint)
-RETURNS TABLE (windows int, chunks bigint, bytes bigint, last_wm bigint, contiguous boolean) AS $$
+RETURNS TABLE (windows int, nrows bigint, maxbytes bigint, last_wm bigint, contiguous boolean) AS $$
 DECLARE
   since bigint := 0;
   w int := 0;
@@ -69,39 +76,41 @@ DECLARE
   r record;
 BEGIN
   LOOP
-    SELECT count(*) AS n, coalesce(sum(payload_size), 0) AS sz,
-           max(watermark_db_version) AS wm, bool_or(window_capped) AS capped,
-           min(db_version_min) AS first_dbv
+    SELECT count(*) AS n, coalesce(sum(rows), 0) AS nr, coalesce(sum(payload_size), 0) AS sz,
+           max(watermark_db_version) FILTER (WHERE is_final) AS wm,
+           bool_or(window_capped) AS capped, min(db_version_min) AS first_dbv
       INTO r
       FROM cloudsync_payload_chunks(since, NULL, NULL, false, NULL, NULL, NULL, cap);
     EXIT WHEN r.n = 0;
     -- Windows must abut exactly, and each must advance or the drain never ends.
     IF r.first_dbv <> since + 1 OR r.wm <= since THEN ok := false; END IF;
-    w := w + 1; c := c + r.n; b := b + r.sz; since := r.wm;
+    -- A window ends at the first db_version boundary at or after the budget, so it can
+    -- overshoot by at most the chunk that crossed it plus the version in progress.
+    w := w + 1; c := c + r.nr; b := greatest(b, r.sz); since := r.wm;
     EXIT WHEN NOT r.capped OR w > 100;
   END LOOP;
   RETURN QUERY SELECT w, c, b, since, ok;
 END $$ LANGUAGE plpgsql;
 
-SELECT d.windows AS w1, d.chunks AS c1, d.bytes AS b1, d.last_wm AS wm1,
-       (d.windows > 1 AND d.contiguous AND d.chunks = :base_chunks::bigint
-        AND d.bytes = :base_bytes::bigint AND d.last_wm = :base_wm::bigint) AS cap1_ok
+SELECT d.windows AS w1, d.nrows AS c1, d.maxbytes AS b1, d.last_wm AS wm1,
+       (d.windows > 1 AND d.contiguous AND d.nrows = :base_rows::bigint
+        AND d.maxbytes <= 200000 + 3 * 262144 AND d.last_wm = :base_wm::bigint) AS cap1_ok
   FROM pg_temp.drain_capped(200000) d \gset
 \if :cap1_ok
 \echo [PASS] (:testid) a 200 KB budget splits the stream into :w1 windows that tile it exactly
 \else
-\echo [FAIL] (:testid) windows=:w1 chunks=:c1/:base_chunks bytes=:b1/:base_bytes wm=:wm1/:base_wm
+\echo [FAIL] (:testid) windows=:w1 rows=:c1/:base_rows maxwindow=:b1 wm=:wm1/:base_wm
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
-SELECT d.windows AS w2, d.chunks AS c2, d.bytes AS b2, d.last_wm AS wm2,
-       (d.windows > 1 AND d.contiguous AND d.chunks = :base_chunks::bigint
-        AND d.bytes = :base_bytes::bigint AND d.last_wm = :base_wm::bigint) AS cap2_ok
+SELECT d.windows AS w2, d.nrows AS c2, d.maxbytes AS b2, d.last_wm AS wm2,
+       (d.windows > 1 AND d.contiguous AND d.nrows = :base_rows::bigint
+        AND d.maxbytes <= 1 + 3 * 262144 AND d.last_wm = :base_wm::bigint) AS cap2_ok
   FROM pg_temp.drain_capped(1) d \gset
 \if :cap2_ok
 \echo [PASS] (:testid) a 1-byte budget still advances and tiles the stream exactly
 \else
-\echo [FAIL] (:testid) windows=:w2 chunks=:c2/:base_chunks bytes=:b2/:base_bytes wm=:wm2/:base_wm
+\echo [FAIL] (:testid) windows=:w2 rows=:c2/:base_rows maxwindow=:b2 wm=:wm2/:base_wm
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 

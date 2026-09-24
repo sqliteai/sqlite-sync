@@ -1272,6 +1272,13 @@ static int payload_chunks_build_next(cloudsync_payload_chunks_cursor *c) {
         }
 
         if (cloudsync_payload_context_nrows(payload) > 0 && cloudsync_payload_context_bused(payload) + row_size > (size_t)max_size) break;
+        // Once the budget is spent, end the chunk at the first db_version boundary so
+        // the window can be capped there. Waiting for a chunk to happen to end on a
+        // boundary is not enough: when a transaction's rows and a chunk's capacity stay
+        // out of step, every chunk ends mid-version and the cap never fires at all.
+        if (c->max_window_bytes > 0 && cloudsync_payload_context_nrows(payload) > 0 &&
+            sqlite3_column_int64(c->src, 5) != c->dbv_max &&
+            c->window_bytes + (int64_t)cloudsync_payload_context_bused(payload) >= c->max_window_bytes) break;
         rc = cloudsync_payload_encode_step(payload, data, 9, (dbvalue_t **)rowv);
         if (rc != SQLITE_OK) { cloudsync_memory_free(payload); return rc; }
         int64_t dbv = sqlite3_column_int64(c->src, 5);
@@ -1284,6 +1291,9 @@ static int payload_chunks_build_next(cloudsync_payload_chunks_cursor *c) {
     if (cloudsync_payload_context_nrows(payload) == 0) { cloudsync_memory_free(payload); c->eof = true; return SQLITE_OK; }
     rc = cloudsync_payload_encode_final(payload, data);
     if (rc != SQLITE_OK) { cloudsync_memory_free(payload); return rc; }
+    // Measure the window in the unit max_size is expressed in -- encoded bytes before
+    // compression -- so a budget and a chunk size mean the same thing to a caller.
+    c->window_bytes += (int64_t)cloudsync_payload_context_bused(payload);
     c->payload = cloudsync_payload_blob(payload, &c->payload_size, &c->rows);
     cloudsync_memory_free(payload);
     c->chunk_index++;
@@ -1329,7 +1339,6 @@ static void payload_chunks_set_next_cursor(cloudsync_payload_chunks_cursor *c) {
 // and the drain would never advance at all.
 static void payload_chunks_apply_window_cap(cloudsync_payload_chunks_cursor *c) {
     if (c->max_window_bytes <= 0 || c->eof) return;
-    c->window_bytes += c->payload_size;
     if (c->is_final || c->frag_active) return;
     if (c->window_bytes < c->max_window_bytes) return;
     if (c->next_dbv == c->dbv_max) return;      // still inside a db_version
