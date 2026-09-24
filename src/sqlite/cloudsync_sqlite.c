@@ -1035,6 +1035,12 @@ typedef struct {
     int64_t next_seq;
     int64_t next_frag_offset;
     bool is_final;
+    // Window cap (max_window_bytes): payload bytes emitted so far by this scan, and
+    // whether the scan ended because the budget ran out rather than because the
+    // window was drained. window_bytes counts across chunks, not within one.
+    int64_t max_window_bytes;
+    int64_t window_bytes;
+    bool window_capped;
 } cloudsync_payload_chunks_cursor;
 
 static int payload_chunks_connect(sqlite3 *db, void *aux, int argc, const char *const *argv, sqlite3_vtab **vtab, char **err) {
@@ -1048,7 +1054,12 @@ static int payload_chunks_connect(sqlite3 *db, void *aux, int argc, const char *
         // back as the resume_* inputs (cols 15..17) to continue the drain without
         // a spool table — O(1) seek per chunk instead of replaying from since.
         "next_db_version INTEGER, next_seq INTEGER, next_frag_offset INTEGER, is_final INTEGER, "
-        "resume_db_version HIDDEN, resume_seq HIDDEN, resume_frag_offset HIDDEN)");
+        // window_capped (col 15) is an output, so it does not shift the hidden columns
+        // a table-valued call binds positionally. max_window_bytes is declared last for
+        // the same reason: it becomes argument 8, leaving arguments 1..7 as they were.
+        "window_capped INTEGER, "
+        "resume_db_version HIDDEN, resume_seq HIDDEN, resume_frag_offset HIDDEN, "
+        "max_window_bytes HIDDEN)");
     if (rc != SQLITE_OK) return rc;
     cloudsync_payload_chunks_vtab *p = sqlite3_malloc64(sizeof(*p));
     if (!p) return SQLITE_NOMEM;
@@ -1086,9 +1097,9 @@ static int payload_chunks_best_index(sqlite3_vtab *vtab, sqlite3_index_info *idx
     // in a fixed order regardless of how SQLite presents constraints. idxNum bit k
     // is set when handled_cols[k] is bound; xFilter reads argv in this same order.
     //   bit0=since_db_version(7) bit1=site_id(8) bit2=until_db_version(9)
-    //   bit3=exclude_filter_site_id(10) bit4=resume_db_version(15)
-    //   bit5=resume_seq(16) bit6=resume_frag_offset(17)
-    static const int handled_cols[] = {7, 8, 9, 10, 15, 16, 17};
+    //   bit3=exclude_filter_site_id(10) bit4=resume_db_version(16)
+    //   bit5=resume_seq(17) bit6=resume_frag_offset(18) bit7=max_window_bytes(19)
+    static const int handled_cols[] = {7, 8, 9, 10, 16, 17, 18, 19};
     int argv_index = 1;
     int idxnum = 0;
     for (size_t k = 0; k < sizeof(handled_cols) / sizeof(handled_cols[0]); ++k) {
@@ -1305,9 +1316,38 @@ static void payload_chunks_set_next_cursor(cloudsync_payload_chunks_cursor *c) {
     }
 }
 
+// Stop the scan once max_window_bytes is spent, at the first db_version boundary, and
+// report the window as an ordinary complete stream ending at that reduced watermark.
+// The caller then checkpoints there and asks again, so preparation is bounded without
+// any new resumable state.
+//
+// Two conditions are load-bearing. Never cap mid-value (frag_active) or mid-db_version
+// (next_dbv == dbv_max): the receive cursor must land on a complete db_version or the
+// next request skips the unapplied remainder, since it resumes with db_version > since
+// and no seq. And because the boundary test is what stops us, a db_version larger than
+// the whole budget is still emitted in full -- otherwise a window could end up empty
+// and the drain would never advance at all.
+static void payload_chunks_apply_window_cap(cloudsync_payload_chunks_cursor *c) {
+    if (c->max_window_bytes <= 0 || c->eof) return;
+    c->window_bytes += c->payload_size;
+    if (c->is_final || c->frag_active) return;
+    if (c->window_bytes < c->max_window_bytes) return;
+    if (c->next_dbv == c->dbv_max) return;      // still inside a db_version
+
+    c->window_capped = true;
+    c->is_final = true;
+    c->watermark = c->dbv_max;                  // the window the caller checkpoints at
+    c->next_dbv = c->watermark;
+    c->next_seq = 0;
+    c->next_frag_offset = 0;
+}
+
 static int payload_chunks_advance(cloudsync_payload_chunks_cursor *c) {
     int rc = payload_chunks_build_next(c);
-    if (rc == SQLITE_OK && !c->eof) payload_chunks_set_next_cursor(c);
+    if (rc == SQLITE_OK && !c->eof) {
+        payload_chunks_set_next_cursor(c);
+        payload_chunks_apply_window_cap(c);
+    }
     return rc;
 }
 
@@ -1353,9 +1393,22 @@ static int payload_chunks_filter(sqlite3_vtab_cursor *cursor, int idxnum, const 
     }
     if (idxnum & 4) until = sqlite3_value_int64(argv[argi++]);
     if (idxnum & 8) exclude = (sqlite3_value_int(argv[argi++]) != 0);
-    if (idxnum & 16) { resume_dbv = sqlite3_value_int64(argv[argi++]); positional = true; }
+    // An explicit NULL means "not given", as it already does for site_id. Callers must
+    // pass NULLs to reach a later argument, and treating one as a resume point of 0
+    // would silently restart the scan at the beginning of the window.
+    if (idxnum & 16) {
+        if (sqlite3_value_type(argv[argi]) != SQLITE_NULL) {
+            resume_dbv = sqlite3_value_int64(argv[argi]);
+            positional = true;
+        }
+        argi++;
+    }
     if (idxnum & 32) resume_seq = sqlite3_value_int64(argv[argi++]);
     if (idxnum & 64) resume_frag = sqlite3_value_int64(argv[argi++]);
+    if (idxnum & 128) {
+        int64_t cap = sqlite3_value_int64(argv[argi++]);
+        c->max_window_bytes = (cap > 0) ? cap : 0;   // <= 0 means no cap
+    }
 
     // Resolve the site filter:
     //   exclude=true  -> all sites except filter_site_id (CHECK path); site required
@@ -1445,7 +1498,11 @@ static int payload_chunks_filter(sqlite3_vtab_cursor *cursor, int idxnum, const 
 }
 
 static int payload_chunks_next(sqlite3_vtab_cursor *cursor) {
-    return payload_chunks_advance((cloudsync_payload_chunks_cursor *)cursor);
+    cloudsync_payload_chunks_cursor *c = (cloudsync_payload_chunks_cursor *)cursor;
+    // A capped window ends the scan: the rows past it belong to the next window, and
+    // emitting them here would contradict the reduced watermark already reported.
+    if (c->window_capped) { c->eof = true; return SQLITE_OK; }
+    return payload_chunks_advance(c);
 }
 
 static int payload_chunks_eof(sqlite3_vtab_cursor *cursor) {
@@ -1466,6 +1523,7 @@ static int payload_chunks_column(sqlite3_vtab_cursor *cursor, sqlite3_context *c
         case 12: sqlite3_result_int64(ctx, c->next_seq); break;
         case 13: sqlite3_result_int64(ctx, c->next_frag_offset); break;
         case 14: sqlite3_result_int(ctx, c->is_final ? 1 : 0); break;
+        case 15: sqlite3_result_int(ctx, c->window_capped ? 1 : 0); break;
         default: sqlite3_result_null(ctx); break;
     }
     return SQLITE_OK;
