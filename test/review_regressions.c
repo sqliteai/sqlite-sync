@@ -395,6 +395,35 @@ static void test_db_version_per_transaction(void) {
     CHECK(scalar(db, "SELECT cloudsync_db_version()") == 8);
     CHECK(close_db(db) == SQLITE_OK);
 }
+static void test_db_version_apply_in_transaction(void) {
+    // A payload applied inside the caller's transaction takes its own db_versions, apart
+    // from the local writes before and after it, and a rollback gives them all back.
+    const char *changes = "SELECT string_agg(cloudsync_pk_decode(pk,1) || '@' || db_version || '/' || seq, '  ' ORDER BY db_version, seq) FROM cloudsync_changes";
+    const char *schema = "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, v TEXT); SELECT cloudsync_init('t');";
+    sqlite3 *source = open_db();
+    CHECK(sql(source, schema) == SQLITE_OK);
+    CHECK(sql(source, "INSERT INTO t VALUES ('r1','x'),('r2','x')") == SQLITE_OK);
+    CHECK(sql(source, "INSERT INTO t VALUES ('r3','x')") == SQLITE_OK);
+
+    sqlite3 *db = open_db();
+    CHECK(sql(db, schema) == SQLITE_OK);
+    CHECK(sql(db, "BEGIN; INSERT INTO t VALUES ('l1','x');") == SQLITE_OK);
+    CHECK(apply_payload(source, db) == SQLITE_ROW);
+    CHECK(sql(db, "INSERT INTO t VALUES ('l2','x'); COMMIT;") == SQLITE_OK);
+    CHECK(text_is(db, changes, "l1@1/0  r1@2/0  r2@2/1  r3@3/0  l2@4/0"));
+    CHECK(close_db(db) == SQLITE_OK);
+
+    db = open_db();
+    CHECK(sql(db, schema) == SQLITE_OK);
+    CHECK(sql(db, "BEGIN;") == SQLITE_OK);
+    CHECK(apply_payload(source, db) == SQLITE_ROW);
+    CHECK(sql(db, "ROLLBACK;") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 0);
+    CHECK(sql(db, "INSERT INTO t VALUES ('l1','x')") == SQLITE_OK);
+    CHECK(text_is(db, changes, "l1@1/0"));
+    CHECK(close_db(db) == SQLITE_OK);
+    CHECK(close_db(source) == SQLITE_OK);
+}
 static void test_block_write_errors(void) {
     for (int update = 0; update < 2; update++) {
         sqlite3 *db = open_db();
@@ -677,6 +706,7 @@ int main(void) {
     test_batched_update_missing_row();
     test_fragment_retention();
     test_db_version_per_transaction();
+    test_db_version_apply_in_transaction();
     test_block_write_errors();
     test_block_materialize_errors();
     test_block_migration_orphan();

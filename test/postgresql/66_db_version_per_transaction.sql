@@ -86,6 +86,71 @@ SELECT :'pinned_list' = 'p1@10/0  p2@11/0  p3@12/0  p4@12/1  p5@13/0' AS pinned_
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
+-- A payload applied inside a transaction takes its own db_versions, apart from the local
+-- writes before and after it, and a rollback gives them all back. Same expectations as
+-- test_db_version_apply_in_transaction in test/review_regressions.c.
+\connect postgres
+\ir helper_psql_conn_setup.sql
+DROP DATABASE IF EXISTS cloudsync_test_66_src;
+DROP DATABASE IF EXISTS cloudsync_test_66_dst;
+DROP DATABASE IF EXISTS cloudsync_test_66_rb;
+CREATE DATABASE cloudsync_test_66_src;
+CREATE DATABASE cloudsync_test_66_dst;
+CREATE DATABASE cloudsync_test_66_rb;
+
+\connect cloudsync_test_66_src
+\ir helper_psql_conn_setup.sql
+CREATE EXTENSION IF NOT EXISTS cloudsync;
+CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, v TEXT);
+SELECT cloudsync_init('t') AS _init \gset
+INSERT INTO t VALUES ('r1','x'),('r2','x');
+INSERT INTO t VALUES ('r3','x');
+SELECT '\x' || encode(cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq), 'hex') AS payload
+FROM cloudsync_changes \gset
+
+\connect cloudsync_test_66_dst
+\ir helper_psql_conn_setup.sql
+CREATE EXTENSION IF NOT EXISTS cloudsync;
+CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, v TEXT);
+SELECT cloudsync_init('t') AS _init \gset
+BEGIN;
+INSERT INTO t VALUES ('l1','x');
+SELECT cloudsync_payload_apply(decode(substr(:'payload', 3), 'hex')) AS _apply \gset
+INSERT INTO t VALUES ('l2','x');
+COMMIT;
+SELECT string_agg(cloudsync_pk_decode(pk,1) || '@' || db_version || '/' || seq, '  ' ORDER BY db_version, seq) AS apply_list
+FROM cloudsync_changes \gset
+SELECT :'apply_list' = 'l1@1/0  r1@2/0  r2@2/1  r3@3/0  l2@4/0' AS apply_ok \gset
+\if :apply_ok
+\echo [PASS] (:testid) a payload applied inside a transaction keeps its db_versions apart from local writes
+\else
+\echo [FAIL] (:testid) payload applied inside a transaction: :apply_list
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+\connect cloudsync_test_66_rb
+\ir helper_psql_conn_setup.sql
+CREATE EXTENSION IF NOT EXISTS cloudsync;
+CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, v TEXT);
+SELECT cloudsync_init('t') AS _init \gset
+BEGIN;
+SELECT cloudsync_payload_apply(decode(substr(:'payload', 3), 'hex')) AS _apply \gset
+ROLLBACK;
+SELECT cloudsync_db_version() AS rb_dbv \gset
+INSERT INTO t VALUES ('l1','x');
+SELECT string_agg(cloudsync_pk_decode(pk,1) || '@' || db_version || '/' || seq, '  ' ORDER BY db_version, seq) AS rb_list
+FROM cloudsync_changes \gset
+SELECT :rb_dbv = 0 AND :'rb_list' = 'l1@1/0' AS rb_ok \gset
+\if :rb_ok
+\echo [PASS] (:testid) a rolled back payload apply takes no db_version
+\else
+\echo [FAIL] (:testid) after a rolled back apply: db_version :rb_dbv, :rb_list
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
 \connect postgres
 \ir helper_psql_conn_setup.sql
 DROP DATABASE IF EXISTS cloudsync_test_66;
+DROP DATABASE IF EXISTS cloudsync_test_66_src;
+DROP DATABASE IF EXISTS cloudsync_test_66_dst;
+DROP DATABASE IF EXISTS cloudsync_test_66_rb;
