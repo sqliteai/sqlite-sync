@@ -21,6 +21,8 @@ CREATE DATABASE cloudsync_test_65;
 CREATE EXTENSION IF NOT EXISTS cloudsync;
 CREATE TABLE items (id TEXT PRIMARY KEY NOT NULL, v BYTEA);
 SELECT cloudsync_init('items', 'CLS', 1) AS _init \gset
+CREATE TABLE big (id TEXT PRIMARY KEY NOT NULL, v BYTEA);
+SELECT cloudsync_init('big', 'CLS', 1) AS _init2 \gset
 -- The smallest chunk size the setting allows, so the rows below span several chunks.
 SELECT cloudsync_set('payload_max_chunk_size', '262144') AS _chunk \gset
 
@@ -128,20 +130,15 @@ SELECT (:fail::int + 1) AS fail \gset
 -- A history of oversized values is emitted entirely as fragment chunks, which the
 -- ordinary chunk builder never produces. Those bytes still have to spend the budget, or
 -- such a history never reaches the cap at all.
---
--- These rows go in the table already synced above rather than a second one: on
--- PostgreSQL the db_version reload reads only the first synced table's maximum, so a
--- second table's writes collapse onto a single db_version and the window would have no
--- boundary to end on. Tracked as the step 1 defect of issue #69; keeping to one table
--- avoids it while that is open.
-INSERT INTO items (id, v) SELECT 'f1', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
-INSERT INTO items (id, v) SELECT 'f2', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
-INSERT INTO items (id, v) SELECT 'f3', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
-INSERT INTO items (id, v) SELECT 'f4', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
-INSERT INTO items (id, v) SELECT 'f5', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
-INSERT INTO items (id, v) SELECT 'f6', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
-INSERT INTO items (id, v) SELECT 'f7', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
-INSERT INTO items (id, v) SELECT 'f8', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+
+INSERT INTO big (id, v) SELECT 'f1', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+INSERT INTO big (id, v) SELECT 'f2', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+INSERT INTO big (id, v) SELECT 'f3', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+INSERT INTO big (id, v) SELECT 'f4', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+INSERT INTO big (id, v) SELECT 'f5', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+INSERT INTO big (id, v) SELECT 'f6', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+INSERT INTO big (id, v) SELECT 'f7', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+INSERT INTO big (id, v) SELECT 'f8', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
 
 SELECT sum(rows) AS frag_rows, max(watermark_db_version) AS frag_wm
   FROM cloudsync_payload_chunks(:base_wm, NULL, NULL, false) \gset
