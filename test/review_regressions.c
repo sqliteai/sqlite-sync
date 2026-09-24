@@ -364,6 +364,66 @@ static void test_fragment_retention(void) {
 
     for (int i = 0; i < frag_count; i++) free(frag_data[i]);
 }
+static bool text_is(sqlite3 *db, const char *query, const char *expected) {
+    sqlite3_stmt *vm = NULL;
+    bool ok = sqlite3_prepare_v2(db, query, -1, &vm, NULL) == SQLITE_OK && sqlite3_step(vm) == SQLITE_ROW &&
+              sqlite3_column_text(vm, 0) && strcmp((const char *)sqlite3_column_text(vm, 0), expected) == 0;
+    if (!ok) fprintf(stderr, "  got: %s\n  expected: %s\n", vm && sqlite3_column_text(vm, 0) ? (const char *)sqlite3_column_text(vm, 0) : "(null)", expected);
+    sqlite3_finalize(vm);
+    return ok;
+}
+static void test_db_version_per_transaction(void) {
+    // Every transaction, implicit or explicit, takes one db_version; its changes share it
+    // with seq restarting at 0, and a rolled back transaction takes none. Same scenario
+    // and expectations as test/postgresql/66_db_version_per_transaction.sql.
+    const char *changes = "SELECT string_agg(cloudsync_pk_decode(pk,1) || ':' || col_name || '@' || db_version || '/' || seq, '  ' ORDER BY db_version, seq) FROM cloudsync_changes";
+    sqlite3 *db = open_db();
+    CHECK(sql(db, "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, v TEXT); SELECT cloudsync_init('t');") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO t VALUES ('a1','x')") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO t VALUES ('a2','x')") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO t VALUES ('b1','x'),('b2','x')") == SQLITE_OK);
+    CHECK(text_is(db, changes, "a1:v@1/0  a2:v@2/0  b1:v@3/0  b2:v@3/1"));
+    CHECK(sql(db, "BEGIN; INSERT INTO t VALUES ('c1','x');") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 3);   // the last committed one
+    CHECK(sql(db, "INSERT INTO t VALUES ('c2','x'); UPDATE t SET v='y' WHERE id='a1'; COMMIT;") == SQLITE_OK);
+    CHECK(sql(db, "UPDATE t SET v='z' WHERE id='a2'") == SQLITE_OK);
+    CHECK(sql(db, "BEGIN; UPDATE t SET v='y' WHERE id='b1'; UPDATE t SET v='y' WHERE id='b2'; COMMIT;") == SQLITE_OK);
+    CHECK(sql(db, "BEGIN; INSERT INTO t VALUES ('r1','x'); ROLLBACK;") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO t VALUES ('d1','x')") == SQLITE_OK);
+    CHECK(sql(db, "BEGIN; UPDATE t SET v='w' WHERE id='a1'; UPDATE t SET v='q' WHERE id='a1'; DELETE FROM t WHERE id='b2'; COMMIT;") == SQLITE_OK);
+    CHECK(text_is(db, changes, "c1:v@4/0  c2:v@4/1  a2:v@5/0  b1:v@6/0  d1:v@7/0  a1:v@8/1  b2:__[RIP]__@8/2"));
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 8);
+    CHECK(close_db(db) == SQLITE_OK);
+}
+static void test_db_version_apply_in_transaction(void) {
+    // A payload applied inside the caller's transaction takes its own db_versions, apart
+    // from the local writes before and after it, and a rollback gives them all back.
+    const char *changes = "SELECT string_agg(cloudsync_pk_decode(pk,1) || '@' || db_version || '/' || seq, '  ' ORDER BY db_version, seq) FROM cloudsync_changes";
+    const char *schema = "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, v TEXT); SELECT cloudsync_init('t');";
+    sqlite3 *source = open_db();
+    CHECK(sql(source, schema) == SQLITE_OK);
+    CHECK(sql(source, "INSERT INTO t VALUES ('r1','x'),('r2','x')") == SQLITE_OK);
+    CHECK(sql(source, "INSERT INTO t VALUES ('r3','x')") == SQLITE_OK);
+
+    sqlite3 *db = open_db();
+    CHECK(sql(db, schema) == SQLITE_OK);
+    CHECK(sql(db, "BEGIN; INSERT INTO t VALUES ('l1','x');") == SQLITE_OK);
+    CHECK(apply_payload(source, db) == SQLITE_ROW);
+    CHECK(sql(db, "INSERT INTO t VALUES ('l2','x'); COMMIT;") == SQLITE_OK);
+    CHECK(text_is(db, changes, "l1@1/0  r1@2/0  r2@2/1  r3@3/0  l2@4/0"));
+    CHECK(close_db(db) == SQLITE_OK);
+
+    db = open_db();
+    CHECK(sql(db, schema) == SQLITE_OK);
+    CHECK(sql(db, "BEGIN;") == SQLITE_OK);
+    CHECK(apply_payload(source, db) == SQLITE_ROW);
+    CHECK(sql(db, "ROLLBACK;") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 0);
+    CHECK(sql(db, "INSERT INTO t VALUES ('l1','x')") == SQLITE_OK);
+    CHECK(text_is(db, changes, "l1@1/0"));
+    CHECK(close_db(db) == SQLITE_OK);
+    CHECK(close_db(source) == SQLITE_OK);
+}
 static void test_block_write_errors(void) {
     for (int update = 0; update < 2; update++) {
         sqlite3 *db = open_db();
@@ -645,6 +705,8 @@ int main(void) {
     test_resurrected_group_rollback();
     test_batched_update_missing_row();
     test_fragment_retention();
+    test_db_version_per_transaction();
+    test_db_version_apply_in_transaction();
     test_block_write_errors();
     test_block_materialize_errors();
     test_block_migration_orphan();

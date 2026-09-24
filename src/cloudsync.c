@@ -176,6 +176,8 @@ struct cloudsync_context {
     int64_t    db_version;
     // version the DB would have if the transaction committed now
     int64_t    pending_db_version;
+    // set when a payload group ends inside a transaction: the next change takes a new version
+    bool       pending_closed;
     // used to set an order inside each transaction
     int        seq;
 
@@ -493,6 +495,8 @@ int64_t cloudsync_dbversion_next (cloudsync_context *data, int64_t merging_versi
     
     int64_t result = data->db_version + 1;
     if (result < data->pending_db_version) result = data->pending_db_version;
+    if (data->pending_closed && result <= data->pending_db_version) result = data->pending_db_version + 1;
+    data->pending_closed = false;
     if (merging_version != CLOUDSYNC_VALUE_NOTSET && result < merging_version) result = merging_version;
     data->pending_db_version = result;
     
@@ -2648,6 +2652,7 @@ int cloudsync_commit_hook (void *ctx) {
     
     data->db_version = data->pending_db_version;
     data->pending_db_version = CLOUDSYNC_VALUE_NOTSET;
+    data->pending_closed = false;
     data->seq = 0;
     
     return DBRES_OK;
@@ -2657,6 +2662,24 @@ void cloudsync_rollback_hook (void *ctx) {
     cloudsync_context *data = (cloudsync_context *)ctx;
     
     data->pending_db_version = CLOUDSYNC_VALUE_NOTSET;
+    data->pending_closed = false;
+    data->seq = 0;
+}
+
+// For a backend without commit and rollback hooks (PostgreSQL), called at the end of
+// every transaction. It acts only on a transaction that took a db_version, so the cached
+// db_version survives the many read-only transactions in between.
+void cloudsync_transaction_end (cloudsync_context *data, bool committed) {
+    if (!data || data->pending_db_version == CLOUDSYNC_VALUE_NOTSET) return;
+    if (committed) cloudsync_commit_hook(data);
+    else cloudsync_rollback_hook(data);
+}
+
+// Ends the pending db_version without committing it: the next change takes a new one with
+// seq restarting at 0. The committed db_version is left alone, so a rollback restores it.
+static void cloudsync_pending_version_close (cloudsync_context *data) {
+    if (data->pending_db_version == CLOUDSYNC_VALUE_NOTSET) return;
+    data->pending_closed = true;
     data->seq = 0;
 }
 
@@ -4487,6 +4510,8 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
                 break;
             }
             int n = 0;
+            // each value takes its own db_version, as each group does in the row path
+            cloudsync_pending_version_close(data);
             rc = cloudsync_payload_apply_fragment_row(data, &row, checkpoint_db_version != CLOUDSYNC_CHECKPOINT_LAST_APPLIED, &n);
             // stop at the first error, as the row path does
             if (rc != DBRES_OK) break;
@@ -4494,6 +4519,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
             buffer += seek;
             buf_len -= seek;
         }
+        cloudsync_pending_version_close(data);
         if (clone) cloudsync_memory_free(clone);
         cloudsync_apply_stats_add(data, applied_rows);
         if (pnrows) *pnrows = applied_rows;
@@ -4575,6 +4601,11 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
             in_savepoint = false;
         }
 
+        // Inside a caller's transaction (always on PostgreSQL) no commit hook runs between
+        // groups: close the group's db_version here, or every source db_version would get
+        // the same local one and their seqs would collide. A no-op after the RELEASE above.
+        if (db_version_changed) cloudsync_pending_version_close(data);
+
         if (!in_savepoint && db_version_changed && !database_in_transaction(data)) {
             rc = database_begin_savepoint(data, "cloudsync_payload_apply");
             if (rc != DBRES_OK) {
@@ -4648,6 +4679,8 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
             in_savepoint = false;
         }
     }
+    // Local writes that follow in the same transaction take a db_version of their own.
+    cloudsync_pending_version_close(data);
 
     rc = fail_rc;
     if (rc != DBRES_OK) {
