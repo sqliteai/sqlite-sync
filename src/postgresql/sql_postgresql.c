@@ -97,10 +97,12 @@ const char * const SQL_DBVERSION_BUILD_QUERY =
     "), "
     "query_parts AS ("
     "SELECT tbl_name, "
-    "format('SELECT COALESCE(MAX(db_version), 0) FROM %s', tbl_name) as part "
+    "format('SELECT MAX(db_version) AS version FROM %s', tbl_name) as part "
     "FROM table_names"
     ") "
-    "SELECT string_agg(part, ' UNION ALL ') FROM query_parts;";
+    "SELECT 'SELECT COALESCE(MAX(version), 0) FROM (' || string_agg(part, ' UNION ALL ') || "
+    "' UNION ALL SELECT value::bigint FROM cloudsync_settings WHERE key = ''pre_alter_dbversion'') v' "
+    "FROM query_parts;";
 
 const char * const SQL_CHANGES_INSERT_ROW =
     "INSERT INTO cloudsync_changes(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) "

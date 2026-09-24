@@ -2660,6 +2660,16 @@ void cloudsync_rollback_hook (void *ctx) {
     data->seq = 0;
 }
 
+// Runs the commit or rollback hook where the database does not: at the end of every
+// PostgreSQL transaction, and between source db_versions of a payload applied inside one.
+// It acts only when a db_version was taken, so the cached one survives read-only
+// transactions.
+void cloudsync_transaction_end (cloudsync_context *data, bool committed) {
+    if (!data || data->pending_db_version == CLOUDSYNC_VALUE_NOTSET) return;
+    if (committed) cloudsync_commit_hook(data);
+    else cloudsync_rollback_hook(data);
+}
+
 int cloudsync_begin_alter (cloudsync_context *data, const char *table_name) {
     // init cloudsync_settings
     if (cloudsync_context_init(data) == NULL) {
@@ -4574,6 +4584,11 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
             }
             in_savepoint = false;
         }
+
+        // Inside a caller's transaction (always on PostgreSQL) no commit hook runs between
+        // groups: close the group's db_version here, or every source db_version would get
+        // the same local one and their seqs would collide. A no-op after the RELEASE above.
+        if (db_version_changed) cloudsync_transaction_end(data, true);
 
         if (!in_savepoint && db_version_changed && !database_in_transaction(data)) {
             rc = database_begin_savepoint(data, "cloudsync_payload_apply");

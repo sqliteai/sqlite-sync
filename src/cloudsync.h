@@ -124,6 +124,7 @@ void cloudsync_apply_stats_reset (cloudsync_context *data);
 int cloudsync_apply_rows_count (cloudsync_context *data);
 int cloudsync_commit_hook (void *ctx);
 void cloudsync_rollback_hook (void *ctx);
+void cloudsync_transaction_end (cloudsync_context *data, bool committed);
 void cloudsync_set_schema (cloudsync_context *data, const char *schema);
 const char *cloudsync_schema (cloudsync_context *data);
 const char *cloudsync_table_schema (cloudsync_context *data, const char *table_name);

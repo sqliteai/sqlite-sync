@@ -72,6 +72,7 @@
 \ir 62_deferred_fk_caller_commit.sql
 \ir 63_deep_savepoints.sql
 \ir 64_block_rewrite_leftovers.sql
+\ir 66_db_version_per_transaction.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

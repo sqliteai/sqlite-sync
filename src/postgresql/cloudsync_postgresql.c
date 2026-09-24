@@ -126,6 +126,29 @@ static cloudsync_context *get_cloudsync_context(void) {
     return pg_cloudsync_context;
 }
 
+// PostgreSQL has no commit or rollback hook like SQLite's: the transaction callback closes
+// the transaction's db_version and restarts seq as the SQLite hooks do, so the next
+// transaction takes a new db_version even while another session pins the snapshot xmin.
+// It only assigns fields, so it is safe during commit.
+static void cloudsync_xact_callback (XactEvent event, void *arg) {
+    UNUSED_PARAMETER(arg);
+    cloudsync_context *data = pg_cloudsync_context;
+    if (!data) return;
+    switch (event) {
+        case XACT_EVENT_COMMIT:
+        case XACT_EVENT_PARALLEL_COMMIT:
+        case XACT_EVENT_PREPARE:
+            cloudsync_transaction_end(data, true);
+            break;
+        case XACT_EVENT_ABORT:
+        case XACT_EVENT_PARALLEL_ABORT:
+            cloudsync_transaction_end(data, false);
+            break;
+        default:
+            break;
+    }
+}
+
 // MARK: - Extension Entry Points -
 
 void _PG_init (void) {
@@ -138,11 +161,14 @@ void _PG_init (void) {
 
     // Set fractional-indexing allocator to use cloudsync memory
     block_init_allocator();
+
+    RegisterXactCallback(cloudsync_xact_callback, NULL);
 }
 
 void _PG_fini (void) {
     // Extension cleanup
     elog(DEBUG1, "CloudSync extension unloading");
+    UnregisterXactCallback(cloudsync_xact_callback, NULL);
 
     // Free global context if it exists
     if (pg_cloudsync_context) {
