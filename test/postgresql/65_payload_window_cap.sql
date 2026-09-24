@@ -128,6 +128,12 @@ SELECT (:fail::int + 1) AS fail \gset
 -- A history of oversized values is emitted entirely as fragment chunks, which the
 -- ordinary chunk builder never produces. Those bytes still have to spend the budget, or
 -- such a history never reaches the cap at all.
+--
+-- These rows go in the table already synced above rather than a second one. By this
+-- point the session has held snapshots open (the drains above), and issue #69 defect 2
+-- means the cached db_version is only reloaded when txid_snapshot_xmin changes -- so
+-- fresh single-statement transactions collapse onto one db_version and the window would
+-- have no boundary to end on. Keeping to one table avoids that while it is open.
 INSERT INTO items (id, v) SELECT 'f1', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
 INSERT INTO items (id, v) SELECT 'f2', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
 INSERT INTO items (id, v) SELECT 'f3', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
