@@ -1234,6 +1234,10 @@ static bytea *payload_chunks_emit_pg_fragment(PayloadChunksState *st, cloudsync_
     if (rc != DBRES_OK) ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
     rc = cloudsync_payload_encode_final(payload, data);
     if (rc != DBRES_OK) ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
+    // A fragment chunk spends the window budget like any other. Fragments are emitted
+    // here rather than by the ordinary builder, so without this a history made of
+    // oversized values never spends the budget and the cap never fires.
+    st->window_bytes += (int64)cloudsync_payload_context_bused(payload);
     int64 blob_size = 0;
     char *blob = cloudsync_payload_blob(payload, &blob_size, rows);
     bytea *result = (bytea *)palloc(VARHDRSZ + blob_size);

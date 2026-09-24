@@ -65,10 +65,10 @@ SELECT (:fail::int + 1) AS fail \gset
 -- Drain the same stream in capped windows, following watermark_db_version each time,
 -- and add up what the windows covered. A budget below one chunk also proves the drain
 -- still advances: a db_version larger than the whole budget must be emitted in full.
-CREATE FUNCTION pg_temp.drain_capped(cap bigint)
+CREATE FUNCTION pg_temp.drain_capped_from(start_since bigint, cap bigint)
 RETURNS TABLE (windows int, nrows bigint, maxbytes bigint, last_wm bigint, contiguous boolean) AS $$
 DECLARE
-  since bigint := 0;
+  since bigint := start_since;
   w int := 0;
   c bigint := 0;
   b bigint := 0;
@@ -95,7 +95,7 @@ END $$ LANGUAGE plpgsql;
 SELECT d.windows AS w1, d.nrows AS c1, d.maxbytes AS b1, d.last_wm AS wm1,
        (d.windows > 1 AND d.contiguous AND d.nrows = :base_rows::bigint
         AND d.maxbytes <= 200000 + 3 * 262144 AND d.last_wm = :base_wm::bigint) AS cap1_ok
-  FROM pg_temp.drain_capped(200000) d \gset
+  FROM pg_temp.drain_capped_from(0, 200000) d \gset
 \if :cap1_ok
 \echo [PASS] (:testid) a 200 KB budget splits the stream into :w1 windows that tile it exactly
 \else
@@ -106,7 +106,7 @@ SELECT (:fail::int + 1) AS fail \gset
 SELECT d.windows AS w2, d.nrows AS c2, d.maxbytes AS b2, d.last_wm AS wm2,
        (d.windows > 1 AND d.contiguous AND d.nrows = :base_rows::bigint
         AND d.maxbytes <= 1 + 3 * 262144 AND d.last_wm = :base_wm::bigint) AS cap2_ok
-  FROM pg_temp.drain_capped(1) d \gset
+  FROM pg_temp.drain_capped_from(0, 1) d \gset
 \if :cap2_ok
 \echo [PASS] (:testid) a 1-byte budget still advances and tiles the stream exactly
 \else
@@ -122,6 +122,32 @@ SELECT count(*) AS res_chunks, min(db_version_min) AS res_first,
 \echo [PASS] (:testid) positional resume is unaffected by the new argument
 \else
 \echo [FAIL] (:testid) positional resume returned :res_chunks chunk(s) starting at :res_first
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+-- A history of oversized values is emitted entirely as fragment chunks, which the
+-- ordinary chunk builder never produces. Those bytes still have to spend the budget, or
+-- such a history never reaches the cap at all.
+INSERT INTO items (id, v) SELECT 'f1', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+INSERT INTO items (id, v) SELECT 'f2', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+INSERT INTO items (id, v) SELECT 'f3', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+INSERT INTO items (id, v) SELECT 'f4', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+INSERT INTO items (id, v) SELECT 'f5', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+INSERT INTO items (id, v) SELECT 'f6', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+INSERT INTO items (id, v) SELECT 'f7', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+INSERT INTO items (id, v) SELECT 'f8', (SELECT decode(string_agg(md5(random()::text || g::text), ''), 'hex') FROM generate_series(1, 18750) g);
+
+SELECT sum(rows) AS frag_rows, max(watermark_db_version) AS frag_wm
+  FROM cloudsync_payload_chunks(:base_wm, NULL, NULL, false) \gset
+
+SELECT d.windows AS w3, d.nrows AS c3, d.last_wm AS wm3,
+       (d.windows > 1 AND d.contiguous AND d.nrows = :frag_rows::bigint
+        AND d.last_wm = :frag_wm::bigint) AS cap3_ok
+  FROM pg_temp.drain_capped_from(:base_wm, 200000) d \gset
+\if :cap3_ok
+\echo [PASS] (:testid) a purely fragmented history is capped into :w3 windows
+\else
+\echo [FAIL] (:testid) windows=:w3 rows=:c3/:frag_rows wm=:wm3/:frag_wm
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 

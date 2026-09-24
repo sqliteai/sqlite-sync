@@ -796,6 +796,54 @@ static void test_payload_window_cap(void) {
     }
 
     CHECK(close_db(db) == SQLITE_OK);
+
+    // A history of oversized values is emitted entirely as fragment chunks, which the
+    // ordinary chunk builder never produces. Those bytes still have to spend the budget,
+    // or such a history never reaches the cap at all.
+    db = open_db();
+    CHECK(sql(db, "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, v BLOB);"
+                  "SELECT cloudsync_init('t');"
+                  "SELECT cloudsync_set('payload_max_chunk_size','262144');") == SQLITE_OK);
+    for (int i = 0; i < 20; i++) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "INSERT INTO t VALUES('f%03d', randomblob(300000));", i);
+        CHECK(sql(db, buf) == SQLITE_OK);
+    }
+    int64_t frag_rows = 0, frag_wm = 0;
+    vm = NULL;
+    CHECK(sqlite3_prepare_v2(db, "SELECT sum(rows), max(CASE WHEN is_final THEN watermark_db_version END) "
+                                 "FROM cloudsync_payload_chunks(0,NULL,NULL,false)", -1, &vm, NULL) == SQLITE_OK);
+    if (sqlite3_step(vm) == SQLITE_ROW) { frag_rows = sqlite3_column_int64(vm, 0); frag_wm = sqlite3_column_int64(vm, 1); }
+    sqlite3_finalize(vm);
+    CHECK(frag_rows > 0 && frag_wm == 20);
+
+    int64_t since = 0, seen = 0;
+    int windows = 0;
+    bool capped = true;
+    while (capped && windows < 100) {
+        vm = NULL;
+        char q[384];
+        snprintf(q, sizeof(q),
+                 "SELECT count(*), coalesce(sum(rows),0), "
+                 "max(CASE WHEN is_final THEN watermark_db_version END), max(window_capped), "
+                 "min(db_version_min) "
+                 "FROM cloudsync_payload_chunks(%lld,NULL,NULL,false,NULL,NULL,NULL,200000)",
+                 (long long)since);
+        CHECK(sqlite3_prepare_v2(db, q, -1, &vm, NULL) == SQLITE_OK);
+        if (sqlite3_step(vm) != SQLITE_ROW || sqlite3_column_int64(vm, 0) == 0) { sqlite3_finalize(vm); break; }
+        seen += sqlite3_column_int64(vm, 1);
+        int64_t wm = sqlite3_column_int64(vm, 2);
+        capped = sqlite3_column_int(vm, 3) != 0;
+        CHECK(sqlite3_column_int64(vm, 4) == since + 1);
+        CHECK(wm > since);
+        sqlite3_finalize(vm);
+        since = wm;
+        windows++;
+    }
+    CHECK(windows > 1);            // the budget split a purely fragmented history
+    CHECK(since == frag_wm);
+    CHECK(seen == frag_rows);
+    CHECK(close_db(db) == SQLITE_OK);
 }
 
 int main(void) {

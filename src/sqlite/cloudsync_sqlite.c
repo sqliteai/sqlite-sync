@@ -1230,6 +1230,10 @@ static int payload_chunks_emit_fragment(cloudsync_payload_chunks_cursor *c) {
     if (rc != SQLITE_OK) { cloudsync_memory_free(payload); return rc; }
     rc = cloudsync_payload_encode_final(payload, data);
     if (rc != SQLITE_OK) { cloudsync_memory_free(payload); return rc; }
+    // A fragment chunk spends the window budget like any other. The fragment paths
+    // return before the ordinary builder's accounting, so without this a history made
+    // of oversized values never spends the budget and the cap never fires.
+    c->window_bytes += (int64_t)cloudsync_payload_context_bused(payload);
     c->payload = cloudsync_payload_blob(payload, &c->payload_size, &c->rows);
     cloudsync_memory_free(payload);
     c->dbv_min = sqlite3_column_int64(c->src, 5);
