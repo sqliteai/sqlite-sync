@@ -1,10 +1,12 @@
 -- CloudSync PostgreSQL extension upgrade: 1.1 -> 1.2
 --
 -- Bounds what one call to cloudsync_payload_chunks() prepares:
---   * new max_window_bytes input, declared last so the existing positional
---     arguments 1..7 keep their meaning
+--   * new max_window_bytes and resume_window_bytes inputs, declared last so the
+--     existing positional arguments 1..7 keep their meaning
 --   * new window_capped output, true when the scan stopped on the budget
---     rather than because the window was drained
+--     rather than because the window was drained, and window_bytes, the budget
+--     spent so far -- pass it back as resume_window_bytes to carry the budget
+--     across a stream fetched one chunk per call
 --
 -- Both are optional: without max_window_bytes the function behaves exactly as
 -- it did in 1.1.
@@ -26,7 +28,8 @@ CREATE OR REPLACE FUNCTION cloudsync_payload_chunks(
   resume_db_version bigint DEFAULT NULL,
   resume_seq bigint DEFAULT NULL,
   resume_frag_offset bigint DEFAULT NULL,
-  max_window_bytes bigint DEFAULT NULL
+  max_window_bytes bigint DEFAULT NULL,
+  resume_window_bytes bigint DEFAULT NULL
 )
 RETURNS TABLE (
   payload bytea,
@@ -40,7 +43,8 @@ RETURNS TABLE (
   next_seq bigint,
   next_frag_offset bigint,
   is_final boolean,
-  window_capped boolean
+  window_capped boolean,
+  window_bytes bigint
 )
 AS 'MODULE_PATHNAME', 'cloudsync_payload_chunks'
 LANGUAGE C VOLATILE;

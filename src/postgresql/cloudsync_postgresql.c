@@ -1403,6 +1403,11 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
         // Cap the whole prepared window, not one chunk: <= 0 and NULL both mean no cap.
         int64 window_cap = PG_ARGISNULL(7) ? 0 : PG_GETARG_INT64(7);
         st->max_window_bytes = (window_cap > 0) ? window_cap : 0;
+        // Budget already spent by earlier calls of this window. State is created fresh
+        // per call, so a caller paging one chunk at a time seeds it here; a caller
+        // draining the window in one call leaves it at 0 and it accumulates.
+        int64 window_spent = PG_ARGISNULL(8) ? 0 : PG_GETARG_INT64(8);
+        st->window_bytes = (window_spent > 0) ? window_spent : 0;
         // Site filter resolution:
         //   exclude=true  -> all sites except filter_site_id (CHECK path); site required
         //   filter given  -> only that site
@@ -1542,8 +1547,8 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
         }
     }
 
-    Datum outvals[12];
-    bool outnulls[12] = {false,false,false,false,false,false,false,false,false,false,false,false};
+    Datum outvals[13];
+    bool outnulls[13] = {false,false,false,false,false,false,false,false,false,false,false,false,false};
     outvals[0] = PointerGetDatum(payload);
     outvals[1] = Int64GetDatum(st->chunk_index++);
     outvals[2] = Int64GetDatum(VARSIZE_ANY_EXHDR(payload));
@@ -1556,6 +1561,7 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
     outvals[9] = Int64GetDatum(next_frag);
     outvals[10] = BoolGetDatum(is_final);
     outvals[11] = BoolGetDatum(st->window_capped);
+    outvals[12] = Int64GetDatum(st->window_bytes);
     HeapTuple outtup = heap_form_tuple(st->outdesc, outvals, outnulls);
     SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(outtup));
 }

@@ -1054,12 +1054,18 @@ static int payload_chunks_connect(sqlite3 *db, void *aux, int argc, const char *
         // back as the resume_* inputs (cols 15..17) to continue the drain without
         // a spool table — O(1) seek per chunk instead of replaying from since.
         "next_db_version INTEGER, next_seq INTEGER, next_frag_offset INTEGER, is_final INTEGER, "
-        // window_capped (col 15) is an output, so it does not shift the hidden columns
-        // a table-valued call binds positionally. max_window_bytes is declared last for
-        // the same reason: it becomes argument 8, leaving arguments 1..7 as they were.
-        "window_capped INTEGER, "
+        // window_capped and window_bytes (cols 15..16) are outputs, so they do not shift
+        // the hidden columns a table-valued call binds positionally. The two budget
+        // inputs are declared last for the same reason: they become arguments 8 and 9,
+        // leaving arguments 1..7 as they were.
+        //
+        // window_bytes/resume_window_bytes carry the budget spent across calls exactly
+        // as next_*/resume_* carry the stream position. Without it a caller that fetches
+        // one chunk per call -- which is how a stateless /check pages -- restarts the
+        // count every time and never reaches the budget at all.
+        "window_capped INTEGER, window_bytes INTEGER, "
         "resume_db_version HIDDEN, resume_seq HIDDEN, resume_frag_offset HIDDEN, "
-        "max_window_bytes HIDDEN)");
+        "max_window_bytes HIDDEN, resume_window_bytes HIDDEN)");
     if (rc != SQLITE_OK) return rc;
     cloudsync_payload_chunks_vtab *p = sqlite3_malloc64(sizeof(*p));
     if (!p) return SQLITE_NOMEM;
@@ -1097,9 +1103,10 @@ static int payload_chunks_best_index(sqlite3_vtab *vtab, sqlite3_index_info *idx
     // in a fixed order regardless of how SQLite presents constraints. idxNum bit k
     // is set when handled_cols[k] is bound; xFilter reads argv in this same order.
     //   bit0=since_db_version(7) bit1=site_id(8) bit2=until_db_version(9)
-    //   bit3=exclude_filter_site_id(10) bit4=resume_db_version(16)
-    //   bit5=resume_seq(17) bit6=resume_frag_offset(18) bit7=max_window_bytes(19)
-    static const int handled_cols[] = {7, 8, 9, 10, 16, 17, 18, 19};
+    //   bit3=exclude_filter_site_id(10) bit4=resume_db_version(17)
+    //   bit5=resume_seq(18) bit6=resume_frag_offset(19) bit7=max_window_bytes(20)
+    //   bit8=resume_window_bytes(21)
+    static const int handled_cols[] = {7, 8, 9, 10, 17, 18, 19, 20, 21};
     int argv_index = 1;
     int idxnum = 0;
     for (size_t k = 0; k < sizeof(handled_cols) / sizeof(handled_cols[0]); ++k) {
@@ -1422,6 +1429,13 @@ static int payload_chunks_filter(sqlite3_vtab_cursor *cursor, int idxnum, const 
         int64_t cap = sqlite3_value_int64(argv[argi++]);
         c->max_window_bytes = (cap > 0) ? cap : 0;   // <= 0 means no cap
     }
+    // Budget already spent by earlier calls of this window. The per-scan reset above
+    // cleared window_bytes, so a caller paging one chunk at a time seeds it here; a
+    // caller draining the window in one scan leaves it at 0 and it accumulates.
+    if (idxnum & 256) {
+        int64_t spent = sqlite3_value_int64(argv[argi++]);
+        c->window_bytes = (spent > 0) ? spent : 0;
+    }
 
     // Resolve the site filter:
     //   exclude=true  -> all sites except filter_site_id (CHECK path); site required
@@ -1537,6 +1551,7 @@ static int payload_chunks_column(sqlite3_vtab_cursor *cursor, sqlite3_context *c
         case 13: sqlite3_result_int64(ctx, c->next_frag_offset); break;
         case 14: sqlite3_result_int(ctx, c->is_final ? 1 : 0); break;
         case 15: sqlite3_result_int(ctx, c->window_capped ? 1 : 0); break;
+        case 16: sqlite3_result_int64(ctx, c->window_bytes); break;
         default: sqlite3_result_null(ctx); break;
     }
     return SQLITE_OK;

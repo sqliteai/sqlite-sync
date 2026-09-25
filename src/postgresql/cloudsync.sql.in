@@ -157,7 +157,8 @@ CREATE OR REPLACE FUNCTION cloudsync_payload_chunks(
   resume_db_version bigint DEFAULT NULL,
   resume_seq bigint DEFAULT NULL,
   resume_frag_offset bigint DEFAULT NULL,
-  max_window_bytes bigint DEFAULT NULL
+  max_window_bytes bigint DEFAULT NULL,
+  resume_window_bytes bigint DEFAULT NULL
 )
 RETURNS TABLE (
   payload bytea,
@@ -171,7 +172,8 @@ RETURNS TABLE (
   next_seq bigint,
   next_frag_offset bigint,
   is_final boolean,
-  window_capped boolean
+  window_capped boolean,
+  window_bytes bigint
 )
 AS 'MODULE_PATHNAME', 'cloudsync_payload_chunks'
 LANGUAGE C VOLATILE;

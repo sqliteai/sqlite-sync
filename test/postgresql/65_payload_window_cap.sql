@@ -154,6 +154,63 @@ SELECT d.windows AS w3, d.nrows AS c3, d.last_wm AS wm3,
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
+-- A stateless caller fetches one chunk per call and resumes through resume_*, which is
+-- how the /check job pages. Each call builds its state fresh, so the budget spent has to
+-- be carried back in through resume_window_bytes or the count restarts every time and
+-- the cap never fires at all -- the whole window comes out uncapped however long it runs.
+-- The budget here spans several chunks, so it can only be reached by accumulating.
+CREATE FUNCTION pg_temp.drain_paged(cap bigint)
+RETURNS TABLE (windows int, nrows bigint, last_wm bigint, contiguous boolean) AS $$
+DECLARE
+  since bigint := 0; wm bigint; w int := 0; nr bigint := 0; ok boolean := true;
+  rdbv bigint; rseq bigint; rfrag bigint; spent bigint;
+  capped boolean; final_seen boolean; first_dbv bigint; last_dbv bigint; n int;
+  r record;
+BEGIN
+  SELECT max(watermark_db_version) INTO wm FROM cloudsync_payload_chunks(0, NULL, NULL, false);
+  LOOP
+    rdbv := NULL; rseq := NULL; rfrag := NULL; spent := 0;
+    capped := false; final_seen := false; n := 0;
+    LOOP
+      IF n = 0 THEN
+        SELECT * INTO r FROM cloudsync_payload_chunks(since, NULL, NULL, false, NULL, NULL, NULL, cap, 0) LIMIT 1;
+      ELSE
+        SELECT * INTO r FROM cloudsync_payload_chunks(NULL, NULL, wm, false, rdbv, rseq, rfrag, cap, spent) LIMIT 1;
+      END IF;
+      EXIT WHEN r IS NULL;
+      nr := nr + r.rows;
+      rdbv := r.next_db_version; rseq := r.next_seq; rfrag := r.next_frag_offset;
+      final_seen := r.is_final; capped := r.window_capped; spent := r.window_bytes;
+      IF n = 0 THEN first_dbv := r.db_version_min; END IF;
+      last_dbv := r.db_version_max;
+      n := n + 1;
+      EXIT WHEN final_seen OR n > 500;
+    END LOOP;
+    EXIT WHEN n = 0;
+    -- Windows abut and advance, and the budget is only ever reached across calls.
+    IF first_dbv <> since + 1 OR last_dbv <= since OR spent > cap + 3 * 262144 THEN ok := false; END IF;
+    w := w + 1;
+    IF capped THEN since := last_dbv; ELSE since := wm; END IF;
+    EXIT WHEN NOT capped OR w > 100;
+  END LOOP;
+  RETURN QUERY SELECT w, nr, since, ok;
+END $$ LANGUAGE plpgsql;
+
+-- Fresh totals: the fragment case above added rows after the first baseline was taken.
+SELECT sum(rows) AS all_rows, max(watermark_db_version) AS all_wm
+  FROM cloudsync_payload_chunks(0, NULL, NULL, false) \gset
+
+SELECT d.windows AS w4, d.nrows AS c4, d.last_wm AS wm4,
+       (d.windows > 1 AND d.contiguous AND d.nrows = :all_rows::bigint
+        AND d.last_wm = :all_wm::bigint) AS cap4_ok
+  FROM pg_temp.drain_paged(600000) d \gset
+\if :cap4_ok
+\echo [PASS] (:testid) a budget spanning chunks caps a stream paged one chunk per call (:w4 windows)
+\else
+\echo [FAIL] (:testid) windows=:w4 rows=:c4/:all_rows wm=:wm4/:all_wm
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
 \connect postgres
 \ir helper_psql_conn_setup.sql
 DROP DATABASE IF EXISTS cloudsync_test_65;
