@@ -1400,13 +1400,17 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
         int64 resume_dbv = PG_ARGISNULL(4) ? 0 : PG_GETARG_INT64(4);
         int64 resume_seq = PG_ARGISNULL(5) ? 0 : PG_GETARG_INT64(5);
         int64 resume_frag = PG_ARGISNULL(6) ? 0 : PG_GETARG_INT64(6);
+        // Both budget arguments are guarded by PG_NARGS(): between installing the 1.2
+        // binary and running ALTER EXTENSION cloudsync UPDATE, the 1.1 SQL definition
+        // still points at this function and calls it with seven arguments. Reading the
+        // eighth and ninth slots then runs off the end of fcinfo->args.
         // Cap the whole prepared window, not one chunk: <= 0 and NULL both mean no cap.
-        int64 window_cap = PG_ARGISNULL(7) ? 0 : PG_GETARG_INT64(7);
+        int64 window_cap = (PG_NARGS() > 7 && !PG_ARGISNULL(7)) ? PG_GETARG_INT64(7) : 0;
         st->max_window_bytes = (window_cap > 0) ? window_cap : 0;
         // Budget already spent by earlier calls of this window. State is created fresh
         // per call, so a caller paging one chunk at a time seeds it here; a caller
         // draining the window in one call leaves it at 0 and it accumulates.
-        int64 window_spent = PG_ARGISNULL(8) ? 0 : PG_GETARG_INT64(8);
+        int64 window_spent = (PG_NARGS() > 8 && !PG_ARGISNULL(8)) ? PG_GETARG_INT64(8) : 0;
         st->window_bytes = (window_spent > 0) ? window_spent : 0;
         // Site filter resolution:
         //   exclude=true  -> all sites except filter_site_id (CHECK path); site required

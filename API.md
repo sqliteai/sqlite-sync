@@ -567,7 +567,7 @@ SELECT cloudsync_payload_blob_checked(
 
 ---
 
-### `cloudsync_payload_chunks([since_db_version], [filter_site_id], [until_db_version], [exclude_filter_site_id], [resume_db_version], [resume_seq], [resume_frag_offset], [max_window_bytes]), [resume_window_bytes])`
+### `cloudsync_payload_chunks([since_db_version], [filter_site_id], [until_db_version], [exclude_filter_site_id], [resume_db_version], [resume_seq], [resume_frag_offset], [max_window_bytes], [resume_window_bytes])`
 
 **Description:** Generates sync payloads as a stream of transport-sized chunks. It is the chunk-aware evolution of [`cloudsync_payload_encode()`](#cloudsync_payload_encodetbl-pk-col_name-col_value-col_version-db_version-site_id-cl-seq), designed for large rowsets and for single BLOB/TEXT values that are larger than the configured chunk size.
 
