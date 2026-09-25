@@ -662,6 +662,126 @@ static bool test_curl_async_dns(void) {
 }
 #endif
 
+// Bounded send: cloudsync_network_send_changes(until) caps the window at until, so a
+// backlog uploads as several coherent all-or-nothing batches. Records every /apply
+// window so the test can assert all chunks of a batch announce the same one.
+static int64_t apply_min[64], apply_max[64];
+static int napply;
+static int64_t apply_optimistic;
+static bool send_no_status;   // status probe answers without a version, so the local fallback governs
+
+static NETWORK_RESULT send_responder(const char *endpoint, const char *request) {
+    NETWORK_RESULT r = {0};
+    size_t n = endpoint ? strlen(endpoint) : 0;
+    bool is_apply = (n >= 6 && strcmp(endpoint + n - 6, "/apply") == 0);
+    if (is_apply && request && napply < 64) {
+        apply_min[napply] = json_int_after(request, "\"dbVersionMin\":", -1);
+        apply_max[napply] = json_int_after(request, "\"dbVersionMax\":", -1);
+        if (apply_max[napply] > apply_optimistic) apply_optimistic = apply_max[napply];
+        napply++;
+    }
+    // Both /apply and the status probe answer with the same sync-status shape.
+    char *json = cloudsync_memory_alloc(256);
+    if (send_no_status && !is_apply) snprintf(json, 256, "{\"data\":{}}");
+    else snprintf(json, 256, "{\"data\":{\"lastOptimisticVersion\":%lld,\"lastConfirmedVersion\":%lld,\"gaps\":[]}}",
+                  (long long)apply_optimistic, (long long)apply_optimistic);
+    r.code = CLOUDSYNC_NETWORK_BUFFER;
+    r.buffer = json;
+    r.blen = strlen(json);
+    return r;
+}
+
+static int64_t send_checkpoint(sqlite3 *db) {
+    return db_int(db, "SELECT coalesce((SELECT value FROM cloudsync_settings WHERE key='send_dbversion'),0)");
+}
+
+static char *send_changes(sqlite3 *db, const char *arg) {
+    static char out[1024];
+    char sql[128];
+    snprintf(sql, sizeof(sql), "SELECT cloudsync_network_send_changes(%s)", arg ? arg : "");
+    sqlite3_stmt *vm = NULL;
+    out[0] = 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &vm, NULL) == SQLITE_OK && sqlite3_step(vm) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(vm, 0);
+        if (t) snprintf(out, sizeof(out), "%s", t);
+    } else {
+        snprintf(out, sizeof(out), "ERROR: %s", sqlite3_errmsg(db));
+    }
+    sqlite3_finalize(vm);
+    return out;
+}
+
+static bool test_bounded_send(void) {
+    bool ok = true;
+    sqlite3 *db = stream_db(true);
+    ok = ok && expect(db != NULL, "db", NULL);
+    if (!ok) { stream_close(db); return false; }
+
+    // Five rows, one transaction each, so the backlog spans five local db_versions.
+    for (int i = 1; i <= 5 && ok; i++) {
+        char sql[128];
+        snprintf(sql, sizeof(sql), "INSERT INTO t VALUES('r%d', 'v%d');", i, i);
+        ok = ok && db_exec(db, sql) == SQLITE_OK;
+    }
+    ok = ok && expect(db_int(db, "SELECT max(db_version) FROM cloudsync_changes") == 5, "five local db_versions", NULL);
+
+    // Bad arguments are rejected before any I/O.
+    ok = ok && expect(strstr(send_changes(db, "'abc'"), "must be an integer") != NULL, "non-integer count rejected", NULL);
+    ok = ok && expect(strstr(send_changes(db, "0"), "greater than zero") != NULL, "zero count rejected", NULL);
+
+    napply = 0; apply_optimistic = 0;
+    network_test_set_responder(send_responder);
+
+    // Two db_versions per call: the window is [1,2], and every chunk of the batch
+    // announces it.
+    char *json = send_changes(db, "2");
+    bool same_window = (napply > 0);
+    for (int i = 0; i < napply; i++) same_window = same_window && apply_min[i] == 1 && apply_max[i] == 2;
+    ok = ok && expect(same_window, "every chunk announces [1,2]", json);
+    ok = ok && expect(send_checkpoint(db) == 2, "checkpoint advanced to the bound", json);
+    ok = ok && expect(strstr(json, "\"status\":\"out-of-sync\"") != NULL, "backlog reported out-of-sync", json);
+    ok = ok && expect(strstr(json, "\"localVersion\":5") != NULL, "localVersion is the real backlog", json);
+
+    // Asking for more versions than remain sends the rest and stops at the backlog.
+    napply = 0;
+    json = send_changes(db, "100");
+    same_window = (napply > 0);
+    for (int i = 0; i < napply; i++) same_window = same_window && apply_min[i] == 3 && apply_max[i] == 5;
+    ok = ok && expect(same_window, "second batch announces [3,5]", json);
+    ok = ok && expect(send_checkpoint(db) == 5, "checkpoint at the end of the backlog", json);
+    ok = ok && expect(strstr(json, "\"status\":\"synced\"") != NULL, "drained backlog reports synced", json);
+
+    // Sparse local versions: a merge consumes db_versions that hold no local change, so
+    // a count-based window has to skip over them instead of stalling on an empty range.
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('remote1','x');"
+                           "UPDATE \"t_cloudsync\" SET site_id=1, db_version=6 WHERE pk=cloudsync_pk_encode('remote1');") == SQLITE_OK;
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('r6','v6');") == SQLITE_OK;
+    int64_t local_tail = db_int(db, "SELECT max(db_version) FROM \"t_cloudsync\" WHERE site_id=0");
+    ok = ok && expect(local_tail > 6, "a local change sits past the remote-only version", NULL);
+    napply = 0;
+    json = send_changes(db, "1");
+    same_window = (napply > 0);
+    for (int i = 0; i < napply; i++) same_window = same_window && apply_max[i] == local_tail;
+    ok = ok && expect(same_window, "window skips the remote-only db_version", json);
+    ok = ok && expect(send_checkpoint(db) == local_tail, "checkpoint reaches the local change", json);
+
+    // Nothing pending: no batch, and the checkpoint stays put. Advancing past a range
+    // nobody announced would strand later local writes and leave a permanent gap in the
+    // server's ranges. Checked with the status probe answering without a version, so the
+    // local fallback governs -- otherwise the server's optimistic value masks it.
+    napply = 0;
+    send_no_status = true;
+    int64_t before = send_checkpoint(db);
+    json = send_changes(db, "10");
+    ok = ok && expect(napply == 0, "nothing pending sends no batch", json);
+    ok = ok && expect(send_checkpoint(db) == before, "nothing pending leaves the checkpoint alone", json);
+    send_no_status = false;
+
+    network_test_set_responder(NULL);
+    stream_close(db);
+    return ok;
+}
+
 int main(void) {
 #if !defined(_WIN32) && !defined(CLOUDSYNC_OMIT_CURL)
     check("HTTP deadlines and interrupt: API cap, artifact stall, cancel:", test_stalled_http_timeout());
@@ -678,6 +798,7 @@ int main(void) {
     check("non-buffer response is a no-op:", test_non_buffer_is_noop());
     check("send batch /apply payload (window / batchId / chunkIndex / isFinal):", test_apply_json_payload_batch());
     check("network_compute_status:", test_compute_status());
+    check("bounded send: window, checkpoint, empty-window guard:", test_bounded_send());
     check("receive stream: capped paging, failure replay, checkpoint errors:", test_stream_paging());
     check("receive stream: fragmented values:", test_stream_fragments());
     check("receive stream: server without watermark:", test_stream_no_watermark());

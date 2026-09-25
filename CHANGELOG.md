@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`cloudsync_network_send_changes()` accepts an optional limit on how many local database versions to send**, so a large backlog can be uploaded in bounded steps instead of one batch. A send is all or nothing: the server confirms the window only once every chunk of the batch has applied, and a failed batch is re-sent whole. After a long offline period or a bulk import that batch can be large enough to keep failing, and each attempt re-uploads everything. `cloudsync_network_send_changes(max_db_versions)` sends at most that many local transactions, so each call is an independently confirmed batch and a failure costs one bounded window rather than the whole backlog. Call it repeatedly with the same value until `send.status` leaves `out-of-sync`; `send.localVersion` keeps reporting the newest local version so the remaining backlog stays visible. Received changes share the database version counter, so versions holding no local change are skipped instead of consuming the budget. The no-argument form is unchanged.
+
 ### Fixed
 
 - **PostgreSQL: separate transactions no longer share a db_version.** With more than one synced table, the current db_version was read from a single table's metadata instead of the maximum across all of them, so consecutive transactions writing to another table all took the same db_version. Holding a transaction open in another session had the same effect on every table. A change that lands on a db_version already served is skipped by the next download, whose window starts after that version, so peers could miss it. Each transaction now takes its own db_version, as on SQLite, and `seq` restarts at 0 in each one instead of growing for the life of the connection, where a long-lived connection could eventually overflow it.
