@@ -636,7 +636,33 @@ WHERE since_db_version = 100
   AND site_id = cloudsync_uuid_blob('0190a1b2-c3d4-7e5f-8a9b-001122334455')
   AND exclude_filter_site_id = 1
 ORDER BY chunk_index;
+
+-- Stateless paging: one chunk per query, resuming where the previous one stopped,
+-- under a window budget. Carry next_* back as resume_*, and window_bytes back as
+-- resume_window_bytes -- each query is a new scan, so without the echo the budget
+-- restarts every time and a budget larger than one chunk is never reached.
+SELECT payload, watermark_db_version, is_final, window_capped, window_bytes,
+       next_db_version, next_seq, next_frag_offset
+FROM cloudsync_payload_chunks
+WHERE since_db_version = 100
+  AND max_window_bytes = 134217728
+LIMIT 1;
+
+-- ...then for each following chunk of the same window, with the values the
+-- previous query returned:
+SELECT payload, watermark_db_version, is_final, window_capped, window_bytes,
+       next_db_version, next_seq, next_frag_offset
+FROM cloudsync_payload_chunks
+WHERE until_db_version = 200          -- the watermark the first chunk reported
+  AND resume_db_version = 142         -- next_db_version
+  AND resume_seq = 0                  -- next_seq
+  AND resume_frag_offset = 0          -- next_frag_offset
+  AND max_window_bytes = 134217728    -- unchanged for the whole window
+  AND resume_window_bytes = 5242880   -- window_bytes
+LIMIT 1;
 ```
+
+Stop when `is_final` is true. If `window_capped` is also true the budget ended the window early: checkpoint at that chunk's `watermark_db_version` and start a new window from it, with `resume_window_bytes` back at `0`.
 
 **PostgreSQL usage:** `cloudsync_payload_chunks` is exposed as a set-returning function with optional arguments:
 
@@ -652,6 +678,17 @@ FROM cloudsync_payload_chunks(100, cloudsync_siteid(), 200);
 -- /check download: all changes EXCEPT the requesting peer's site
 SELECT *
 FROM cloudsync_payload_chunks(100, cloudsync_uuid_blob('0190a1b2-c3d4-7e5f-8a9b-001122334455'), NULL, true);
+
+-- Stateless paging under a window budget: one chunk per call, carrying next_* back as
+-- resume_* and window_bytes back as resume_window_bytes.
+SELECT * FROM cloudsync_payload_chunks(100, NULL, NULL, false,
+                                       NULL, NULL, NULL,      -- fresh stream
+                                       134217728, 0) LIMIT 1;
+
+SELECT * FROM cloudsync_payload_chunks(NULL, NULL, 200, false,
+                                       142, 0, 0,             -- next_db_version, next_seq, next_frag_offset
+                                       134217728, 5242880)    -- same budget, window_bytes echoed back
+LIMIT 1;
 ```
 
 **Apply example:**
