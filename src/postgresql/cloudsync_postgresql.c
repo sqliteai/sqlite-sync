@@ -1083,6 +1083,12 @@ typedef struct {
     bool eof;
     int64 chunk_index;
     int64 watermark;
+    // Window cap (max_window_bytes): payload bytes emitted so far by this scan, and
+    // whether it ended because the budget ran out rather than because the window was
+    // drained. window_bytes counts across chunks, not within one.
+    int64 max_window_bytes;
+    int64 window_bytes;
+    bool window_capped;
     int max_size;
     int frag_target;
 
@@ -1228,6 +1234,10 @@ static bytea *payload_chunks_emit_pg_fragment(PayloadChunksState *st, cloudsync_
     if (rc != DBRES_OK) ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
     rc = cloudsync_payload_encode_final(payload, data);
     if (rc != DBRES_OK) ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
+    // A fragment chunk spends the window budget like any other. Fragments are emitted
+    // here rather than by the ordinary builder, so without this a history made of
+    // oversized values never spends the budget and the cap never fires.
+    st->window_bytes += (int64)cloudsync_payload_context_bused(payload);
     int64 blob_size = 0;
     char *blob = cloudsync_payload_blob(payload, &blob_size, rows);
     bytea *result = (bytea *)palloc(VARHDRSZ + blob_size);
@@ -1317,6 +1327,13 @@ static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_con
         }
 
         if (cloudsync_payload_context_nrows(payload) > 0 && cloudsync_payload_context_bused(payload) + row_size > (size_t)st->max_size) break;
+        // Once the budget is spent, end the chunk at the first db_version boundary so
+        // the window can be capped there. Waiting for a chunk to happen to end on a
+        // boundary is not enough: when a transaction's rows and a chunk's capacity stay
+        // out of step, every chunk ends mid-version and the cap never fires at all.
+        if (st->max_window_bytes > 0 && cloudsync_payload_context_nrows(payload) > 0 &&
+            st->db_version != *dbv_max &&
+            st->window_bytes + (int64)cloudsync_payload_context_bused(payload) >= st->max_window_bytes) break;
 
         pgvalue_t *vals[9] = {0};
         text *owned_texts[2] = {0};
@@ -1334,6 +1351,9 @@ static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_con
         cloudsync_memory_free(payload);
         return NULL;
     }
+    // Measure the window in the unit max_size is expressed in -- encoded bytes before
+    // compression -- so a budget and a chunk size mean the same thing to a caller.
+    st->window_bytes += (int64)cloudsync_payload_context_bused(payload);
     int rc = cloudsync_payload_encode_final(payload, data);
     if (rc != DBRES_OK) ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
     int64 blob_size = 0;
@@ -1380,6 +1400,18 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
         int64 resume_dbv = PG_ARGISNULL(4) ? 0 : PG_GETARG_INT64(4);
         int64 resume_seq = PG_ARGISNULL(5) ? 0 : PG_GETARG_INT64(5);
         int64 resume_frag = PG_ARGISNULL(6) ? 0 : PG_GETARG_INT64(6);
+        // Both budget arguments are guarded by PG_NARGS(): between installing the 1.2
+        // binary and running ALTER EXTENSION cloudsync UPDATE, the 1.1 SQL definition
+        // still points at this function and calls it with seven arguments. Reading the
+        // eighth and ninth slots then runs off the end of fcinfo->args.
+        // Cap the whole prepared window, not one chunk: <= 0 and NULL both mean no cap.
+        int64 window_cap = (PG_NARGS() > 7 && !PG_ARGISNULL(7)) ? PG_GETARG_INT64(7) : 0;
+        st->max_window_bytes = (window_cap > 0) ? window_cap : 0;
+        // Budget already spent by earlier calls of this window. State is created fresh
+        // per call, so a caller paging one chunk at a time seeds it here; a caller
+        // draining the window in one call leaves it at 0 and it accumulates.
+        int64 window_spent = (PG_NARGS() > 8 && !PG_ARGISNULL(8)) ? PG_GETARG_INT64(8) : 0;
+        st->window_bytes = (window_spent > 0) ? window_spent : 0;
         // Site filter resolution:
         //   exclude=true  -> all sites except filter_site_id (CHECK path); site required
         //   filter given  -> only that site
@@ -1472,7 +1504,9 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
     PayloadChunksState *st = (PayloadChunksState *)funcctx->user_fctx;
 
     int64 rows = 0, dbv_min = 0, dbv_max = 0;
-    bytea *payload = payload_chunks_build_pg_next(st, data, &rows, &dbv_min, &dbv_max);
+    // A capped window ends the scan: the rows past it belong to the next window, and
+    // emitting them here would contradict the reduced watermark already reported.
+    bytea *payload = st->window_capped ? NULL : payload_chunks_build_pg_next(st, data, &rows, &dbv_min, &dbv_max);
     if (!payload) {
         if (st->portal) SPI_cursor_close(st->portal);
         st->portal = NULL;
@@ -1497,8 +1531,28 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
         next_dbv = st->watermark; next_seq = 0; next_frag = 0; is_final = true;
     }
 
-    Datum outvals[11];
-    bool outnulls[11] = {false,false,false,false,false,false,false,false,false,false,false};
+    // Stop once max_window_bytes is spent, at the first db_version boundary, and report
+    // the window as an ordinary complete stream ending at that reduced watermark. The
+    // caller checkpoints there and asks again, so preparation is bounded with no new
+    // resumable state.
+    //
+    // Two conditions are load-bearing. Never cap mid-value (frag_active) or
+    // mid-db_version (next_dbv == dbv_max): the receive cursor must land on a complete
+    // db_version or the next request skips the unapplied remainder, since it resumes
+    // with db_version > since and no seq. And because the boundary test is what stops
+    // us, a db_version larger than the whole budget is still emitted in full --
+    // otherwise a window could come out empty and the drain would never advance.
+    if (st->max_window_bytes > 0) {
+        if (!is_final && !st->frag_active && st->window_bytes >= st->max_window_bytes && next_dbv != dbv_max) {
+            st->window_capped = true;
+            is_final = true;
+            st->watermark = dbv_max;
+            next_dbv = st->watermark; next_seq = 0; next_frag = 0;
+        }
+    }
+
+    Datum outvals[13];
+    bool outnulls[13] = {false,false,false,false,false,false,false,false,false,false,false,false,false};
     outvals[0] = PointerGetDatum(payload);
     outvals[1] = Int64GetDatum(st->chunk_index++);
     outvals[2] = Int64GetDatum(VARSIZE_ANY_EXHDR(payload));
@@ -1510,6 +1564,8 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
     outvals[8] = Int64GetDatum(next_seq);
     outvals[9] = Int64GetDatum(next_frag);
     outvals[10] = BoolGetDatum(is_final);
+    outvals[11] = BoolGetDatum(st->window_capped);
+    outvals[12] = Int64GetDatum(st->window_bytes);
     HeapTuple outtup = heap_form_tuple(st->outdesc, outvals, outnulls);
     SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(outtup));
 }
