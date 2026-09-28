@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [1.2.0] - 2026-09-28
 
 ### Added
 
@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - **SQLite: an explicit `NULL` for `resume_db_version` on `cloudsync_payload_chunks()` now means "not given"**, matching what it has always meant for `filter_site_id` and on PostgreSQL. It was previously read as a resume point of database version 0, which silently ignored `since_db_version` and restarted the scan at the beginning of the window. Reaching a later argument requires passing `NULL` for the ones before it, so this is easy to hit: `cloudsync_payload_chunks(100, NULL, NULL, false, NULL, NULL, NULL, 1048576)` used to replay from the start of the history instead of resuming after version 100.
-- **The PostgreSQL extension version moves to `1.2`.** `cloudsync_payload_chunks()` gained an argument and an output column, so existing deployments need `ALTER EXTENSION cloudsync UPDATE;` after installing the new binary. The upgrade script replaces the function: a `CREATE OR REPLACE` cannot change a return type, and leaving the old seven-argument version in place would make every existing call ambiguous against the new eight-argument one.
+- **The PostgreSQL extension version moves to `1.2`.** `cloudsync_payload_chunks()` gained two arguments and two output columns, so existing deployments need `ALTER EXTENSION cloudsync UPDATE;` after installing the new binary. The upgrade script replaces the function: a `CREATE OR REPLACE` cannot change a return type, and leaving the old seven-argument version in place would make every existing call ambiguous against the new eight-argument one.
 
 ### Fixed
 
