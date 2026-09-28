@@ -46,8 +46,10 @@ RUN mkdir -p /tmp/cloudsync-artifacts/lib /tmp/cloudsync-artifacts/extension && 
         cp /tmp/cloudsync/src/postgresql/migrations/cloudsync--*--*.sql /tmp/cloudsync-artifacts/extension/; \
     fi
 
-# Runtime image based on Supabase Postgres
-FROM public.ecr.aws/supabase/postgres:${SUPABASE_POSTGRES_TAG}
+# Runtime image based on Supabase Postgres. Docker Hub and public.ecr.aws carry
+# the same image; see Dockerfile.supabase.release for why this one is used.
+# make postgres-supabase-build rewrites this line to the running CLI image tag.
+FROM supabase/postgres:${SUPABASE_POSTGRES_TAG}
 
 # Extension version (derived from src/cloudsync.h by the Makefile and passed in
 # as a build arg); used only for the image label.

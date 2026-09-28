@@ -19,7 +19,11 @@
 #
 
 ARG SUPABASE_POSTGRES_TAG=17.6.1.170
-FROM public.ecr.aws/supabase/postgres:${SUPABASE_POSTGRES_TAG}
+# Supabase publishes the same image to Docker Hub and to public.ecr.aws; both
+# tags resolve to identical manifest digests. Docker Hub is used here because CI
+# already authenticates to it, while anonymous ECR Public pulls are charged to a
+# data quota shared by every GitHub Actions runner.
+FROM supabase/postgres:${SUPABASE_POSTGRES_TAG}
 
 ARG CLOUDSYNC_VERSION
 ARG TARGETARCH
