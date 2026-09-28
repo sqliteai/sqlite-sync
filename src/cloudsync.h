@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define CLOUDSYNC_VERSION                       "1.1.4"
+#define CLOUDSYNC_VERSION                       "1.2.0"
 // LZ4's block format cannot expand input by more than 255:1, so a compressed payload
 // declaring a larger expansion is forged or corrupt (see cloudsync_payload_apply).
 #define CLOUDSYNC_PAYLOAD_LZ4_MAX_RATIO         255

@@ -690,6 +690,242 @@ static void test_block_group_atomicity(void) {
     }
 }
 
+// A window cap must produce ordinary complete streams over smaller windows: repeated
+// capped calls tile the stream exactly, every window ends on a db_version boundary, and
+// the drain always advances -- a window that emitted nothing would never progress.
+static void test_payload_window_cap(void) {
+    sqlite3 *db = open_db();
+    // The smallest chunk size the setting allows, so 60 rows of 20 KB span several
+    // chunks and a budget has something to split.
+    CHECK(sql(db, "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, v BLOB);"
+                  "SELECT cloudsync_init('t');"
+                  "SELECT cloudsync_set('payload_max_chunk_size','262144');") == SQLITE_OK);
+    // Two shapes, both needed. Single-row transactions give chunk boundaries that
+    // coincide with db_version boundaries, which is where a window may end and is the
+    // common production shape. The two 15-row transactions are ~300 KB each, larger
+    // than a chunk, so a chunk boundary also falls *inside* a db_version -- that is
+    // what exercises the rule that a window must not end there. Capping mid-version
+    // would leave the remainder unsent, because the next window starts past it.
+    int row = 0;
+    for (int i = 0; i < 40; i++) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "INSERT INTO t VALUES('r%03d', randomblob(20000));", row++);
+        CHECK(sql(db, buf) == SQLITE_OK);
+    }
+    for (int txn = 0; txn < 2; txn++) {
+        CHECK(sql(db, "BEGIN;") == SQLITE_OK);
+        for (int i = 0; i < 15; i++) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "INSERT INTO t VALUES('r%03d', randomblob(20000));", row++);
+            CHECK(sql(db, buf) == SQLITE_OK);
+        }
+        CHECK(sql(db, "COMMIT;") == SQLITE_OK);
+    }
+    // A third shape, and the one that matters most: ~13 rows fill a 256 KB chunk, so
+    // transactions of 12 then 13 rows keep every chunk boundary one row inside a
+    // db_version. Waiting for a chunk to end on a boundary never succeeds here, so a
+    // cap that only checks after a chunk is built never fires and the whole history
+    // comes out in a single window.
+    for (int txn = 0; txn < 20; txn++) {
+        CHECK(sql(db, "BEGIN;") == SQLITE_OK);
+        for (int i = 0; i < (txn == 0 ? 12 : 13); i++) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "INSERT INTO t VALUES('r%03d', randomblob(20000));", row++);
+            CHECK(sql(db, buf) == SQLITE_OK);
+        }
+        CHECK(sql(db, "COMMIT;") == SQLITE_OK);
+    }
+
+    // Baseline: the whole window in one uncapped scan.
+    sqlite3_stmt *vm = NULL;
+    int64_t total_bytes = 0, total_rows = 0, watermark = 0;
+    CHECK(sqlite3_prepare_v2(db, "SELECT sum(rows), sum(payload_size), "
+                                 "max(CASE WHEN is_final THEN watermark_db_version END), "
+                                 "max(window_capped) FROM cloudsync_payload_chunks(0,NULL,NULL,false)",
+                             -1, &vm, NULL) == SQLITE_OK);
+    if (sqlite3_step(vm) == SQLITE_ROW) {
+        total_rows = sqlite3_column_int64(vm, 0);
+        total_bytes = sqlite3_column_int64(vm, 1);
+        watermark = sqlite3_column_int64(vm, 2);
+        CHECK(sqlite3_column_int(vm, 3) == 0);   // nothing is capped without a budget
+    }
+    sqlite3_finalize(vm);
+    CHECK(total_rows > 0 && total_bytes > 0 && watermark == 62);
+
+    // Two budgets: one that spans several chunks, and one below a single chunk so the
+    // "always emit one whole db_version" guarantee is what keeps the drain moving.
+    const int64_t budgets[] = {200000, 1};
+    for (size_t b = 0; b < sizeof(budgets) / sizeof(budgets[0]); ++b) {
+        int64_t since = 0, sum_rows = 0;
+        int windows = 0;
+        bool capped = true;
+        while (capped && windows < 100) {
+            char q[512];
+            snprintf(q, sizeof(q),
+                     "SELECT count(*), coalesce(sum(rows),0), coalesce(sum(payload_size),0), "
+                     "max(CASE WHEN is_final THEN watermark_db_version END), "
+                     "max(window_capped), min(db_version_min) "
+                     "FROM cloudsync_payload_chunks(%lld,NULL,NULL,false,NULL,NULL,NULL,%lld)",
+                     (long long)since, (long long)budgets[b]);
+            vm = NULL;
+            CHECK(sqlite3_prepare_v2(db, q, -1, &vm, NULL) == SQLITE_OK);
+            if (sqlite3_step(vm) != SQLITE_ROW || sqlite3_column_int64(vm, 0) == 0) { sqlite3_finalize(vm); break; }
+            int64_t nrows = sqlite3_column_int64(vm, 1);
+            int64_t bytes = sqlite3_column_int64(vm, 2);
+            // A window ends at the first db_version boundary at or after the budget, so
+            // it can overshoot by at most the chunk that crossed it plus the version in
+            // progress -- never by the whole history.
+            CHECK(bytes <= budgets[b] + 3 * 262144);
+            int64_t wm = sqlite3_column_int64(vm, 3);
+            capped = sqlite3_column_int(vm, 4) != 0;
+            int64_t first = sqlite3_column_int64(vm, 5);
+            sqlite3_finalize(vm);
+
+            CHECK(first == since + 1);     // windows abut, no gap and no overlap
+            CHECK(wm > since);             // always advances, so the drain terminates
+            sum_rows += nrows;
+            since = wm;
+            windows++;
+        }
+        CHECK(windows > 1);                // the budget really did split the stream
+        CHECK(since == watermark);         // and the last window reached the end
+        // Rows are the invariant, not bytes or chunks: ending a chunk early at a
+        // db_version boundary repacks the same rows into more chunks, each carrying
+        // its own header, so a capped drain legitimately moves a few more bytes.
+        CHECK(sum_rows == total_rows);
+    }
+
+    CHECK(close_db(db) == SQLITE_OK);
+
+    // A history of oversized values is emitted entirely as fragment chunks, which the
+    // ordinary chunk builder never produces. Those bytes still have to spend the budget,
+    // or such a history never reaches the cap at all.
+    db = open_db();
+    CHECK(sql(db, "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, v BLOB);"
+                  "SELECT cloudsync_init('t');"
+                  "SELECT cloudsync_set('payload_max_chunk_size','262144');") == SQLITE_OK);
+    for (int i = 0; i < 20; i++) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "INSERT INTO t VALUES('f%03d', randomblob(300000));", i);
+        CHECK(sql(db, buf) == SQLITE_OK);
+    }
+    int64_t frag_rows = 0, frag_wm = 0;
+    vm = NULL;
+    CHECK(sqlite3_prepare_v2(db, "SELECT sum(rows), max(CASE WHEN is_final THEN watermark_db_version END) "
+                                 "FROM cloudsync_payload_chunks(0,NULL,NULL,false)", -1, &vm, NULL) == SQLITE_OK);
+    if (sqlite3_step(vm) == SQLITE_ROW) { frag_rows = sqlite3_column_int64(vm, 0); frag_wm = sqlite3_column_int64(vm, 1); }
+    sqlite3_finalize(vm);
+    CHECK(frag_rows > 0 && frag_wm == 20);
+
+    int64_t since = 0, seen = 0;
+    int windows = 0;
+    bool capped = true;
+    while (capped && windows < 100) {
+        vm = NULL;
+        char q[384];
+        snprintf(q, sizeof(q),
+                 "SELECT count(*), coalesce(sum(rows),0), "
+                 "max(CASE WHEN is_final THEN watermark_db_version END), max(window_capped), "
+                 "min(db_version_min) "
+                 "FROM cloudsync_payload_chunks(%lld,NULL,NULL,false,NULL,NULL,NULL,200000)",
+                 (long long)since);
+        CHECK(sqlite3_prepare_v2(db, q, -1, &vm, NULL) == SQLITE_OK);
+        if (sqlite3_step(vm) != SQLITE_ROW || sqlite3_column_int64(vm, 0) == 0) { sqlite3_finalize(vm); break; }
+        seen += sqlite3_column_int64(vm, 1);
+        int64_t wm = sqlite3_column_int64(vm, 2);
+        capped = sqlite3_column_int(vm, 3) != 0;
+        CHECK(sqlite3_column_int64(vm, 4) == since + 1);
+        CHECK(wm > since);
+        sqlite3_finalize(vm);
+        since = wm;
+        windows++;
+    }
+    CHECK(windows > 1);            // the budget split a purely fragmented history
+    CHECK(since == frag_wm);
+    CHECK(seen == frag_rows);
+    CHECK(close_db(db) == SQLITE_OK);
+}
+
+// A stateless caller fetches one chunk per call and resumes through resume_*, which is
+// how the /check job pages. Each call is a fresh scan, so the budget spent has to be
+// carried back in through resume_window_bytes or the count restarts every time and the
+// cap never fires at all -- the whole window comes out uncapped however long it runs.
+static void test_payload_window_cap_paged(void) {
+    sqlite3 *db = open_db();
+    CHECK(sql(db, "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, v BLOB);"
+                  "SELECT cloudsync_init('t');"
+                  "SELECT cloudsync_set('payload_max_chunk_size','262144');") == SQLITE_OK);
+    for (int i = 0; i < 60; i++) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "INSERT INTO t VALUES('r%03d', randomblob(20000));", i);
+        CHECK(sql(db, buf) == SQLITE_OK);
+    }
+
+    sqlite3_stmt *vm = NULL;
+    int64_t watermark = 0, total_rows = 0;
+    CHECK(sqlite3_prepare_v2(db, "SELECT max(CASE WHEN is_final THEN watermark_db_version END), sum(rows) "
+                                 "FROM cloudsync_payload_chunks(0,NULL,NULL,false)", -1, &vm, NULL) == SQLITE_OK);
+    if (sqlite3_step(vm) == SQLITE_ROW) { watermark = sqlite3_column_int64(vm, 0); total_rows = sqlite3_column_int64(vm, 1); }
+    sqlite3_finalize(vm);
+    CHECK(watermark == 60 && total_rows > 0);
+
+    // A budget spanning several chunks: it can only be reached by accumulating across
+    // calls, so this is exactly the case a per-call counter cannot cap.
+    const int64_t budget = 600000;
+    int64_t since = 0, seen_rows = 0;
+    int windows = 0;
+    while (windows < 100) {
+        int64_t rdbv = 0, rseq = 0, rfrag = 0, spent = 0;
+        bool capped = false, final_seen = false;
+        int chunks = 0;
+        int64_t window_first = 0, window_last = 0;
+        while (chunks < 500) {
+            char q[640];
+            if (chunks == 0)
+                snprintf(q, sizeof(q),
+                         "SELECT rows, next_db_version, next_seq, next_frag_offset, is_final, window_capped, "
+                         "window_bytes, db_version_min, db_version_max "
+                         "FROM cloudsync_payload_chunks(%lld,NULL,NULL,false,NULL,NULL,NULL,%lld,0) LIMIT 1",
+                         (long long)since, (long long)budget);
+            else
+                snprintf(q, sizeof(q),
+                         "SELECT rows, next_db_version, next_seq, next_frag_offset, is_final, window_capped, "
+                         "window_bytes, db_version_min, db_version_max "
+                         "FROM cloudsync_payload_chunks(NULL,NULL,%lld,false,%lld,%lld,%lld,%lld,%lld) LIMIT 1",
+                         (long long)watermark, (long long)rdbv, (long long)rseq, (long long)rfrag,
+                         (long long)budget, (long long)spent);
+            vm = NULL;
+            CHECK(sqlite3_prepare_v2(db, q, -1, &vm, NULL) == SQLITE_OK);
+            if (sqlite3_step(vm) != SQLITE_ROW) { sqlite3_finalize(vm); break; }
+            seen_rows += sqlite3_column_int64(vm, 0);
+            rdbv  = sqlite3_column_int64(vm, 1);
+            rseq  = sqlite3_column_int64(vm, 2);
+            rfrag = sqlite3_column_int64(vm, 3);
+            final_seen = sqlite3_column_int(vm, 4) != 0;
+            capped = sqlite3_column_int(vm, 5) != 0;
+            spent = sqlite3_column_int64(vm, 6);
+            if (chunks == 0) window_first = sqlite3_column_int64(vm, 7);
+            window_last = sqlite3_column_int64(vm, 8);
+            sqlite3_finalize(vm);
+            chunks++;
+            if (final_seen) break;
+        }
+        if (chunks == 0) break;
+        CHECK(window_first == since + 1);        // windows abut: no gap, no overlap
+        CHECK(window_last > since);              // and each one advances
+        // The budget is reached by accumulating across calls, never within one.
+        CHECK(spent <= budget + 3 * 262144);
+        since = capped ? window_last : watermark;
+        windows++;
+        if (!capped) break;
+    }
+    CHECK(windows > 1);                          // the budget really did split the stream
+    CHECK(since == watermark);                   // and the drain reached the end
+    CHECK(seen_rows == total_rows);              // covering every row exactly once
+    CHECK(close_db(db) == SQLITE_OK);
+}
+
+
 int main(void) {
     CHECK(sqlite3_config(SQLITE_CONFIG_GETMALLOC, &memory) == SQLITE_OK);
     sqlite3_mem_methods faults = memory;
@@ -712,6 +948,8 @@ int main(void) {
     test_block_migration_orphan();
     test_block_not_null_payload();
     test_block_group_atomicity();
+    test_payload_window_cap();
+    test_payload_window_cap_paged();
     test_refill_error();
     test_block_oom();
     cloudsync_memory_finalize();
