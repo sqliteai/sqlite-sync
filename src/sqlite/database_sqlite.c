@@ -603,6 +603,11 @@ int database_fragment_lock (cloudsync_context *data, const char *value_id) {
     return DBRES_OK;
 }
 
+int database_merge_lock (cloudsync_context *data, const char *table_ref, const void *pk, int pklen) {
+    // SQLite already serializes writers, including the clock reads and writes.
+    return DBRES_OK;
+}
+
 bool database_table_exists (cloudsync_context *data, const char *name, const char *schema) {
     UNUSED_PARAMETER(schema);
     return database_system_exists(data, name, "table");

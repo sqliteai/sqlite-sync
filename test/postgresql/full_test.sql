@@ -73,6 +73,7 @@
 \ir 63_deep_savepoints.sql
 \ir 64_block_rewrite_leftovers.sql
 \ir 66_db_version_per_transaction.sql
+\ir 67_concurrent_merge.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'
