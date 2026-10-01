@@ -74,6 +74,7 @@
 \ir 64_block_rewrite_leftovers.sql
 \ir 65_payload_window_cap.sql
 \ir 66_db_version_per_transaction.sql
+\ir 67_concurrent_merge.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

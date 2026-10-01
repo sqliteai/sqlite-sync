@@ -2197,6 +2197,11 @@ int table_col_index (cloudsync_table_context *table, const char *col_name) {
 }
 
 int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, int64_t insert_cl, const char *insert_name, dbvalue_t *insert_value, int64_t insert_col_version, int64_t insert_db_version, const char *insert_site_id, int insert_site_id_len, int64_t insert_seq, int64_t *rowid) {
+    // Hold through the transaction, including deferred column writes. Lock before
+    // reading any row clocks, even when the row does not exist yet.
+    int lock_rc = database_merge_lock(data, table->meta_ref, insert_pk, insert_pk_len);
+    if (lock_rc != DBRES_OK) return lock_rc;
+
     // Handle DWS and AWS algorithms here
     // Delete-Wins Set (DWS): table_algo_crdt_dws
     // Add-Wins Set (AWS): table_algo_crdt_aws
