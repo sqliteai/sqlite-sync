@@ -368,6 +368,17 @@ chunk-bench: $(TARGET) $(DIST_DIR)/chunk_bench$(EXE)
 	if [ -n "$(CHUNK_BENCH_VERBOSE)" ]; then export CHUNK_BENCH_VERBOSE="$(CHUNK_BENCH_VERBOSE)"; fi; \
 	./$(DIST_DIR)/chunk_bench$(EXE)
 
+# Concurrent cloudsync_payload_apply stress test across transaction modes. Not part
+# of `make test`: it needs threads and reports machine-dependent timings. Rebuilt on
+# every run so APPLY_STRESS_SQLITE_DIR can point at another sqlite3.c (one with
+# BEGIN CONCURRENT, for example).
+APPLY_STRESS_SQLITE_DIR ?= $(SQLITE_DIR)
+
+apply-stress: $(TARGET)
+	$(CC) -O2 -Wall -Wno-unused-parameter -I$(APPLY_STRESS_SQLITE_DIR) -DSQLITE_THREADSAFE=1 -DHAVE_USLEEP=1 \
+		$(TEST_DIR)/stress/apply_stress.c $(APPLY_STRESS_SQLITE_DIR)/sqlite3.c -o $(DIST_DIR)/apply_stress$(EXE) -lpthread -lm
+	./$(DIST_DIR)/apply_stress$(EXE)
+
 OPENSSL_TARBALL = $(OPENSSL_DIR)/$(OPENSSL_VERSION).tar.gz
 
 $(OPENSSL_TARBALL):
@@ -597,4 +608,4 @@ help:
 # Include PostgreSQL extension targets
 include docker/Makefile.postgresql
 
-.PHONY: all clean test unittest e2e extension help version xcframework aar
+.PHONY: all clean test unittest e2e apply-stress extension help version xcframework aar
