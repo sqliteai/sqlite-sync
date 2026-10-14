@@ -202,6 +202,11 @@ static const char *cloudsync_check_headers[] = {
     CLOUDSYNC_HEADER_CHECK_CAPABILITIES,
 };
 
+static const char *cloudsync_apply_headers[] = {
+    CLOUDSYNC_HEADER_VERSION_LINE,
+    CLOUDSYNC_HEADER_APPLY_CAPABILITIES,
+};
+
 #define ARRAY_LEN(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
 // MARK: -
@@ -1745,7 +1750,7 @@ static int network_send_payload_to_apply(sqlite3_context *context, network_data 
         }
 
         *res_out = network_receive_buffer(netdata, netdata->apply_endpoint, netdata->authentication, true, true,
-                                          json_payload, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
+                                          json_payload, cloudsync_apply_headers, ARRAY_LEN(cloudsync_apply_headers));
         cloudsync_memory_free(json_payload);
         return SQLITE_OK;
     }
@@ -1790,7 +1795,7 @@ static int network_send_payload_to_apply(sqlite3_context *context, network_data 
 
     network_result_cleanup(&upload_res);
     *res_out = network_receive_buffer(netdata, netdata->apply_endpoint, netdata->authentication, true, true,
-                                      json_payload, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
+                                      json_payload, cloudsync_apply_headers, ARRAY_LEN(cloudsync_apply_headers));
     cloudsync_memory_free(json_payload);
     return SQLITE_OK;
 }
@@ -1871,13 +1876,16 @@ void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, s
     
     NETWORK_RESULT res = network_receive_buffer(netdata, netdata->status_endpoint, netdata->authentication, true, false, NULL, cloudsync_default_headers, ARRAY_LEN(cloudsync_default_headers));
 
-    int64_t last_optimistic_version = -1;
+    // Compare against the confirmed version, not the optimistic one: an accepted but
+    // not yet applied send can still fail and be rolled back, so it is not safe to
+    // discard locally. A status without a confirmed version proves nothing either.
+    int64_t last_confirmed_version = -1;
 
     if (res.code == CLOUDSYNC_NETWORK_BUFFER && res.buffer) {
         char *ack_owned = NULL;
         size_t ack_len = 0;
         const char *ack_json = json_response_payload(res.buffer, res.blen, &ack_owned, &ack_len);
-        last_optimistic_version = json_extract_int(ack_json, ack_len, "lastOptimisticVersion", -1);
+        last_confirmed_version = json_extract_int(ack_json, ack_len, "lastConfirmedVersion", -1);
         cloudsync_memory_free(ack_owned);
     } else if (res.code != CLOUDSYNC_NETWORK_OK) {
         network_result_to_sqlite_error(context, res, "unable to retrieve current status from remote host.");
@@ -1886,7 +1894,7 @@ void cloudsync_network_has_unsent_changes (sqlite3_context *context, int argc, s
     }
     
     network_result_cleanup(&res);
-    sqlite3_result_int(context, (last_optimistic_version >= 0 && last_optimistic_version < last_local_change));
+    sqlite3_result_int(context, (last_confirmed_version < 0 || last_confirmed_version < last_local_change));
 }
 
 // Window for a bounded send, in one pass over the metadata tables: the db_version of

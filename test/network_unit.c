@@ -782,6 +782,271 @@ static bool test_bounded_send(void) {
     return ok;
 }
 
+// MARK: - Real HTTP transport (/apply capability, deferred 202 lifecycle, rollback)
+
+#if !defined(_WIN32) && !defined(CLOUDSYNC_OMIT_CURL)
+#include <strings.h>
+
+// A loopback HTTP/1.1 server answering one request per connection, so requests are
+// built by the real libcurl transport rather than the test responder (which bypasses
+// header construction). /apply and /status replies are scripted; /upload hands out a
+// loopback URL for the S3 PUT. Every request records whether it advertised apply-defer.
+#define HTTP_MAX_REQ 64
+static int http_fd = -1;
+static unsigned http_port;
+static volatile bool http_stop;
+static int http_apply_code, http_status_code;
+static char http_apply_body[512], http_status_body[512];
+static int http_nreq, http_napply, http_nstatus, http_nupload, http_nput;
+static char http_req_endpoint[HTTP_MAX_REQ][8];
+static bool http_req_defer[HTTP_MAX_REQ];
+static char http_apply_batch[HTTP_MAX_REQ][48];
+static int64_t http_apply_chunk[HTTP_MAX_REQ], http_apply_min[HTTP_MAX_REQ];
+static bool http_apply_url[HTTP_MAX_REQ];
+
+static const char *http_header(const char *head, const char *name) {
+    size_t n = strlen(name);
+    for (const char *line = strstr(head, "\r\n"); line; line = strstr(line + 2, "\r\n")) {
+        if (strncasecmp(line + 2, name, n) == 0 && line[2 + n] == ':') return line + 3 + n;
+    }
+    return NULL;
+}
+
+static void http_reply(int c, int code, const char *body) {
+    const char *reason = code == 200 ? "OK" : code == 202 ? "Accepted" : code == 409 ? "Conflict" : "Service Unavailable";
+    char head[256];
+    int len = snprintf(head, sizeof(head), "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+                       code, reason, strlen(body));
+    if (write(c, head, (size_t)len) < 0 || write(c, body, strlen(body)) < 0) return;
+}
+
+static void http_handle(int c) {
+    size_t cap = 4096, used = 0, head_len = 0, body_len = 0;
+    char *buf = malloc(cap);
+    bool continued = false;
+    while (buf) {
+        if (used + 1 >= cap) { char *grown = realloc(buf, cap *= 2); if (!grown) break; buf = grown; }
+        ssize_t r = read(c, buf + used, cap - used - 1);
+        if (r <= 0) break;
+        used += (size_t)r;
+        buf[used] = 0;
+        if (!head_len) {
+            char *end = strstr(buf, "\r\n\r\n");
+            if (!end) continue;
+            head_len = (size_t)(end - buf) + 4;
+            const char *length = http_header(buf, "Content-Length");
+            body_len = length ? (size_t)strtoull(length, NULL, 10) : 0;
+        }
+        const char *expect = http_header(buf, "Expect");
+        if (!continued && expect && strncasecmp(expect + strspn(expect, " "), "100-continue", 12) == 0) {
+            continued = true;
+            if (write(c, "HTTP/1.1 100 Continue\r\n\r\n", 25) < 0) break;
+        }
+        if (used >= head_len + body_len) break;
+    }
+    if (!buf || !head_len) { free(buf); return; }
+
+    buf[head_len - 2] = 0;  // headers only, body follows at buf + head_len
+    const char *body = buf + head_len;
+    char path[256] = "";
+    sscanf(buf, "%*s %255s", path);
+    const char *slash = strrchr(path, '/');
+    const char *endpoint = slash ? slash + 1 : path;
+    const char *capabilities = http_header(buf, "X-CloudSync-Capabilities");
+    int i = http_nreq < HTTP_MAX_REQ ? http_nreq++ : HTTP_MAX_REQ - 1;
+    snprintf(http_req_endpoint[i], sizeof(http_req_endpoint[i]), "%s", endpoint);
+    http_req_defer[i] = capabilities && strstr(capabilities, "apply-defer");
+
+    if (strcmp(endpoint, "apply") == 0) {
+        int k = http_napply < HTTP_MAX_REQ ? http_napply++ : HTTP_MAX_REQ - 1;
+        const char *batch = strstr(body, "\"batchId\":\"");
+        http_apply_batch[k][0] = 0;
+        if (batch) sscanf(batch + 11, "%47[^\"]", http_apply_batch[k]);
+        http_apply_chunk[k] = json_int_after(body, "\"chunkIndex\":", -1);
+        http_apply_min[k] = json_int_after(body, "\"dbVersionMin\":", -1);
+        http_apply_url[k] = strstr(body, "{\"url\":") == body;
+        http_reply(c, http_apply_code, http_apply_body);
+    } else if (strcmp(endpoint, "status") == 0) {
+        http_nstatus++;
+        http_reply(c, http_status_code, http_status_body);
+    } else if (strcmp(endpoint, "upload") == 0) {
+        http_nupload++;
+        char url[128];
+        snprintf(url, sizeof(url), "{\"url\":\"http://127.0.0.1:%u/s3\"}", http_port);
+        http_reply(c, 200, url);
+    } else {
+        http_nput++;
+        http_reply(c, 200, "");
+    }
+    free(buf);
+}
+
+static void *http_serve(void *arg) {
+    (void)arg;
+    while (!http_stop) {
+        int c = accept(http_fd, NULL, NULL);
+        if (c < 0) continue;
+        if (!http_stop) http_handle(c);
+        close(c);
+    }
+    return NULL;
+}
+
+static bool http_start(pthread_t *thread) {
+    http_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (http_fd < 0) return false;
+    struct sockaddr_in address = {0};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t len = sizeof(address);
+    if (bind(http_fd, (struct sockaddr *)&address, sizeof(address)) != 0 || listen(http_fd, 8) != 0 ||
+        getsockname(http_fd, (struct sockaddr *)&address, &len) != 0) {
+        close(http_fd);
+        return false;
+    }
+    http_port = ntohs(address.sin_port);
+    http_stop = false;
+    return pthread_create(thread, NULL, http_serve, NULL) == 0;
+}
+
+static void http_shutdown(pthread_t thread) {
+    // accept() is not woken by close() everywhere: unblock it with one last connection.
+    http_stop = true;
+    int wake = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in address = {0};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons((uint16_t)http_port);
+    if (wake >= 0) { connect(wake, (struct sockaddr *)&address, sizeof(address)); close(wake); }
+    pthread_join(thread, NULL);
+    close(http_fd);
+}
+
+// Server state for one send: what /apply answers and what a later /status reports.
+static void http_script(int apply_code, int64_t apply_optimistic, int64_t apply_confirmed,
+                        int64_t status_optimistic, int64_t status_confirmed, const char *status_failure) {
+    http_apply_code = apply_code;
+    if (apply_code >= 400) {
+        snprintf(http_apply_body, sizeof(http_apply_body), "{\"error\":{\"code\":\"%s\",\"retryable\":true}}",
+                 apply_code == 409 ? "apply_batch_superseded" : "database_unreachable");
+    } else {
+        snprintf(http_apply_body, sizeof(http_apply_body),
+                 "{\"data\":{\"lastOptimisticVersion\":%lld,\"lastConfirmedVersion\":%lld,\"gaps\":[]}}",
+                 (long long)apply_optimistic, (long long)apply_confirmed);
+    }
+    http_status_code = 200;
+    snprintf(http_status_body, sizeof(http_status_body),
+             "{\"data\":{\"lastOptimisticVersion\":%lld,\"lastConfirmedVersion\":%lld,\"gaps\":[],\"failures\":{\"apply\":%s,\"check\":null}}}",
+             (long long)status_optimistic, (long long)status_confirmed, status_failure ? status_failure : "null");
+}
+
+static int64_t has_unsent(sqlite3 *db) {
+    return db_int(db, "SELECT cloudsync_network_has_unsent_changes()");
+}
+
+// A rolled-back range is re-sent as a new batch that starts at chunk zero, so the
+// server's supersession rules can replace the failed attempt.
+static bool resent_as_new_batch(int prev, int64_t min, const char *what, const char *json) {
+    int last = http_napply - 1;
+    bool ok = last > prev && strcmp(http_apply_batch[last], http_apply_batch[prev]) != 0 &&
+              http_apply_chunk[last] == 0 && http_apply_min[last] == min;
+    return expect(ok, what, json);
+}
+
+static bool test_apply_defer_transport(void) {
+    pthread_t thread;
+    if (!http_start(&thread)) return false;
+    http_nreq = http_napply = http_nstatus = http_nupload = http_nput = 0;
+
+    char init[160];
+    snprintf(init, sizeof(init), "SELECT cloudsync_network_init_custom('http://127.0.0.1:%u', 'test-managed-database-id');", http_port);
+    sqlite3 *db = stream_db(false);
+    bool ok = expect(db && db_exec(db, init) == SQLITE_OK, "network init", NULL);
+    ok = ok && db_exec(db, "SELECT cloudsync_set('network_request_timeout', '10');") == SQLITE_OK;
+    char *json = NULL;
+
+    // Deferred send: /apply answers 202 with the range accepted but not confirmed.
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('r1', 'v1');") == SQLITE_OK;
+    http_script(202, 1, 0, 1, 0, NULL);
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && expect(http_napply == 1 && !http_apply_url[0] && http_apply_chunk[0] == 0, "one inline /apply", json);
+    ok = ok && expect(strstr(json, "\"status\":\"syncing\"") != NULL, "202 reports syncing", json);
+    ok = ok && expect(send_checkpoint(db) == 1, "202 advances the checkpoint to optimistic", json);
+    ok = ok && expect(has_unsent(db) == 1, "accepted but unconfirmed counts as unsent", NULL);
+
+    // Confirmation arrives through a later /status, without repeating /apply.
+    http_script(202, 1, 0, 1, 1, NULL);
+    ok = ok && expect(has_unsent(db) == 0, "confirmed range is no longer unsent", NULL);
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && expect(http_napply == 1, "confirmation does not repeat /apply", json);
+    ok = ok && expect(strstr(json, "\"status\":\"synced\"") != NULL, "confirmed reports synced", json);
+
+    // Rollback with no visible failure: a lower optimistic version alone rolls the
+    // checkpoint back, and the next send re-sends the range.
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('r2', 'v2');") == SQLITE_OK;
+    http_script(202, 2, 1, 1, 1, NULL);
+    if (ok) json = send_changes(db, NULL);
+    int prev = http_napply - 1;
+    ok = ok && expect(send_checkpoint(db) == 2, "deferred send accepted", json);
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && expect(send_checkpoint(db) == 1, "lower optimistic rolls the checkpoint back", json);
+    ok = ok && expect(strstr(json, "\"status\":\"out-of-sync\"") && !strstr(json, "lastFailure"), "out-of-sync, no failure", json);
+    http_script(200, 2, 2, 2, 2, NULL);
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && resent_as_new_batch(prev, 2, "rolled-back range re-sent as a new batch", json);
+    ok = ok && expect(strstr(json, "\"status\":\"synced\"") != NULL, "re-send converges", json);
+
+    // Rollback with a visible failure: same recovery, and the diagnostic is surfaced.
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('r3', 'v3');") == SQLITE_OK;
+    http_script(202, 3, 2, 2, 2, "{\"jobId\":7,\"code\":\"apply_deferred_expired\",\"retryable\":true}");
+    if (ok) json = send_changes(db, NULL);
+    prev = http_napply - 1;
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && expect(send_checkpoint(db) == 2, "failed deferred range rolls the checkpoint back", json);
+    ok = ok && expect(strstr(json, "\"lastFailure\":{\"jobId\":7") != NULL, "failures.apply surfaced as lastFailure", json);
+    http_script(200, 3, 3, 3, 3, NULL);
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && resent_as_new_batch(prev, 3, "failed range re-sent as a new batch", json);
+
+    // 503 and 409 fail the call and leave the checkpoint alone; the retry is a new batch.
+    const int rejections[] = {503, 409};
+    for (int i = 0; i < 2 && ok; i++) {
+        char sql[64];
+        snprintf(sql, sizeof(sql), "INSERT INTO t VALUES('x%d', 'v');", i);
+        ok = db_exec(db, sql) == SQLITE_OK;
+        int64_t before = send_checkpoint(db);
+        http_script(rejections[i], 0, 0, before, before, NULL);
+        if (ok) json = send_changes(db, NULL);
+        prev = http_napply - 1;
+        ok = ok && expect(strncmp(json, "ERROR:", 6) == 0, "rejected /apply is an error", json);
+        ok = ok && expect(send_checkpoint(db) == before, "rejected /apply keeps the checkpoint", json);
+        http_script(200, before + 1, before + 1, before + 1, before + 1, NULL);
+        if (ok) json = send_changes(db, NULL);
+        ok = ok && resent_as_new_batch(prev, before + 1, "retry after rejection is a new batch", json);
+    }
+
+    // The S3 form (payload above the inline limit) advertises the capability too.
+    int napply_before = http_napply;
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('big', randomblob(200000));") == SQLITE_OK;
+    int64_t big = db_int(db, "SELECT max(db_version) FROM cloudsync_changes");
+    http_script(202, big, big - 1, big, big - 1, NULL);
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && expect(http_nupload == 1 && http_nput == 1 && http_napply == napply_before + 1 && http_apply_url[http_napply - 1],
+                      "large payload goes through /upload + S3 + /apply", json);
+
+    // Only /apply negotiates deferral.
+    bool headers_ok = http_nreq > 0;
+    for (int i = 0; i < http_nreq && i < HTTP_MAX_REQ; i++) {
+        headers_ok = headers_ok && http_req_defer[i] == (strcmp(http_req_endpoint[i], "apply") == 0);
+    }
+    ok = ok && expect(headers_ok, "apply-defer sent on every /apply and nowhere else", NULL);
+
+    stream_close(db);
+    http_shutdown(thread);
+    return ok;
+}
+#endif
+
 int main(void) {
 #if !defined(_WIN32) && !defined(CLOUDSYNC_OMIT_CURL)
     check("HTTP deadlines and interrupt: API cap, artifact stall, cancel:", test_stalled_http_timeout());
@@ -804,6 +1069,7 @@ int main(void) {
     check("receive stream: server without watermark:", test_stream_no_watermark());
 #if !defined(_WIN32) && !defined(CLOUDSYNC_OMIT_CURL)
     check("runtime deadlines (cloudsync_set) and interrupt of a call:", test_runtime_deadlines());
+    check("apply-defer over HTTP: header, 202 lifecycle, rollback, 503/409:", test_apply_defer_transport());
 #endif
     if (failures) { printf("\n%d test(s) FAILED\n", failures); return 1; }
     printf("\nAll network unit tests passed\n");

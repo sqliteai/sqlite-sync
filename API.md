@@ -841,7 +841,7 @@ Without the argument the call sends every unsent change as a single all-or-nothi
 
 The argument counts local database versions, not a version number: each version is one local transaction, so `cloudsync_network_send_changes(50)` uploads at most fifty transactions. Received changes share the same version counter, so versions holding no local change are skipped rather than consuming the budget — the call always makes progress while anything is pending.
 
-Call it repeatedly with the same value until `send.status` is no longer `"out-of-sync"`. `send.localVersion` always reports the newest local version and `send.serverVersion` what the server has confirmed, so the two can be compared to see what is left. When nothing is pending the call sends nothing and leaves the send checkpoint where it was.
+Call it repeatedly with the same value until `send.status` is no longer `"out-of-sync"`. `send.localVersion` always reports the newest local version and `send.serverVersion` what the server has accepted, so the two can be compared to see what is left to send. When nothing is pending the call sends nothing and leaves the send checkpoint where it was.
 
 **Returns:** A JSON string with the send result:
 
@@ -851,7 +851,7 @@ Call it repeatedly with the same value until `send.status` is no longer `"out-of
 
 - `send.status`: The current sync state — `"synced"` (all changes confirmed), `"syncing"` (changes sent but not yet confirmed), `"out-of-sync"` (local changes pending or gaps detected), or `"error"`.
 - `send.localVersion`: The latest local database version.
-- `send.serverVersion`: The latest version confirmed by the server.
+- `send.serverVersion`: The latest version the server has accepted. The server may accept changes before applying them (a large payload, or a busy database), so this can be ahead of what is confirmed. Only `send.status == "synced"` means every sent change is confirmed; `send.serverVersion == send.localVersion` alone does not. If an accepted change later fails to apply, the server lowers this version again and the next call re-sends it.
 - `send.chunks`: The number of payload chunks sent this call (a large push is split into multiple transport chunks bounded by `payload_max_chunk_size`). `0` when there were no local changes to send.
 - `send.bytes`: The total serialized payload bytes sent this call (uncompressed cloudsync payload size, summed across chunks; not the compressed wire size).
 - `send.lastFailure` (optional): Present only when the server reports a failed apply job. Forwarded verbatim from the server's `failures.apply` and typically includes `jobId`, `code`, `stage`, `message`, `retryable`, and `failedAt`. It is emitted regardless of `status` so callers can detect server-side failures during `"syncing"` or even after the state has nominally recovered. This function is **send/apply-scoped**: server-reported check-job failures (`failures.check`) are not surfaced here — see [`cloudsync_network_receive_changes()`](#cloudsync_network_receive_changesmax_chunks) and [`cloudsync_network_sync()`](#cloudsync_network_syncwait_ms-max_retries).
@@ -962,7 +962,7 @@ When the server delivers changes as a stream of chunks, this function drains the
 
 - `send.status`: The current sync state — `"synced"`, `"syncing"`, `"out-of-sync"`, or `"error"`.
 - `send.localVersion`: The latest local database version.
-- `send.serverVersion`: The latest version confirmed by the server.
+- `send.serverVersion`: The latest version the server has accepted, which can be ahead of what is confirmed. Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes).
 - `send.chunks` / `send.bytes`: Number of payload chunks sent and total serialized payload bytes sent during the send phase. Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes).
 - `send.lastFailure` (optional): Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes) — forwarded verbatim from the server's `failures.apply` whenever a failed apply job is reported, regardless of `status`.
 - `receive.rows`: The **total** number of rows received and applied during the receive phase, summed across **all** chunks drained in this call, including the rows applied before an error.
@@ -1009,11 +1009,15 @@ SELECT cloudsync_network_reset_sync_version();
 
 ### `cloudsync_network_has_unsent_changes()`
 
-**Description:** Checks if there are any local changes that have not yet been sent to the remote server.
+**Description:** Checks if there are any local changes that the remote server has not yet confirmed. A change counts as unsent until the server has applied it, not just accepted it: an accepted change can still fail to apply, and the device must keep it to send it again. A result of 0 therefore means the local changes are safe to discard, for example before [`cloudsync_network_logout()`](#cloudsync_network_logout).
+
+The function asks the server for its current status, so it makes one network request.
+
+While a send is accepted but not yet applied (`send.status` is `"syncing"`), this function keeps returning 1 even though there is nothing new to send. Do not loop on it calling [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes) back to back: once `send.status` is `"syncing"`, stop and check again on your normal sync schedule. The server completes the work on its own.
 
 **Parameters:** None.
 
-**Returns:** 1 if there are unsent changes, 0 otherwise.
+**Returns:** 1 if there are local changes the server has not confirmed, 0 otherwise.
 
 **Example:**
 

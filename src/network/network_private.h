@@ -53,6 +53,7 @@
 // CLOUDSYNC_VERSION is defined in cloudsync.h — include it before this header at use sites.
 #define CLOUDSYNC_HEADER_VERSION_LINE       CLOUDSYNC_HEADER_VERSION ": " CLOUDSYNC_VERSION
 #define CLOUDSYNC_HEADER_CHECK_CAPABILITIES "X-CloudSync-Capabilities: check-status-response, check-chunks"
+#define CLOUDSYNC_HEADER_APPLY_CAPABILITIES "X-CloudSync-Capabilities: apply-defer"
 
 #define CLOUDSYNC_NETWORK_OK                1
 #define CLOUDSYNC_NETWORK_ERROR             2
