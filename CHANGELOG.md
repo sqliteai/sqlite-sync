@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **`/apply` requests advertise the `apply-defer` capability** in `X-CloudSync-Capabilities`. A CloudSync server whose database is busy can then accept a small send and apply it later, answering `202` instead of making the client wait or fail. The client already handles that answer: the send reports `syncing`, a later call learns from the server's status when the changes are applied, and if they fail to apply the server lowers the accepted version so the next call re-sends them. Servers that do not support deferral ignore the header. Custom network implementations must forward the header and treat `202` as success with its body (see `docs/internal/network.md`).
+- **`/apply` requests advertise the `apply-defer` capability** in `X-CloudSync-Capabilities`. When its database is busy, a CloudSync server can then accept a chunk sent inline and apply it later, answering `202` instead of making the client wait or fail. The server decides chunk by chunk, so the header goes on every `/apply`: one batch can mix chunks applied at once, deferred ones and ones uploaded through S3, and the server confirms the batch only once every chunk is applied. The client already handles that answer: the send reports `syncing`, a later call learns from the server's status when the changes are applied, and if they fail to apply the server lowers the accepted version so the next call re-sends them. Servers that do not support deferral ignore the header. Custom network implementations must forward the header and treat `202` as success with its body (see `docs/internal/network.md`).
 
 ### Changed
 

@@ -233,17 +233,31 @@ static bool test_unicode(void) {
 #include "sqlite3.h"
 extern bool network_test_curl_timeout(const char *, bool, bool);
 extern bool network_test_curl_interrupt(const char *, sqlite3 *);
-static bool test_stalled_http_timeout(void) {
+
+// A socket listening on an ephemeral loopback port, or -1.
+static int loopback_listen(unsigned *port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return false;
+    if (fd < 0) return -1;
     struct sockaddr_in address = {0};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    bool ok = bind(fd, (struct sockaddr *)&address, sizeof(address)) == 0 && listen(fd, 8) == 0;
     socklen_t len = sizeof(address);
-    ok = ok && getsockname(fd, (struct sockaddr *)&address, &len) == 0;
+    if (bind(fd, (struct sockaddr *)&address, sizeof(address)) != 0 || listen(fd, 8) != 0 ||
+        getsockname(fd, (struct sockaddr *)&address, &len) != 0) {
+        close(fd);
+        return -1;
+    }
+    *port = ntohs(address.sin_port);
+    return fd;
+}
+
+static bool test_stalled_http_timeout(void) {
+    unsigned port = 0;
+    int fd = loopback_listen(&port);
+    if (fd < 0) return false;
+    bool ok = true;
     char url[80];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", ntohs(address.sin_port));
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", port);
     // A listening socket that never sends HTTP simulates a stalled server.
     // An API endpoint is bounded by elapsed time; an artifact transfer by a stall.
     // Both shapes must abort against a server that accepts and then sends nothing.
@@ -609,18 +623,13 @@ static int timed_receive(sqlite3 *db, double *seconds) {
 // call in flight is cancelled by sqlite3_interrupt() with SQLITE_INTERRUPT. The server is
 // a listening socket that never answers; this build compiles a 1 s request deadline.
 static bool test_runtime_deadlines(void) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    unsigned port = 0;
+    int fd = loopback_listen(&port);
     if (fd < 0) return false;
-    struct sockaddr_in address = {0};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    bool ok = bind(fd, (struct sockaddr *)&address, sizeof(address)) == 0 && listen(fd, 8) == 0;
-    socklen_t len = sizeof(address);
-    ok = ok && getsockname(fd, (struct sockaddr *)&address, &len) == 0;
     char init[160];
-    snprintf(init, sizeof(init), "SELECT cloudsync_network_init_custom('http://127.0.0.1:%u', 'test-managed-database-id');", ntohs(address.sin_port));
-    sqlite3 *db = ok ? stream_db(false) : NULL;
-    ok = ok && db && db_exec(db, init) == SQLITE_OK;
+    snprintf(init, sizeof(init), "SELECT cloudsync_network_init_custom('http://127.0.0.1:%u', 'test-managed-database-id');", port);
+    sqlite3 *db = stream_db(false);
+    bool ok = db && db_exec(db, init) == SQLITE_OK;
     double seconds = 0;
     char detail[96];
 
@@ -786,24 +795,30 @@ static bool test_bounded_send(void) {
 
 #if !defined(_WIN32) && !defined(CLOUDSYNC_OMIT_CURL)
 #include <strings.h>
+#include <poll.h>
+#include <errno.h>
 
 // A loopback HTTP/1.1 server answering one request per connection, so requests are
 // built by the real libcurl transport rather than the test responder (which bypasses
 // header construction). /apply and /status replies are scripted; /upload hands out a
 // loopback URL for the S3 PUT. Every request records whether it advertised apply-defer.
+// The counters need no lock: the server records a request before writing its reply, and
+// the test reads them only after curl has received that reply.
 #define HTTP_MAX_REQ 64
 static int http_fd = -1;
 static unsigned http_port;
 static volatile bool http_stop;
 static int http_apply_code, http_status_code;
 static char http_apply_body[512], http_status_body[512];
+static char http_partial_body[512];   // when set, /apply's answer to a non-final chunk
 static int http_nreq, http_napply, http_nstatus, http_nupload, http_nput;
 static char http_req_endpoint[HTTP_MAX_REQ][8];
 static bool http_req_defer[HTTP_MAX_REQ];
 static char http_apply_batch[HTTP_MAX_REQ][48];
 static int64_t http_apply_chunk[HTTP_MAX_REQ], http_apply_min[HTTP_MAX_REQ];
-static bool http_apply_url[HTTP_MAX_REQ];
+static bool http_apply_url[HTTP_MAX_REQ], http_apply_final[HTTP_MAX_REQ];
 
+// head holds only the request line and headers, so a body can never match.
 static const char *http_header(const char *head, const char *name) {
     size_t n = strlen(name);
     for (const char *line = strstr(head, "\r\n"); line; line = strstr(line + 2, "\r\n")) {
@@ -823,36 +838,35 @@ static void http_reply(int c, int code, const char *body) {
 static void http_handle(int c) {
     size_t cap = 4096, used = 0, head_len = 0, body_len = 0;
     char *buf = malloc(cap);
-    bool continued = false;
+    char *head = NULL;
     while (buf) {
         if (used + 1 >= cap) { char *grown = realloc(buf, cap *= 2); if (!grown) break; buf = grown; }
         ssize_t r = read(c, buf + used, cap - used - 1);
         if (r <= 0) break;
         used += (size_t)r;
         buf[used] = 0;
-        if (!head_len) {
+        if (!head) {
             char *end = strstr(buf, "\r\n\r\n");
             if (!end) continue;
             head_len = (size_t)(end - buf) + 4;
-            const char *length = http_header(buf, "Content-Length");
+            head = strndup(buf, head_len - 2);
+            if (!head) break;
+            const char *length = http_header(head, "Content-Length");
             body_len = length ? (size_t)strtoull(length, NULL, 10) : 0;
-        }
-        const char *expect = http_header(buf, "Expect");
-        if (!continued && expect && strncasecmp(expect + strspn(expect, " "), "100-continue", 12) == 0) {
-            continued = true;
-            if (write(c, "HTTP/1.1 100 Continue\r\n\r\n", 25) < 0) break;
+            const char *expect = http_header(head, "Expect");
+            if (expect && strncasecmp(expect + strspn(expect, " "), "100-continue", 12) == 0 &&
+                write(c, "HTTP/1.1 100 Continue\r\n\r\n", 25) < 0) break;
         }
         if (used >= head_len + body_len) break;
     }
-    if (!buf || !head_len) { free(buf); return; }
+    if (!buf || !head) { free(buf); free(head); return; }
 
-    buf[head_len - 2] = 0;  // headers only, body follows at buf + head_len
     const char *body = buf + head_len;
     char path[256] = "";
-    sscanf(buf, "%*s %255s", path);
+    sscanf(head, "%*s %255s", path);
     const char *slash = strrchr(path, '/');
     const char *endpoint = slash ? slash + 1 : path;
-    const char *capabilities = http_header(buf, "X-CloudSync-Capabilities");
+    const char *capabilities = http_header(head, "X-CloudSync-Capabilities");
     int i = http_nreq < HTTP_MAX_REQ ? http_nreq++ : HTTP_MAX_REQ - 1;
     snprintf(http_req_endpoint[i], sizeof(http_req_endpoint[i]), "%s", endpoint);
     http_req_defer[i] = capabilities && strstr(capabilities, "apply-defer");
@@ -865,7 +879,8 @@ static void http_handle(int c) {
         http_apply_chunk[k] = json_int_after(body, "\"chunkIndex\":", -1);
         http_apply_min[k] = json_int_after(body, "\"dbVersionMin\":", -1);
         http_apply_url[k] = strstr(body, "{\"url\":") == body;
-        http_reply(c, http_apply_code, http_apply_body);
+        http_apply_final[k] = strstr(body, "\"isFinal\":true") != NULL;
+        http_reply(c, http_apply_code, http_partial_body[0] && !http_apply_final[k] ? http_partial_body : http_apply_body);
     } else if (strcmp(endpoint, "status") == 0) {
         http_nstatus++;
         http_reply(c, http_status_code, http_status_body);
@@ -878,46 +893,41 @@ static void http_handle(int c) {
         http_nput++;
         http_reply(c, 200, "");
     }
+    free(head);
     free(buf);
 }
 
+// Polls instead of blocking in accept(), so a stop request is seen within 100 ms and a
+// failing listener ends the thread instead of spinning.
 static void *http_serve(void *arg) {
     (void)arg;
     while (!http_stop) {
+        struct pollfd p = {http_fd, POLLIN, 0};
+        int n = poll(&p, 1, 100);
+        if (n < 0 && errno != EINTR) break;
+        if (n <= 0) continue;
         int c = accept(http_fd, NULL, NULL);
-        if (c < 0) continue;
-        if (!http_stop) http_handle(c);
+        if (c < 0) {
+            if (errno == EINTR || errno == EAGAIN || errno == ECONNABORTED) continue;
+            break;
+        }
+        http_handle(c);
         close(c);
     }
     return NULL;
 }
 
 static bool http_start(pthread_t *thread) {
-    http_fd = socket(AF_INET, SOCK_STREAM, 0);
+    http_fd = loopback_listen(&http_port);
     if (http_fd < 0) return false;
-    struct sockaddr_in address = {0};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    socklen_t len = sizeof(address);
-    if (bind(http_fd, (struct sockaddr *)&address, sizeof(address)) != 0 || listen(http_fd, 8) != 0 ||
-        getsockname(http_fd, (struct sockaddr *)&address, &len) != 0) {
-        close(http_fd);
-        return false;
-    }
-    http_port = ntohs(address.sin_port);
     http_stop = false;
-    return pthread_create(thread, NULL, http_serve, NULL) == 0;
+    if (pthread_create(thread, NULL, http_serve, NULL) == 0) return true;
+    close(http_fd);
+    return false;
 }
 
 static void http_shutdown(pthread_t thread) {
-    // accept() is not woken by close() everywhere: unblock it with one last connection.
     http_stop = true;
-    int wake = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in address = {0};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    address.sin_port = htons((uint16_t)http_port);
-    if (wake >= 0) { connect(wake, (struct sockaddr *)&address, sizeof(address)); close(wake); }
     pthread_join(thread, NULL);
     close(http_fd);
 }
@@ -926,6 +936,7 @@ static void http_shutdown(pthread_t thread) {
 static void http_script(int apply_code, int64_t apply_optimistic, int64_t apply_confirmed,
                         int64_t status_optimistic, int64_t status_confirmed, const char *status_failure) {
     http_apply_code = apply_code;
+    http_partial_body[0] = 0;
     if (apply_code >= 400) {
         snprintf(http_apply_body, sizeof(http_apply_body), "{\"error\":{\"code\":\"%s\",\"retryable\":true}}",
                  apply_code == 409 ? "apply_batch_superseded" : "database_unreachable");
@@ -1033,6 +1044,36 @@ static bool test_apply_defer_transport(void) {
     if (ok) json = send_changes(db, NULL);
     ok = ok && expect(http_nupload == 1 && http_nput == 1 && http_napply == napply_before + 1 && http_apply_url[http_napply - 1],
                       "large payload goes through /upload + S3 + /apply", json);
+
+    // A batch of several chunks: the server defers each chunk on its own and advances
+    // optimistic only on the final one. The client sends every chunk of the same batch,
+    // each advertising the capability, and takes its checkpoint from the final reply.
+    // Chunks above the inline limit go through S3, so the batch mixes both forms.
+    ok = ok && db_exec(db, "SELECT cloudsync_set('payload_max_chunk_size', '262144');") == SQLITE_OK;
+    int64_t base = send_checkpoint(db);
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('m1', randomblob(200000));") == SQLITE_OK;
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('m2', randomblob(200000));") == SQLITE_OK;
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('m3', randomblob(100000));") == SQLITE_OK;
+    int64_t top = db_int(db, "SELECT max(db_version) FROM cloudsync_changes");
+    http_script(202, top, base, top, base, NULL);
+    snprintf(http_partial_body, sizeof(http_partial_body),
+             "{\"data\":{\"lastOptimisticVersion\":%lld,\"lastConfirmedVersion\":%lld,\"gaps\":[]}}",
+             (long long)base, (long long)base);
+    int first = http_napply;
+    if (ok) json = send_changes(db, NULL);
+    int nchunks = http_napply - first;
+    bool batch_ok = nchunks >= 2;
+    bool inline_seen = false, url_seen = false;
+    for (int k = 0; k < nchunks && batch_ok; k++) {
+        int a = first + k;
+        batch_ok = strcmp(http_apply_batch[a], http_apply_batch[first]) == 0 && http_apply_chunk[a] == k &&
+                   http_apply_final[a] == (k == nchunks - 1) && http_apply_min[a] == base + 1;
+        if (http_apply_url[a]) url_seen = true; else inline_seen = true;
+    }
+    ok = ok && expect(batch_ok, "one batch, chunks 0..n-1, final only on the last", json);
+    ok = ok && expect(inline_seen && url_seen, "the batch mixes inline and S3 chunks", json);
+    ok = ok && expect(send_checkpoint(db) == top, "checkpoint taken from the final chunk's reply", json);
+    ok = ok && expect(strstr(json, "\"status\":\"syncing\"") != NULL, "deferred batch reports syncing", json);
 
     // Only /apply negotiates deferral.
     bool headers_ok = http_nreq > 0;
