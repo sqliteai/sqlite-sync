@@ -5,6 +5,10 @@ on:
       - '**'
     tags-ignore:
       - '**'
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE*'
   workflow_dispatch:
 
 permissions:
