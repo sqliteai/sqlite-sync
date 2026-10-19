@@ -139,7 +139,7 @@ jobs:
 
       - name: windows install dependencies
         if: matrix.name == 'windows'
-        run: choco install sqlite -y
+        run: choco install sqlite -y && command -v sqlite3
 
       - name: macos install dependencies
         if: matrix.name == 'macos'
