@@ -739,6 +739,8 @@ Fix the cause and deliver the payload again: the changes already applied merge a
 
 Every network request has a deadline, so a stalled server cannot hold the connection indefinitely. The deadlines can be tuned with the `network_*` settings of [`cloudsync_set()`](#cloudsync_setkey-value). A network call in progress can also be cancelled with `sqlite3_interrupt()` on its connection: it stops within about a second and fails with `SQLITE_INTERRUPT` (SQLite 3.41 or later), so a deliberate stop can be told apart from a failure worth retrying.
 
+Network calls spend most of their time waiting on the network while they hold a read or write on the database. Use WAL mode (`PRAGMA journal_mode=WAL`) if other connections write to the database while it syncs: with the default rollback journal, they get `SQLITE_BUSY` until the upload in progress finishes.
+
 ### `cloudsync_network_init(managedDatabaseId)`
 
 **Description:** Initializes the `sqlite-sync` network component. This function configures the endpoints for the CloudSync service and initializes the cURL library.
