@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+
+- **`/apply` requests advertise the `apply-defer` capability** in `X-CloudSync-Capabilities`. When its database is busy, a CloudSync server can then accept a chunk sent inline and apply it later, answering `202` instead of making the client wait or fail. The server decides chunk by chunk, so the header goes on every `/apply`: one batch can mix chunks applied at once, deferred ones and ones uploaded through S3, and the server confirms the batch only once every chunk is applied. The client already handles that answer: the send reports `syncing`, a later call learns from the server's status when the changes are applied, and if they fail to apply the server lowers the accepted version so the next call re-sends them. Servers that do not support deferral ignore the header. Custom network implementations must forward the header and treat `202` as success with its body (see `docs/internal/network.md`).
+
+### Changed
+
+- **`cloudsync_network_has_unsent_changes()` returns 1 until the server has confirmed the local changes, not just accepted them.** It used to compare against the accepted version, so after a send that the server accepted but had not applied yet it returned 0. If that apply then failed, an application that logged out on 0 had already deleted changes the server never stored. The function now compares against the confirmed version, and also returns 1 when the server's status reports no confirmed version. While a send is `syncing` it keeps returning 1, so stop calling `cloudsync_network_send_changes()` in a loop once `send.status` is `syncing` and check again on your normal schedule.
+
+### Fixed
+
+- **`send.serverVersion` is documented as the server's accepted version.** API.md described it as confirmed, but it has always reported the accepted version, which can be ahead of what is applied. Only `send.status == "synced"` means every sent change is confirmed.
+
 ## [1.2.0] - 2026-09-28
 
 ### Added

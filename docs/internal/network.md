@@ -47,9 +47,17 @@ This is useful when:
    // Performs a network request (GET or POST depending on `is_post_request`) to the specified `endpoint`, using the given `authentication` token or header.
    // If `json_payload` is provided, it will be sent as the POST body (for `is_post_request == true`).
    // If `zero_terminated == true`, ensure that the returned buffer is null-terminated.
-   // `extra_headers` is an array of `nextra_headers` request-header lines (each formatted as `"Name: value"`) appended to the standard headers (`Authorization`, `X-CloudSync-Org`, `Content-Type`). Pass `NULL, 0` for none. Used by call sites to send `X-CloudSync-Version` on every cloudsync API call and `X-CloudSync-Capabilities: check-status-response` on calls to the `/check` endpoint.
+   // `extra_headers` is an array of `nextra_headers` request-header lines (each formatted as `"Name: value"`) appended to the standard headers (`Authorization`, `X-CloudSync-Org`, `Content-Type`). Pass `NULL, 0` for none. Used by call sites to send `X-CloudSync-Version` on every cloudsync API call, `X-CloudSync-Capabilities: check-status-response, check-chunks` on calls to the `/check` endpoint, and `X-CloudSync-Capabilities: apply-defer` on calls to the `/apply` endpoint.
    // Returns a `NETWORK_RESULT` enum value indicating success, error, or timeout.
    ```
+
+#### Requirements for `network_receive_buffer`
+
+The core relies on these behaviors, so a custom implementation must provide them:
+
+* **Forward every `extra_headers` line unchanged.** The capability headers tell the server which responses the client understands. If `apply-defer` is dropped from `/apply` requests, the server never defers that client's applies and answers with a retryable error when the database is busy.
+* **Treat every `2xx` status as success, including `202 Accepted`, and return its body.** The server answers `/apply` with `202` when it has accepted the changes but not yet applied them, and `/check` with `202` while a download is being prepared. The body of a `202` carries the sync status the core needs, so it must reach the caller like the body of a `200`.
+* **Treat `4xx` and `5xx` as errors.** Do not retry them inside the transport: the core keeps its send checkpoint and the next sync call re-sends.
 
 #### Platform-Specific Notes
 
