@@ -198,6 +198,20 @@ static bool test_json_envelope(void) {
     cloudsync_memory_free(url);
     return ok;
 }
+extern int network_test_retry_after_parse(const char *);
+static bool test_retry_after_parse(void) {
+    return network_test_retry_after_parse("5") == 5 &&
+           network_test_retry_after_parse(" 7 \r\n") == 7 &&
+           network_test_retry_after_parse("0") == 0 &&
+           network_test_retry_after_parse("3600") == 3600 &&
+           network_test_retry_after_parse("3601") == 3600 &&
+           network_test_retry_after_parse("99999999999999999999") == 3600 &&
+           network_test_retry_after_parse("") == -1 &&
+           network_test_retry_after_parse("-1") == -1 &&
+           network_test_retry_after_parse("1.5") == -1 &&
+           network_test_retry_after_parse("Wed, 21 Oct 2015 07:28:00 GMT") == -1;
+}
+
 extern char *network_test_receive_json(int, bool, const char *, const char *);
 static bool receive_json_is(char *json, const char *expected) {
     bool ok = json && strcmp(json, expected) == 0;
@@ -800,8 +814,9 @@ static bool test_bounded_send(void) {
 
 // A loopback HTTP/1.1 server answering one request per connection, so requests are
 // built by the real libcurl transport rather than the test responder (which bypasses
-// header construction). /apply and /status replies are scripted; /upload hands out a
-// loopback URL for the S3 PUT. Every request records whether it advertised apply-defer.
+// header construction). /apply, /status and /check replies are scripted, Retry-After
+// included; /upload hands out a loopback URL for the S3 PUT. Every request records
+// whether it advertised apply-defer.
 // The counters need no lock: the server records a request before writing its reply, and
 // the test reads them only after curl has received that reply.
 #define HTTP_MAX_REQ 64
@@ -811,7 +826,15 @@ static volatile bool http_stop;
 static int http_apply_code, http_status_code;
 static char http_apply_body[512], http_status_body[512];
 static char http_partial_body[512];   // when set, /apply's answer to a non-final chunk
-static int http_nreq, http_napply, http_nstatus, http_nupload, http_nput;
+static int http_apply_code_from;      // chunks before this index answer 202 with http_partial_body
+static char http_apply_retry[32], http_status_retry[32], http_upload_retry[32];   // "" = no Retry-After
+static int http_upload_code;
+static char http_upload_body[512];
+#define HTTP_CHECK_SCRIPT 8
+static int http_check_code[HTTP_CHECK_SCRIPT];        // /check answers in order, the last one repeats
+static char http_check_retry[HTTP_CHECK_SCRIPT][32];
+static int http_check_steps;
+static int http_nreq, http_napply, http_nstatus, http_nupload, http_nput, http_ncheck;
 static char http_req_endpoint[HTTP_MAX_REQ][8];
 static bool http_req_defer[HTTP_MAX_REQ];
 static char http_apply_batch[HTTP_MAX_REQ][48];
@@ -827,11 +850,14 @@ static const char *http_header(const char *head, const char *name) {
     return NULL;
 }
 
-static void http_reply(int c, int code, const char *body) {
-    const char *reason = code == 200 ? "OK" : code == 202 ? "Accepted" : code == 409 ? "Conflict" : "Service Unavailable";
-    char head[256];
-    int len = snprintf(head, sizeof(head), "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
-                       code, reason, strlen(body));
+static void http_reply(int c, int code, const char *body, const char *retry_after) {
+    const char *reason = code == 200 ? "OK" : code == 202 ? "Accepted" : code == 409 ? "Conflict" :
+                         code == 429 ? "Too Many Requests" : "Service Unavailable";
+    char retry[64] = "";
+    if (retry_after && retry_after[0]) snprintf(retry, sizeof(retry), "Retry-After: %s\r\n", retry_after);
+    char head[320];
+    int len = snprintf(head, sizeof(head), "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\n%sContent-Length: %zu\r\nConnection: close\r\n\r\n",
+                       code, reason, retry, strlen(body));
     if (write(c, head, (size_t)len) < 0 || write(c, body, strlen(body)) < 0) return;
 }
 
@@ -880,18 +906,27 @@ static void http_handle(int c) {
         http_apply_min[k] = json_int_after(body, "\"dbVersionMin\":", -1);
         http_apply_url[k] = strstr(body, "{\"url\":") == body;
         http_apply_final[k] = strstr(body, "\"isFinal\":true") != NULL;
-        http_reply(c, http_apply_code, http_partial_body[0] && !http_apply_final[k] ? http_partial_body : http_apply_body);
+        if (http_apply_chunk[k] < http_apply_code_from) http_reply(c, 202, http_partial_body, NULL);
+        else http_reply(c, http_apply_code, http_partial_body[0] && !http_apply_final[k] ? http_partial_body : http_apply_body,
+                        http_apply_retry);
     } else if (strcmp(endpoint, "status") == 0) {
         http_nstatus++;
-        http_reply(c, http_status_code, http_status_body);
+        http_reply(c, http_status_code, http_status_body, http_status_retry);
     } else if (strcmp(endpoint, "upload") == 0) {
         http_nupload++;
         char url[128];
         snprintf(url, sizeof(url), "{\"url\":\"http://127.0.0.1:%u/s3\"}", http_port);
-        http_reply(c, 200, url);
+        http_reply(c, http_upload_code, http_upload_code == 200 ? url : http_upload_body, http_upload_retry);
+    } else if (strcmp(endpoint, "check") == 0) {
+        int step = http_ncheck < http_check_steps ? http_ncheck : http_check_steps - 1;
+        http_ncheck++;
+        int code = step >= 0 ? http_check_code[step] : 202;
+        http_reply(c, code, code < 400 ? "{\"data\":{\"lastOptimisticVersion\":0,\"lastConfirmedVersion\":0,\"gaps\":[]}}"
+                                       : "{\"errors\":[{\"status\":\"429\",\"code\":\"check_rate_limited\",\"title\":\"Busy\"}]}",
+                   step >= 0 ? http_check_retry[step] : NULL);
     } else {
         http_nput++;
-        http_reply(c, 200, "");
+        http_reply(c, 200, "", NULL);
     }
     free(head);
     free(buf);
@@ -937,6 +972,9 @@ static void http_script(int apply_code, int64_t apply_optimistic, int64_t apply_
                         int64_t status_optimistic, int64_t status_confirmed, const char *status_failure) {
     http_apply_code = apply_code;
     http_partial_body[0] = 0;
+    http_apply_code_from = 0;
+    http_apply_retry[0] = http_status_retry[0] = http_upload_retry[0] = 0;
+    http_upload_code = 200;
     if (apply_code >= 400) {
         snprintf(http_apply_body, sizeof(http_apply_body), "{\"error\":{\"code\":\"%s\",\"retryable\":true}}",
                  apply_code == 409 ? "apply_batch_superseded" : "database_unreachable");
@@ -1086,6 +1124,188 @@ static bool test_apply_defer_transport(void) {
     http_shutdown(thread);
     return ok;
 }
+
+// /apply refused as busy: the server's errors[0].code, or the fallback when there is none.
+static void http_busy_apply(int code, const char *retry_after, const char *error_code) {
+    http_apply_code = code;
+    snprintf(http_apply_retry, sizeof(http_apply_retry), "%s", retry_after ? retry_after : "");
+    if (error_code) {
+        snprintf(http_apply_body, sizeof(http_apply_body),
+                 "{\"errors\":[{\"status\":\"%d\",\"code\":\"%s\",\"title\":\"Busy\"}],\"request_id\":\"test-request\"}",
+                 code, error_code);
+    } else {
+        http_apply_body[0] = 0;
+    }
+}
+
+// /check answers, in order; the last one repeats.
+static void http_check_script(int steps, const int *codes, const char *const *retry_after) {
+    http_check_steps = steps;
+    http_ncheck = 0;
+    for (int i = 0; i < steps; i++) {
+        http_check_code[i] = codes[i];
+        snprintf(http_check_retry[i], sizeof(http_check_retry[i]), "%s", retry_after[i] ? retry_after[i] : "");
+    }
+}
+
+static char *sql_text(sqlite3 *db, const char *sql) {
+    static char out[1024];
+    sqlite3_stmt *vm = NULL;
+    out[0] = 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &vm, NULL) == SQLITE_OK && sqlite3_step(vm) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(vm, 0);
+        if (t) snprintf(out, sizeof(out), "%s", t);
+    } else {
+        snprintf(out, sizeof(out), "ERROR: %s", sqlite3_errmsg(db));
+    }
+    sqlite3_finalize(vm);
+    return out;
+}
+
+// A busy server (429, or 503 with Retry-After) is a result, not an error: the send keeps
+// its checkpoint, the receive loop waits only within the caller's budget, and both report
+// retryAfter/retryCode. Without those answers (today's server) nothing changes.
+static bool test_soft_overload_transport(void) {
+    pthread_t thread;
+    if (!http_start(&thread)) return false;
+    http_nreq = http_napply = http_nstatus = http_nupload = http_nput = http_ncheck = 0;
+
+    char init[160];
+    snprintf(init, sizeof(init), "SELECT cloudsync_network_init_custom('http://127.0.0.1:%u', 'test-managed-database-id');", http_port);
+    sqlite3 *db = stream_db(false);
+    bool ok = expect(db && db_exec(db, init) == SQLITE_OK, "network init", NULL);
+    ok = ok && db_exec(db, "SELECT cloudsync_set('network_request_timeout', '10');") == SQLITE_OK;
+    char *json = NULL;
+
+    // 429 with Retry-After and an error code.
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('b1', 'v');") == SQLITE_OK;
+    http_script(200, 0, 0, 0, 0, NULL);
+    http_busy_apply(429, "30", "tenant_rate_limited");
+    if (ok) json = send_changes(db, NULL);
+    int prev = http_napply - 1;
+    ok = ok && expect(strstr(json, "\"status\":\"out-of-sync\"") && strstr(json, "\"serverVersion\":0,") &&
+                      strstr(json, "\"chunks\":0,") &&
+                      strstr(json, "\"retryAfter\":30,\"retryCode\":\"tenant_rate_limited\"}"), "busy 429 is a result", json);
+    ok = ok && expect(send_checkpoint(db) == 0, "busy keeps the checkpoint", json);
+    ok = ok && expect(http_nstatus == 0, "busy send does not probe /status", json);
+    http_script(200, 1, 1, 1, 1, NULL);
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && resent_as_new_batch(prev, 1, "send after busy is a new batch", json);
+    ok = ok && expect(strstr(json, "\"status\":\"synced\"") && !strstr(json, "retryAfter"), "no retry fields when not busy", json);
+
+    // 429 without Retry-After or body, and 503 with Retry-After.
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('b2', 'v');") == SQLITE_OK;
+    http_busy_apply(429, NULL, NULL);
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && expect(strstr(json, "\"retryAfter\":0,\"retryCode\":\"http_429\"") != NULL, "429 without hint", json);
+    http_busy_apply(503, "5", "database_unreachable");
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && expect(strstr(json, "\"retryAfter\":5,\"retryCode\":\"database_unreachable\"") != NULL, "503 with Retry-After", json);
+    // An HTTP-date is no valid hint, so that 503 stays an error.
+    http_busy_apply(503, "Wed, 21 Oct 2015 07:28:00 GMT", "database_unreachable");
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && expect(strncmp(json, "ERROR:", 6) == 0, "503 with an HTTP-date is an error", json);
+    ok = ok && expect(send_checkpoint(db) == 1, "checkpoint kept across busy answers", json);
+    http_script(200, 2, 2, 2, 2, NULL);
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && expect(send_checkpoint(db) == 2, "recovers once the server accepts", json);
+
+    // /upload refused as busy: nothing reaches S3.
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('b3', randomblob(200000));") == SQLITE_OK;
+    int nput = http_nput, napply = http_napply;
+    http_script(200, 0, 0, 0, 0, NULL);
+    http_upload_code = 429;
+    snprintf(http_upload_retry, sizeof(http_upload_retry), "2");
+    snprintf(http_upload_body, sizeof(http_upload_body), "{\"errors\":[{\"status\":\"429\",\"code\":\"upload_rate_limited\"}]}");
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && expect(strstr(json, "\"retryAfter\":2,\"retryCode\":\"upload_rate_limited\"") && http_nput == nput &&
+                      http_napply == napply, "busy /upload", json);
+    ok = ok && expect(send_checkpoint(db) == 2, "busy /upload keeps the checkpoint", json);
+    int64_t top = db_int(db, "SELECT max(db_version) FROM cloudsync_changes");
+    http_script(200, top, top, top, top, NULL);
+    if (ok) json = send_changes(db, NULL);
+
+    // Busy in the middle of a batch: the chunks already accepted do not move the
+    // checkpoint, and the next call starts a new batch at chunk 0. The accepted chunk
+    // answers with no body, so the local fallback must not advance the checkpoint either.
+    ok = ok && db_exec(db, "SELECT cloudsync_set('payload_max_chunk_size', '262144');") == SQLITE_OK;
+    int64_t base = send_checkpoint(db);
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('m1', randomblob(200000));") == SQLITE_OK;
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('m2', randomblob(200000));") == SQLITE_OK;
+    top = db_int(db, "SELECT max(db_version) FROM cloudsync_changes");
+    http_script(200, top, top, top, top, NULL);
+    http_apply_code_from = 1;
+    http_busy_apply(429, "4", "tenant_rate_limited");
+    int first = http_napply;
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && expect(http_napply - first == 2 && http_apply_chunk[first + 1] == 1, "batch stops at the busy chunk", json);
+    ok = ok && expect(send_checkpoint(db) == base, "mid-batch busy keeps the checkpoint", json);
+    char expected[96];
+    snprintf(expected, sizeof(expected), "\"localVersion\":%lld,\"serverVersion\":%lld,\"chunks\":1,",
+             (long long)top, (long long)base);
+    ok = ok && expect(strstr(json, "\"status\":\"out-of-sync\"") && strstr(json, expected) &&
+                      strstr(json, "\"retryAfter\":4"), "mid-batch busy report", json);
+    http_script(200, top, top, top, top, NULL);
+    if (ok) json = send_changes(db, NULL);
+    int again = first + 2;
+    ok = ok && expect(http_napply > again && strcmp(http_apply_batch[again], http_apply_batch[first]) != 0 &&
+                      http_apply_chunk[again] == 0 && http_apply_min[again] == base + 1, "batch re-sent from chunk 0", json);
+    ok = ok && db_exec(db, "SELECT cloudsync_set('payload_max_chunk_size', '0');") == SQLITE_OK;
+
+    // receive_changes: a delayed 202 and a busy /check are results, a 503 without
+    // Retry-After stays an error.
+    const int c202[] = {202}, c429[] = {429}, c503[] = {503};
+    const char *const ra10[] = {"10"}, *const ra7[] = {"7"}, *const none[] = {NULL};
+    http_check_script(1, c202, ra10);
+    if (ok) json = sql_text(db, "SELECT cloudsync_network_receive_changes()");
+    ok = ok && expect(http_ncheck == 1 && strstr(json, "\"complete\":true,\"retryAfter\":10}") && !strstr(json, "retryCode"),
+                      "202 with Retry-After", json);
+    http_check_script(1, c429, ra7);
+    if (ok) json = sql_text(db, "SELECT cloudsync_network_receive_changes()");
+    ok = ok && expect(strstr(json, "\"complete\":false,\"retryAfter\":7,\"retryCode\":\"check_rate_limited\"}") != NULL,
+                      "busy /check", json);
+    http_check_script(1, c503, none);
+    if (ok) json = sql_text(db, "SELECT cloudsync_network_receive_changes()");
+    ok = ok && expect(strncmp(json, "ERROR:", 6) == 0, "503 /check without Retry-After is an error", json);
+    http_check_script(1, c202, none);
+    if (ok) json = sql_text(db, "SELECT cloudsync_network_receive_changes()");
+    ok = ok && expect(strstr(json, "\"complete\":true}") != NULL, "plain 202 unchanged", json);
+
+    // sync() keeps receiving after a busy send, and each half reports its own hint.
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('b4', 'v');") == SQLITE_OK;
+    http_script(200, 0, 0, 0, 0, NULL);
+    http_busy_apply(429, "30", "tenant_rate_limited");
+    http_check_script(1, c202, ra10);
+    if (ok) json = sql_text(db, "SELECT cloudsync_network_sync(0, 1)");
+    ok = ok && expect(http_ncheck == 1 && strstr(json, "\"retryAfter\":30,\"retryCode\":\"tenant_rate_limited\"},\"receive\"") &&
+                      strstr(json, "\"complete\":true,\"retryAfter\":10}"), "sync receives after a busy send", json);
+    top = db_int(db, "SELECT max(db_version) FROM cloudsync_changes");
+    http_script(200, top, top, top, top, NULL);
+
+    // The loop waits out a Retry-After that fits wait_ms * (max_retries - 1), counting it
+    // against that budget, and returns on one that does not fit.
+    const int c202x2[] = {202, 202}, c429_202[] = {429, 202};
+    const char *const ra1_3[] = {"1", "3"}, *const ra1_none[] = {"1", NULL};
+    http_check_script(2, c202x2, ra1_3);
+    double t0 = monotonic_seconds();
+    if (ok) json = sql_text(db, "SELECT cloudsync_network_sync(500, 5)");
+    double elapsed = monotonic_seconds() - t0;
+    ok = ok && expect(http_ncheck == 2 && strstr(json, "\"retryAfter\":3}") && elapsed >= 0.9 && elapsed < 2.0,
+                      "waits for 1 s, returns on 3 s", json);
+    http_check_script(2, c429_202, ra1_none);
+    t0 = monotonic_seconds();
+    if (ok) json = sql_text(db, "SELECT cloudsync_network_sync(500, 5)");
+    elapsed = monotonic_seconds() - t0;
+    ok = ok && expect(http_ncheck == 4 && !strstr(json, "retryAfter") && elapsed >= 1.9 && elapsed < 2.6,
+                      "a waited-out busy /check costs budget, not time", json);
+    http_check_script(1, c202, none);
+    if (ok) json = sql_text(db, "SELECT cloudsync_network_sync(100, 3)");
+    ok = ok && expect(http_ncheck == 3 && !strstr(json, "retryAfter"), "plain 202 polls max_retries times", json);
+
+    stream_close(db);
+    http_shutdown(thread);
+    return ok;
+}
 #endif
 
 int main(void) {
@@ -1099,6 +1319,7 @@ int main(void) {
     check("Gateway data envelope is unwrapped before scoped lookups:", test_json_envelope());
     check("JSON Unicode, surrogate pairs and malformed escapes:", test_unicode());
     check("receive JSON members (rows, error, lastFailure):", test_receive_json());
+    check("Retry-After parsing (delta-seconds, cap, HTTP-date):", test_retry_after_parse());
     printf("\nNetwork unit tests\n");
     check("optimistic/confirmed version folds latest-valid (allows rollback):", test_optimistic_version_rollback());
     check("non-buffer response is a no-op:", test_non_buffer_is_noop());
@@ -1111,6 +1332,7 @@ int main(void) {
 #if !defined(_WIN32) && !defined(CLOUDSYNC_OMIT_CURL)
     check("runtime deadlines (cloudsync_set) and interrupt of a call:", test_runtime_deadlines());
     check("apply-defer over HTTP: header, 202 lifecycle, rollback, 503/409:", test_apply_defer_transport());
+    check("soft overload over HTTP: busy send/receive, Retry-After budget:", test_soft_overload_transport());
 #endif
     if (failures) { printf("\n%d test(s) FAILED\n", failures); return 1; }
     printf("\nAll network unit tests passed\n");
