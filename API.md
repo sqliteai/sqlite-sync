@@ -874,6 +874,17 @@ SELECT cloudsync_network_send_changes(2);
 SELECT cloudsync_network_send_changes(2);
 -- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":460}}'
 
+-- The same loop in a single statement: one bounded send per row, stopping at the first
+-- status other than "out-of-sync" (at most 100 calls). It returns the last result: when
+-- it carries retryAfter, the server asked to wait, so run it again after that delay.
+WITH RECURSIVE send(n, result) AS (
+  SELECT 1, cloudsync_network_send_changes(2)
+  UNION ALL
+  SELECT n + 1, cloudsync_network_send_changes(2) FROM send
+  WHERE result ->> '$.send.status' = 'out-of-sync' AND n < 100
+)
+SELECT result FROM send ORDER BY n DESC LIMIT 1;
+
 -- With a server-reported failure (e.g. unknown schema hash on the server side):
 -- '{"send":{"status":"out-of-sync","localVersion":1,"serverVersion":0,"chunks":1,"bytes":512,"lastFailure":{"jobId":44961,"code":"internal_error","stage":"apply_payload","message":"cloudsync operation failed: Cannot apply the received payload because the schema hash is unknown 4288148391734624266.","retryable":true,"failedAt":"2026-04-15T22:21:09.018606Z"}}}'
 

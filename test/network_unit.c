@@ -827,6 +827,7 @@ static int http_apply_code, http_status_code;
 static char http_apply_body[512], http_status_body[512];
 static char http_partial_body[512];   // when set, /apply's answer to a non-final chunk
 static int http_apply_code_from;      // chunks before this index answer 202 with http_partial_body
+static bool http_apply_echo;          // a 200 /apply confirms exactly the window it received
 static char http_apply_retry[32], http_status_retry[32], http_upload_retry[32];   // "" = no Retry-After
 static int http_upload_code;
 static char http_upload_body[512];
@@ -906,7 +907,13 @@ static void http_handle(int c) {
         http_apply_min[k] = json_int_after(body, "\"dbVersionMin\":", -1);
         http_apply_url[k] = strstr(body, "{\"url\":") == body;
         http_apply_final[k] = strstr(body, "\"isFinal\":true") != NULL;
-        if (http_apply_chunk[k] < http_apply_code_from) http_reply(c, 202, http_partial_body, NULL);
+        if (http_apply_echo && http_apply_code == 200) {
+            char echo[160];
+            int64_t max = json_int_after(body, "\"dbVersionMax\":", -1);
+            snprintf(echo, sizeof(echo), "{\"data\":{\"lastOptimisticVersion\":%lld,\"lastConfirmedVersion\":%lld,\"gaps\":[]}}",
+                     (long long)max, (long long)max);
+            http_reply(c, 200, echo, NULL);
+        } else if (http_apply_chunk[k] < http_apply_code_from) http_reply(c, 202, http_partial_body, NULL);
         else http_reply(c, http_apply_code, http_partial_body[0] && !http_apply_final[k] ? http_partial_body : http_apply_body,
                         http_apply_retry);
     } else if (strcmp(endpoint, "status") == 0) {
@@ -973,6 +980,7 @@ static void http_script(int apply_code, int64_t apply_optimistic, int64_t apply_
     http_apply_code = apply_code;
     http_partial_body[0] = 0;
     http_apply_code_from = 0;
+    http_apply_echo = false;
     http_apply_retry[0] = http_status_retry[0] = http_upload_retry[0] = 0;
     http_upload_code = 200;
     if (apply_code >= 400) {
@@ -1360,7 +1368,9 @@ static bool test_soft_overload_transport(void) {
     // The loops API.md recommended before this behaviour (send until not out-of-sync,
     // receive while not complete) stop after one call against a busy server.
     ok = ok && reset_retry(db);
-    ok = ok && db_exec(db, "INSERT INTO t VALUES('l1', 'v'), ('l2', 'v'), ('l3', 'v');") == SQLITE_OK;
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('l1', 'v');") == SQLITE_OK;
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('l2', 'v');") == SQLITE_OK;
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('l3', 'v');") == SQLITE_OK;
     http_script(200, 0, 0, 0, 0, NULL);
     http_busy_apply(429, NULL, NULL);
     int calls = 0;
@@ -1379,6 +1389,30 @@ static bool test_soft_overload_transport(void) {
         if (!strstr(json, "\"complete\":false")) break;
     }
     ok = ok && expect(calls == 1 && http_ncheck == 1, "old receive loop stops on a busy server", json);
+
+    // The single-statement loop from API.md: one bounded send per row, stopping at the
+    // first status other than out-of-sync.
+    const char *cte_loop =
+        "WITH RECURSIVE send(n, result) AS ("
+        "  SELECT 1, cloudsync_network_send_changes(1)"
+        "  UNION ALL"
+        "  SELECT n + 1, cloudsync_network_send_changes(1) FROM send"
+        "  WHERE result ->> '$.send.status' = 'out-of-sync' AND n < 100"
+        ") SELECT n || ' ' || result FROM send ORDER BY n DESC LIMIT 1;";
+    ok = ok && reset_retry(db);
+    http_script(200, 0, 0, 0, 0, NULL);
+    http_apply_echo = true;
+    napply = http_napply;
+    if (ok) json = sql_text(db, cte_loop);
+    ok = ok && expect(strncmp(json, "3 ", 2) == 0 && strstr(json, "\"status\":\"synced\"") && http_napply == napply + 3,
+                      "SQL loop drains a backlog in bounded sends", json);
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('l4', 'v');") == SQLITE_OK;
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('l5', 'v');") == SQLITE_OK;
+    http_busy_apply(429, "30", "tenant_rate_limited");
+    napply = http_napply;
+    if (ok) json = sql_text(db, cte_loop);
+    ok = ok && expect(strncmp(json, "1 ", 2) == 0 && strstr(json, "\"status\":\"syncing\"") && strstr(json, "\"retryAfter\":30") &&
+                      http_napply == napply + 1, "SQL loop stops on a busy server", json);
 
     stream_close(db);
     http_shutdown(thread);
