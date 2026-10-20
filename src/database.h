@@ -98,6 +98,7 @@ int database_commit_savepoint (cloudsync_context *data, const char *savepoint_na
 int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_name);
 bool database_in_transaction (cloudsync_context *data);
 int database_fragment_lock (cloudsync_context *data, const char *value_id);
+int database_merge_lock (cloudsync_context *data, const char *table_ref, const void *pk, int pklen);
 int database_errcode (cloudsync_context *data);
 const char *database_errmsg (cloudsync_context *data);
 void database_log_warning (cloudsync_context *data, const char *message);

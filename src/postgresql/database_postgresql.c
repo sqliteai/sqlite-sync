@@ -23,6 +23,7 @@
 // PostgreSQL SPI and other headers
 #include "access/xact.h"
 #include "catalog/pg_type.h"
+#include "common/hashfn.h"
 #include "executor/spi.h"
 #include "funcapi.h"
 #include "utils/array.h"
@@ -1210,6 +1211,31 @@ int database_fragment_lock (cloudsync_context *data, const char *value_id) {
     if (rc == DBRES_OK) rc = databasevm_step(vm);
     if (vm) databasevm_finalize(vm);
     return (rc == DBRES_ROW) ? DBRES_OK : cloudsync_set_error(data, "cloudsync_payload_apply: unable to lock a fragmented value", rc);
+}
+
+// Serialize merge decisions for every column of a row, including tombstones and
+// blocks. READ COMMITTED takes a fresh snapshot on the subsequent clock reads.
+// SERIALIZABLE detects stale decisions itself; REPEATABLE READ cannot refresh its
+// snapshot after waiting and is refused, as for fragmented values above.
+int database_merge_lock (cloudsync_context *data, const char *table_ref, const void *pk, int pklen) {
+    if (IsolationIsSerializable()) return DBRES_OK;
+    if (IsolationUsesXactSnapshot()) {
+        int rc = cloudsync_set_error(data, "cloudsync merge cannot run under REPEATABLE READ, use READ COMMITTED or SERIALIZABLE", DBRES_MISUSE);
+        cloudsync_set_sqlstate(data, ERRCODE_FEATURE_NOT_SUPPORTED);
+        return rc;
+    }
+
+    // A fixed pool bounds lock-table use even for very large imports. Collisions
+    // only serialize unrelated rows. Include the qualified metadata table so all
+    // callers resolving the same table agree, regardless of their search_path.
+    uint32 bucket = (hash_bytes((const unsigned char *)table_ref, strlen(table_ref)) ^
+                     hash_bytes((const unsigned char *)pk, pklen)) & 255;
+    dbvm_t *vm = NULL;
+    int rc = databasevm_prepare(data, "SELECT pg_advisory_xact_lock(1129530963, $1::integer);", &vm, 0);
+    if (rc == DBRES_OK) rc = databasevm_bind_int(vm, 1, bucket);
+    if (rc == DBRES_OK) rc = databasevm_step(vm);
+    if (vm) databasevm_finalize(vm);
+    return (rc == DBRES_ROW) ? DBRES_OK : rc;
 }
 
 bool database_table_exists (cloudsync_context *data, const char *name, const char *schema) {

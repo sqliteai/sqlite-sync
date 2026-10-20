@@ -247,6 +247,26 @@ EXECUTE FUNCTION bump_app_schema_version();
 
 ## Development Workflow
 
+### Reproducible PostgreSQL tests
+
+From the repository root, run:
+
+```bash
+./scripts/test-postgres-docker.sh
+# Issue #70 regression only (serial/concurrent merge, rollback, isolation, lock bound)
+./scripts/test-postgres-docker.sh 67_concurrent_merge.sql
+# Select another PostgreSQL image tag
+POSTGRES_TAG=15-bookworm ./scripts/test-postgres-docker.sh
+POSTGRES_TAG=18-bookworm ./scripts/test-postgres-docker.sh
+```
+
+The script builds the extension from the current source, creates an isolated container,
+runs psql with `ON_ERROR_STOP`, and removes the container and its volumes on exit.
+It does not publish ports or use an existing database. The image remains cached.
+The concurrency test uses dblink and checks that the second session is waiting on
+a lock before allowing the first to commit. On the code before the issue #70 fix,
+it fails with `expected higher/3, got lower/2`.
+
 ### 1. Make Changes
 
 Edit source files in `src/postgresql/` or `src/` (shared code).
