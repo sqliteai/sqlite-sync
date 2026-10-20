@@ -131,6 +131,8 @@ static double network_now_ms(void) {
 #endif
 }
 
+static void network_retry_clear (network_data *netdata);
+
 #ifdef CLOUDSYNC_NETWORK_TRACE
 double network_trace_now_ms(void) {
     return network_now_ms();
@@ -1373,6 +1375,8 @@ static void cloudsync_network_init_internal (sqlite3_context *context, const cha
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     network_data *netdata = cloudsync_network_data(context);
     if (!netdata) goto abort_memory;
+    // A wait the server asked for belongs to the previous database.
+    network_retry_clear(netdata);
 
     // init context
     uint8_t *site_id = (uint8_t *)cloudsync_context_init(data);
@@ -1580,6 +1584,15 @@ static char *network_result_error_code (const NETWORK_RESULT *res) {
     return code;
 }
 
+// Takes the error code and delay of a busy result. A refusal without a usable
+// Retry-After waits CLOUDSYNC_RETRY_AFTER_DEFAULT_SECONDS, so a caller retrying in a
+// loop pauses anyway. Returns false when out of memory.
+static bool network_busy_take (const NETWORK_RESULT *res, char **code, int *retry_after) {
+    *code = network_result_error_code(res);
+    *retry_after = res->has_retry_after ? res->retry_after : CLOUDSYNC_RETRY_AFTER_DEFAULT_SECONDS;
+    return *code != NULL;
+}
+
 // Arms a Retry-After deadline, or clears it when seconds <= 0. Takes ownership of code.
 static void network_retry_arm (double *until, char **slot, int seconds, char *code) {
     if (*slot) cloudsync_memory_free(*slot);
@@ -1591,6 +1604,11 @@ static void network_retry_arm (double *until, char **slot, int seconds, char *co
     }
     *until = network_now_ms() + seconds * 1000.0;
     *slot = code;
+}
+
+static void network_retry_clear (network_data *netdata) {
+    network_retry_arm(&netdata->send_retry_until, &netdata->send_retry_code, 0, NULL);
+    network_retry_arm(&netdata->check_retry_until, &netdata->check_retry_code, 0, NULL);
 }
 
 // Milliseconds left before a Retry-After deadline, 0 when none is pending.
@@ -2112,8 +2130,8 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
         if (out) {
             out->server_version = db_version;
             out->local_version = pending_max;
-            out->status = "out-of-sync";
-            out->send_retry_code = cloudsync_string_dup(netdata->send_retry_code ? netdata->send_retry_code : "");
+            out->status = "syncing";
+            out->send_retry_code = cloudsync_string_dup(netdata->send_retry_code);
             out->send_retry_after = network_retry_seconds(retry_left);
             if (!out->send_retry_code) {
                 sqlite3_result_error_nomem(context);
@@ -2201,15 +2219,14 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
                                                     &apply_failure_json, &check_failure_json);
         } else if (network_result_is_busy(&res)) {
             // Stop the batch and keep the checkpoint: the next call re-sends it as a new batch.
-            busy_code = network_result_error_code(&res);
-            busy_retry_after = res.retry_after;
-            busy_watermark = watermark;
+            bool taken = network_busy_take(&res, &busy_code, &busy_retry_after);
             network_result_cleanup(&res);
-            if (!busy_code) {
+            if (!taken) {
                 sqlite3_result_error_nomem(context);
                 rc = SQLITE_NOMEM;
                 goto cleanup;
             }
+            busy_watermark = watermark;
             rc = SQLITE_DONE;
             break;
         } else if (res.code != CLOUDSYNC_NETWORK_OK) {
@@ -2255,9 +2272,8 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
             network_sync_state_update_from_response(&res, &last_optimistic_version, &last_confirmed_version, &gaps_size,
                                                     &apply_failure_json, &check_failure_json);
         } else if (network_result_is_busy(&res)) {
-            busy_code = network_result_error_code(&res);
-            busy_retry_after = res.retry_after;
-            if (!busy_code) {
+            bool taken = network_busy_take(&res, &busy_code, &busy_retry_after);
+            if (!taken) {
                 network_result_cleanup(&res);
                 sqlite3_result_error_nomem(context);
                 rc = SQLITE_NOMEM;
@@ -2292,21 +2308,18 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     int64_t local_version = new_db_version;
     if (bounded && max_local > local_version) local_version = max_local;
 
-    // A busy reply may leave the server state unread: report the checkpoint as the
-    // server version and never "error", since the server was reachable.
+    // A busy reply asks the caller to wait, so it reports syncing rather than out-of-sync,
+    // which tells a send loop to call again at once. The server state may be unread:
+    // the server version is then the checkpoint.
     const char *status;
     if (busy_code) {
         if (busy_watermark > local_version) local_version = busy_watermark;
         if (last_optimistic_version < 0) last_optimistic_version = db_version;
-        status = network_compute_status(last_optimistic_version, last_confirmed_version, gaps_size, local_version);
-        if (strcmp(status, "error") == 0) status = "out-of-sync";
+        status = "syncing";
+        char *code = cloudsync_string_dup(busy_code);
+        network_retry_arm(&netdata->send_retry_until, &netdata->send_retry_code, code ? busy_retry_after : 0, code);
     } else {
         status = network_compute_status(last_optimistic_version, last_confirmed_version, gaps_size, local_version);
-    }
-
-    if (busy_code) {
-        network_retry_arm(&netdata->send_retry_until, &netdata->send_retry_code, busy_retry_after,
-                          cloudsync_string_dup(busy_code));
     }
 
     // populate sync result
@@ -2600,13 +2613,11 @@ int cloudsync_network_check_internal(sqlite3_context *context, int *pnrows, sync
         }
     } else if (out && network_result_is_busy(&result)) {
         // Busy is not an error: the drain decides whether to wait or to report it.
-        out->check_retry_code = network_result_error_code(&result);
-        if (!out->check_retry_code) {
+        if (!network_busy_take(&result, &out->check_retry_code, &out->check_retry_after)) {
             sqlite3_result_error_nomem(context);
             rc = -1;
         } else {
             out->check_has_retry_after = true;
-            out->check_retry_after = result.retry_after;
             if (pnrows) *pnrows = 0;
         }
     } else if (result.code == CLOUDSYNC_NETWORK_ERROR) {
@@ -2712,7 +2723,9 @@ static int network_drain_changes (sqlite3_context *context, sync_result *sr,
     int rc = SQLITE_OK;
 
     // A pending Retry-After deadline is waited out like one received in the loop below:
-    // only when it fits the budget, otherwise the call returns without a request.
+    // only when it fits the budget, otherwise the call returns without a request. A
+    // result that asks to wait reports complete, so a loop on complete == false stops;
+    // the next call after the deadline resumes the drain.
     network_data *netdata = (network_data *)cloudsync_auxdata(data);
     double retry_left = netdata ? network_retry_left(netdata->check_retry_until) : 0;
     bool gated = false;
@@ -2725,7 +2738,6 @@ static int network_drain_changes (sqlite3_context *context, sync_result *sr,
                 sqlite3_result_error_nomem(context);
                 rc = SQLITE_NOMEM;
             }
-            if (netdata->check_retry_code) complete = false;
             gated = true;
         } else {
             ntries += (int)((retry_left + wait_ms - 1) / wait_ms);
@@ -2786,12 +2798,14 @@ static int network_drain_changes (sqlite3_context *context, sync_result *sr,
             if (ntries + 1 >= max_retries || delay_ms > budget_ms) {
                 dr->has_retry_after = true;
                 dr->retry_after = sr->check_retry_after;
-                dr->retry_code = sr->check_retry_code;   // busy: the stream state is unknown
+                dr->retry_code = sr->check_retry_code;
                 sr->check_retry_code = NULL;
-                if (dr->retry_code) complete = false;
+                complete = true;
                 if (netdata) {
                     char *code = dr->retry_code ? cloudsync_string_dup(dr->retry_code) : NULL;
-                    network_retry_arm(&netdata->check_retry_until, &netdata->check_retry_code, dr->retry_after, code);
+                    bool lost = dr->retry_code && !code;   // never arm a refusal without its code
+                    network_retry_arm(&netdata->check_retry_until, &netdata->check_retry_code,
+                                      lost ? 0 : dr->retry_after, code);
                 }
                 break;
             }
@@ -2963,8 +2977,7 @@ void cloudsync_network_reset_retry_after (sqlite3_context *context, int argc, sq
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     network_data *netdata = (network_data *)cloudsync_auxdata(data);
     if (!netdata) {sqlite3_result_error(context, "Unable to retrieve CloudSync network context.", -1); return;}
-    network_retry_arm(&netdata->send_retry_until, &netdata->send_retry_code, 0, NULL);
-    network_retry_arm(&netdata->check_retry_until, &netdata->check_retry_code, 0, NULL);
+    network_retry_clear(netdata);
 }
 
 void cloudsync_network_reset_sync_version (sqlite3_context *context, int argc, sqlite3_value **argv) {

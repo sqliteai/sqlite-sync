@@ -57,6 +57,7 @@
 #define CLOUDSYNC_HEADER_APPLY_CAPABILITIES "X-CloudSync-Capabilities: apply-defer"
 #define CLOUDSYNC_HEADER_RETRY_AFTER        "Retry-After"
 #define CLOUDSYNC_RETRY_AFTER_MAX_SECONDS   3600
+#define CLOUDSYNC_RETRY_AFTER_DEFAULT_SECONDS 5
 
 #define CLOUDSYNC_NETWORK_OK                1
 #define CLOUDSYNC_NETWORK_ERROR             2

@@ -1189,18 +1189,28 @@ static bool test_soft_overload_transport(void) {
     http_busy_apply(429, "30", "tenant_rate_limited");
     if (ok) json = send_changes(db, NULL);
     int prev = http_napply - 1;
-    ok = ok && expect(strstr(json, "\"status\":\"out-of-sync\"") && strstr(json, "\"serverVersion\":0,") &&
+    ok = ok && expect(strstr(json, "\"status\":\"syncing\"") && strstr(json, "\"serverVersion\":0,") &&
                       strstr(json, "\"chunks\":0,") &&
                       strstr(json, "\"retryAfter\":30,\"retryCode\":\"tenant_rate_limited\"}"), "busy 429 is a result", json);
     ok = ok && expect(send_checkpoint(db) == 0, "busy keeps the checkpoint", json);
     ok = ok && expect(http_nstatus == 0, "busy send does not probe /status", json);
     // Until the deadline the send is refused locally; the receive side is not gated.
     if (ok) json = send_changes(db, NULL);
-    ok = ok && expect(http_napply == prev + 1 && http_nstatus == 0 && strstr(json, "\"localVersion\":1,\"serverVersion\":0,") &&
+    ok = ok && expect(http_napply == prev + 1 && http_nstatus == 0 && strstr(json, "\"status\":\"syncing\",\"localVersion\":1,\"serverVersion\":0,") &&
                       (strstr(json, "\"retryAfter\":30,") || strstr(json, "\"retryAfter\":29,")) &&
                       strstr(json, "\"retryCode\":\"tenant_rate_limited\""), "gated send makes no request", json);
     if (ok) json = sql_text(db, "SELECT cloudsync_network_receive_changes()");
     ok = ok && expect(http_ncheck == 1 && !strstr(json, "retryAfter"), "a busy send does not gate receive", json);
+    // A token refresh keeps the wait; a new init clears it.
+    ok = ok && db_exec(db, "SELECT cloudsync_network_set_token('test-refreshed-token');") == SQLITE_OK;
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && expect(http_napply == prev + 1 && strstr(json, "\"retryCode\":\"tenant_rate_limited\""), "token refresh keeps the wait", json);
+    ok = ok && db_exec(db, init) == SQLITE_OK;
+    http_script(200, 0, 0, 0, 0, NULL);
+    http_busy_apply(429, "30", "tenant_rate_limited");
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && expect(http_napply == prev + 2, "a new init clears the wait", json);
+    prev = http_napply - 1;
     ok = ok && reset_retry(db);
     http_script(200, 1, 1, 1, 1, NULL);
     if (ok) json = send_changes(db, NULL);
@@ -1211,7 +1221,11 @@ static bool test_soft_overload_transport(void) {
     ok = ok && db_exec(db, "INSERT INTO t VALUES('b2', 'v');") == SQLITE_OK;
     http_busy_apply(429, NULL, NULL);
     if (ok) json = send_changes(db, NULL);
-    ok = ok && expect(strstr(json, "\"retryAfter\":0,\"retryCode\":\"http_429\"") != NULL, "429 without hint", json);
+    ok = ok && expect(strstr(json, "\"retryAfter\":5,\"retryCode\":\"http_429\"") != NULL, "429 without hint waits the default", json);
+    int napply_hint = http_napply;
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && expect(http_napply == napply_hint, "429 without hint holds the next call", json);
+    ok = ok && reset_retry(db);
     http_busy_apply(503, "5", "database_unreachable");
     if (ok) json = send_changes(db, NULL);
     ok = ok && expect(strstr(json, "\"retryAfter\":5,\"retryCode\":\"database_unreachable\"") != NULL, "503 with Retry-After", json);
@@ -1259,7 +1273,7 @@ static bool test_soft_overload_transport(void) {
     char expected[96];
     snprintf(expected, sizeof(expected), "\"localVersion\":%lld,\"serverVersion\":%lld,\"chunks\":1,",
              (long long)top, (long long)base);
-    ok = ok && expect(strstr(json, "\"status\":\"out-of-sync\"") && strstr(json, expected) &&
+    ok = ok && expect(strstr(json, "\"status\":\"syncing\"") && strstr(json, expected) &&
                       strstr(json, "\"retryAfter\":4"), "mid-batch busy report", json);
     ok = ok && reset_retry(db);
     http_script(200, top, top, top, top, NULL);
@@ -1280,11 +1294,11 @@ static bool test_soft_overload_transport(void) {
     ok = ok && reset_retry(db);
     http_check_script(1, c429, ra7);
     if (ok) json = sql_text(db, "SELECT cloudsync_network_receive_changes()");
-    ok = ok && expect(strstr(json, "\"complete\":false,\"retryAfter\":7,\"retryCode\":\"check_rate_limited\"}") != NULL,
+    ok = ok && expect(strstr(json, "\"complete\":true,\"retryAfter\":7,\"retryCode\":\"check_rate_limited\"}") != NULL,
                       "busy /check", json);
     // Until the deadline receive is refused locally, and sync cannot wait 7 s on a 2 s budget.
     if (ok) json = sql_text(db, "SELECT cloudsync_network_receive_changes()");
-    ok = ok && expect(http_ncheck == 1 && strstr(json, "\"complete\":false,\"retryAfter\":") &&
+    ok = ok && expect(http_ncheck == 1 && strstr(json, "\"complete\":true,\"retryAfter\":") &&
                       strstr(json, "\"retryCode\":\"check_rate_limited\"}"), "gated receive makes no request", json);
     int nstatus = http_nstatus;
     double t0 = monotonic_seconds();
@@ -1342,6 +1356,29 @@ static bool test_soft_overload_transport(void) {
     elapsed = monotonic_seconds() - t0;
     ok = ok && expect(http_ncheck == 3 && !strstr(json, "retryAfter") && elapsed >= 1.9 && elapsed < 2.6,
                       "pending deadline waited out within the budget", json);
+
+    // The loops API.md recommended before this behaviour (send until not out-of-sync,
+    // receive while not complete) stop after one call against a busy server.
+    ok = ok && reset_retry(db);
+    ok = ok && db_exec(db, "INSERT INTO t VALUES('l1', 'v'), ('l2', 'v'), ('l3', 'v');") == SQLITE_OK;
+    http_script(200, 0, 0, 0, 0, NULL);
+    http_busy_apply(429, NULL, NULL);
+    int calls = 0;
+    napply = http_napply;
+    while (ok && calls < 100) {
+        calls++;
+        json = send_changes(db, "1");
+        if (!strstr(json, "\"status\":\"out-of-sync\"")) break;
+    }
+    ok = ok && expect(calls == 1 && http_napply == napply + 1, "old send loop stops on a busy server", json);
+    http_check_script(1, c429, none);
+    calls = 0;
+    while (ok && calls < 100) {
+        calls++;
+        json = sql_text(db, "SELECT cloudsync_network_receive_changes(1)");
+        if (!strstr(json, "\"complete\":false")) break;
+    }
+    ok = ok && expect(calls == 1 && http_ncheck == 1, "old receive loop stops on a busy server", json);
 
     stream_close(db);
     http_shutdown(thread);
