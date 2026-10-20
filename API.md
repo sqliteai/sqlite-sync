@@ -875,13 +875,15 @@ SELECT cloudsync_network_send_changes(2);
 -- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":460}}'
 
 -- The same loop in a single statement: one bounded send per row, stopping at the first
--- status other than "out-of-sync" (at most 100 calls). It returns the last result: when
--- it carries retryAfter, the server asked to wait, so run it again after that delay.
-WITH RECURSIVE send(n, result) AS (
-  SELECT 1, cloudsync_network_send_changes(2)
+-- status other than "out-of-sync", or when a send makes no progress (the server keeps
+-- failing it), with at most 100 calls. Each send commits its own checkpoint. It returns
+-- the last result: when it carries retryAfter, run it again after that delay.
+WITH RECURSIVE send(n, result, prev) AS (
+  SELECT 1, cloudsync_network_send_changes(2), -1
   UNION ALL
-  SELECT n + 1, cloudsync_network_send_changes(2) FROM send
-  WHERE result ->> '$.send.status' = 'out-of-sync' AND n < 100
+  SELECT n + 1, cloudsync_network_send_changes(2), result ->> '$.send.serverVersion' FROM send
+  WHERE result ->> '$.send.status' = 'out-of-sync'
+    AND result ->> '$.send.serverVersion' > prev AND n < 100
 )
 SELECT result FROM send ORDER BY n DESC LIMIT 1;
 

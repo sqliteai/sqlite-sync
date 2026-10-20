@@ -828,6 +828,11 @@ static char http_apply_body[512], http_status_body[512];
 static char http_partial_body[512];   // when set, /apply's answer to a non-final chunk
 static int http_apply_code_from;      // chunks before this index answer 202 with http_partial_body
 static bool http_apply_echo;          // a 200 /apply confirms exactly the window it received
+#define HTTP_PROBE_MAX 8
+static const char *http_probe_path;   // when set, each /apply reads the send checkpoint from a second connection
+static int64_t http_probe_cp[HTTP_PROBE_MAX];
+static bool http_probe_write[HTTP_PROBE_MAX];
+static int http_nprobe;
 static char http_apply_retry[32], http_status_retry[32], http_upload_retry[32];   // "" = no Retry-After
 static int http_upload_code;
 static char http_upload_body[512];
@@ -899,6 +904,13 @@ static void http_handle(int c) {
     http_req_defer[i] = capabilities && strstr(capabilities, "apply-defer");
 
     if (strcmp(endpoint, "apply") == 0) {
+        sqlite3 *probe = NULL;
+        if (http_probe_path && http_nprobe < HTTP_PROBE_MAX && sqlite3_open(http_probe_path, &probe) == SQLITE_OK) {
+            int i = http_nprobe++;
+            http_probe_cp[i] = db_int(probe, "SELECT coalesce((SELECT value FROM cloudsync_settings WHERE key='send_dbversion'),0)");
+            http_probe_write[i] = db_exec(probe, "CREATE TABLE IF NOT EXISTS probe(x); DELETE FROM probe;") == SQLITE_OK;
+        }
+        if (probe) sqlite3_close(probe);
         int k = http_napply < HTTP_MAX_REQ ? http_napply++ : HTTP_MAX_REQ - 1;
         const char *batch = strstr(body, "\"batchId\":\"");
         http_apply_batch[k][0] = 0;
@@ -1390,29 +1402,65 @@ static bool test_soft_overload_transport(void) {
     }
     ok = ok && expect(calls == 1 && http_ncheck == 1, "old receive loop stops on a busy server", json);
 
-    // The single-statement loop from API.md: one bounded send per row, stopping at the
-    // first status other than out-of-sync.
+    stream_close(db);
+    db = NULL;
+
+    // The single-statement loop from API.md, on a WAL file database: one bounded send
+    // per row, stopping at the first status other than out-of-sync or when a send makes
+    // no progress. Each send's checkpoint commits on its own, so another connection sees
+    // it move during the loop and can still write. (Without WAL, the read lock that any
+    // send holds during its upload blocks other writers, inside the loop or not.)
     const char *cte_loop =
-        "WITH RECURSIVE send(n, result) AS ("
-        "  SELECT 1, cloudsync_network_send_changes(1)"
+        "WITH RECURSIVE send(n, result, prev) AS ("
+        "  SELECT 1, cloudsync_network_send_changes(1), -1"
         "  UNION ALL"
-        "  SELECT n + 1, cloudsync_network_send_changes(1) FROM send"
-        "  WHERE result ->> '$.send.status' = 'out-of-sync' AND n < 100"
+        "  SELECT n + 1, cloudsync_network_send_changes(1), result ->> '$.send.serverVersion' FROM send"
+        "  WHERE result ->> '$.send.status' = 'out-of-sync'"
+        "    AND result ->> '$.send.serverVersion' > prev AND n < 100"
         ") SELECT n || ' ' || result FROM send ORDER BY n DESC LIMIT 1;";
-    ok = ok && reset_retry(db);
+    char path[64];
+    snprintf(path, sizeof(path), "/tmp/cloudsync_network_unit_%d.db", (int)getpid());
+    remove(path);
+    sqlite3 *fdb = NULL;
+    ok = ok && sqlite3_open(path, &fdb) == SQLITE_OK && db_exec(fdb, "PRAGMA journal_mode=WAL;") == SQLITE_OK &&
+         sqlite3_cloudsync_init(fdb, NULL, NULL) == SQLITE_OK &&
+         db_exec(fdb, "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, v BLOB); SELECT cloudsync_init('t');") == SQLITE_OK &&
+         db_exec(fdb, init) == SQLITE_OK &&
+         db_exec(fdb, "INSERT INTO t VALUES('f1', 'v');") == SQLITE_OK &&
+         db_exec(fdb, "INSERT INTO t VALUES('f2', 'v');") == SQLITE_OK &&
+         db_exec(fdb, "INSERT INTO t VALUES('f3', 'v');") == SQLITE_OK;
     http_script(200, 0, 0, 0, 0, NULL);
     http_apply_echo = true;
+    http_probe_path = path;
+    http_nprobe = 0;
     napply = http_napply;
-    if (ok) json = sql_text(db, cte_loop);
+    if (ok) json = sql_text(fdb, cte_loop);
+    http_probe_path = NULL;
     ok = ok && expect(strncmp(json, "3 ", 2) == 0 && strstr(json, "\"status\":\"synced\"") && http_napply == napply + 3,
                       "SQL loop drains a backlog in bounded sends", json);
-    ok = ok && db_exec(db, "INSERT INTO t VALUES('l4', 'v');") == SQLITE_OK;
-    ok = ok && db_exec(db, "INSERT INTO t VALUES('l5', 'v');") == SQLITE_OK;
+    ok = ok && expect(http_nprobe == 3 && http_probe_cp[0] == 0 && http_probe_cp[1] == 1 && http_probe_cp[2] == 2 &&
+                      http_probe_write[0] && http_probe_write[1] && http_probe_write[2],
+                      "each send commits its checkpoint during the loop", json);
+    // A send the server keeps failing: the loop stops after one call without progress.
+    ok = ok && db_exec(fdb, "INSERT INTO t VALUES('f4', 'v');") == SQLITE_OK;
+    ok = ok && db_exec(fdb, "INSERT INTO t VALUES('f5', 'v');") == SQLITE_OK;
+    http_script(200, 3, 3, 3, 3, NULL);
+    napply = http_napply;
+    if (ok) json = sql_text(fdb, cte_loop);
+    ok = ok && expect(strncmp(json, "2 ", 2) == 0 && strstr(json, "\"status\":\"out-of-sync\"") && http_napply == napply + 2,
+                      "SQL loop stops when a send makes no progress", json);
     http_busy_apply(429, "30", "tenant_rate_limited");
     napply = http_napply;
-    if (ok) json = sql_text(db, cte_loop);
+    if (ok) json = sql_text(fdb, cte_loop);
     ok = ok && expect(strncmp(json, "1 ", 2) == 0 && strstr(json, "\"status\":\"syncing\"") && strstr(json, "\"retryAfter\":30") &&
                       http_napply == napply + 1, "SQL loop stops on a busy server", json);
+    stream_close(fdb);
+    remove(path);
+    char wal[80];
+    snprintf(wal, sizeof(wal), "%s-wal", path);
+    remove(wal);
+    snprintf(wal, sizeof(wal), "%s-shm", path);
+    remove(wal);
 
     stream_close(db);
     http_shutdown(thread);
