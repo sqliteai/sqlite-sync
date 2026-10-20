@@ -1162,9 +1162,15 @@ static char *sql_text(sqlite3 *db, const char *sql) {
     return out;
 }
 
+static bool reset_retry(sqlite3 *db) {
+    return db_exec(db, "SELECT cloudsync_network_reset_retry_after();") == SQLITE_OK;
+}
+
 // A busy server (429, or 503 with Retry-After) is a result, not an error: the send keeps
 // its checkpoint, the receive loop waits only within the caller's budget, and both report
-// retryAfter/retryCode. Without those answers (today's server) nothing changes.
+// retryAfter/retryCode. Until the deadline, calls return without a request unless
+// cloudsync_network_reset_retry_after() clears it. Without those answers (today's
+// server) nothing changes.
 static bool test_soft_overload_transport(void) {
     pthread_t thread;
     if (!http_start(&thread)) return false;
@@ -1188,6 +1194,14 @@ static bool test_soft_overload_transport(void) {
                       strstr(json, "\"retryAfter\":30,\"retryCode\":\"tenant_rate_limited\"}"), "busy 429 is a result", json);
     ok = ok && expect(send_checkpoint(db) == 0, "busy keeps the checkpoint", json);
     ok = ok && expect(http_nstatus == 0, "busy send does not probe /status", json);
+    // Until the deadline the send is refused locally; the receive side is not gated.
+    if (ok) json = send_changes(db, NULL);
+    ok = ok && expect(http_napply == prev + 1 && http_nstatus == 0 && strstr(json, "\"localVersion\":1,\"serverVersion\":0,") &&
+                      (strstr(json, "\"retryAfter\":30,") || strstr(json, "\"retryAfter\":29,")) &&
+                      strstr(json, "\"retryCode\":\"tenant_rate_limited\""), "gated send makes no request", json);
+    if (ok) json = sql_text(db, "SELECT cloudsync_network_receive_changes()");
+    ok = ok && expect(http_ncheck == 1 && !strstr(json, "retryAfter"), "a busy send does not gate receive", json);
+    ok = ok && reset_retry(db);
     http_script(200, 1, 1, 1, 1, NULL);
     if (ok) json = send_changes(db, NULL);
     ok = ok && resent_as_new_batch(prev, 1, "send after busy is a new batch", json);
@@ -1201,6 +1215,7 @@ static bool test_soft_overload_transport(void) {
     http_busy_apply(503, "5", "database_unreachable");
     if (ok) json = send_changes(db, NULL);
     ok = ok && expect(strstr(json, "\"retryAfter\":5,\"retryCode\":\"database_unreachable\"") != NULL, "503 with Retry-After", json);
+    ok = ok && reset_retry(db);
     // An HTTP-date is no valid hint, so that 503 stays an error.
     http_busy_apply(503, "Wed, 21 Oct 2015 07:28:00 GMT", "database_unreachable");
     if (ok) json = send_changes(db, NULL);
@@ -1221,6 +1236,7 @@ static bool test_soft_overload_transport(void) {
     ok = ok && expect(strstr(json, "\"retryAfter\":2,\"retryCode\":\"upload_rate_limited\"") && http_nput == nput &&
                       http_napply == napply, "busy /upload", json);
     ok = ok && expect(send_checkpoint(db) == 2, "busy /upload keeps the checkpoint", json);
+    ok = ok && reset_retry(db);
     int64_t top = db_int(db, "SELECT max(db_version) FROM cloudsync_changes");
     http_script(200, top, top, top, top, NULL);
     if (ok) json = send_changes(db, NULL);
@@ -1245,6 +1261,7 @@ static bool test_soft_overload_transport(void) {
              (long long)top, (long long)base);
     ok = ok && expect(strstr(json, "\"status\":\"out-of-sync\"") && strstr(json, expected) &&
                       strstr(json, "\"retryAfter\":4"), "mid-batch busy report", json);
+    ok = ok && reset_retry(db);
     http_script(200, top, top, top, top, NULL);
     if (ok) json = send_changes(db, NULL);
     int again = first + 2;
@@ -1260,10 +1277,21 @@ static bool test_soft_overload_transport(void) {
     if (ok) json = sql_text(db, "SELECT cloudsync_network_receive_changes()");
     ok = ok && expect(http_ncheck == 1 && strstr(json, "\"complete\":true,\"retryAfter\":10}") && !strstr(json, "retryCode"),
                       "202 with Retry-After", json);
+    ok = ok && reset_retry(db);
     http_check_script(1, c429, ra7);
     if (ok) json = sql_text(db, "SELECT cloudsync_network_receive_changes()");
     ok = ok && expect(strstr(json, "\"complete\":false,\"retryAfter\":7,\"retryCode\":\"check_rate_limited\"}") != NULL,
                       "busy /check", json);
+    // Until the deadline receive is refused locally, and sync cannot wait 7 s on a 2 s budget.
+    if (ok) json = sql_text(db, "SELECT cloudsync_network_receive_changes()");
+    ok = ok && expect(http_ncheck == 1 && strstr(json, "\"complete\":false,\"retryAfter\":") &&
+                      strstr(json, "\"retryCode\":\"check_rate_limited\"}"), "gated receive makes no request", json);
+    int nstatus = http_nstatus;
+    double t0 = monotonic_seconds();
+    if (ok) json = sql_text(db, "SELECT cloudsync_network_sync(500, 5)");
+    ok = ok && expect(http_ncheck == 1 && http_nstatus == nstatus + 1 && monotonic_seconds() - t0 < 0.5 &&
+                      strstr(json, "\"retryCode\":\"check_rate_limited\"}"), "gated sync still sends, then returns", json);
+    ok = ok && reset_retry(db);
     http_check_script(1, c503, none);
     if (ok) json = sql_text(db, "SELECT cloudsync_network_receive_changes()");
     ok = ok && expect(strncmp(json, "ERROR:", 6) == 0, "503 /check without Retry-After is an error", json);
@@ -1279,6 +1307,7 @@ static bool test_soft_overload_transport(void) {
     if (ok) json = sql_text(db, "SELECT cloudsync_network_sync(0, 1)");
     ok = ok && expect(http_ncheck == 1 && strstr(json, "\"retryAfter\":30,\"retryCode\":\"tenant_rate_limited\"},\"receive\"") &&
                       strstr(json, "\"complete\":true,\"retryAfter\":10}"), "sync receives after a busy send", json);
+    ok = ok && reset_retry(db);
     top = db_int(db, "SELECT max(db_version) FROM cloudsync_changes");
     http_script(200, top, top, top, top, NULL);
 
@@ -1287,11 +1316,12 @@ static bool test_soft_overload_transport(void) {
     const int c202x2[] = {202, 202}, c429_202[] = {429, 202};
     const char *const ra1_3[] = {"1", "3"}, *const ra1_none[] = {"1", NULL};
     http_check_script(2, c202x2, ra1_3);
-    double t0 = monotonic_seconds();
+    t0 = monotonic_seconds();
     if (ok) json = sql_text(db, "SELECT cloudsync_network_sync(500, 5)");
     double elapsed = monotonic_seconds() - t0;
     ok = ok && expect(http_ncheck == 2 && strstr(json, "\"retryAfter\":3}") && elapsed >= 0.9 && elapsed < 2.0,
                       "waits for 1 s, returns on 3 s", json);
+    ok = ok && reset_retry(db);
     http_check_script(2, c429_202, ra1_none);
     t0 = monotonic_seconds();
     if (ok) json = sql_text(db, "SELECT cloudsync_network_sync(500, 5)");
@@ -1301,6 +1331,17 @@ static bool test_soft_overload_transport(void) {
     http_check_script(1, c202, none);
     if (ok) json = sql_text(db, "SELECT cloudsync_network_sync(100, 3)");
     ok = ok && expect(http_ncheck == 3 && !strstr(json, "retryAfter"), "plain 202 polls max_retries times", json);
+
+    // A deadline left by an earlier call is waited out when it fits the budget, and
+    // costs retries like one received in the loop.
+    http_check_script(1, c202, (const char *const[]){"1"});
+    if (ok) json = sql_text(db, "SELECT cloudsync_network_receive_changes()");
+    http_check_script(1, c202, none);
+    t0 = monotonic_seconds();
+    if (ok) json = sql_text(db, "SELECT cloudsync_network_sync(500, 5)");
+    elapsed = monotonic_seconds() - t0;
+    ok = ok && expect(http_ncheck == 3 && !strstr(json, "retryAfter") && elapsed >= 1.9 && elapsed < 2.6,
+                      "pending deadline waited out within the budget", json);
 
     stream_close(db);
     http_shutdown(thread);
