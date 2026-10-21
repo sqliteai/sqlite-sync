@@ -1419,16 +1419,17 @@ static bool test_soft_overload_transport(void) {
         "    AND result ->> '$.send.serverVersion' > prev AND n < 100"
         ") SELECT n || ' ' || result FROM send ORDER BY n DESC LIMIT 1;";
     char path[64];
-    snprintf(path, sizeof(path), "/tmp/cloudsync_network_unit_%d.db", (int)getpid());
+    snprintf(path, sizeof(path), "cloudsync_network_unit_%d.db", (int)getpid());   // cwd: Android has no /tmp
     remove(path);
     sqlite3 *fdb = NULL;
-    ok = ok && sqlite3_open(path, &fdb) == SQLITE_OK && db_exec(fdb, "PRAGMA journal_mode=WAL;") == SQLITE_OK &&
-         sqlite3_cloudsync_init(fdb, NULL, NULL) == SQLITE_OK &&
-         db_exec(fdb, "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, v BLOB); SELECT cloudsync_init('t');") == SQLITE_OK &&
-         db_exec(fdb, init) == SQLITE_OK &&
-         db_exec(fdb, "INSERT INTO t VALUES('f1', 'v');") == SQLITE_OK &&
-         db_exec(fdb, "INSERT INTO t VALUES('f2', 'v');") == SQLITE_OK &&
-         db_exec(fdb, "INSERT INTO t VALUES('f3', 'v');") == SQLITE_OK;
+    ok = ok && expect(sqlite3_open(path, &fdb) == SQLITE_OK && db_exec(fdb, "PRAGMA journal_mode=WAL;") == SQLITE_OK &&
+                      sqlite3_cloudsync_init(fdb, NULL, NULL) == SQLITE_OK &&
+                      db_exec(fdb, "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, v BLOB); SELECT cloudsync_init('t');") == SQLITE_OK &&
+                      db_exec(fdb, init) == SQLITE_OK &&
+                      db_exec(fdb, "INSERT INTO t VALUES('f1', 'v');") == SQLITE_OK &&
+                      db_exec(fdb, "INSERT INTO t VALUES('f2', 'v');") == SQLITE_OK &&
+                      db_exec(fdb, "INSERT INTO t VALUES('f3', 'v');") == SQLITE_OK,
+                      "file database setup", fdb ? sqlite3_errmsg(fdb) : path);
     http_script(200, 0, 0, 0, 0, NULL);
     http_apply_echo = true;
     http_probe_path = path;
