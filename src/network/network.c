@@ -2130,7 +2130,7 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
         if (out) {
             out->server_version = db_version;
             out->local_version = pending_max;
-            out->status = "syncing";
+            out->status = "busy";
             out->send_retry_code = cloudsync_string_dup(netdata->send_retry_code);
             out->send_retry_after = network_retry_seconds(retry_left);
             if (!out->send_retry_code) {
@@ -2308,14 +2308,14 @@ int cloudsync_network_send_changes_internal (sqlite3_context *context, int argc,
     int64_t local_version = new_db_version;
     if (bounded && max_local > local_version) local_version = max_local;
 
-    // A busy reply asks the caller to wait, so it reports syncing rather than out-of-sync,
+    // A busy reply asks the caller to wait, so it reports busy rather than out-of-sync,
     // which tells a send loop to call again at once. The server state may be unread:
     // the server version is then the checkpoint.
     const char *status;
     if (busy_code) {
         if (busy_watermark > local_version) local_version = busy_watermark;
         if (last_optimistic_version < 0) last_optimistic_version = db_version;
-        status = "syncing";
+        status = "busy";
         char *code = cloudsync_string_dup(busy_code);
         network_retry_arm(&netdata->send_retry_until, &netdata->send_retry_code, code ? busy_retry_after : 0, code);
     } else {

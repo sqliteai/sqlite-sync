@@ -850,16 +850,16 @@ Call it repeatedly with the same value until `send.status` is no longer `"out-of
 **Returns:** A JSON string with the send result:
 
 ```json
-{"send": {"status": "synced|syncing|out-of-sync|error", "localVersion": N, "serverVersion": N, "chunks": C, "bytes": B, "lastFailure": {...}, "retryAfter": S, "retryCode": "..."}}
+{"send": {"status": "synced|syncing|busy|out-of-sync|error", "localVersion": N, "serverVersion": N, "chunks": C, "bytes": B, "lastFailure": {...}, "retryAfter": S, "retryCode": "..."}}
 ```
 
-- `send.status`: The current sync state — `"synced"` (all changes confirmed), `"syncing"` (changes sent but not yet confirmed, or the server asked to wait: see `send.retryAfter`), `"out-of-sync"` (local changes pending or gaps detected), or `"error"`. Only `"out-of-sync"` means "call again now"; on `"syncing"` check again on your normal schedule.
+- `send.status`: The current sync state — `"synced"` (all changes confirmed), `"syncing"` (changes sent but not yet confirmed), `"busy"` (the server refused the send and asked to wait: see `send.retryAfter`), `"out-of-sync"` (local changes pending or gaps detected), or `"error"`. Only `"out-of-sync"` means "call again now"; on `"syncing"` check again on your normal schedule, and on `"busy"` not before `send.retryAfter` seconds have passed.
 - `send.localVersion`: The latest local database version.
 - `send.serverVersion`: The latest version the server has accepted. The server may accept changes before applying them (a large payload, or a busy database), so this can be ahead of what is confirmed. Only `send.status == "synced"` means every sent change is confirmed; `send.serverVersion == send.localVersion` alone does not. If an accepted change later fails to apply, the server lowers this version again and the next call re-sends it.
 - `send.chunks`: The number of payload chunks sent this call (a large push is split into multiple transport chunks bounded by `payload_max_chunk_size`). `0` when there were no local changes to send.
 - `send.bytes`: The total serialized payload bytes sent this call (uncompressed cloudsync payload size, summed across chunks; not the compressed wire size).
 - `send.lastFailure` (optional): Present only when the server reports a failed apply job. Forwarded verbatim from the server's `failures.apply` and typically includes `jobId`, `code`, `stage`, `message`, `retryable`, and `failedAt`. It is emitted regardless of `status` so callers can detect server-side failures during `"syncing"` or even after the state has nominally recovered. This function is **send/apply-scoped**: server-reported check-job failures (`failures.check`) are not surfaced here — see [`cloudsync_network_receive_changes()`](#cloudsync_network_receive_changesmax_chunks) and [`cloudsync_network_sync()`](#cloudsync_network_syncwait_ms-max_retries).
-- `send.retryAfter` (optional, integer): Present only when the server refused the send because it is busy; `send.status` is then `"syncing"`. The number of seconds to wait before sending again: the server's `Retry-After`, or 5 seconds when it gave none. Nothing refused is lost: the send checkpoint does not move, and a later call sends the same changes again. Compare `send.localVersion` with `send.serverVersion` to see what is still pending. Until that delay has passed, calls return this result again without contacting the server, with `retryAfter` counting down and `send.serverVersion` read from the local checkpoint; [`cloudsync_network_reset_retry_after()`](#cloudsync_network_reset_retry_after) lifts the wait.
+- `send.retryAfter` (optional, integer): Present only when the server refused the send because it is busy; `send.status` is then `"busy"`. The number of seconds to wait before sending again: the server's `Retry-After`, or 5 seconds when it gave none. Nothing refused is lost: the send checkpoint does not move, and a later call sends the same changes again. Compare `send.localVersion` with `send.serverVersion` to see what is still pending. Until that delay has passed, calls return this result again without contacting the server, with `retryAfter` counting down and `send.serverVersion` read from the local checkpoint; [`cloudsync_network_reset_retry_after()`](#cloudsync_network_reset_retry_after) lifts the wait.
 - `send.retryCode` (optional, string): Present together with `send.retryAfter`. The server's error code for the refusal, or `http_<status>` when it gave none.
 
 **Example:**
@@ -893,7 +893,7 @@ SELECT result FROM send ORDER BY n DESC LIMIT 1;
 -- '{"send":{"status":"out-of-sync","localVersion":1,"serverVersion":0,"chunks":1,"bytes":512,"lastFailure":{"jobId":44961,"code":"internal_error","stage":"apply_payload","message":"cloudsync operation failed: Cannot apply the received payload because the schema hash is unknown 4288148391734624266.","retryable":true,"failedAt":"2026-04-15T22:21:09.018606Z"}}}'
 
 -- Refused because the server is busy; send again in 30 seconds:
--- '{"send":{"status":"syncing","localVersion":7,"serverVersion":5,"chunks":0,"bytes":0,"retryAfter":30,"retryCode":"tenant_rate_limited"}}'
+-- '{"send":{"status":"busy","localVersion":7,"serverVersion":5,"chunks":0,"bytes":0,"retryAfter":30,"retryCode":"tenant_rate_limited"}}'
 ```
 
 ---
@@ -984,12 +984,12 @@ When the server answers with a `Retry-After` delay (nothing ready yet, or busy),
 
 ```json
 {
-  "send": {"status": "synced|syncing|out-of-sync|error", "localVersion": N, "serverVersion": N, "chunks": C, "bytes": B, "lastFailure": {...}, "retryAfter": S, "retryCode": "..."},
+  "send": {"status": "synced|syncing|busy|out-of-sync|error", "localVersion": N, "serverVersion": N, "chunks": C, "bytes": B, "lastFailure": {...}, "retryAfter": S, "retryCode": "..."},
   "receive": {"rows": N, "tables": ["table1", "table2"], "chunks": C, "bytes": B, "complete": true, "error": "...", "lastFailure": {...}, "retryAfter": S, "retryCode": "..."}
 }
 ```
 
-- `send.status`: The current sync state — `"synced"`, `"syncing"`, `"out-of-sync"`, or `"error"`.
+- `send.status`: The current sync state — `"synced"`, `"syncing"`, `"busy"`, `"out-of-sync"`, or `"error"`.
 - `send.localVersion`: The latest local database version.
 - `send.serverVersion`: The latest version the server has accepted, which can be ahead of what is confirmed. Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes).
 - `send.chunks` / `send.bytes`: Number of payload chunks sent and total serialized payload bytes sent during the send phase. Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes).

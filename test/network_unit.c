@@ -1209,14 +1209,14 @@ static bool test_soft_overload_transport(void) {
     http_busy_apply(429, "30", "tenant_rate_limited");
     if (ok) json = send_changes(db, NULL);
     int prev = http_napply - 1;
-    ok = ok && expect(strstr(json, "\"status\":\"syncing\"") && strstr(json, "\"serverVersion\":0,") &&
+    ok = ok && expect(strstr(json, "\"status\":\"busy\"") && strstr(json, "\"serverVersion\":0,") &&
                       strstr(json, "\"chunks\":0,") &&
                       strstr(json, "\"retryAfter\":30,\"retryCode\":\"tenant_rate_limited\"}"), "busy 429 is a result", json);
     ok = ok && expect(send_checkpoint(db) == 0, "busy keeps the checkpoint", json);
     ok = ok && expect(http_nstatus == 0, "busy send does not probe /status", json);
     // Until the deadline the send is refused locally; the receive side is not gated.
     if (ok) json = send_changes(db, NULL);
-    ok = ok && expect(http_napply == prev + 1 && http_nstatus == 0 && strstr(json, "\"status\":\"syncing\",\"localVersion\":1,\"serverVersion\":0,") &&
+    ok = ok && expect(http_napply == prev + 1 && http_nstatus == 0 && strstr(json, "\"status\":\"busy\",\"localVersion\":1,\"serverVersion\":0,") &&
                       (strstr(json, "\"retryAfter\":30,") || strstr(json, "\"retryAfter\":29,")) &&
                       strstr(json, "\"retryCode\":\"tenant_rate_limited\""), "gated send makes no request", json);
     if (ok) json = sql_text(db, "SELECT cloudsync_network_receive_changes()");
@@ -1293,7 +1293,7 @@ static bool test_soft_overload_transport(void) {
     char expected[96];
     snprintf(expected, sizeof(expected), "\"localVersion\":%lld,\"serverVersion\":%lld,\"chunks\":1,",
              (long long)top, (long long)base);
-    ok = ok && expect(strstr(json, "\"status\":\"syncing\"") && strstr(json, expected) &&
+    ok = ok && expect(strstr(json, "\"status\":\"busy\"") && strstr(json, expected) &&
                       strstr(json, "\"retryAfter\":4"), "mid-batch busy report", json);
     ok = ok && reset_retry(db);
     http_script(200, top, top, top, top, NULL);
@@ -1453,7 +1453,7 @@ static bool test_soft_overload_transport(void) {
     http_busy_apply(429, "30", "tenant_rate_limited");
     napply = http_napply;
     if (ok) json = sql_text(fdb, cte_loop);
-    ok = ok && expect(strncmp(json, "1 ", 2) == 0 && strstr(json, "\"status\":\"syncing\"") && strstr(json, "\"retryAfter\":30") &&
+    ok = ok && expect(strncmp(json, "1 ", 2) == 0 && strstr(json, "\"status\":\"busy\"") && strstr(json, "\"retryAfter\":30") &&
                       http_napply == napply + 1, "SQL loop stops on a busy server", json);
     stream_close(fdb);
     remove(path);
