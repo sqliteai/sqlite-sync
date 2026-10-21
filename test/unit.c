@@ -13520,7 +13520,7 @@ bool do_test_payload_chunks_empty_final (bool print_result, bool cleanup_databas
     sqlite3_stmt *stmt = NULL;
     cloudsync_context *ctx = NULL;
     test_payload_chunk empty = {0};
-    unsigned char s1[16] = {0};
+    unsigned char s0[16] = {0}, s1[16] = {0};
     // a site that never wrote anything to db[0]
     static const unsigned char fresh[16] = {0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0x01};
     const char *chunks_sql =
@@ -13603,6 +13603,26 @@ bool do_test_payload_chunks_empty_final (bool print_result, bool cleanup_databas
     sqlite3_clear_bindings(stmt);
     sqlite3_bind_int64(stmt, 1, 0);
     sqlite3_bind_int64(stmt, 3, watermark);
+    if (test_count_chunks(stmt) != 0) goto finalize;
+
+    // The caller's own changes above the newest change from another site do not move
+    // the watermark: a window that reaches that change ends there, one above it is empty.
+    rc = sqlite3_exec(db[0], "INSERT INTO t(id, note) VALUES ('c0','n'),('d0','n');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    {
+        sqlite3_stmt *sid = NULL;
+        if (sqlite3_prepare_v2(db[0], "SELECT cloudsync_siteid();", -1, &sid, NULL) != SQLITE_OK) goto finalize;
+        bool ok = (sqlite3_step(sid) == SQLITE_ROW && sqlite3_column_bytes(sid, 0) == 16);
+        if (ok) memcpy(s0, sqlite3_column_blob(sid, 0), 16);
+        sqlite3_finalize(sid);
+        if (!ok) goto finalize;
+    }
+    sqlite3_clear_bindings(stmt);
+    sqlite3_bind_int64(stmt, 1, watermark - 1);
+    sqlite3_bind_blob(stmt, 2, s0, 16, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, 1);
+    if (!test_expect_empty_final(stmt, watermark, NULL)) goto finalize;
+    sqlite3_bind_int64(stmt, 1, watermark);
     if (test_count_chunks(stmt) != 0) goto finalize;
     sqlite3_finalize(stmt); stmt = NULL;
 

@@ -1041,10 +1041,8 @@ typedef struct {
     int64_t max_window_bytes;
     int64_t window_bytes;
     bool window_capped;
-    // Whether a scan that emits nothing ends with an empty final chunk, and whether
-    // this scan has emitted a chunk yet.
+    // Whether a scan that emits nothing ends with an empty final chunk.
     bool empty_final;
-    bool emitted;
 } cloudsync_payload_chunks_cursor;
 
 static int payload_chunks_connect(sqlite3 *db, void *aux, int argc, const char *const *argv, sqlite3_vtab **vtab, char **err) {
@@ -1381,34 +1379,34 @@ static int payload_chunks_build_empty_final(cloudsync_payload_chunks_cursor *c) 
 
 static int payload_chunks_advance(cloudsync_payload_chunks_cursor *c) {
     int rc = payload_chunks_build_next(c);
-    if (rc == SQLITE_OK && c->eof && c->empty_final && !c->emitted) rc = payload_chunks_build_empty_final(c);
+    if (rc == SQLITE_OK && c->eof && c->empty_final && c->chunk_index == 0) rc = payload_chunks_build_empty_final(c);
     if (rc == SQLITE_OK && !c->eof) {
         payload_chunks_set_next_cursor(c);
         payload_chunks_apply_window_cap(c);
-        c->emitted = true;
     }
     return rc;
 }
 
-// Highest db_version recorded by any site other than site_id, read from the metadata
-// tables rather than through cloudsync_changes. cloudsync_changes drops the rows the
-// caller cannot read, so its MAX stops at the last visible change: a caller that can
+// Highest db_version above `lower` recorded by any site other than site_id, read from the
+// metadata tables rather than through cloudsync_changes. cloudsync_changes drops the rows
+// the caller cannot read, so its MAX stops at the last visible change: a caller that can
 // read nothing would get 0 and never move past changes it will never receive.
-static int payload_chunks_metadata_max(sqlite3 *db, const void *site_id, int site_id_len, int64_t *out) {
+static int payload_chunks_metadata_max(sqlite3 *db, const void *site_id, int site_id_len, int64_t lower, int64_t *out) {
     *out = 0;
     sqlite3_stmt *list = NULL;
     int rc = sqlite3_prepare_v2(db, "SELECT tbl_name FROM sqlite_master WHERE type='table' AND tbl_name LIKE '%_cloudsync';", -1, &list, NULL);
     if (rc != SQLITE_OK) return rc;
 
     // One ORDER BY db_version DESC LIMIT 1 per table: it walks the db_version index back
-    // from the newest change and stops at the first one from another site.
+    // from the newest change and stops at the first one from another site, or at `lower`.
     char *sql = NULL;
     while ((rc = sqlite3_step(list)) == SQLITE_ROW) {
         char *next = sqlite3_mprintf(
             "%z%sSELECT (SELECT t1.db_version FROM \"%w\" AS t1 JOIN cloudsync_site_id AS s ON t1.site_id = s.rowid "
-            "WHERE s.site_id <> ?1 ORDER BY t1.db_version DESC LIMIT 1) AS v",
+            "WHERE t1.db_version > ?2 AND s.site_id <> ?1 ORDER BY t1.db_version DESC LIMIT 1) AS v",
             sql, sql ? " UNION ALL " : "", (const char *)sqlite3_column_text(list, 0));
-        if (!next) { rc = SQLITE_NOMEM; break; }
+        // %z has already freed sql, even when the call fails
+        if (!next) { sql = NULL; rc = SQLITE_NOMEM; break; }
         sql = next;
     }
     sqlite3_finalize(list);
@@ -1422,6 +1420,7 @@ static int payload_chunks_metadata_max(sqlite3 *db, const void *site_id, int sit
     sqlite3_free(sql);
     if (rc != SQLITE_OK) return rc;
     sqlite3_bind_blob(mx, 1, site_id, site_id_len, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(mx, 2, lower);
     rc = sqlite3_step(mx);
     if (rc == SQLITE_ROW) *out = sqlite3_column_int64(mx, 0);
     sqlite3_finalize(mx);
@@ -1512,10 +1511,12 @@ static int payload_chunks_filter(sqlite3_vtab_cursor *cursor, int idxnum, const 
     }
 
     if (until == 0 && exclude) {
-        int rc = payload_chunks_metadata_max(c->vtab->db, site_id, site_id_len, &until);
+        // Changes at or below the window's lower bound cannot widen it.
+        int64_t lower = positional ? resume_dbv - 1 : since;
+        int rc = payload_chunks_metadata_max(c->vtab->db, site_id, site_id_len, lower, &until);
         if (rc != SQLITE_OK) {
             if (c->vtab->base.zErrMsg) sqlite3_free(c->vtab->base.zErrMsg);
-            c->vtab->base.zErrMsg = sqlite3_mprintf("%s", sqlite3_errmsg(c->vtab->db));
+            c->vtab->base.zErrMsg = sqlite3_mprintf("%s", rc == SQLITE_NOMEM ? sqlite3_errstr(rc) : sqlite3_errmsg(c->vtab->db));
             return rc;
         }
     } else if (until == 0) {
