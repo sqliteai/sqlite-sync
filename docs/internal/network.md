@@ -58,6 +58,7 @@ The core relies on these behaviors, so a custom implementation must provide them
 * **Forward every `extra_headers` line unchanged.** The capability headers tell the server which responses the client understands. If `apply-defer` is dropped from `/apply` requests, the server never defers that client's applies and answers with a retryable error when the database is busy.
 * **Treat every `2xx` status as success, including `202 Accepted`, and return its body.** The server answers `/apply` with `202` when it has accepted the changes but not yet applied them, and `/check` with `202` while a download is being prepared. The body of a `202` carries the sync status the core needs, so it must reach the caller like the body of a `200`.
 * **Treat `4xx` and `5xx` as errors.** Do not retry them inside the transport: the core keeps its send checkpoint and the next sync call re-sends.
+* **Report the HTTP status and `Retry-After` in the result**, on success and on error: set `http_status`, and when the response carries a `Retry-After` header, set `has_retry_after` and `retry_after` from `network_retry_after_parse()`. The core uses them to tell a busy server (`429`, or `503` with `Retry-After`) from a failure, and to wait as the server asks. A transport that leaves them zero still works: busy answers are then reported as SQL errors, and `Retry-After` delays are ignored.
 
 #### Platform-Specific Notes
 

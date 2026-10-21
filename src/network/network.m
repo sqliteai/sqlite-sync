@@ -145,6 +145,7 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
     __block NSInteger errorCode = 0;
     __block NSString *responseTicket = nil;
     __block NSString *responseTicketExpiresAt = nil;
+    __block int retryAfter = -1;
 
     dispatch_semaphore_t sema = dispatch_semaphore_create(0);
 
@@ -167,6 +168,9 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
                     responseTicket = value;
                 } else if ([name caseInsensitiveCompare:@CLOUDSYNC_HEADER_TICKET_EXPIRES_AT] == NSOrderedSame) {
                     responseTicketExpiresAt = value;
+                } else if ([name caseInsensitiveCompare:@CLOUDSYNC_HEADER_RETRY_AFTER] == NSOrderedSame) {
+                    const char *utf8 = value.UTF8String;
+                    retryAfter = utf8 ? network_retry_after_parse(utf8, strlen(utf8)) : -1;
                 }
             }
         }
@@ -185,7 +189,7 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
     if (!responseError && (statusCode >= 200 && statusCode < 300)) {
         // check if OK should be returned
         if (responseData == nil || [responseData length] == 0) {
-            NETWORK_RESULT result = {CLOUDSYNC_NETWORK_OK, NULL, 0, NULL, NULL};
+            NETWORK_RESULT result = {CLOUDSYNC_NETWORK_OK, NULL, 0, NULL, NULL, (long)statusCode, retryAfter >= 0, retryAfter >= 0 ? retryAfter : 0};
             #ifdef CLOUDSYNC_NETWORK_TRACE
             fprintf(stderr,
                     "[cloudsync-network] endpoint=%s using_ticket=%s\n",
@@ -199,11 +203,14 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
         // otherwise return a buffer
         NETWORK_RESULT result = {};
         result.code = CLOUDSYNC_NETWORK_BUFFER;
+        result.http_status = (long)statusCode;
+        result.has_retry_after = retryAfter >= 0;
+        result.retry_after = retryAfter >= 0 ? retryAfter : 0;
         if (zero_terminated) {
             NSString *utf8String = [[NSString alloc] initWithData:responseData encoding:NSUTF8StringEncoding];
             if (!utf8String) {
                 NSString *msg = @"Response is not valid UTF-8";
-                NETWORK_RESULT error_result = {CLOUDSYNC_NETWORK_ERROR, (char *)msg.UTF8String, 0, (void *)CFBridgingRetain(msg), network_buffer_cleanup};
+                NETWORK_RESULT error_result = {CLOUDSYNC_NETWORK_ERROR, (char *)msg.UTF8String, 0, (void *)CFBridgingRetain(msg), network_buffer_cleanup, (long)statusCode, false, 0};
                 #ifdef CLOUDSYNC_NETWORK_TRACE
                 network_trace_log(data, method, endpoint, (long)statusCode, error_result.code, request_bytes, 0, network_trace_now_ms() - trace_start_ms);
                 #endif
@@ -247,6 +254,11 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
     result.xdata = (void *)CFBridgingRetain(msg);
     result.xfree = network_buffer_cleanup;
     result.blen = responseError ? (size_t)errorCode : (size_t)statusCode;
+    if (!responseError) {
+        result.http_status = (long)statusCode;
+        result.has_retry_after = retryAfter >= 0;
+        result.retry_after = retryAfter >= 0 ? retryAfter : 0;
+    }
     
     #ifdef CLOUDSYNC_NETWORK_TRACE
     fprintf(stderr,

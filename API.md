@@ -42,6 +42,7 @@ This document provides a reference for the SQL functions provided by the `sqlite
   - [`cloudsync_network_check_changes()`](#cloudsync_network_check_changesmax_chunks) (deprecated)
   - [`cloudsync_network_sync()`](#cloudsync_network_syncwait_ms-max_retries)
   - [`cloudsync_network_reset_sync_version()`](#cloudsync_network_reset_sync_version)
+  - [`cloudsync_network_reset_retry_after()`](#cloudsync_network_reset_retry_after)
   - [`cloudsync_network_has_unsent_changes()`](#cloudsync_network_has_unsent_changes)
   - [`cloudsync_network_logout()`](#cloudsync_network_logout)
 
@@ -738,6 +739,8 @@ Fix the cause and deliver the payload again: the changes already applied merge a
 
 Every network request has a deadline, so a stalled server cannot hold the connection indefinitely. The deadlines can be tuned with the `network_*` settings of [`cloudsync_set()`](#cloudsync_setkey-value). A network call in progress can also be cancelled with `sqlite3_interrupt()` on its connection: it stops within about a second and fails with `SQLITE_INTERRUPT` (SQLite 3.41 or later), so a deliberate stop can be told apart from a failure worth retrying.
 
+Network calls spend most of their time waiting on the network while they hold a read or write on the database. Use WAL mode (`PRAGMA journal_mode=WAL`) if other connections write to the database while it syncs: with the default rollback journal, they get `SQLITE_BUSY` until the upload in progress finishes.
+
 ### `cloudsync_network_init(managedDatabaseId)`
 
 **Description:** Initializes the `sqlite-sync` network component. This function configures the endpoints for the CloudSync service and initializes the cURL library.
@@ -818,6 +821,7 @@ The sync functions follow a consistent error-handling contract:
 | **Apply errors** (`cloudsync_payload_apply` failures — unknown schema hash, invalid checksum, decompression error) | Structured JSON — a `receive.error` string field is included in the response. |
 | **Server-reported apply job failures** (the server processed the request but its own apply job failed) | Structured JSON — a `send.lastFailure` object is included in the response. |
 | **Server-reported check job failures** (the server failed to encode a changeset for the client) | Structured JSON — a `receive.lastFailure` object is included in the response. |
+| **Server busy** (HTTP `429`, or `503` with a `Retry-After` header) | Structured JSON — `retryAfter` and `retryCode` are included in the `send` or `receive` block that was refused. |
 
 This means: if you get JSON back, the server was reachable and the network protocol ran. If you get a SQL error, connectivity or configuration is broken.
 
@@ -846,15 +850,17 @@ Call it repeatedly with the same value until `send.status` is no longer `"out-of
 **Returns:** A JSON string with the send result:
 
 ```json
-{"send": {"status": "synced|syncing|out-of-sync|error", "localVersion": N, "serverVersion": N, "chunks": C, "bytes": B, "lastFailure": {...}}}
+{"send": {"status": "synced|syncing|busy|out-of-sync|error", "localVersion": N, "serverVersion": N, "chunks": C, "bytes": B, "lastFailure": {...}, "retryAfter": S, "retryCode": "..."}}
 ```
 
-- `send.status`: The current sync state — `"synced"` (all changes confirmed), `"syncing"` (changes sent but not yet confirmed), `"out-of-sync"` (local changes pending or gaps detected), or `"error"`.
+- `send.status`: The current sync state — `"synced"` (all changes confirmed), `"syncing"` (changes sent but not yet confirmed), `"busy"` (the server refused the send and asked to wait: see `send.retryAfter`), `"out-of-sync"` (local changes pending or gaps detected), or `"error"`. Only `"out-of-sync"` means "call again now"; on `"syncing"` check again on your normal schedule, and on `"busy"` not before `send.retryAfter` seconds have passed.
 - `send.localVersion`: The latest local database version.
 - `send.serverVersion`: The latest version the server has accepted. The server may accept changes before applying them (a large payload, or a busy database), so this can be ahead of what is confirmed. Only `send.status == "synced"` means every sent change is confirmed; `send.serverVersion == send.localVersion` alone does not. If an accepted change later fails to apply, the server lowers this version again and the next call re-sends it.
 - `send.chunks`: The number of payload chunks sent this call (a large push is split into multiple transport chunks bounded by `payload_max_chunk_size`). `0` when there were no local changes to send.
 - `send.bytes`: The total serialized payload bytes sent this call (uncompressed cloudsync payload size, summed across chunks; not the compressed wire size).
 - `send.lastFailure` (optional): Present only when the server reports a failed apply job. Forwarded verbatim from the server's `failures.apply` and typically includes `jobId`, `code`, `stage`, `message`, `retryable`, and `failedAt`. It is emitted regardless of `status` so callers can detect server-side failures during `"syncing"` or even after the state has nominally recovered. This function is **send/apply-scoped**: server-reported check-job failures (`failures.check`) are not surfaced here — see [`cloudsync_network_receive_changes()`](#cloudsync_network_receive_changesmax_chunks) and [`cloudsync_network_sync()`](#cloudsync_network_syncwait_ms-max_retries).
+- `send.retryAfter` (optional, integer): Present only when the server refused the send because it is busy; `send.status` is then `"busy"`. The number of seconds to wait before sending again: the server's `Retry-After`, or 5 seconds when it gave none. Nothing refused is lost: the send checkpoint does not move, and a later call sends the same changes again. Compare `send.localVersion` with `send.serverVersion` to see what is still pending. Until that delay has passed, calls return this result again without contacting the server, with `retryAfter` counting down and `send.serverVersion` read from the local checkpoint; [`cloudsync_network_reset_retry_after()`](#cloudsync_network_reset_retry_after) lifts the wait.
+- `send.retryCode` (optional, string): Present together with `send.retryAfter`. The server's error code for the refusal, or `http_<status>` when it gave none.
 
 **Example:**
 
@@ -870,8 +876,24 @@ SELECT cloudsync_network_send_changes(2);
 SELECT cloudsync_network_send_changes(2);
 -- '{"send":{"status":"synced","localVersion":5,"serverVersion":5,"chunks":1,"bytes":460}}'
 
+-- The same loop in a single statement: one bounded send per row, stopping at the first
+-- status other than "out-of-sync", or when a send makes no progress (the server keeps
+-- failing it), with at most 100 calls. Each send commits its own checkpoint. It returns
+-- the last result: when it carries retryAfter, run it again after that delay.
+WITH RECURSIVE send(n, result, prev) AS (
+  SELECT 1, cloudsync_network_send_changes(2), -1
+  UNION ALL
+  SELECT n + 1, cloudsync_network_send_changes(2), result ->> '$.send.serverVersion' FROM send
+  WHERE result ->> '$.send.status' = 'out-of-sync'
+    AND result ->> '$.send.serverVersion' > prev AND n < 100
+)
+SELECT result FROM send ORDER BY n DESC LIMIT 1;
+
 -- With a server-reported failure (e.g. unknown schema hash on the server side):
 -- '{"send":{"status":"out-of-sync","localVersion":1,"serverVersion":0,"chunks":1,"bytes":512,"lastFailure":{"jobId":44961,"code":"internal_error","stage":"apply_payload","message":"cloudsync operation failed: Cannot apply the received payload because the schema hash is unknown 4288148391734624266.","retryable":true,"failedAt":"2026-04-15T22:21:09.018606Z"}}}'
+
+-- Refused because the server is busy; send again in 30 seconds:
+-- '{"send":{"status":"busy","localVersion":7,"serverVersion":5,"chunks":0,"bytes":0,"retryAfter":30,"retryCode":"tenant_rate_limited"}}'
 ```
 
 ---
@@ -889,7 +911,7 @@ By default this function **drains all currently-available chunks** in one call. 
 SELECT cloudsync_network_receive_changes(5) ->> '$.receive.complete';
 ```
 
-`receive.complete` is `false` only when the stream is *known* to have more pending. `true` means this drain delivered everything that was ready — it is not a guarantee that the server holds nothing further. It is also reported when the server is still preparing a download and answers with no artifact (see issue #80), and would be reported for a window the server bounded deliberately. So loop while it is `false`, but treat `true` as "nothing more was ready just now" and keep syncing on your normal schedule rather than concluding the database is fully up to date.
+`receive.complete` is `false` only when the stream is *known* to have more pending. `true` means this drain delivered everything that was ready — it is not a guarantee that the server holds nothing further. It is also reported when the server is still preparing a download and answers with no artifact (see issue #80), and would be reported for a window the server bounded deliberately. It is also `true` when the result carries `receive.retryAfter`: the server asked to wait, so more may be pending, and the next call after that delay resumes where this one stopped. So loop while it is `false`, but treat `true` as "nothing more was ready just now" and keep syncing on your normal schedule rather than concluding the database is fully up to date.
 
 The drain position (the per-stream page cursor) is held **in memory** on the network context, so a capped drain resumes where it left off on the next call — the caller does not manage any cursor; it just loops while `receive.complete` is `false`. If the connection is closed or the process restarts mid-drain, or a call fails, the next call safely restarts the drain from the beginning of the stream: already-applied chunks are re-downloaded and re-applied idempotently, so **no rows are skipped** — only redundant download is incurred. This is safe because the durable receive checkpoint (`check_dbversion`/`check_seq`) stays fixed for the whole stream and only advances once the stream has been **fully** applied. A stream whose final chunk arrives while a fragmented value it delivered is still incomplete fails with an error instead of advancing.
 
@@ -902,16 +924,18 @@ If the network is misconfigured or the remote server is unreachable, the functio
 **Returns:** A JSON string with the receive result:
 
 ```json
-{"receive": {"rows": N, "tables": ["table1", "table2"], "chunks": C, "bytes": B, "complete": true, "error": "...", "lastFailure": {...}}}
+{"receive": {"rows": N, "tables": ["table1", "table2"], "chunks": C, "bytes": B, "complete": true, "error": "...", "lastFailure": {...}, "retryAfter": S, "retryCode": "..."}}
 ```
 
 - `receive.rows`: The total number of rows received and applied to the local database, summed across all chunks drained this call, including the rows applied before an error. `0` when nothing was available, or when only intermediate fragments were staged without completing a value.
 - `receive.tables`: An array of table names that received changes (the union across all drained chunks, including changes applied before an error). Empty (`[]`) if no changes were applied.
 - `receive.chunks`: The number of payload chunks fully applied by this call. `0` when nothing was ready, `1` for a single monolithic/inline page, and `N` for a drained `N`-chunk stream (bounded by `max_chunks` if given).
 - `receive.bytes`: The total serialized payload bytes received this call (uncompressed cloudsync payload size, summed across chunks; transport-independent, not the compressed wire size). Useful for byte-budgeted draining together with `max_chunks`.
-- `receive.complete` (boolean): `true` when the receive stream is fully drained (nothing pending), `false` when more chunks remain — because `max_chunks` capped the drain, or it stopped early. When `false`, call this function again to continue.
+- `receive.complete` (boolean): `false` when more chunks are known to remain — because `max_chunks` capped the drain, or it stopped early. When `false`, call this function again to continue. `true` means nothing more was ready just now, not that everything is synced: with `receive.retryAfter` present the server asked to wait and more may be pending, so call again after that delay.
 - `receive.error` (optional, string): Present when client-side `cloudsync_payload_apply` failed. Contains the error of the first change that could not be applied (see [Failed writes](#failed-writes)); `receive.complete` is then `false`, and the next call receives the changes again from the same checkpoint.
 - `receive.lastFailure` (optional, object): Present only when the server reports a failed check job. Forwarded verbatim from the server's `failures.check` and typically includes `jobId`, `dbVersion`, `seq`, `code`, `stage`, `message`, `retryable`, and `failedAt`. Distinct from `receive.error`: `receive.error` describes a client-side apply failure (string), while `receive.lastFailure` describes a server-side check-job failure (object). Both can coexist in the same response. This function is **check-scoped**: server-reported apply-job failures (`failures.apply`) are not surfaced here — see [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes) and [`cloudsync_network_sync()`](#cloudsync_network_syncwait_ms-max_retries).
+- `receive.retryAfter` (optional, integer): Present when the server asked the client not to ask again for that many seconds: either it has nothing ready yet and gave a delay, or it refused the request because it is busy (5 seconds when it gave no hint). `receive.complete` is then `true`, even if the stream stopped part-way. Changes applied earlier in the same call are kept. Until that delay has passed, calls return without contacting the server, with `retryAfter` counting down; [`cloudsync_network_reset_retry_after()`](#cloudsync_network_reset_retry_after) lifts the wait.
+- `receive.retryCode` (optional, string): Present only when the request was refused because the server is busy: the server's error code, or `http_<status>` when it gave none.
 
 **Example:**
 
@@ -927,6 +951,9 @@ SELECT cloudsync_network_receive_changes();
 
 -- With a server-reported check-job failure:
 -- '{"receive":{"rows":0,"tables":[],"chunks":0,"bytes":0,"complete":true,"lastFailure":{"jobId":456,"dbVersion":15,"seq":1,"code":"tenant_unreachable","stage":"encode_changes","message":"tenant check failed","retryable":true,"failedAt":"2026-04-24T10:22:00Z"}}}'
+
+-- Nothing ready yet, and the server asks to check again in 10 seconds:
+-- '{"receive":{"rows":0,"tables":[],"chunks":0,"bytes":0,"complete":true,"retryAfter":10}}'
 ```
 
 ---
@@ -946,6 +973,8 @@ SELECT cloudsync_network_receive_changes();
 
 When the server delivers changes as a stream of chunks, this function drains the **whole stream in a single call**: as long as the next chunk is already available it is fetched back-to-back with no delay. `wait_ms` and `max_retries` are spent only while the server payload is **not yet ready** (the server is still preparing a package): in that case the function waits `wait_ms` and retries up to `max_retries` times. They are not consumed while paging through chunks that are already available.
 
+When the server answers with a `Retry-After` delay (nothing ready yet, or busy), the function waits that delay instead of `wait_ms`, as long as it fits in the remaining `wait_ms × (max_retries − 1)`; the wait uses up retries accordingly. A delay that does not fit ends the call and is reported in `receive.retryAfter`. A delay left by an earlier call is handled the same way before the first request. Either way, one call never waits longer than it would without the delay. The send and receive phases wait independently: a send refused because the server is busy does not stop the receive phase.
+
 **Parameters:**
 
 - `wait_ms` (INTEGER, optional): The time to wait in milliseconds between retries while the server payload is not yet ready. Defaults to 100.
@@ -955,23 +984,25 @@ When the server delivers changes as a stream of chunks, this function drains the
 
 ```json
 {
-  "send": {"status": "synced|syncing|out-of-sync|error", "localVersion": N, "serverVersion": N, "chunks": C, "bytes": B, "lastFailure": {...}},
-  "receive": {"rows": N, "tables": ["table1", "table2"], "chunks": C, "bytes": B, "complete": true, "error": "...", "lastFailure": {...}}
+  "send": {"status": "synced|syncing|busy|out-of-sync|error", "localVersion": N, "serverVersion": N, "chunks": C, "bytes": B, "lastFailure": {...}, "retryAfter": S, "retryCode": "..."},
+  "receive": {"rows": N, "tables": ["table1", "table2"], "chunks": C, "bytes": B, "complete": true, "error": "...", "lastFailure": {...}, "retryAfter": S, "retryCode": "..."}
 }
 ```
 
-- `send.status`: The current sync state — `"synced"`, `"syncing"`, `"out-of-sync"`, or `"error"`.
+- `send.status`: The current sync state — `"synced"`, `"syncing"`, `"busy"`, `"out-of-sync"`, or `"error"`.
 - `send.localVersion`: The latest local database version.
 - `send.serverVersion`: The latest version the server has accepted, which can be ahead of what is confirmed. Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes).
 - `send.chunks` / `send.bytes`: Number of payload chunks sent and total serialized payload bytes sent during the send phase. Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes).
 - `send.lastFailure` (optional): Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes) — forwarded verbatim from the server's `failures.apply` whenever a failed apply job is reported, regardless of `status`.
+- `send.retryAfter` / `send.retryCode` (optional): Same semantics as in [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes).
 - `receive.rows`: The **total** number of rows received and applied during the receive phase, summed across **all** chunks drained in this call, including the rows applied before an error.
 - `receive.tables`: An array of table names that received changes (the union across all drained chunks, including changes applied before an error). Empty (`[]`) if no changes were applied.
 - `receive.chunks`: The number of payload chunks applied in this call. `0` when nothing was ready, `1` for a single monolithic/inline page, and `N` for a fully drained `N`-chunk stream. `cloudsync_network_sync()` always drains the whole stream (it does not cap chunks).
 - `receive.bytes`: The total serialized payload bytes received this call (uncompressed cloudsync payload size, summed across chunks; not the compressed wire size). Same semantics as in [`cloudsync_network_receive_changes()`](#cloudsync_network_receive_changesmax_chunks).
-- `receive.complete` (boolean): `true` when the server stream was fully drained, `false` when the download stopped before the final chunk (an error occurred, or an internal safety bound was reached). When `false`, call `cloudsync_network_sync()` again to resume; re-delivered rows are idempotent.
+- `receive.complete` (boolean): `false` when the download stopped before the final chunk (an error occurred, or an internal safety bound was reached). When `false`, call `cloudsync_network_sync()` again to resume; re-delivered rows are idempotent. `true` means nothing more was ready just now, not that everything is synced: with `receive.retryAfter` present the server asked to wait and more may be pending, so call again after that delay.
 - `receive.error` (optional, string): Present when client-side `cloudsync_payload_apply` failed (for example `"Cannot apply the received payload because the schema hash is unknown 7218827471400075525."`). The send result is always preserved so the caller can tell that local changes reached the server even when applying incoming changes failed. The receive drain stops immediately on apply errors, since failures like schema-hash mismatches do not heal across retries. Endpoint/network errors during the receive phase raise a SQL error instead.
 - `receive.lastFailure` (optional, object): Same semantics as in [`cloudsync_network_receive_changes()`](#cloudsync_network_receive_changesmax_chunks) — forwarded verbatim from the server's `failures.check` whenever a failed check job is reported. Distinct from `receive.error`. `cloudsync_network_sync()` reports both `send.lastFailure` and `receive.lastFailure` when present.
+- `receive.retryAfter` / `receive.retryCode` (optional): Same semantics as in [`cloudsync_network_receive_changes()`](#cloudsync_network_receive_changesmax_chunks), reported only for a delay this call could not wait out.
 
 **Example:**
 
@@ -1007,11 +1038,29 @@ SELECT cloudsync_network_reset_sync_version();
 
 ---
 
+### `cloudsync_network_reset_retry_after()`
+
+**Description:** Lifts the wait the server asked for with `Retry-After`, so the next send and receive contact the server again. Use it when the user explicitly asks for a refresh; leave it out of scheduled syncs, which should respect the server's delay. The wait is kept in memory per connection. It is also lifted by a new `cloudsync_network_init()`, when the network is cleaned up or the connection is closed, and by a successful logout; a new token or API key keeps it.
+
+**Parameters:** None.
+
+**Returns:** None.
+
+**Example:**
+
+```sql
+-- Pull to refresh: sync now even if the server asked to wait
+SELECT cloudsync_network_reset_retry_after();
+SELECT cloudsync_network_sync();
+```
+
+---
+
 ### `cloudsync_network_has_unsent_changes()`
 
 **Description:** Checks if there are any local changes that the remote server has not yet confirmed. A change counts as unsent until the server has applied it, not just accepted it: an accepted change can still fail to apply, and the device must keep it to send it again. A result of 0 therefore means the local changes are safe to discard, for example before [`cloudsync_network_logout()`](#cloudsync_network_logout).
 
-The function asks the server for its current status, so it makes one network request.
+The function asks the server for its current status, so it makes one network request. It does so even while the server has asked to wait (see `send.retryAfter`), so the answer is always current; when the server is busy it raises a SQL error.
 
 While a send is accepted but not yet applied (`send.status` is `"syncing"`), this function keeps returning 1 even though there is nothing new to send. Do not loop on it calling [`cloudsync_network_send_changes()`](#cloudsync_network_send_changes) back to back: once `send.status` is `"syncing"`, stop and check again on your normal sync schedule. The server completes the work on its own.
 

@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #define CLOUDSYNC_DEFAULT_ADDRESS           "https://cloudsync.sqlite.ai"
 #ifndef CLOUDSYNC_CONNECT_TIMEOUT_SECONDS
@@ -54,6 +55,9 @@
 #define CLOUDSYNC_HEADER_VERSION_LINE       CLOUDSYNC_HEADER_VERSION ": " CLOUDSYNC_VERSION
 #define CLOUDSYNC_HEADER_CHECK_CAPABILITIES "X-CloudSync-Capabilities: check-status-response, check-chunks"
 #define CLOUDSYNC_HEADER_APPLY_CAPABILITIES "X-CloudSync-Capabilities: apply-defer"
+#define CLOUDSYNC_HEADER_RETRY_AFTER        "Retry-After"
+#define CLOUDSYNC_RETRY_AFTER_MAX_SECONDS   3600
+#define CLOUDSYNC_RETRY_AFTER_DEFAULT_SECONDS 5
 
 #define CLOUDSYNC_NETWORK_OK                1
 #define CLOUDSYNC_NETWORK_ERROR             2
@@ -67,6 +71,9 @@ typedef struct {
     size_t  blen;                   // blen if code is SQLITE_OK, rc in case of error
     void    *xdata;                 // optional custom external data
     void    (*xfree) (void *);      // optional custom free callback
+    long    http_status;            // HTTP status code, 0 if unknown
+    bool    has_retry_after;        // a valid Retry-After header was received
+    int     retry_after;            // Retry-After in seconds, see network_retry_after_parse
 } NETWORK_RESULT;
 
 char *network_data_get_siteid (network_data *data);
@@ -78,6 +85,7 @@ bool network_data_set_endpoints (network_data *data, char *auth, char *check, ch
 
 bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size);
 NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint, const char *authentication, bool zero_terminated, bool is_post_request, char *json_payload, const char **extra_headers, int nextra_headers);
+int network_retry_after_parse (const char *value, size_t len);
 
 // Exposed (non-static) for the network unit test; otherwise internal to network.c.
 void network_sync_state_update_from_response(NETWORK_RESULT *res, int64_t *last_optimistic_version, int64_t *last_confirmed_version, int *gaps_size, char **apply_failure_json, char **check_failure_json);
