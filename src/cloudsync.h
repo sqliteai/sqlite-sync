@@ -166,6 +166,7 @@ int    cloudsync_payload_apply (cloudsync_context *data, const char *payload, in
 int    cloudsync_payload_encode_step (cloudsync_payload_context *payload, cloudsync_context *data, int argc, dbvalue_t **argv);
 int    cloudsync_payload_encode_final (cloudsync_payload_context *payload, cloudsync_context *data);
 char  *cloudsync_payload_blob (cloudsync_payload_context *payload, int64_t *blob_size, int64_t *nrows);
+char  *cloudsync_payload_empty_blob (cloudsync_context *data, int64_t *blob_size);
 size_t cloudsync_payload_context_size (size_t *header_size);
 void   cloudsync_payload_context_free (cloudsync_payload_context *payload);
 uint64_t cloudsync_payload_context_nrows (cloudsync_payload_context *payload);
