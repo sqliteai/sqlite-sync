@@ -3715,6 +3715,20 @@ char *cloudsync_payload_blob (cloudsync_payload_context *payload, int64_t *blob_
     return payload->buffer;
 }
 
+// A valid payload that carries no rows: applying it only moves the receive checkpoint
+// to the watermark the caller passes along with it.
+char *cloudsync_payload_empty_blob (cloudsync_context *data, int64_t *blob_size) {
+    cloudsync_payload_header header;
+    cloudsync_payload_header_init(&header, CLOUDSYNC_PAYLOAD_VERSION_LATEST, 0, CLOUDSYNC_CHANGES_NCOLS, 0, data->schema_hash);
+    cloudsync_payload_checksum_store(&header, pk_checksum(NULL, 0));
+
+    char *blob = cloudsync_memory_alloc(sizeof(cloudsync_payload_header));
+    if (!blob) return NULL;
+    memcpy(blob, &header, sizeof(cloudsync_payload_header));
+    if (blob_size) *blob_size = (int64_t)sizeof(cloudsync_payload_header);
+    return blob;
+}
+
 static int cloudsync_payload_decode_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
     cloudsync_pk_decode_bind_context *decode_context = (cloudsync_pk_decode_bind_context*)xdata;
     int rc = pk_decode_bind_callback(decode_context->vm, index, type, ival, dval, pval);

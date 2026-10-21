@@ -1089,6 +1089,8 @@ typedef struct {
     int64 max_window_bytes;
     int64 window_bytes;
     bool window_capped;
+    // Whether a scan that emits nothing ends with an empty final chunk.
+    bool empty_final;
     int max_size;
     int frag_target;
 
@@ -1366,6 +1368,55 @@ static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_con
     return result;
 }
 
+// Highest db_version above `lower` recorded by any site other than site_id, read from the
+// metadata tables rather than through cloudsync_changes_select. That function drops the
+// rows the caller cannot read, so its MAX stops at the last visible change: a caller that
+// can read nothing would get 0 and never move past changes it will never receive.
+// Requires SPI.
+static int64 payload_chunks_pg_metadata_max(bytea *site_id, int64 lower) {
+    int rc = SPI_execute(
+        "SELECT n.nspname, c.relname FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog','information_schema') "
+        "AND c.relname LIKE '%\\_cloudsync' ESCAPE '\\'", true, 0);
+    if (rc != SPI_OK_SELECT || !SPI_tuptable) ereport(ERROR, (errmsg("cloudsync: SPI_execute failed while listing *_cloudsync")));
+
+    // One ORDER BY db_version DESC LIMIT 1 per table: it walks the db_version index back
+    // from the newest change and stops at the first one from another site, or at `lower`.
+    StringInfoData q;
+    initStringInfo(&q);
+    uint64 ntables = SPI_processed;
+    for (uint64 i = 0; i < ntables; i++) {
+        char *nsp = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1);
+        char *rel = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 2);
+        appendStringInfo(&q,
+            "%sSELECT (SELECT t1.db_version FROM %s.%s t1 JOIN cloudsync_site_id s ON t1.site_id = s.id "
+            "WHERE t1.db_version > $2 AND s.site_id <> $1 ORDER BY t1.db_version DESC LIMIT 1) AS v",
+            i ? " UNION ALL " : "", quote_identifier(nsp), quote_identifier(rel));
+    }
+    SPI_freetuptable(SPI_tuptable);
+    SPI_tuptable = NULL;
+    if (ntables == 0) { pfree(q.data); return 0; }
+
+    StringInfoData mx;
+    initStringInfo(&mx);
+    appendStringInfo(&mx, "SELECT COALESCE(MAX(v),0) FROM (%s) m", q.data);
+    pfree(q.data);
+
+    Oid mt[2] = {BYTEAOID, INT8OID};
+    Datum mv[2] = {PointerGetDatum(site_id), Int64GetDatum(lower)};
+    char mn[2] = {' ', ' '};
+    int64 until = 0;
+    if (SPI_execute_with_args(mx.data, 2, mt, mv, mn, true, 1) == SPI_OK_SELECT && SPI_processed > 0) {
+        bool isnull = false;
+        Datum d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
+        until = isnull ? 0 : DatumGetInt64(d);
+    }
+    if (SPI_tuptable) { SPI_freetuptable(SPI_tuptable); SPI_tuptable = NULL; }
+    pfree(mx.data);
+    return until;
+}
+
 PG_FUNCTION_INFO_V1(cloudsync_payload_chunks);
 Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
     FuncCallContext *funcctx;
@@ -1427,7 +1478,10 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
         }
 
         int64 until = PG_ARGISNULL(2) ? 0 : PG_GETARG_INT64(2);
-        if (until == 0) {
+        if (until == 0 && exclude) {
+            // Changes at or below the window's lower bound cannot widen it.
+            until = payload_chunks_pg_metadata_max(site_id, positional ? resume_dbv - 1 : since);
+        } else if (until == 0) {
             Oid mt[1] = {BYTEAOID};
             Datum mv[1] = {PointerGetDatum(site_id)};
             char mn[1] = {' '};
@@ -1443,6 +1497,9 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
             if (SPI_tuptable) { SPI_freetuptable(SPI_tuptable); SPI_tuptable = NULL; }
         }
         st->watermark = until;
+        // Only the receive side (exclude_filter_site_id) gets the empty final chunk, and
+        // only when the window moves the caller forward. The send path must never upload one.
+        st->empty_final = exclude && until > 0 && (positional ? until >= resume_dbv : until > since);
 
         StringInfoData q;
         initStringInfo(&q);
@@ -1507,6 +1564,19 @@ Datum cloudsync_payload_chunks(PG_FUNCTION_ARGS) {
     // A capped window ends the scan: the rows past it belong to the next window, and
     // emitting them here would contradict the reduced watermark already reported.
     bytea *payload = st->window_capped ? NULL : payload_chunks_build_pg_next(st, data, &rows, &dbv_min, &dbv_max);
+    // End a window that has nothing for the caller with one chunk carrying no rows, so
+    // the caller still learns the watermark and checkpoints past what was scanned.
+    // Without it a window whose changes are all hidden from the caller returns nothing,
+    // the caller's checkpoint never moves, and every later request scans it again.
+    if (!payload && st->empty_final && st->chunk_index == 0) {
+        int64 blob_size = 0;
+        char *blob = cloudsync_payload_empty_blob(data, &blob_size);
+        if (!blob) ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("out of memory")));
+        payload = (bytea *)palloc(VARHDRSZ + blob_size);
+        SET_VARSIZE(payload, VARHDRSZ + blob_size);
+        memcpy(VARDATA(payload), blob, blob_size);
+        cloudsync_memory_free(blob);
+    }
     if (!payload) {
         if (st->portal) SPI_cursor_close(st->portal);
         st->portal = NULL;

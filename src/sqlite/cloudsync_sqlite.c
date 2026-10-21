@@ -1041,6 +1041,8 @@ typedef struct {
     int64_t max_window_bytes;
     int64_t window_bytes;
     bool window_capped;
+    // Whether a scan that emits nothing ends with an empty final chunk.
+    bool empty_final;
 } cloudsync_payload_chunks_cursor;
 
 static int payload_chunks_connect(sqlite3 *db, void *aux, int argc, const char *const *argv, sqlite3_vtab **vtab, char **err) {
@@ -1362,13 +1364,67 @@ static void payload_chunks_apply_window_cap(cloudsync_payload_chunks_cursor *c) 
     c->next_frag_offset = 0;
 }
 
+// End a window that has nothing for the caller with one chunk carrying no rows, so the
+// caller still learns the watermark and checkpoints past what was scanned. Without it a
+// window whose changes are all hidden from the caller returns nothing, the caller's
+// checkpoint never moves, and every later request scans the same window again.
+static int payload_chunks_build_empty_final(cloudsync_payload_chunks_cursor *c) {
+    c->payload = cloudsync_payload_empty_blob(c->vtab->data, &c->payload_size);
+    if (!c->payload) return SQLITE_NOMEM;
+    c->rows = c->dbv_min = c->dbv_max = 0;
+    c->eof = false;
+    c->chunk_index++;
+    return SQLITE_OK;
+}
+
 static int payload_chunks_advance(cloudsync_payload_chunks_cursor *c) {
     int rc = payload_chunks_build_next(c);
+    if (rc == SQLITE_OK && c->eof && c->empty_final && c->chunk_index == 0) rc = payload_chunks_build_empty_final(c);
     if (rc == SQLITE_OK && !c->eof) {
         payload_chunks_set_next_cursor(c);
         payload_chunks_apply_window_cap(c);
     }
     return rc;
+}
+
+// Highest db_version above `lower` recorded by any site other than site_id, read from the
+// metadata tables rather than through cloudsync_changes. cloudsync_changes drops the rows
+// the caller cannot read, so its MAX stops at the last visible change: a caller that can
+// read nothing would get 0 and never move past changes it will never receive.
+static int payload_chunks_metadata_max(sqlite3 *db, const void *site_id, int site_id_len, int64_t lower, int64_t *out) {
+    *out = 0;
+    sqlite3_stmt *list = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT tbl_name FROM sqlite_master WHERE type='table' AND tbl_name LIKE '%_cloudsync';", -1, &list, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    // One ORDER BY db_version DESC LIMIT 1 per table: it walks the db_version index back
+    // from the newest change and stops at the first one from another site, or at `lower`.
+    char *sql = NULL;
+    while ((rc = sqlite3_step(list)) == SQLITE_ROW) {
+        char *next = sqlite3_mprintf(
+            "%z%sSELECT (SELECT t1.db_version FROM \"%w\" AS t1 JOIN cloudsync_site_id AS s ON t1.site_id = s.rowid "
+            "WHERE t1.db_version > ?2 AND s.site_id <> ?1 ORDER BY t1.db_version DESC LIMIT 1) AS v",
+            sql, sql ? " UNION ALL " : "", (const char *)sqlite3_column_text(list, 0));
+        // %z has already freed sql, even when the call fails
+        if (!next) { sql = NULL; rc = SQLITE_NOMEM; break; }
+        sql = next;
+    }
+    sqlite3_finalize(list);
+    if (rc != SQLITE_DONE) { sqlite3_free(sql); return rc; }
+    if (!sql) return SQLITE_OK;
+    sql = sqlite3_mprintf("SELECT COALESCE(MAX(v),0) FROM (%z)", sql);
+    if (!sql) return SQLITE_NOMEM;
+
+    sqlite3_stmt *mx = NULL;
+    rc = sqlite3_prepare_v2(db, sql, -1, &mx, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) return rc;
+    sqlite3_bind_blob(mx, 1, site_id, site_id_len, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(mx, 2, lower);
+    rc = sqlite3_step(mx);
+    if (rc == SQLITE_ROW) *out = sqlite3_column_int64(mx, 0);
+    sqlite3_finalize(mx);
+    return (rc == SQLITE_ROW) ? SQLITE_OK : (rc == SQLITE_DONE ? SQLITE_ERROR : rc);
 }
 
 static int payload_chunks_filter(sqlite3_vtab_cursor *cursor, int idxnum, const char *idxstr, int argc, sqlite3_value **argv) {
@@ -1454,7 +1510,16 @@ static int payload_chunks_filter(sqlite3_vtab_cursor *cursor, int idxnum, const 
         if (!site_id_given) { site_id = cloudsync_siteid(data); site_id_len = UUID_LEN; }
     }
 
-    if (until == 0) {
+    if (until == 0 && exclude) {
+        // Changes at or below the window's lower bound cannot widen it.
+        int64_t lower = positional ? resume_dbv - 1 : since;
+        int rc = payload_chunks_metadata_max(c->vtab->db, site_id, site_id_len, lower, &until);
+        if (rc != SQLITE_OK) {
+            if (c->vtab->base.zErrMsg) sqlite3_free(c->vtab->base.zErrMsg);
+            c->vtab->base.zErrMsg = sqlite3_mprintf("%s", rc == SQLITE_NOMEM ? sqlite3_errstr(rc) : sqlite3_errmsg(c->vtab->db));
+            return rc;
+        }
+    } else if (until == 0) {
         char *mxsql = sqlite3_mprintf(
             "SELECT COALESCE(MAX(db_version),0) FROM cloudsync_changes WHERE site_id%s?", site_op);
         if (!mxsql) return SQLITE_NOMEM;
@@ -1475,6 +1540,9 @@ static int payload_chunks_filter(sqlite3_vtab_cursor *cursor, int idxnum, const 
         }
     }
     c->watermark = until;
+    // Only the receive side (exclude_filter_site_id) gets the empty final chunk, and only
+    // when the window moves the caller forward. The send path must never upload one.
+    c->empty_final = exclude && until > 0 && (positional ? until >= resume_dbv : until > since);
 
     // Window upper bound is always `until`. The lower bound is either the legacy
     // exclusive `since` (db_version > since) or the inclusive positional cursor

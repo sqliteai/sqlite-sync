@@ -13478,6 +13478,190 @@ finalize:
     return result;
 }
 
+// Step a bound cloudsync_payload_chunks query and expect exactly one chunk: the empty
+// final chunk ending the window at expect_watermark. Copies its payload into *out.
+static bool test_expect_empty_final (sqlite3_stmt *q, int64_t expect_watermark, test_payload_chunk *out) {
+    bool ok = false;
+    if (sqlite3_step(q) != SQLITE_ROW) goto done;
+    int len = sqlite3_column_bytes(q, 0);
+    if (len != 32 || sqlite3_column_int64(q, 1) != 32) goto done;
+    if (sqlite3_column_int64(q, 2) != 0) goto done;                 // rows
+    if (sqlite3_column_int(q, 3) != 1) goto done;                   // is_final
+    if (sqlite3_column_int64(q, 4) != expect_watermark) goto done;  // watermark_db_version
+    if (sqlite3_column_int64(q, 5) != expect_watermark) goto done;  // next_db_version
+    if (sqlite3_column_int(q, 6) != 0) goto done;                   // window_capped
+    if (out) {
+        out->data = malloc(len);
+        if (!out->data) goto done;
+        memcpy(out->data, sqlite3_column_blob(q, 0), len);
+        out->len = len;
+    }
+    ok = (sqlite3_step(q) == SQLITE_DONE);
+done:
+    sqlite3_reset(q);
+    return ok;
+}
+
+// Count the chunks a bound query returns.
+static int test_count_chunks (sqlite3_stmt *q) {
+    int n = 0;
+    int rc;
+    while ((rc = sqlite3_step(q)) == SQLITE_ROW) ++n;
+    sqlite3_reset(q);
+    return (rc == SQLITE_DONE) ? n : -1;
+}
+
+// A receive window (exclude_filter_site_id) whose changes are all hidden from the
+// caller, or all its own, ends with one chunk carrying no rows, so the caller still
+// checkpoints at the watermark instead of scanning the same window on every request.
+// A window with nothing new, and the send path, still return no chunk at all.
+bool do_test_payload_chunks_empty_final (bool print_result, bool cleanup_databases) {
+    sqlite3 *db[3] = {NULL, NULL, NULL};
+    sqlite3_stmt *stmt = NULL;
+    cloudsync_context *ctx = NULL;
+    test_payload_chunk empty = {0};
+    unsigned char s0[16] = {0}, s1[16] = {0};
+    // a site that never wrote anything to db[0]
+    static const unsigned char fresh[16] = {0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0xAA,0x01};
+    const char *chunks_sql =
+        "SELECT payload, payload_size, rows, is_final, watermark_db_version, next_db_version, window_capped "
+        "FROM cloudsync_payload_chunks(?1, ?2, ?3, ?4, ?5, ?6, ?7);";
+    int64_t watermark = 0;
+    bool result = false;
+    int rc = SQLITE_OK;
+
+    time_t timestamp = time(NULL);
+    int saved_counter = test_counter++;
+
+    for (int i = 0; i < 3; ++i) {
+        db[i] = do_create_database_file(i, timestamp, saved_counter);
+        if (!db[i]) goto finalize;
+        rc = sqlite3_exec(db[i],
+            "CREATE TABLE t (id TEXT PRIMARY KEY, note TEXT DEFAULT '');"
+            "SELECT cloudsync_init('t');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+
+    // db[0] holds only changes made by site S1 (db[1]).
+    rc = sqlite3_exec(db[1], "INSERT INTO t(id, note) VALUES ('a1','n'),('b1','n');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    if (sqlite3_prepare_v2(db[1], "SELECT cloudsync_siteid();", -1, &stmt, NULL) != SQLITE_OK) goto finalize;
+    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_bytes(stmt, 0) != 16) goto finalize;
+    memcpy(s1, sqlite3_column_blob(stmt, 0), 16);
+    sqlite3_finalize(stmt); stmt = NULL;
+    if (sqlite3_prepare_v2(db[1], "SELECT payload FROM cloudsync_payload_chunks WHERE since_db_version=0 ORDER BY chunk_index;", -1, &stmt, NULL) != SQLITE_OK) goto finalize;
+    if (test_chunks_apply_all(stmt, db[0]) != SQLITE_OK) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+
+    if (sqlite3_prepare_v2(db[0], chunks_sql, -1, &stmt, NULL) != SQLITE_OK) goto finalize;
+
+    // Visible changes: ordinary chunks, none of them empty, ending at the watermark.
+    sqlite3_bind_int64(stmt, 1, 0);
+    sqlite3_bind_blob(stmt, 2, fresh, 16, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, 1);
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        if (sqlite3_column_int64(stmt, 2) <= 0) goto finalize;
+        watermark = sqlite3_column_int64(stmt, 4);
+    }
+    if (rc != SQLITE_DONE || watermark <= 0) goto finalize;
+    sqlite3_reset(stmt);
+
+    // The window holds only the caller's own changes: empty final chunk at the watermark.
+    sqlite3_bind_blob(stmt, 2, s1, 16, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 3, watermark);
+    if (!test_expect_empty_final(stmt, watermark, NULL)) goto finalize;
+
+    // Hide every row from the caller, as a row-level security rule would:
+    // cloudsync_col_value() then finds no row and the change is dropped.
+    rc = sqlite3_exec(db[0], "DROP TRIGGER cloudsync_after_delete_t; DELETE FROM t;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    sqlite3_clear_bindings(stmt);
+    sqlite3_bind_int64(stmt, 1, 0);
+    sqlite3_bind_blob(stmt, 2, fresh, 16, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, 1);
+    if (!test_expect_empty_final(stmt, watermark, &empty)) goto finalize;
+
+    // Positional resume with nothing left before the watermark: the stream still ends.
+    sqlite3_clear_bindings(stmt);
+    sqlite3_bind_blob(stmt, 2, fresh, 16, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 3, watermark);
+    sqlite3_bind_int(stmt, 4, 1);
+    sqlite3_bind_int64(stmt, 5, watermark);
+    sqlite3_bind_int64(stmt, 6, 0);
+    sqlite3_bind_int64(stmt, 7, 0);
+    if (!test_expect_empty_final(stmt, watermark, NULL)) goto finalize;
+
+    // Nothing new since the caller's checkpoint: no chunk.
+    sqlite3_clear_bindings(stmt);
+    sqlite3_bind_int64(stmt, 1, watermark);
+    sqlite3_bind_blob(stmt, 2, fresh, 16, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, 1);
+    if (test_count_chunks(stmt) != 0) goto finalize;
+
+    // Send path (no exclude_filter_site_id): never an empty chunk, even with an explicit
+    // window that holds no local change.
+    sqlite3_clear_bindings(stmt);
+    sqlite3_bind_int64(stmt, 1, 0);
+    sqlite3_bind_int64(stmt, 3, watermark);
+    if (test_count_chunks(stmt) != 0) goto finalize;
+
+    // The caller's own changes above the newest change from another site do not move
+    // the watermark: a window that reaches that change ends there, one above it is empty.
+    rc = sqlite3_exec(db[0], "INSERT INTO t(id, note) VALUES ('c0','n'),('d0','n');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    {
+        sqlite3_stmt *sid = NULL;
+        if (sqlite3_prepare_v2(db[0], "SELECT cloudsync_siteid();", -1, &sid, NULL) != SQLITE_OK) goto finalize;
+        bool ok = (sqlite3_step(sid) == SQLITE_ROW && sqlite3_column_bytes(sid, 0) == 16);
+        if (ok) memcpy(s0, sqlite3_column_blob(sid, 0), 16);
+        sqlite3_finalize(sid);
+        if (!ok) goto finalize;
+    }
+    sqlite3_clear_bindings(stmt);
+    sqlite3_bind_int64(stmt, 1, watermark - 1);
+    sqlite3_bind_blob(stmt, 2, s0, 16, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, 1);
+    if (!test_expect_empty_final(stmt, watermark, NULL)) goto finalize;
+    sqlite3_bind_int64(stmt, 1, watermark);
+    if (test_count_chunks(stmt) != 0) goto finalize;
+    sqlite3_finalize(stmt); stmt = NULL;
+
+    // Applied as the final chunk of a receive, the empty payload applies no rows and
+    // moves the receive checkpoint to the watermark.
+    ctx = cloudsync_context_create(db[2]);
+    if (!ctx || cloudsync_context_init(ctx) == NULL) goto finalize;
+    {
+        int n = -1;
+        if (cloudsync_payload_apply(ctx, empty.data, empty.len, &n, watermark, 0) != DBRES_OK) goto finalize;
+        if (n != 0) goto finalize;
+    }
+    if (test_read_check_dbversion(db[2]) != watermark) goto finalize;
+    if (!test_chunks_ids_equal(db[2], "")) goto finalize;
+
+    result = true;
+
+finalize:
+    if (!result && print_result) {
+        printf("do_test_payload_chunks_empty_final error: %s\n", db[0] ? sqlite3_errmsg(db[0]) : "no db");
+    }
+    if (stmt) sqlite3_finalize(stmt);
+    if (ctx) cloudsync_context_free(ctx);
+    if (empty.data) free(empty.data);
+    for (int i = 0; i < 3; ++i) if (db[i]) close_db(db[i]);
+    if (cleanup_databases) {
+        for (int i = 0; i < 3; ++i) {
+            char path[256], walpath[300], shmpath[300];
+            do_build_database_path(path, i, timestamp, saved_counter);
+            snprintf(walpath, sizeof(walpath), "%s-wal", path);
+            snprintf(shmpath, sizeof(shmpath), "%s-shm", path);
+            file_delete_internal(path);
+            file_delete_internal(walpath);
+            file_delete_internal(shmpath);
+        }
+    }
+    return result;
+}
+
 // A database whose cloudsync_table_settings rows survived while the *_cloudsync
 // meta tables were lost (e.g. a dump/restore that skipped them) must raise an
 // actionable error from cloudsync_changes, not a misclassified SQLITE_NOMEM
@@ -14106,6 +14290,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Payload Chunks Split db_version:", do_test_payload_chunks_split_dbversion(print_result, cleanup_databases));
     result += test_report("Payload Chunks Positional Resume:", do_test_payload_chunks_positional_resume(print_result, cleanup_databases));
     result += test_report("Payload Chunks Uninitialized:", do_test_payload_chunks_uninitialized(print_result, cleanup_databases));
+    result += test_report("Payload Chunks Empty Final:", do_test_payload_chunks_empty_final(print_result, cleanup_databases));
     result += test_report("Changes Vtab Missing Meta Tables:", do_test_changes_vtab_missing_meta_tables(print_result));
 
     // close local database
