@@ -22,6 +22,8 @@ typedef struct cloudsync_changes_vtab {
     sqlite3_vtab            base;       // base class, must be first
     sqlite3                 *db;
     cloudsync_context       *data;
+    cloudsync_table_context **oversized; // tables whose visible-pk set exceeded the cap on this connection
+    int                     noversized;
 } cloudsync_changes_vtab;
 
 typedef struct cloudsync_changes_cursor {
@@ -49,6 +51,12 @@ typedef enum {
 } changes_pkset_state_t;
 
 typedef enum {
+    pkset_build_ok = 0,
+    pkset_build_failed,
+    pkset_build_oversized
+} changes_pkset_build_t;
+
+typedef enum {
     pk_affinity_blob = 0,
     pk_affinity_text,
     pk_affinity_integer,
@@ -66,6 +74,7 @@ typedef struct {
 } changes_scan_table;
 
 struct cloudsync_changes_scan {
+    cloudsync_changes_vtab  *vtab;
     changes_scan_table      *tables;
     int                     ntables;
     int                     capacity;
@@ -80,9 +89,13 @@ struct cloudsync_changes_scan {
 
 #if CLOUDSYNC_UNITTEST
 int64_t changes_visible_set_threshold = CHANGES_VISIBLE_SET_THRESHOLD;
+int64_t changes_visible_set_max_rows = CHANGES_VISIBLE_SET_MAX_ROWS;
+int64_t changes_visible_set_builds = 0;
 #define VISIBLE_SET_THRESHOLD       changes_visible_set_threshold
+#define VISIBLE_SET_MAX_ROWS        changes_visible_set_max_rows
 #else
 #define VISIBLE_SET_THRESHOLD       CHANGES_VISIBLE_SET_THRESHOLD
+#define VISIBLE_SET_MAX_ROWS        CHANGES_VISIBLE_SET_MAX_ROWS
 #endif
 
 char *cloudsync_changes_columns[] = {"tbl", "pk", "col_name", "col_value", "col_version", "db_version", "site_id", "cl", "seq"};
@@ -336,13 +349,18 @@ static void changes_scan_table_clear (changes_scan_table *t) {
     t->affinity = NULL;
 }
 
-static bool changes_scan_build_set (changes_scan_table *t, sqlite3 *db, const char *table_name) {
+static changes_pkset_build_t changes_scan_build_set (changes_scan_table *t, sqlite3 *db, const char *table_name, sqlite3_stmt *lookup) {
     sqlite3_stmt *vm = NULL;
     char *cols = NULL;
-    bool result = false;
+    char *where = NULL;
+    changes_pkset_build_t result = pkset_build_failed;
     int capacity = 0;
 
-    // pk columns in the order the metadata pk is encoded in, as the lookup statement uses
+    #if CLOUDSYNC_UNITTEST
+    changes_visible_set_builds++;
+    #endif
+
+    // pk columns with their declared types (for affinity), in pk order
     int rc = sqlite3_prepare_v2(db, "SELECT name, type FROM pragma_table_info(?1) WHERE pk>0 ORDER BY pk;", -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
     sqlite3_bind_text(vm, 1, table_name, -1, SQLITE_STATIC);
@@ -354,12 +372,23 @@ static bool changes_scan_build_set (changes_scan_table *t, sqlite3 *db, const ch
             t->affinity = affinity;
         }
         t->affinity[t->npks++] = changes_pk_affinity((const char *)sqlite3_column_text(vm, 1));
-        cols = sqlite3_mprintf("%z%s\"%w\"", cols, cols ? "," : "", (const char *)sqlite3_column_text(vm, 0));
-        if (!cols) goto cleanup;
+        const char *name = (const char *)sqlite3_column_text(vm, 0);
+        cols = sqlite3_mprintf("%z%s\"%w\"", cols, cols ? "," : "", name);
+        where = sqlite3_mprintf("%z%s\"%w\"=?", where, where ? " AND " : "", name);
+        if (!cols || !where) goto cleanup;
     }
-    if (rc != SQLITE_DONE || t->npks == 0 || t->npks > CHANGES_SCAN_MAX_PKS) goto cleanup;
+    if (rc != SQLITE_DONE || t->npks == 0 || t->npks > CHANGES_SCAN_MAX_PKS || t->npks != table_count_pks(t->table)) goto cleanup;
     sqlite3_finalize(vm);
     vm = NULL;
+
+    // the set encodes pks in the column order above, so it must be the order the lookup binds them in
+    char *expected = sqlite3_mprintf(" WHERE %s", where);
+    if (!expected) goto cleanup;
+    const char *lookup_sql = lookup ? sqlite3_sql(lookup) : NULL;
+    const char *found = lookup_sql ? strstr(lookup_sql, expected) : NULL;
+    char next = found ? found[strlen(expected)] : 0;
+    sqlite3_free(expected);
+    if (next != ';' && next != ' ') goto cleanup;
 
     // a non-binary collation lets the lookup match a pk spelled differently from the stored one
     rc = sqlite3_prepare_v2(db, "SELECT 1 FROM pragma_index_list(?1) AS l, pragma_index_xinfo(l.name) AS x "
@@ -390,16 +419,32 @@ static bool changes_scan_build_set (changes_scan_table *t, sqlite3 *db, const ch
         int ret = 0;
         kh_put(changes_pkset, t->set, changes_pk_hash(pk, (int)pklen), &ret);
         if (pk != buffer) cloudsync_memory_free(pk);
-        if (ret < 0 || kh_size(t->set) > CHANGES_VISIBLE_SET_MAX_ROWS) goto cleanup;
+        if (ret < 0) goto cleanup;
+        if (kh_size(t->set) > (khint_t)VISIBLE_SET_MAX_ROWS) {result = pkset_build_oversized; goto cleanup;}
     }
     if (rc != SQLITE_DONE) goto cleanup;
     t->changes = sqlite3_total_changes64(db);
-    result = true;
+    result = pkset_build_ok;
 
 cleanup:
     if (vm) sqlite3_finalize(vm);
     if (cols) sqlite3_free(cols);
+    if (where) sqlite3_free(where);
     return result;
+}
+
+static bool changes_vtab_is_oversized (cloudsync_changes_vtab *vtab, cloudsync_table_context *table) {
+    for (int i = 0; i < vtab->noversized; ++i) {
+        if (vtab->oversized[i] == table) return true;
+    }
+    return false;
+}
+
+static void changes_vtab_set_oversized (cloudsync_changes_vtab *vtab, cloudsync_table_context *table) {
+    cloudsync_table_context **tables = cloudsync_memory_realloc(vtab->oversized, (uint64_t)(sizeof(cloudsync_table_context *) * (vtab->noversized + 1)));
+    if (!tables) return;
+    tables[vtab->noversized++] = table;
+    vtab->oversized = tables;
 }
 
 static changes_scan_table *changes_scan_table_get (cloudsync_changes_scan *scan, cloudsync_table_context *table) {
@@ -419,12 +464,16 @@ static changes_scan_table *changes_scan_table_get (cloudsync_changes_scan *scan,
     return t;
 }
 
-bool changes_scan_pk_hidden (cloudsync_changes_scan *scan, sqlite3 *db, cloudsync_table_context *table, const char *table_name, const void *pk, int pklen) {
+bool changes_scan_pk_hidden (cloudsync_changes_scan *scan, sqlite3 *db, cloudsync_table_context *table, const char *table_name, sqlite3_stmt *lookup, const void *pk, int pklen) {
     changes_scan_table *t = changes_scan_table_get(scan, table);
     if (!t || t->state == pkset_off) return false;
     if (t->state == pkset_none) {
         if (t->hidden < VISIBLE_SET_THRESHOLD) return false;
-        if (!changes_scan_build_set(t, db, table_name)) {
+        // a set over the cap is not built again on this connection: its scans keep the lookups
+        bool oversized = changes_vtab_is_oversized(scan->vtab, table);
+        changes_pkset_build_t built = oversized ? pkset_build_oversized : changes_scan_build_set(t, db, table_name, lookup);
+        if (built != pkset_build_ok) {
+            if (built == pkset_build_oversized && !oversized) changes_vtab_set_oversized(scan->vtab, table);
             changes_scan_table_clear(t);
             t->state = pkset_off;
             return false;
@@ -432,7 +481,10 @@ bool changes_scan_pk_hidden (cloudsync_changes_scan *scan, sqlite3 *db, cloudsyn
         t->state = pkset_built;
     }
 
-    // a write on this connection since the build may have changed what a lookup finds
+    // A completed write on this connection since the build may have changed what a lookup
+    // finds. Writes not counted yet (a statement still running) leave the set answering as of
+    // its build, as lookups made before them would: SQLite leaves undefined whether a pending
+    // read sees changes the same connection makes after it started.
     if (sqlite3_total_changes64(db) != t->changes) {
         changes_scan_table_clear(t);
         t->state = pkset_off;
@@ -526,6 +578,7 @@ int cloudsync_changesvtab_disconnect (sqlite3_vtab *vtab) {
     DEBUG_VTAB("cloudsync_changesvtab_disconnect");
     
     cloudsync_changes_vtab *p = (cloudsync_changes_vtab *)vtab;
+    if (p->oversized) cloudsync_memory_free(p->oversized);
     sqlite3_free(p);
     return SQLITE_OK;
 }
@@ -746,6 +799,7 @@ int cloudsync_changesvtab_filter (sqlite3_vtab_cursor *cursor, int idxn, const c
         cloudsync_memory_free(sql);
         return SQLITE_NOMEM;
     }
+    c->scan->vtab = c->vtab;
     
     int rc = sqlite3_prepare_v2(db, sql, -1, &c->vm, NULL);
     cloudsync_memory_free(sql);

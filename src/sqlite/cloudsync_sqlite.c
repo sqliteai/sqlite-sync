@@ -354,7 +354,7 @@ void dbsync_col_value (sqlite3_context *context, int argc, sqlite3_value **argv)
     cloudsync_changes_scan *scan = (argc > 3) ? (cloudsync_changes_scan *)sqlite3_value_pointer(argv[3], CLOUDSYNC_CHANGES_SCAN_PTR) : NULL;
     if (scan) {
         if (changes_scan_take_value(scan, table, col_name, pk, pklen, context)) return;
-        if (changes_scan_pk_hidden(scan, sqlite3_context_db_handle(context), table, table_name, pk, pklen)) {
+        if (changes_scan_pk_hidden(scan, sqlite3_context_db_handle(context), table, table_name, vm, pk, pklen)) {
             sqlite3_result_text(context, CLOUDSYNC_RLS_RESTRICTED_VALUE, -1, SQLITE_STATIC);
             return;
         }

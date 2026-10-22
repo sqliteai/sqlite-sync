@@ -32,6 +32,8 @@ extern char *OUT_OF_MEMORY_BUFFER;
 extern bool force_vtab_filter_abort;
 extern bool force_uncompressed_blob;
 extern int64_t changes_visible_set_threshold;
+extern int64_t changes_visible_set_max_rows;
+extern int64_t changes_visible_set_builds;
 extern int64_t col_value_lookup_count;
 static char test_directory[192];
 
@@ -14091,6 +14093,73 @@ finalize:
     return result;
 }
 
+// The set is skipped, with output unchanged, when it would not match the lookups: pk
+// columns now declared in another order than the one the metadata was encoded in. A set
+// over the row cap is dropped and not built again by later scans on the same connection.
+bool do_test_changes_visible_pk_fallbacks (bool print_result) {
+    sqlite3 *db = NULL;
+    bool result = false;
+    const char *step = "setup";
+    int64_t saved_threshold = changes_visible_set_threshold;
+    int64_t saved_max_rows = changes_visible_set_max_rows;
+
+    db = do_create_database();
+    if (!db) goto finalize;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE vis_order (k1 TEXT NOT NULL, k2 TEXT NOT NULL, ws INTEGER, note TEXT, PRIMARY KEY (k1, k2));"
+        "CREATE TABLE vis_cap (id TEXT PRIMARY KEY NOT NULL, ws INTEGER, note TEXT);"
+        "SELECT cloudsync_init('vis_order'); SELECT cloudsync_init('vis_cap');"
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 40) "
+        "INSERT INTO vis_order(k1, k2, ws, note) SELECT printf('a-%d', i), printf('b-%d', i), i % 2, 'note' FROM c;"
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 60) "
+        "INSERT INTO vis_cap(id, ws, note) SELECT printf('cap-%03d', i), i % 2, 'note' FROM c;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    step = "hide";
+    if (!test_vis_drop_triggers(db, "vis_order") || !test_vis_drop_triggers(db, "vis_cap")) goto finalize;
+    rc = sqlite3_exec(db,
+        "CREATE TABLE vis_order_swap (k1 TEXT NOT NULL, k2 TEXT NOT NULL, ws INTEGER, note TEXT, PRIMARY KEY (k2, k1));"
+        "INSERT INTO vis_order_swap SELECT * FROM vis_order WHERE ws = 0;"
+        "DROP TABLE vis_order; ALTER TABLE vis_order_swap RENAME TO vis_order;"
+        "DELETE FROM vis_cap WHERE ws = 1;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    uint64_t base_fp, fp;
+    int base_rows, rows;
+    int64_t base_lookups, lookups;
+    step = "baseline";
+    changes_visible_set_threshold = INT64_MAX;
+    if (!test_vis_scan(db, &base_fp, &base_rows, &base_lookups)) goto finalize;
+    if (base_rows != 100 || base_lookups != 200) goto finalize;
+
+    // vis_order (20 visible pks) keeps its lookups; vis_cap's 30 visible pks exceed a cap of 25
+    step = "fallback";
+    changes_visible_set_threshold = 1;
+    changes_visible_set_max_rows = 25;
+    int64_t builds = changes_visible_set_builds;
+    if (!test_vis_scan(db, &fp, &rows, &lookups)) goto finalize;
+    if (fp != base_fp || rows != base_rows || lookups != base_lookups) goto finalize;
+    if (changes_visible_set_builds - builds != 2) goto finalize;
+
+    step = "oversized remembered";
+    builds = changes_visible_set_builds;
+    if (!test_vis_scan(db, &fp, &rows, &lookups)) goto finalize;
+    if (fp != base_fp || rows != base_rows || lookups != base_lookups) goto finalize;
+    if (changes_visible_set_builds - builds != 1) goto finalize;
+
+    result = true;
+
+finalize:
+    if (!result && print_result) {
+        printf("do_test_changes_visible_pk_fallbacks error at %s: %s\n", step, db ? sqlite3_errmsg(db) : "no db");
+    }
+    changes_visible_set_threshold = saved_threshold;
+    changes_visible_set_max_rows = saved_max_rows;
+    if (db) close_db(db);
+    return result;
+}
+
 bool do_test_payload_idempotency (int nclients, bool print_result, bool cleanup_databases) {
     sqlite3 *db[2] = {NULL, NULL};
     bool result = false;
@@ -14688,6 +14757,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Changes Vtab Missing Meta Tables:", do_test_changes_vtab_missing_meta_tables(print_result));
     result += test_report("Changes Visible PK Set:", do_test_changes_visible_pk_set(print_result));
     result += test_report("Changes Visible PK Noncanonical:", do_test_changes_visible_pk_noncanonical(print_result));
+    result += test_report("Changes Visible PK Fallbacks:", do_test_changes_visible_pk_fallbacks(print_result));
 
     // close local database
     close_db(db);
