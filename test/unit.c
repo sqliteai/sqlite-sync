@@ -14003,6 +14003,94 @@ finalize:
     return result;
 }
 
+// Fingerprint every row cloudsync_changes returns (rows hidden by RLS are left out).
+static bool test_vis_scan (sqlite3 *db, uint64_t *fp, int *rows, int64_t *lookups) {
+    sqlite3_stmt *stmt = NULL;
+    *fp = 1469598103934665603ULL; *rows = 0;
+    int64_t start = col_value_lookup_count;
+    if (sqlite3_prepare_v2(db, "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                               "FROM cloudsync_changes;", -1, &stmt, NULL) != SQLITE_OK) return false;
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        *fp = test_fp_columns(*fp, stmt, 9);
+        (*rows)++;
+    }
+    sqlite3_finalize(stmt);
+    *lookups = col_value_lookup_count - start;
+    return (rc == SQLITE_DONE);
+}
+
+// Base-table edits after this stand for what the caller can see, not for changes.
+static bool test_vis_drop_triggers (sqlite3 *db, const char *table) {
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+    if (sqlite3_prepare_v2(db, "SELECT group_concat(format('DROP TRIGGER \"%w\";', name), '') FROM sqlite_master "
+                               "WHERE type = 'trigger' AND tbl_name = ?1;", -1, &stmt, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, table, -1, SQLITE_STATIC);
+    if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) == SQLITE_TEXT) {
+        result = (sqlite3_exec(db, (const char *)sqlite3_column_text(stmt, 0), NULL, NULL, NULL) == SQLITE_OK);
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+// A pk received from a peer may decode to a valid row while its bytes differ from the
+// encoder's (a zero with the negative-integer tag, a magnitude above INT64_MAX). Those
+// rows must be found by the lookup, not answered as hidden because the set misses them.
+bool do_test_changes_visible_pk_noncanonical (bool print_result) {
+    sqlite3 *db = NULL;
+    bool result = false;
+    const char *step = "setup";
+    int64_t saved_threshold = changes_visible_set_threshold;
+
+    db = do_create_database();
+    if (!db) goto finalize;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE \"Vis_N\" (id INTEGER PRIMARY KEY NOT NULL, ws INTEGER, note TEXT);"
+        "SELECT cloudsync_init('Vis_N', 'cls', 1);"
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 40) "
+        "INSERT INTO \"Vis_N\"(id, ws, note) SELECT i, i % 2, 'local' FROM c;"
+        // id 0 tagged as a negative integer, and -(2^63-1) stored as an unsigned 2^63+1
+        "INSERT INTO cloudsync_changes (tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES "
+        "('Vis_N',x'010800','note','peer zero',1,1,x'0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F',1,0);"
+        "INSERT INTO cloudsync_changes (tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES "
+        "('Vis_N',x'01418000000000000001','note','peer wide',1,2,x'0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F',1,0);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    step = "peer rows";
+    if (test_vis_select_int(db, "SELECT count(*) FROM \"Vis_N\" WHERE id IN (0, -9223372036854775807) AND ?1 = ?1;", 0) != 2) goto finalize;
+
+    // hide the odd workspace from the lookups
+    step = "hide";
+    if (!test_vis_drop_triggers(db, "Vis_N")) goto finalize;
+    if (sqlite3_exec(db, "DELETE FROM \"Vis_N\" WHERE ws = 1;", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+
+    // 40 local changes of the even ids and the 2 peer changes are visible
+    uint64_t base_fp, fp;
+    int base_rows, rows;
+    int64_t base_lookups, lookups;
+    step = "baseline";
+    changes_visible_set_threshold = INT64_MAX;
+    if (!test_vis_scan(db, &base_fp, &base_rows, &base_lookups)) goto finalize;
+    if (base_rows != 42 || base_lookups != 82) goto finalize;
+    step = "set";
+    changes_visible_set_threshold = 1;
+    if (!test_vis_scan(db, &fp, &rows, &lookups)) goto finalize;
+    if (fp != base_fp || rows != base_rows) goto finalize;
+    // the set is in use: a hidden pk is looked up only until the threshold
+    if (lookups != 43) goto finalize;
+
+    result = true;
+
+finalize:
+    if (!result && print_result) {
+        printf("do_test_changes_visible_pk_noncanonical error at %s: %s\n", step, db ? sqlite3_errmsg(db) : "no db");
+    }
+    changes_visible_set_threshold = saved_threshold;
+    if (db) close_db(db);
+    return result;
+}
+
 bool do_test_payload_idempotency (int nclients, bool print_result, bool cleanup_databases) {
     sqlite3 *db[2] = {NULL, NULL};
     bool result = false;
@@ -14599,6 +14687,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Payload Chunks Empty Final:", do_test_payload_chunks_empty_final(print_result, cleanup_databases));
     result += test_report("Changes Vtab Missing Meta Tables:", do_test_changes_vtab_missing_meta_tables(print_result));
     result += test_report("Changes Visible PK Set:", do_test_changes_visible_pk_set(print_result));
+    result += test_report("Changes Visible PK Noncanonical:", do_test_changes_visible_pk_noncanonical(print_result));
 
     // close local database
     close_db(db);

@@ -280,40 +280,53 @@ static uint8_t changes_pk_affinity (const char *type) {
 
 typedef struct {
     changes_scan_table  *t;
-    size_t              size;
+    const uint8_t       *pk;
+    size_t              pklen;
+    size_t              offset;     // where the value being checked starts in pk
     bool                canonical;
 } changes_pk_check;
 
 static int changes_pk_check_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
-    UNUSED_PARAMETER(dval); UNUSED_PARAMETER(pval);
+    UNUSED_PARAMETER(dval);
     changes_pk_check *check = (changes_pk_check *)xdata;
+    if (!check->canonical) return DBRES_OK;
     if (index >= check->t->npks) {check->canonical = false; return DBRES_OK;}
     uint8_t affinity = check->t->affinity[index];
+    const uint8_t *p = check->pk + check->offset;
+    size_t avail = check->pklen - check->offset;
     switch (type) {
-        case DBTYPE_INTEGER:
-            if (affinity != pk_affinity_integer && affinity != pk_affinity_blob) check->canonical = false;
-            break;
+        case DBTYPE_INTEGER: {
+            if (affinity != pk_affinity_integer && affinity != pk_affinity_blob) {check->canonical = false; break;}
+            // the decoder accepts several byte forms of one integer: only the encoder's one matches the set
+            char buffer[16];
+            size_t size = pk_encode_raw_int(buffer, ival);
+            if (size > avail || memcmp(p, buffer, size) != 0) {check->canonical = false; break;}
+            check->offset += size;
+        } break;
         case DBTYPE_TEXT:
-            if (affinity != pk_affinity_text && affinity != pk_affinity_blob) check->canonical = false;
-            break;
-        case DBTYPE_BLOB:
-            break;
+        case DBTYPE_BLOB: {
+            if (type == DBTYPE_TEXT && affinity != pk_affinity_text && affinity != pk_affinity_blob) {check->canonical = false; break;}
+            // the length must be stored in the minimal number of bytes
+            size_t size = pk_encode_raw_size(type, ival);
+            if (size == SIZE_MAX || size > avail) {check->canonical = false; break;}
+            size_t nbytes = size - 1 - (size_t)ival;
+            if (p[0] != (uint8_t)((nbytes << 3) | (size_t)type) || (const uint8_t *)pval != p + 1 + nbytes) {check->canonical = false; break;}
+            check->offset += size;
+        } break;
         default:
             check->canonical = false;
-            return DBRES_OK;
+            break;
     }
-    size_t size = pk_encode_raw_size(type, ival);
-    if (size == SIZE_MAX) check->canonical = false;
-    else check->size += size;
     return DBRES_OK;
 }
 
 // True when a base row matching this pk under the lookup's `pk = ?` comparison would
-// encode to exactly these bytes: no affinity conversion applies and the encoding is minimal.
+// encode to exactly these bytes: no affinity conversion applies and the bytes are the encoder's.
 static bool changes_pk_canonical (changes_scan_table *t, const void *pk, int pklen) {
-    changes_pk_check check = {.t = t, .size = 1, .canonical = true};
+    changes_pk_check check = {.t = t, .pk = (const uint8_t *)pk, .pklen = (size_t)pklen, .offset = 1, .canonical = true};
+    if (pklen < 1) return false;
     int count = pk_decode_prikey((char *)pk, (size_t)pklen, changes_pk_check_callback, &check);
-    return (check.canonical && count == t->npks && check.size == (size_t)pklen);
+    return (check.canonical && count == t->npks && check.offset == (size_t)pklen);
 }
 
 static void changes_scan_table_clear (changes_scan_table *t) {
