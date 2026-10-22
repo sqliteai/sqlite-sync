@@ -14160,6 +14160,133 @@ finalize:
     return result;
 }
 
+// MARK: - Change visibility -
+
+// Changes respect visibility for every change type: the sentinel of a live row (resurrected
+// row, new pk after a pk change, row of a pk-only table) and block-column values are returned
+// only when the base row can be read, like column changes. Delete sentinels have no base row
+// and are always returned. Rows of workspace 2 are parked in stash tables (sync triggers
+// dropped first), so their metadata stays while the lookups no longer find them.
+bool do_test_changes_visibility_all_types (bool print_result) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+    const char *step = "setup";
+    int64_t saved_threshold = changes_visible_set_threshold;
+
+    db = do_create_database();
+    if (!db) goto finalize;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE items (id TEXT PRIMARY KEY NOT NULL, ws INTEGER, title TEXT, body TEXT);"
+        "CREATE TABLE notes (id TEXT PRIMARY KEY NOT NULL, ws INTEGER, title TEXT);"
+        "CREATE TABLE tags (ws INTEGER NOT NULL, tag TEXT NOT NULL, PRIMARY KEY (ws, tag));"
+        "SELECT cloudsync_init('items'); SELECT cloudsync_set_column('items', 'body', 'algo', 'block');"
+        "SELECT cloudsync_init('notes'); SELECT cloudsync_init('tags');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // the same history for workspace 1 (visible) and workspace 2 (hidden)
+    for (int ws = 1; ws <= 2; ++ws) {
+        const char *p = (ws == 1) ? "mine" : "other";
+        char *sql = sqlite3_mprintf(
+            "INSERT INTO items VALUES ('%s_live', %d, 'title', 'line1' || char(10) || 'line2');"
+            "UPDATE items SET body = 'line1' || char(10) || 'line2' || char(10) || 'line3' WHERE id = '%s_live';"
+            "INSERT INTO items VALUES ('%s_del', %d, 'title', 'body'); DELETE FROM items WHERE id = '%s_del';"
+            "INSERT INTO items VALUES ('%s_res', %d, 'v1', 'x'); DELETE FROM items WHERE id = '%s_res';"
+            "INSERT INTO items VALUES ('%s_res', %d, 'v2', 'res1' || char(10) || 'res2');"
+            "INSERT INTO notes VALUES ('%s_old', %d, 'title'); UPDATE notes SET id = '%s_new' WHERE id = '%s_old';"
+            "INSERT INTO tags VALUES (%d, '%s_tag'), (%d, '%s_tag_deleted'); DELETE FROM tags WHERE tag = '%s_tag_deleted';"
+            "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < %d) "
+            "INSERT INTO tags SELECT %d, printf('%s_bulk_%%d', i) FROM c;",
+            p, ws, p, p, ws, p, p, ws, p, p, ws, p, ws, p, p, ws, p, ws, p, p, (ws == 1) ? 5 : 50, ws, p);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+    rc = sqlite3_exec(db, "CREATE TEMP TABLE ref AS SELECT * FROM cloudsync_changes;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // from here on base-table edits stand for what the caller can see, not for changes
+    step = "hide";
+    if (sqlite3_prepare_v2(db, "SELECT group_concat(format('DROP TRIGGER \"%w\";', name), '') FROM sqlite_master "
+                               "WHERE type = 'trigger' AND tbl_name IN ('items', 'notes', 'tags');", -1, &stmt, NULL) != SQLITE_OK) goto finalize;
+    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_type(stmt, 0) != SQLITE_TEXT) goto finalize;
+    rc = sqlite3_exec(db, (const char *)sqlite3_column_text(stmt, 0), NULL, NULL, NULL);
+    sqlite3_finalize(stmt); stmt = NULL;
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db,
+        "CREATE TABLE items_stash AS SELECT * FROM items WHERE ws = 2; DELETE FROM items WHERE ws = 2;"
+        "CREATE TABLE notes_stash AS SELECT * FROM notes WHERE ws = 2; DELETE FROM notes WHERE ws = 2;"
+        "CREATE TABLE tags_stash AS SELECT * FROM tags WHERE ws = 2; DELETE FROM tags WHERE ws = 2;"
+        "CREATE TEMP TABLE expected AS SELECT * FROM ref WHERE (col_name = '" CLOUDSYNC_TOMBSTONE_VALUE "' AND cl % 2 = 0) "
+        "OR (tbl = 'items' AND pk IN (SELECT cloudsync_pk_encode(id) FROM items)) "
+        "OR (tbl = 'notes' AND pk IN (SELECT cloudsync_pk_encode(id) FROM notes)) "
+        "OR (tbl = 'tags' AND pk IN (SELECT cloudsync_pk_encode(ws, tag) FROM tags));", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    if (do_select_int(db, "SELECT count(*) FROM ref") <= do_select_int(db, "SELECT count(*) FROM expected")) goto finalize;
+
+    // per-row lookups, then the visible-pk set built after the first hidden row
+    const int64_t thresholds[] = {INT64_MAX, 1};
+    int64_t lookups[2] = {0, 0};
+    for (int h = 0; h < 2; ++h) {
+        changes_visible_set_threshold = thresholds[h];
+        int64_t before = col_value_lookup_count;
+        step = "changes";
+        rc = sqlite3_exec(db, "DROP TABLE IF EXISTS got; CREATE TEMP TABLE got AS SELECT * FROM cloudsync_changes;", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto finalize;
+        lookups[h] = col_value_lookup_count - before;
+
+        step = "same rows and bytes as the visible reference";
+        if (do_select_int(db, "SELECT count(*) FROM got") != do_select_int(db, "SELECT count(*) FROM expected")) goto finalize;
+        if (do_select_int(db, "SELECT count(*) FROM (SELECT * FROM got EXCEPT SELECT * FROM expected)") != 0) goto finalize;
+        if (do_select_int(db, "SELECT count(*) FROM (SELECT * FROM expected EXCEPT SELECT * FROM got)") != 0) goto finalize;
+
+        step = "hidden rows";
+        if (do_select_int(db, "SELECT count(*) FROM got WHERE "
+                              "(tbl = 'items' AND pk IN (cloudsync_pk_encode('other_live'), cloudsync_pk_encode('other_res'))) "
+                              "OR (tbl = 'notes' AND pk = cloudsync_pk_encode('other_new')) "
+                              "OR (tbl = 'tags' AND cl % 2 = 1 AND pk IN (SELECT cloudsync_pk_encode(ws, tag) FROM tags_stash))") != 0) goto finalize;
+
+        step = "visible rows";
+        if (do_select_int(db, "SELECT count(*) FROM got WHERE tbl = 'items' AND pk = cloudsync_pk_encode('mine_res') "
+                              "AND col_name = '" CLOUDSYNC_TOMBSTONE_VALUE "' AND cl = 3") != 1) goto finalize;
+        if (do_select_int(db, "SELECT count(*) FROM got WHERE tbl = 'notes' AND pk = cloudsync_pk_encode('mine_new') "
+                              "AND col_name = '" CLOUDSYNC_TOMBSTONE_VALUE "' AND cl = 1") != 1) goto finalize;
+        if (do_select_int(db, "SELECT count(*) FROM got WHERE tbl = 'tags' AND cl = 1") != 6) goto finalize;
+        if (do_select_int(db, "SELECT count(*) FROM got WHERE tbl = 'items' AND pk = cloudsync_pk_encode('mine_live') "
+                              "AND col_name LIKE 'body' || char(31) || '%' AND col_value IS NOT NULL") < 3) goto finalize;
+
+        step = "deletes";
+        if (do_select_int(db, "SELECT count(*) FROM got WHERE col_name = '" CLOUDSYNC_TOMBSTONE_VALUE "' AND cl = 2 AND col_value IS NULL AND "
+                              "((tbl = 'items' AND pk IN (cloudsync_pk_encode('mine_del'), cloudsync_pk_encode('other_del'))) "
+                              "OR (tbl = 'notes' AND pk IN (cloudsync_pk_encode('mine_old'), cloudsync_pk_encode('other_old'))) "
+                              "OR (tbl = 'tags' AND pk IN (cloudsync_pk_encode(1, 'mine_tag_deleted'), cloudsync_pk_encode(2, 'other_tag_deleted'))))") != 6) goto finalize;
+    }
+    // with the set, the hidden rows after the first one of each table need no lookup
+    step = "lookups";
+    if (lookups[1] >= lookups[0] - 40) goto finalize;
+
+    step = "cloudsync_col_value";
+    if (do_select_int(db, "SELECT cloudsync_col_value('items', (SELECT min(col_name) FROM items_cloudsync WHERE pk = cloudsync_pk_encode('other_live') "
+                          "AND col_name LIKE 'body' || char(31) || '%'), cloudsync_pk_encode('other_live')) = '" CLOUDSYNC_RLS_RESTRICTED_VALUE "'") != 1) goto finalize;
+    if (do_select_int(db, "SELECT cloudsync_col_value('items', '" CLOUDSYNC_TOMBSTONE_VALUE "', cloudsync_pk_encode('other_res')) = '" CLOUDSYNC_RLS_RESTRICTED_VALUE "'") != 1) goto finalize;
+    if (do_select_int(db, "SELECT cloudsync_col_value('tags', '" CLOUDSYNC_TOMBSTONE_VALUE "', cloudsync_pk_encode(2, 'other_tag')) = '" CLOUDSYNC_RLS_RESTRICTED_VALUE "'") != 1) goto finalize;
+    if (do_select_int(db, "SELECT cloudsync_col_value('items', '" CLOUDSYNC_TOMBSTONE_VALUE "', cloudsync_pk_encode('mine_res')) IS NULL") != 1) goto finalize;
+    if (do_select_int(db, "SELECT b.col_value IS NOT NULL AND cloudsync_col_value('items', b.col_name, b.pk) = b.col_value FROM items_cloudsync_blocks b "
+                          "WHERE b.pk = cloudsync_pk_encode('mine_live') ORDER BY b.col_name LIMIT 1") != 1) goto finalize;
+
+    result = true;
+
+finalize:
+    if (!result && print_result) {
+        printf("do_test_changes_visibility_all_types error at %s: %s\n", step, db ? sqlite3_errmsg(db) : "no db");
+    }
+    changes_visible_set_threshold = saved_threshold;
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) close_db(db);
+    return result;
+}
+
 bool do_test_payload_idempotency (int nclients, bool print_result, bool cleanup_databases) {
     sqlite3 *db[2] = {NULL, NULL};
     bool result = false;
@@ -14758,6 +14885,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Changes Visible PK Set:", do_test_changes_visible_pk_set(print_result));
     result += test_report("Changes Visible PK Noncanonical:", do_test_changes_visible_pk_noncanonical(print_result));
     result += test_report("Changes Visible PK Fallbacks:", do_test_changes_visible_pk_fallbacks(print_result));
+    result += test_report("Changes Visibility All Types:", do_test_changes_visibility_all_types(print_result));
 
     // close local database
     close_db(db);

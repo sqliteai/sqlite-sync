@@ -3373,12 +3373,15 @@ static char * build_union_sql (void) {
             }
             uint64 ncols = SPI_processed;
 
+            // a delete sentinel (even causal length) has no base row to check; every
+            // other change is returned only when the caller can read its base row
             StringInfoData caseexpr;
             initStringInfo(&caseexpr);
             appendStringInfoString(&caseexpr,
                                    "CASE "
-                                   "WHEN t1.col_name = '" CLOUDSYNC_TOMBSTONE_VALUE "' THEN " CLOUDSYNC_NULL_VALUE_BYTEA " "
+                                   "WHEN t1.col_name = '" CLOUDSYNC_TOMBSTONE_VALUE "' AND t1.col_version % 2 = 0 THEN " CLOUDSYNC_NULL_VALUE_BYTEA " "
                                    "WHEN b.ctid IS NULL THEN " CLOUDSYNC_RLS_RESTRICTED_VALUE_BYTEA " "
+                                   "WHEN t1.col_name = '" CLOUDSYNC_TOMBSTONE_VALUE "' THEN " CLOUDSYNC_NULL_VALUE_BYTEA " "
                                    );
             if (has_blocks_table) {
                 appendStringInfo(&caseexpr,

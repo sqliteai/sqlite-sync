@@ -293,6 +293,20 @@ char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_na
     return (rc == DBRES_OK) ? query : NULL;
 }
 
+char *sql_build_select_row_by_pk (cloudsync_context *data, const char *table_name, const char *schema) {
+    UNUSED_PARAMETER(schema);
+    char buffer[1024];
+    char *singlequote_escaped_table_name = sql_escape_identifier(table_name, buffer, sizeof(buffer));
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_ROW_BY_PK_FMT, table_name, singlequote_escaped_table_name);
+    if (!sql) return NULL;
+
+    char *query = NULL;
+    int rc = database_select_text(data, sql, &query);
+    cloudsync_memory_free(sql);
+
+    return (rc == DBRES_OK) ? query : NULL;
+}
+
 char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, const char *table_name, const char *except_col) {
     UNUSED_PARAMETER(data);
 

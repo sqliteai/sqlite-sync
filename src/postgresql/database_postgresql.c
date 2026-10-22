@@ -401,6 +401,21 @@ char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_na
     return (rc == DBRES_OK) ? query : NULL;
 }
 
+char *sql_build_select_row_by_pk (cloudsync_context *data, const char *table_name, const char *schema) {
+    char *qualified = database_build_base_ref(schema, table_name);
+    if (!qualified) return NULL;
+
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_ROW_BY_PK_FMT, qualified);
+    cloudsync_memory_free(qualified);
+    if (!sql) return NULL;
+
+    char *query = NULL;
+    int rc = database_select_text(data, sql, &query);
+    cloudsync_memory_free(sql);
+
+    return (rc == DBRES_OK) ? query : NULL;
+}
+
 char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, const char *table_name, const char *except_col) {
     char *meta_ref = database_build_meta_ref(cloudsync_schema(data), table_name);
     if (!meta_ref) return NULL;

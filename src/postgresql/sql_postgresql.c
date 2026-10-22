@@ -347,6 +347,25 @@ const char * const SQL_BUILD_SELECT_COLS_BY_PK_FMT =
     "  || (SELECT string_agg(format('%%I=$%%s::%%s', attname, ord, coltype), ' AND ' ORDER BY ord) FROM pk)"
     "  || ';';";
 
+const char * const SQL_BUILD_SELECT_ROW_BY_PK_FMT =
+    "WITH tbl AS ("
+    "  SELECT to_regclass('%s') AS tblreg"
+    "), "
+    "pk AS ("
+    "  SELECT a.attname, k.ord, format_type(a.atttypid, a.atttypmod) AS coltype "
+    "  FROM pg_index x "
+    "  JOIN tbl t ON t.tblreg = x.indrelid "
+    "  JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
+    "  JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = k.attnum "
+    "  WHERE x.indisprimary "
+    "  ORDER BY k.ord"
+    ") "
+    "SELECT "
+    "  'SELECT 1 FROM ' || (SELECT tblreg::text FROM tbl)"
+    "  || ' WHERE '"
+    "  || (SELECT string_agg(format('%%I=$%%s::%%s', attname, ord, coltype), ' AND ' ORDER BY ord) FROM pk)"
+    "  || ';';";
+
 const char * const SQL_CLOUDSYNC_ROW_EXISTS_BY_PK =
     "SELECT EXISTS(SELECT 1 FROM %s WHERE pk = $1 LIMIT 1);";
 

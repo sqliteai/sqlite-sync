@@ -156,6 +156,7 @@ char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_na
 char *sql_build_upsert_pk_and_multi_cols (cloudsync_context *data, const char *table_name, const char **colnames, int ncolnames, const char *schema);
 char *sql_build_update_pk_and_multi_cols (cloudsync_context *data, const char *table_name, const char **colnames, int ncolnames, const char *schema);
 char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_name, const char *colname, const char *schema);
+char *sql_build_select_row_by_pk (cloudsync_context *data, const char *table_name, const char *schema);
 char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, const char *table_name, const char *except_col);
 char *sql_build_delete_cols_not_in_schema_query(const char *schema, const char *table_name, const char *meta_ref, const char *pkcol);
 char *sql_build_pk_collist_query(const char *schema, const char *table_name);
