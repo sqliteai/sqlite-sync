@@ -33,6 +33,17 @@ const char *block_extract_position_id(const char *col_name) {
     return sep + 1;
 }
 
+bool block_position_is_valid(const char *position_id) {
+    // a position comes from a peer: only well-formed base62 order keys may reach the
+    // fractional-indexing code, which indexes its digit table with every character
+    if (!position_id || position_id[0] == 0) return false;
+    for (const char *p = position_id; *p; p++) {
+        char c = *p;
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) return false;
+    }
+    return validate_order_key(position_id);
+}
+
 char *block_build_colname(const char *base_col, const char *position_id) {
     if (!base_col || !position_id) return NULL;
     size_t blen = strlen(base_col);

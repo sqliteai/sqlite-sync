@@ -258,7 +258,7 @@ void dbsync_schema (sqlite3_context *context, int argc, sqlite3_value **argv) {
     
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     const char *schema = cloudsync_schema(data);
-    (schema) ? sqlite3_result_text(context, schema, -1, NULL) : sqlite3_result_null(context);
+    (schema) ? sqlite3_result_text(context, schema, -1, SQLITE_TRANSIENT) : sqlite3_result_null(context);
 }
 
 void dbsync_table_schema (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -267,7 +267,7 @@ void dbsync_table_schema (sqlite3_context *context, int argc, sqlite3_value **ar
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     const char *table_name = (const char *)database_value_text(argv[0]);
     const char *schema = cloudsync_table_schema(data, table_name);
-    (schema) ? sqlite3_result_text(context, schema, -1, NULL) : sqlite3_result_null(context);
+    (schema) ? sqlite3_result_text(context, schema, -1, SQLITE_TRANSIENT) : sqlite3_result_null(context);
 }
 
 void dbsync_is_sync (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -441,11 +441,20 @@ void dbsync_insert (sqlite3_context *context, int argc, sqlite3_value **argv) {
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     cloudsync_reset_error(data);
     
+    if (argc < 1) {
+        sqlite3_result_error(context, "cloudsync_insert requires a table name.", -1);
+        return;
+    }
+
     // lookup table
     const char *table_name = (const char *)database_value_text(argv[0]);
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) {
         dbsync_set_error(context, "Unable to retrieve table name %s in cloudsync_insert.", table_name);
+        return;
+    }
+    if (argc - 1 != table_count_pks(table)) {
+        dbsync_set_error(context, "cloudsync_insert expects %d primary key value(s) for table %s.", table_count_pks(table), table_name);
         return;
     }
     
@@ -506,11 +515,20 @@ void dbsync_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     cloudsync_reset_error(data);
     
+    if (argc < 1) {
+        sqlite3_result_error(context, "cloudsync_delete requires a table name.", -1);
+        return;
+    }
+
     // lookup table
     const char *table_name = (const char *)database_value_text(argv[0]);
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) {
         dbsync_set_error(context, "Unable to retrieve table name %s in cloudsync_delete.", table_name);
+        return;
+    }
+    if (argc - 1 != table_count_pks(table)) {
+        dbsync_set_error(context, "cloudsync_delete expects %d primary key value(s) for table %s.", table_count_pks(table), table_name);
         return;
     }
     
@@ -641,6 +659,13 @@ void dbsync_update_final (sqlite3_context *context) {
         dbsync_update_payload_free(payload);
         return;
     }
+    // the generated trigger passes one row per primary key and column, in that order:
+    // never read past the rows actually collected
+    if (payload->count < table_count_pks(table)) {
+        dbsync_set_error(context, "cloudsync_update expects at least %d value(s) for table %s.", table_count_pks(table), table_name);
+        dbsync_update_payload_free(payload);
+        return;
+    }
 
     // compute the next database version for tracking changes
     int64_t db_version = cloudsync_dbversion_next(data, CLOUDSYNC_VALUE_NOTSET);
@@ -711,6 +736,7 @@ void dbsync_update_final (sqlite3_context *context) {
     // compare NEW and OLD values (excluding primary keys) to handle column updates
     for (int i=0; i<table_count_cols(table); i++) {
         int col_index = table_count_pks(table) + i;  // Regular columns start after primary keys
+        if (col_index >= payload->count) break;
 
         if (dbutils_value_compare(payload->old_values[col_index], payload->new_values[col_index]) != 0) {
             if (table_col_algo(table, i) == col_algo_block) {
@@ -1193,6 +1219,8 @@ static int payload_chunks_begin_fragment(cloudsync_payload_chunks_cursor *c, int
     c->value_data = (const char *)database_value_blob(col_value);
     c->value_data_len = raw_len;
     c->frag_total = header_len + raw_len;
+    // start_offset is a caller-supplied resume cursor: it must fall inside the value
+    if (start_offset < 0 || start_offset >= c->frag_total) return SQLITE_MISUSE;
     c->frag_offset = start_offset;
     int rc = payload_chunks_plan_fragment(c);
     if (rc != SQLITE_OK) return rc;
@@ -1394,7 +1422,7 @@ static int payload_chunks_advance(cloudsync_payload_chunks_cursor *c) {
 static int payload_chunks_metadata_max(sqlite3 *db, const void *site_id, int site_id_len, int64_t lower, int64_t *out) {
     *out = 0;
     sqlite3_stmt *list = NULL;
-    int rc = sqlite3_prepare_v2(db, "SELECT tbl_name FROM sqlite_master WHERE type='table' AND tbl_name LIKE '%_cloudsync';", -1, &list, NULL);
+    int rc = sqlite3_prepare_v2(db, "SELECT tbl_name FROM sqlite_master WHERE type='table' AND substr(tbl_name, -10) = '_cloudsync';", -1, &list, NULL);
     if (rc != SQLITE_OK) return rc;
 
     // One ORDER BY db_version DESC LIMIT 1 per table: it walks the db_version index back
@@ -1938,6 +1966,14 @@ int dbsync_register_function (sqlite3 *db, const char *name, void (*xfunc)(sqlit
     return dbsync_register(db, name, xfunc, NULL, NULL, nargs, pzErrMsg, ctx, ctx_free);
 }
 
+int dbsync_register_directonly_function (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_context*,int,sqlite3_value**), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
+    // functions with side effects (schema changes, file I/O, applying payloads) must never
+    // run from a view or trigger of a database whose schema could be untrusted
+    const int FLAGS_DIRECTONLY = SQLITE_UTF8 | SQLITE_DIRECTONLY;
+    DEBUG_DBFUNCTION("dbsync_register_directonly_function %s", name);
+    return dbsync_register_with_flags(db, name, xfunc, NULL, NULL, nargs, FLAGS_DIRECTONLY, pzErrMsg, ctx, ctx_free);
+}
+
 int dbsync_register_pure_function (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_context*,int,sqlite3_value**), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
     const int FLAGS_PURE = SQLITE_UTF8 | SQLITE_INNOCUOUS | SQLITE_DETERMINISTIC;
     DEBUG_DBFUNCTION("dbsync_register_pure_function %s", name);
@@ -2144,43 +2180,44 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     rc = dbsync_register_pure_function(db, "cloudsync_version", dbsync_version, 0, pzErrMsg, ctx, cloudsync_context_free);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_init", dbsync_init1, 1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_init", dbsync_init1, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_init", dbsync_init2, 2, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_init", dbsync_init2, 2, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_init", dbsync_init3, 3, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_init", dbsync_init3, 3, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = dbsync_register_function(db, "cloudsync_enable", dbsync_enable, 1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_enable", dbsync_enable, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_disable", dbsync_disable, 1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_disable", dbsync_disable, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_is_enabled", dbsync_is_enabled, 1, pzErrMsg, ctx, NULL);
+    // used in the WHEN clause of the grow-only-set triggers
+    rc = dbsync_register_trigger_function(db, "cloudsync_is_enabled", dbsync_is_enabled, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_cleanup", dbsync_cleanup, 1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_cleanup", dbsync_cleanup, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_terminate", dbsync_terminate, 0, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_terminate", dbsync_terminate, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_set", dbsync_set, 2, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_set", dbsync_set, 2, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_set_table", dbsync_set_table, 3, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_set_table", dbsync_set_table, 3, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = dbsync_register_function(db, "cloudsync_set_filter", dbsync_set_filter, 2, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_set_filter", dbsync_set_filter, 2, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = dbsync_register_function(db, "cloudsync_clear_filter", dbsync_clear_filter, 1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_clear_filter", dbsync_clear_filter, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = dbsync_register_function(db, "cloudsync_set_schema", dbsync_set_schema, 1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_set_schema", dbsync_set_schema, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
     rc = dbsync_register_function(db, "cloudsync_schema", dbsync_schema, 0, pzErrMsg, ctx, NULL);
@@ -2189,7 +2226,7 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     rc = dbsync_register_function(db, "cloudsync_table_schema", dbsync_table_schema, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = dbsync_register_function(db, "cloudsync_set_column", dbsync_set_column, 4, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_set_column", dbsync_set_column, 4, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
     rc = dbsync_register_function(db, "cloudsync_siteid", dbsync_siteid, 0, pzErrMsg, ctx, NULL);
@@ -2204,10 +2241,10 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     rc = dbsync_register_function(db, "cloudsync_db_version_next", dbsync_db_version_next, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_begin_alter", dbsync_begin_alter, 1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_begin_alter", dbsync_begin_alter, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_commit_alter", dbsync_commit_alter, 1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_commit_alter", dbsync_commit_alter, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
     rc = dbsync_register_function(db, "cloudsync_uuid", dbsync_uuid, 0, pzErrMsg, ctx, NULL);
@@ -2225,9 +2262,9 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     if (rc != SQLITE_OK) return rc;
     
     // alias
-    rc = dbsync_register_function(db, "cloudsync_payload_decode", dbsync_payload_decode, -1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_payload_decode", dbsync_payload_decode, -1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
-    rc = dbsync_register_function(db, "cloudsync_payload_apply", dbsync_payload_decode, -1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_payload_apply", dbsync_payload_decode, -1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
 
     rc = sqlite3_create_module(db, "cloudsync_payload_chunks", &cloudsync_payload_chunks_module, (void *)ctx);
@@ -2237,10 +2274,10 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     if (rc != SQLITE_OK) return rc;
 
     #ifdef CLOUDSYNC_DESKTOP_OS
-    rc = dbsync_register_function(db, "cloudsync_payload_save", dbsync_payload_save, 1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_payload_save", dbsync_payload_save, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_payload_load", dbsync_payload_load, 1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_payload_load", dbsync_payload_load, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     #endif
     
@@ -2269,7 +2306,7 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     rc = dbsync_register_function(db, "cloudsync_seq", dbsync_seq, 0, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = dbsync_register_function(db, "cloudsync_text_materialize", dbsync_text_materialize, -1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_directonly_function(db, "cloudsync_text_materialize", dbsync_text_materialize, -1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
 
     // NETWORK LAYER

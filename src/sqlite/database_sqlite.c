@@ -668,7 +668,7 @@ int database_count_notnull_without_default (cloudsync_context *data, const char 
 }
 
 int database_cleanup (cloudsync_context *data) {
-    char *sql = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'cloudsync_%' AND name NOT LIKE '%_cloudsync';";
+    char *sql = "SELECT name FROM sqlite_master WHERE type='table' AND substr(name, 1, 10) <> 'cloudsync_' AND substr(name, -10) <> '_cloudsync';";
     sqlite3 *db = (sqlite3 *)cloudsync_db(data);
     
     char **result = NULL;
@@ -742,7 +742,7 @@ int database_create_update_trigger_gos (cloudsync_context *data, const char *tab
     if (database_trigger_exists(data, trigger_name)) return SQLITE_OK;
     
     char buffer2[2048+512];
-    char *sql = sqlite3_snprintf(sizeof(buffer2), buffer2, "CREATE TRIGGER \"%w\" BEFORE UPDATE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%q') = 1 BEGIN SELECT RAISE(ABORT, 'Error: UPDATE operation is not allowed on table %w.'); END", trigger_name, table_name, table_name, table_name);
+    char *sql = sqlite3_snprintf(sizeof(buffer2), buffer2, "CREATE TRIGGER \"%w\" BEFORE UPDATE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%q') = 1 BEGIN SELECT RAISE(ABORT, 'Error: UPDATE operation is not allowed on table %q.'); END", trigger_name, table_name, table_name, table_name);
     
     int rc = database_exec(data, sql);
     DEBUG_SQL("\n%s", sql);
@@ -820,7 +820,7 @@ int database_create_delete_trigger_gos (cloudsync_context *data, const char *tab
     if (database_trigger_exists(data, trigger_name)) return SQLITE_OK;
     
     char buffer2[2048+512];
-    char *sql = sqlite3_snprintf(sizeof(buffer2), buffer2, "CREATE TRIGGER \"%w\" BEFORE DELETE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%q') = 1 BEGIN SELECT RAISE(ABORT, 'Error: DELETE operation is not allowed on table %w.'); END", trigger_name, table_name, table_name, table_name);
+    char *sql = sqlite3_snprintf(sizeof(buffer2), buffer2, "CREATE TRIGGER \"%w\" BEFORE DELETE ON \"%w\" FOR EACH ROW WHEN cloudsync_is_enabled('%q') = 1 BEGIN SELECT RAISE(ABORT, 'Error: DELETE operation is not allowed on table %q.'); END", trigger_name, table_name, table_name, table_name);
         
     int rc = database_exec(data, sql);
     DEBUG_SQL("\n%s", sql);

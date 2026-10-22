@@ -75,7 +75,7 @@ const char * const SQL_DBVERSION_BUILD_QUERY =
     "SELECT format('%w', name) as tbl_name "
     "FROM sqlite_master "
     "WHERE type='table' "
-    "AND name LIKE '%_cloudsync'"
+    "AND substr(name, -10) = '_cloudsync'"
     "), "
     "query_parts AS ("
     "SELECT 'SELECT max(db_version) as version FROM \"' || tbl_name || '\"' as part FROM table_names"
@@ -299,7 +299,7 @@ const char * const SQL_PAYLOAD_FRAGMENTS_UPSERT =
 
 const char * const SQL_PAYLOAD_FRAGMENTS_COUNT =
     "SELECT COUNT(*), MIN(part_count), MAX(part_count), MIN(total_size), MAX(total_size), "
-    "MIN(checksum), MAX(checksum), MIN(part_index), MAX(part_index) "
+    "MIN(checksum), MAX(checksum), MIN(part_index), MAX(part_index), COALESCE(SUM(length(fragment)), 0) "
     "FROM cloudsync_payload_fragments WHERE value_id=?;";
 
 const char * const SQL_PAYLOAD_FRAGMENTS_SELECT =
@@ -320,29 +320,30 @@ const char * const SQL_PAYLOAD_FRAGMENTS_CLEANUP_STALE =
 // MARK: Blocks (block-level LWW)
 
 const char * const SQL_BLOCKS_CREATE_TABLE =
-    "CREATE TABLE IF NOT EXISTS %s ("
+    "CREATE TABLE IF NOT EXISTS \"%w\" ("
     "pk BLOB NOT NULL, "
     "col_name TEXT NOT NULL, "
     "col_value BLOB, "
     "PRIMARY KEY (pk, col_name)) WITHOUT ROWID";
 
 const char * const SQL_BLOCKS_UPSERT =
-    "INSERT OR REPLACE INTO %s (pk, col_name, col_value) VALUES (?1, ?2, ?3)";
+    "INSERT OR REPLACE INTO \"%w\" (pk, col_name, col_value) VALUES (?1, ?2, ?3)";
 
 const char * const SQL_BLOCKS_SELECT =
-    "SELECT col_value FROM %s WHERE pk = ?1 AND col_name = ?2";
+    "SELECT col_value FROM \"%w\" WHERE pk = ?1 AND col_name = ?2";
 
 const char * const SQL_BLOCKS_DELETE =
-    "DELETE FROM %s WHERE pk = ?1 AND col_name = ?2";
+    "DELETE FROM \"%w\" WHERE pk = ?1 AND col_name = ?2";
 
+// ?2/?4 are the literal prefix "<col>\x1F": LIKE would treat % and _ in a column name as wildcards
 const char * const SQL_BLOCKS_LIST_ALIVE =
-    "SELECT b.col_value FROM %s b "
-    "JOIN %s m ON b.pk = m.pk AND b.col_name = m.col_name "
-    "WHERE b.pk = ?1 AND b.col_name LIKE ?2 "
-    "AND m.pk = ?3 AND m.col_name LIKE ?4 AND m.col_version %% 2 = 1 "
+    "SELECT b.col_value FROM \"%w\" b "
+    "JOIN \"%w\" m ON b.pk = m.pk AND b.col_name = m.col_name "
+    "WHERE b.pk = ?1 AND substr(b.col_name, 1, length(?2)) = ?2 "
+    "AND m.pk = ?3 AND substr(m.col_name, 1, length(?4)) = ?4 AND m.col_version %% 2 = 1 "
     "ORDER BY b.col_name";
 
 const char * const SQL_META_SCAN_COL_FOR_MIGRATION =
-    "SELECT DISTINCT m.pk FROM %s m "
+    "SELECT DISTINCT m.pk FROM \"%w\" m "
     "WHERE m.col_name = ?1 AND m.col_version %% 2 = 1 "
-    "AND NOT EXISTS (SELECT 1 FROM %s b WHERE b.pk = m.pk AND b.col_name LIKE ?2)";
+    "AND NOT EXISTS (SELECT 1 FROM \"%w\" b WHERE b.pk = m.pk AND substr(b.col_name, 1, length(?2)) = ?2)";

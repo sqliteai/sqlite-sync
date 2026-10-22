@@ -93,7 +93,7 @@ GRANT USAGE ON SCHEMA public TO rls_role;
 GRANT USAGE ON SCHEMA auth   TO rls_role;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+    GRANT SELECT, INSERT, UPDATE, DELETE
     ON TABLES TO rls_role;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
@@ -104,6 +104,8 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 
 CREATE EXTENSION IF NOT EXISTS cloudsync;
 ```
+
+Do not add `TRUNCATE`, `REFERENCES` or `TRIGGER` to these grants: CloudSync never needs them, `TRUNCATE` ignores row-level security (any user could empty every tenant's rows), and `TRIGGER` lets a user attach code that runs as whoever writes the table next.
 
 **If the extension is already installed**, `ALTER DEFAULT PRIVILEGES` doesn't apply retroactively — backfill existing objects with a one-time broad grant, then still set defaults for future creations:
 

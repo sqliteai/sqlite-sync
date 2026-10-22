@@ -67,6 +67,9 @@ void block_init_allocator(void);
 // Check if a col_name is a block entry (contains BLOCK_SEPARATOR)
 bool block_is_block_colname(const char *col_name);
 
+// Check that a position id is a well-formed order key (base62 characters only)
+bool block_position_is_valid(const char *position_id);
+
 // Extract the base column name from a block col_name (caller must free)
 // e.g., "body\x1F0.5" -> "body"
 char *block_extract_base_colname(const char *col_name);

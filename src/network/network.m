@@ -181,7 +181,8 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
     dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
     [session finishTasksAndInvalidate];
 
-    if (!responseError && (statusCode >= 200 && statusCode < 300) && responseTicket && [responseTicket length] > 0) {
+    // a ticket is only accepted from the CloudSync API, never from an artifact host
+    if (!responseError && (statusCode >= 200 && statusCode < 300) && responseTicket && [responseTicket length] > 0 && network_endpoint_is_api(data, endpoint)) {
         network_data_update_ticket(data, [responseTicket UTF8String],
                                    responseTicketExpiresAt ? [responseTicketExpiresAt UTF8String] : NULL);
     }
@@ -218,11 +219,13 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
             }
             result.buffer = (char *)utf8String.UTF8String;
             result.xdata = (void *)CFBridgingRetain(utf8String);
+            // NSString drops a leading BOM, so the raw data length can exceed the string
+            result.blen = strlen(result.buffer);
         } else {
             result.buffer = (char *)responseData.bytes;
             result.xdata = (void *)CFBridgingRetain(responseData);
+            result.blen = [responseData length];
         }
-        result.blen = [responseData length];
         result.xfree = network_buffer_cleanup;
         
         #ifdef CLOUDSYNC_NETWORK_TRACE

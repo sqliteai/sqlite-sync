@@ -93,7 +93,7 @@ const char * const SQL_DBVERSION_BUILD_QUERY =
     "WITH table_names AS ("
     "SELECT quote_ident(schemaname) || '.' || quote_ident(tablename) as tbl_name "
     "FROM pg_tables "
-    "WHERE tablename LIKE '%_cloudsync'"
+    "WHERE tablename LIKE '%\\_cloudsync'"
     "), "
     "query_parts AS ("
     "SELECT tbl_name, "
@@ -128,7 +128,7 @@ const char * const SQL_PAYLOAD_FRAGMENTS_UPSERT =
 
 const char * const SQL_PAYLOAD_FRAGMENTS_COUNT =
     "SELECT COUNT(*), MIN(part_count), MAX(part_count), MIN(total_size), MAX(total_size), "
-    "MIN(checksum), MAX(checksum), MIN(part_index), MAX(part_index) "
+    "MIN(checksum), MAX(checksum), MIN(part_index), MAX(part_index), COALESCE(SUM(octet_length(fragment)), 0) "
     "FROM cloudsync_payload_fragments WHERE value_id=$1;";
 
 const char * const SQL_PAYLOAD_FRAGMENTS_SELECT =
@@ -485,14 +485,15 @@ const char * const SQL_BLOCKS_SELECT =
 const char * const SQL_BLOCKS_DELETE =
     "DELETE FROM %s WHERE pk = $1 AND col_name = $2";
 
+// $2/$4 are the literal prefix "<col>\x1F": LIKE would treat % and _ in a column name as wildcards
 const char * const SQL_BLOCKS_LIST_ALIVE =
     "SELECT b.col_value FROM %s b "
     "JOIN %s m ON b.pk = m.pk AND b.col_name = m.col_name "
-    "WHERE b.pk = $1 AND b.col_name LIKE $2 "
-    "AND m.pk = $3 AND m.col_name LIKE $4 AND m.col_version %% 2 = 1 "
+    "WHERE b.pk = $1 AND left(b.col_name, length($2)) = $2 "
+    "AND m.pk = $3 AND left(m.col_name, length($4)) = $4 AND m.col_version %% 2 = 1 "
     "ORDER BY b.col_name COLLATE \"C\"";
 
 const char * const SQL_META_SCAN_COL_FOR_MIGRATION =
     "SELECT DISTINCT m.pk FROM %s m "
     "WHERE m.col_name = $1 AND m.col_version %% 2 = 1 "
-    "AND NOT EXISTS (SELECT 1 FROM %s b WHERE b.pk = m.pk AND b.col_name LIKE $2)";
+    "AND NOT EXISTS (SELECT 1 FROM %s b WHERE b.pk = m.pk AND left(b.col_name, length($2)) = $2)";

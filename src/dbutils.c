@@ -57,7 +57,11 @@ int dbutils_value_compare (dbvalue_t *lvalue, dbvalue_t *rvalue) {
             if (l_text == NULL && r_text == NULL) return 0;
             if (l_text == NULL && r_text != NULL) return -1;
             if (l_text != NULL && r_text == NULL) return 1;
-            return strcmp((const char *)l_text, (const char *)r_text);
+            // compare by length, not strcmp: TEXT can contain NUL bytes
+            int l_size = database_value_bytes(lvalue);
+            int r_size = database_value_bytes(rvalue);
+            int cmp = memcmp(l_text, r_text, (l_size < r_size) ? l_size : r_size);
+            return (cmp != 0) ? cmp : (l_size - r_size);
         } break;
             
         case DBTYPE_BLOB: {

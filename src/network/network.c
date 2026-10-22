@@ -50,6 +50,12 @@ static size_t cacert_len = sizeof(cacert_pem) - 1;
 #define CLOUDSYNC_NETWORK_MINBUF_SIZE           512
 #define CLOUDSYNC_SESSION_TOKEN_MAXSIZE         4096
 
+// Upper bound on a single response body: it keeps the length representable as the
+// int that payload apply and the SQLite result APIs take.
+#ifndef CLOUDSYNC_NETWORK_MAX_RESPONSE_SIZE
+#define CLOUDSYNC_NETWORK_MAX_RESPONSE_SIZE     (1024 * 1024 * 1024)
+#endif
+
 #ifndef CLOUDSYNC_CURL_MAXCONNECTS
 #define CLOUDSYNC_CURL_MAXCONNECTS              2L
 #endif
@@ -366,7 +372,7 @@ static int network_error_code (sqlite3_context *context) {
     return network_db_interrupted(sqlite3_context_db_handle(context)) ? SQLITE_INTERRUPT : SQLITE_ERROR;
 }
 
-static bool network_endpoint_is_api(network_data *data, const char *endpoint) {
+bool network_endpoint_is_api (network_data *data, const char *endpoint) {
     if (!data || !endpoint) return false;
     return (data->check_endpoint && strcmp(endpoint, data->check_endpoint) == 0) ||
            (data->upload_endpoint && strcmp(endpoint, data->upload_endpoint) == 0) ||
@@ -454,6 +460,14 @@ static void network_curl_apply_deadlines(CURL *handle, network_data *data, bool 
     long connect = network_deadline_setting(data, CLOUDSYNC_KEY_NETWORK_CONNECT_TIMEOUT, CLOUDSYNC_CONNECT_TIMEOUT_SECONDS, CLOUDSYNC_NETWORK_MAX_SECONDS);
     if (connect > total) connect = total;
 
+    // server-supplied artifact URLs must never reach a non-HTTP scheme (file://, ...)
+#if LIBCURL_VERSION_NUM >= 0x075500
+    curl_easy_setopt(handle, CURLOPT_PROTOCOLS_STR, "http,https");
+    curl_easy_setopt(handle, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+#else
+    curl_easy_setopt(handle, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+    curl_easy_setopt(handle, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+#endif
     curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, connect);
     curl_easy_setopt(handle, CURLOPT_TIMEOUT, total);
     curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
@@ -541,9 +555,13 @@ bool network_test_curl_interrupt(const char *url, sqlite3 *db) {
 static bool network_buffer_check (network_buffer *data, size_t needed) {
     // alloc/resize buffer
     if (data->bused + needed > data->balloc) {
-        if (needed < CLOUDSYNC_NETWORK_MINBUF_SIZE) needed = CLOUDSYNC_NETWORK_MINBUF_SIZE;
-        size_t balloc = data->balloc + needed;
-        
+        size_t want = data->bused + needed;
+        if (want > CLOUDSYNC_NETWORK_MAX_RESPONSE_SIZE) return false;
+        // grow geometrically so a large body costs O(n) copying, not O(n^2)
+        size_t balloc = (data->balloc) ? data->balloc : CLOUDSYNC_NETWORK_MINBUF_SIZE;
+        while (balloc < want) balloc *= 2;
+        if (balloc > CLOUDSYNC_NETWORK_MAX_RESPONSE_SIZE) balloc = want;
+
         char *buffer = cloudsync_memory_realloc(data->buffer, balloc);
         if (!buffer) return false;
         
@@ -557,13 +575,14 @@ static bool network_buffer_check (network_buffer *data, size_t needed) {
 static size_t network_receive_callback (void *ptr, size_t size, size_t nmemb, void *xdata) {
     network_buffer *data = (network_buffer *)xdata;
     
-    size_t ptr_size = (size*nmemb);
-    if (data->zero_term) ptr_size += 1;
-    
+    // always reserve and write a terminator: an error body is later read as a C string
+    // even when the caller asked for raw bytes, and bused stays the exact body length
+    size_t ptr_size = (size*nmemb) + 1;
+
     if (network_buffer_check(data, ptr_size) == false) return CURL_WRITEFUNC_ERROR;
     memcpy(data->buffer+data->bused, ptr, size*nmemb);
     data->bused += size*nmemb;
-    if (data->zero_term) data->buffer[data->bused] = 0;
+    data->buffer[data->bused] = 0;
     
     return (size * nmemb);
 }
@@ -721,7 +740,8 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     if (rc == CURLE_OK) {
         buffer = netdata.buffer;
         blen = netdata.bused;
-        if (response_code < 400 && ticket_headers.ticket) {
+        // a ticket is only accepted from the CloudSync API, never from an artifact host
+        if (response_code < 400 && ticket_headers.ticket && network_endpoint_is_api(data, endpoint)) {
             network_data_update_ticket(data, ticket_headers.ticket, ticket_headers.expires_at);
         }
     } else if (netdata.buffer) {
@@ -1445,8 +1465,8 @@ void cloudsync_network_cleanup (sqlite3_context *context, int argc, sqlite3_valu
 
 bool cloudsync_network_set_authentication_token (sqlite3_context *context, const char *value, bool is_token) {
     network_data *data = cloudsync_network_data(context);
-    if (!data) return false;
-   
+    if (!data || !value) return false;
+
     const char *key = (is_token) ? "token" : "apikey";
     char *new_auth_token = network_authentication_token(key, value);
     if (!new_auth_token) return false;
@@ -1462,6 +1482,11 @@ void cloudsync_network_set_token (sqlite3_context *context, int argc, sqlite3_va
     DEBUG_FUNCTION("cloudsync_network_set_token");
     
     const char *value = (const char *)sqlite3_value_text(argv[0]);
+    if (!value) {
+        sqlite3_result_error(context, "token cannot be NULL", -1);
+        sqlite3_result_error_code(context, SQLITE_MISUSE);
+        return;
+    }
     bool result = cloudsync_network_set_authentication_token(context, value, true);
     (result) ? sqlite3_result_int(context, SQLITE_OK) : sqlite3_result_error_code(context, SQLITE_NOMEM);
 }
@@ -1470,6 +1495,11 @@ void cloudsync_network_set_apikey (sqlite3_context *context, int argc, sqlite3_v
     DEBUG_FUNCTION("cloudsync_network_set_apikey");
 
     const char *value = (const char *)sqlite3_value_text(argv[0]);
+    if (!value) {
+        sqlite3_result_error(context, "apikey cannot be NULL", -1);
+        sqlite3_result_error_code(context, SQLITE_MISUSE);
+        return;
+    }
     bool result = cloudsync_network_set_authentication_token(context, value, false);
     (result) ? sqlite3_result_int(context, SQLITE_OK) : sqlite3_result_error_code(context, SQLITE_NOMEM);
 }
@@ -2041,7 +2071,7 @@ static int network_send_window (sqlite3 *db, int64_t since, int64_t max_versions
     const char *build_sql =
         "SELECT group_concat('SELECT db_version FROM \"' || format('%w',tbl_name) || "
         "'\" WHERE site_id=0 AND db_version>?1', ' UNION ') "
-        "FROM sqlite_master WHERE type='table' AND tbl_name LIKE '%_cloudsync'";
+        "FROM sqlite_master WHERE type='table' AND substr(tbl_name, -10) = '_cloudsync'";
     sqlite3_stmt *vm = NULL;
     int rc = sqlite3_prepare_v2(db, build_sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) return rc;
@@ -3095,7 +3125,10 @@ void cloudsync_network_status (sqlite3_context *context, int argc, sqlite3_value
 // MARK: -
 
 int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
-    const int DEFAULT_FLAGS = SQLITE_UTF8 | SQLITE_INNOCUOUS;
+    // DIRECTONLY: these functions perform network I/O and own the network state, so a
+    // view or trigger (including one fired while a received payload is applied) must
+    // never be able to call them.
+    const int DEFAULT_FLAGS = SQLITE_UTF8 | SQLITE_DIRECTONLY;
     int rc = SQLITE_OK;
     
     rc = sqlite3_create_function(db, "cloudsync_network_init", 1, DEFAULT_FLAGS, ctx, cloudsync_network_init, NULL, NULL);

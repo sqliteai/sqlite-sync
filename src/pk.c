@@ -249,6 +249,11 @@ int pk_decode (char *buffer, size_t blen, int count, size_t *seek, int skip_deco
                 if (nbytes < 1 || nbytes > 8) return -1;
                 uint64_t u = 0;
                 if (!pk_decode_uint64(ubuf, blen, &bseek, nbytes, &u)) return -1;
+                // the encoder only emits magnitudes in [0, INT64_MAX] (INT64_MIN has its own type)
+                // and never a negative zero: anything else would alias another value and the
+                // negation below would overflow
+                if (u > (uint64_t)INT64_MAX) return -1;
+                if (raw_type == DATABASE_TYPE_NEGATIVE_INTEGER && u == 0) return -1;
                 
                 if (skip_decode) {
                     size_t slice_len = bseek - initial_bseek;

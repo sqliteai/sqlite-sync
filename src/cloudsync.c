@@ -1152,6 +1152,23 @@ bool table_ensure_capacity (cloudsync_context *data) {
     return true;
 }
 
+#ifdef CLOUDSYNC_POSTGRESQL_BUILD
+// Doubles single quotes so a name can sit inside a '...' SQL literal (PostgreSQL has no %q).
+// Caller must free with cloudsync_memory_free.
+static char *cloudsync_sql_literal_escape (const char *s) {
+    size_t len = strlen(s);
+    char *out = cloudsync_memory_alloc(len * 2 + 1);
+    if (!out) return NULL;
+    size_t j = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\'') out[j++] = '\'';
+        out[j++] = s[i];
+    }
+    out[j] = 0;
+    return out;
+}
+#endif
+
 bool table_add_to_context (cloudsync_context *data, table_algo algo, const char *table_name) {
     DEBUG_DBFUNCTION("cloudsync_context_add_table %s", table_name);
 
@@ -1215,8 +1232,18 @@ bool table_add_to_context (cloudsync_context *data, table_algo algo, const char 
 
         // Pass empty string when schema is NULL; SQL will fall back to current_schema()
         const char *schema = table->schema ? table->schema : "";
+#ifdef CLOUDSYNC_POSTGRESQL_BUILD
+        // the PostgreSQL template takes plain '%s' literals (no %q), so escape quotes here
+        char *esc_table = cloudsync_sql_literal_escape(table_name);
+        char *esc_schema = cloudsync_sql_literal_escape(schema);
+        char *sql = (esc_table && esc_schema) ? cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID,
+                                              esc_table, esc_schema, esc_table, esc_schema) : NULL;
+        if (esc_table) cloudsync_memory_free(esc_table);
+        if (esc_schema) cloudsync_memory_free(esc_schema);
+#else
         char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID,
                                               table_name, schema, table_name, schema);
+#endif
         if (!sql) goto abort_add_table;
         rc = database_exec_callback(data, sql, table_add_to_context_cb, (void *)table);
         cloudsync_memory_free(sql);
@@ -2047,14 +2074,14 @@ static int block_materialize_column_ex (cloudsync_context *data, cloudsync_table
     if (col_idx < 0) return block_materialize_fail(data, table, base_col_name, "locate", DBRES_ERROR, false);
     const char *delimiter = table->col_delimiter[col_idx] ? table->col_delimiter[col_idx] : BLOCK_DEFAULT_DELIMITER;
 
-    // Build the LIKE pattern for block col_names: "base_col\x1F%"
-    char *like_pattern = block_build_colname(base_col_name, "%");
+    // Build the literal prefix shared by the block col_names: "base_col\x1F"
+    char *like_pattern = block_build_colname(table->col_name[col_idx], "");
     if (!like_pattern) return block_materialize_fail(data, table, base_col_name, "read", DBRES_NOMEM, false);
 
     // Query alive blocks from blocks table joined with metadata
     // block_list_stmt: SELECT b.col_value FROM blocks b JOIN meta m
     //   ON b.pk = m.pk AND b.col_name = m.col_name
-    //   WHERE b.pk = ? AND b.col_name LIKE ? AND m.col_version % 2 = 1
+    //   WHERE b.pk = ? AND <b.col_name starts with ?> AND m.col_version % 2 = 1
     //   ORDER BY b.col_name
     dbvm_t *vm = table->block_list_stmt;
     int rc = databasevm_bind_blob(vm, 1, pk, pklen);
@@ -2196,7 +2223,7 @@ int table_col_index (cloudsync_table_context *table, const char *col_name) {
     return -1;
 }
 
-int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, int64_t insert_cl, const char *insert_name, dbvalue_t *insert_value, int64_t insert_col_version, int64_t insert_db_version, const char *insert_site_id, int insert_site_id_len, int64_t insert_seq, int64_t *rowid) {
+static int merge_insert_internal (cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, int64_t insert_cl, const char *insert_name, int block_col_idx, dbvalue_t *insert_value, int64_t insert_col_version, int64_t insert_db_version, const char *insert_site_id, int insert_site_id_len, int64_t insert_seq, int64_t *rowid) {
     // Handle DWS and AWS algorithms here
     // Delete-Wins Set (DWS): table_algo_crdt_dws
     // Add-Wins Set (AWS): table_algo_crdt_aws
@@ -2267,7 +2294,7 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
     // Block-level LWW: if the incoming col_name is a block entry (contains \x1F),
     // bypass the normal base-table write and instead store the value in the blocks table.
     // The base table column will be materialized from all alive blocks.
-    if (block_is_block_colname(insert_name) && table->has_block_cols) {
+    if (block_col_idx >= 0) {
         // Store or delete block value in blocks table depending on tombstone status
         if (insert_col_version % 2 == 0) {
             // Tombstone: remove from blocks table
@@ -2284,15 +2311,8 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
         if (rc != DBRES_OK) return cloudsync_set_error(data, "Unable to set winner clock for block", rc);
 
         // Materialize the full column from blocks into the base table
-        char *base_col = block_extract_base_colname(insert_name);
-        if (base_col) {
-            rc = block_materialize_column_ex(data, table, insert_pk, insert_pk_len, base_col, (local_cl % 2 == 1) && !needs_resurrect);
-            cloudsync_memory_free(base_col);
-            // the failure already names the stage, column and table
-            if (rc != DBRES_OK) return rc;
-        }
-
-        return DBRES_OK;
+        // the failure already names the stage, column and table
+        return block_materialize_column_ex(data, table, insert_pk, insert_pk_len, table->col_name[block_col_idx], (local_cl % 2 == 1) && !needs_resurrect);
     }
 
     // perform the final column insert or update if the incoming change wins
@@ -2310,6 +2330,29 @@ int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const
         if (rc != DBRES_OK) cloudsync_set_error(data, "Unable to perform merge_insert_col", rc);
     }
 
+    return rc;
+}
+
+int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, int64_t insert_cl, const char *insert_name, dbvalue_t *insert_value, int64_t insert_col_version, int64_t insert_db_version, const char *insert_site_id, int insert_site_id_len, int64_t insert_seq, int64_t *rowid) {
+    if (!block_is_block_colname(insert_name) || !table->has_block_cols) {
+        return merge_insert_internal(data, table, insert_pk, insert_pk_len, insert_cl, insert_name, -1, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
+    }
+
+    // A received block name is untrusted: it must address a column of this table with a
+    // well-formed position, and it is rebuilt from the stored column name so every
+    // spelling of that column maps to the same blocks and the same clock.
+    char *base_name = block_extract_base_colname(insert_name);
+    const char *position_id = block_extract_position_id(insert_name);
+    int col_idx = base_name ? table_col_index(table, base_name) : -1;
+    if (base_name) cloudsync_memory_free(base_name);
+    if (col_idx < 0 || !block_position_is_valid(position_id)) {
+        return cloudsync_set_error(data, "Invalid block column name in merge_insert", DBRES_MISUSE);
+    }
+    char *block_name = block_build_colname(table->col_name[col_idx], position_id);
+    if (!block_name) return cloudsync_set_error(data, "Unable to build block column name", DBRES_NOMEM);
+
+    int rc = merge_insert_internal(data, table, insert_pk, insert_pk_len, insert_cl, block_name, col_idx, insert_value, insert_col_version, insert_db_version, insert_site_id, insert_site_id_len, insert_seq, rowid);
+    cloudsync_memory_free(block_name);
     return rc;
 }
 
@@ -2332,7 +2375,7 @@ static int block_migrate_existing_rows (cloudsync_context *data, cloudsync_table
     // (or had their blocks created via INSERT) are skipped on subsequent calls.
     // We collect PKs before writing so that writes to the metadata table (Phase 2)
     // do not perturb the read cursor on the same table.
-    char *like_pattern = block_build_colname(col_name, "%");
+    char *like_pattern = block_build_colname(col_name, "");
     if (!like_pattern) return DBRES_NOMEM;
 
     char *scan_sql = cloudsync_memory_mprintf(SQL_META_SCAN_COL_FOR_MIGRATION, table->meta_ref, table->blocks_ref);
@@ -3731,6 +3774,28 @@ char *cloudsync_payload_empty_blob (cloudsync_context *data, int64_t *blob_size)
 
 static int cloudsync_payload_decode_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
     cloudsync_pk_decode_bind_context *decode_context = (cloudsync_pk_decode_bind_context*)xdata;
+
+    // a field with an unexpected type would leave the previous row's value in the context
+    // (and so in the batch key), so reject it like the v3 decoder does
+    switch (index) {
+        case CLOUDSYNC_PK_INDEX_TBL:
+            if (type != DBTYPE_TEXT) return DBRES_ERROR;
+            break;
+        case CLOUDSYNC_PK_INDEX_PK:
+        case CLOUDSYNC_PK_INDEX_SITEID:
+            if (type != DBTYPE_BLOB) return DBRES_ERROR;
+            break;
+        case CLOUDSYNC_PK_INDEX_COLNAME:
+            if (type != DBTYPE_TEXT && type != DBTYPE_NULL) return DBRES_ERROR;
+            break;
+        case CLOUDSYNC_PK_INDEX_COLVERSION:
+        case CLOUDSYNC_PK_INDEX_DBVERSION:
+        case CLOUDSYNC_PK_INDEX_CL:
+        case CLOUDSYNC_PK_INDEX_SEQ:
+            if (type != DBTYPE_INTEGER) return DBRES_ERROR;
+            break;
+    }
+
     int rc = pk_decode_bind_callback(decode_context->vm, index, type, ival, dval, pval);
     
     if (rc == DBRES_OK) {
@@ -3754,6 +3819,9 @@ static int cloudsync_payload_decode_callback (void *xdata, int index, int type, 
                 if (type == DBTYPE_TEXT) {
                     decode_context->col_name = pval;
                     decode_context->col_name_len = ival;
+                } else {
+                    decode_context->col_name = NULL;
+                    decode_context->col_name_len = 0;
                 }
                 break;
             case CLOUDSYNC_PK_INDEX_COLVERSION:
@@ -4064,6 +4132,7 @@ static int cloudsync_payload_apply_reassembled_fragment (cloudsync_context *data
     if (checksum_max) snprintf(checksum_max_copy, sizeof(checksum_max_copy), "%s", checksum_max);
     int64_t part_index_min = database_column_int(vm, 7);
     int64_t part_index_max = database_column_int(vm, 8);
+    int64_t fragments_size = database_column_int(vm, 9);
     databasevm_finalize(vm);
     vm = NULL;
     if (have <= 0 || part_count_min <= 0 || have < part_count_max) return DBRES_OK;
@@ -4073,6 +4142,10 @@ static int cloudsync_payload_apply_reassembled_fragment (cloudsync_context *data
         return cloudsync_set_error(data, "Error on cloudsync_payload_apply: inconsistent v3 fragments", DBRES_MISUSE);
     }
     total_size = total_size_max;
+    // total_size comes from the peer: check it against the stored bytes before allocating it
+    if (total_size <= 0 || total_size > INT_MAX || fragments_size != total_size) {
+        return cloudsync_set_error(data, "Error on cloudsync_payload_apply: inconsistent v3 fragment size", DBRES_MISUSE);
+    }
 
     value = cloudsync_memory_alloc((uint64_t)total_size);
     if (!value) return DBRES_NOMEM;
@@ -4780,7 +4853,7 @@ int local_block_update(cloudsync_context *data, cloudsync_table_context *table,
 #ifdef CLOUDSYNC_POSTGRESQL_BUILD
     sql = cloudsync_memory_mprintf("SELECT col_name, col_value FROM %s WHERE pk=$1 ORDER BY col_name COLLATE \"C\"", table_blocks_ref(table));
 #else
-    sql = cloudsync_memory_mprintf("SELECT col_name, col_value FROM %s WHERE pk=?1 ORDER BY col_name COLLATE BINARY", table_blocks_ref(table));
+    sql = cloudsync_memory_mprintf("SELECT col_name, col_value FROM \"%w\" WHERE pk=?1 ORDER BY col_name COLLATE BINARY", table_blocks_ref(table));
 #endif
     if (!sql) goto done;
     rc = databasevm_prepare(data, sql, &vm, 0);

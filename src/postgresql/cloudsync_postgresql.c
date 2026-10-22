@@ -1199,12 +1199,13 @@ static void payload_chunks_make_pgvalues(PayloadChunksState *st, pgvalue_t **val
     owned_texts[0] = cstring_to_text(st->tbl);
     owned_texts[1] = cstring_to_text(st->col_name);
     vals[0] = pgvalue_create(PointerGetDatum(owned_texts[0]), TEXTOID, -1, InvalidOid, false);
-    vals[1] = pgvalue_create(PointerGetDatum(st->pk), BYTEAOID, -1, InvalidOid, false);
+    // a change row can carry NULL bytea columns (e.g. a deleted block): keep the null flag
+    vals[1] = pgvalue_create(PointerGetDatum(st->pk), BYTEAOID, -1, InvalidOid, st->pk == NULL);
     vals[2] = pgvalue_create(PointerGetDatum(owned_texts[1]), TEXTOID, -1, InvalidOid, false);
-    vals[3] = pgvalue_create(PointerGetDatum(st->col_value), BYTEAOID, -1, InvalidOid, false);
+    vals[3] = pgvalue_create(PointerGetDatum(st->col_value), BYTEAOID, -1, InvalidOid, st->col_value == NULL);
     vals[4] = pgvalue_create(Int64GetDatum(st->col_version), INT8OID, -1, InvalidOid, false);
     vals[5] = pgvalue_create(Int64GetDatum(st->db_version), INT8OID, -1, InvalidOid, false);
-    vals[6] = pgvalue_create(PointerGetDatum(st->site_id), BYTEAOID, -1, InvalidOid, false);
+    vals[6] = pgvalue_create(PointerGetDatum(st->site_id), BYTEAOID, -1, InvalidOid, st->site_id == NULL);
     vals[7] = pgvalue_create(Int64GetDatum(st->cl), INT8OID, -1, InvalidOid, false);
     vals[8] = pgvalue_create(Int64GetDatum(st->seq), INT8OID, -1, InvalidOid, false);
 }
@@ -1266,7 +1267,11 @@ static bytea *payload_chunks_emit_pg_fragment(PayloadChunksState *st, cloudsync_
 // fragment carry the same part index. The plan (frag_target/frag_count) is a
 // deterministic function of the row, so a resumed fragment tiles identically.
 static void payload_chunks_pg_begin_fragment(PayloadChunksState *st, cloudsync_context *data, int64 start_offset) {
+    // a resume cursor can point at a row whose value has since become NULL
+    if (!st->col_value || !st->pk || !st->site_id) ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION), errmsg("cloudsync: payload fragment row has no value to split")));
     st->frag_total = VARSIZE_ANY_EXHDR(st->col_value);
+    // start_offset is a caller-supplied resume cursor: it must fall inside the value
+    if (start_offset < 0 || start_offset >= st->frag_total) ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("cloudsync: resume_frag_offset is out of range")));
     st->frag_offset = start_offset;
     st->frag_target = cloudsync_payload_fragment_data_size(data,
         st->tbl, -1,
@@ -2752,8 +2757,10 @@ static int cloudsync_decode_value_cb (void *xdata, int index, int type, int64_t 
             out->dval = dval;
             break;
         case DBTYPE_TEXT:
+            // PostgreSQL text cannot hold NUL: keep the text up to the first one (as pnstrdup
+            // does) and report that length, so len never exceeds the buffer
             out->pval = pnstrdup(pval, (int)ival);
-            out->len = ival;
+            out->len = (int64_t)strlen(out->pval);
             break;
         case DBTYPE_BLOB:
             if (ival > 0) {
@@ -3299,9 +3306,9 @@ static char * build_union_sql (void) {
             if (has_blocks_table) {
                 appendStringInfo(&caseexpr,
                     "WHEN t1.col_name LIKE '%%' || chr(31) || '%%' THEN "
-                    "(SELECT cloudsync_encode_value(blk.col_value) FROM %s.\"%s_cloudsync_blocks\" blk "
+                    "(SELECT cloudsync_encode_value(blk.col_value) FROM %s.%s blk "
                     "WHERE blk.pk = t1.pk AND blk.col_name = t1.col_name) ",
-                    quote_identifier(nsp), base);
+                    quote_identifier(nsp), quote_identifier(blocks_tbl_name));
             }
             appendStringInfoString(&caseexpr,
                                    "ELSE CASE t1.col_name "
@@ -3556,11 +3563,14 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
         TupleDesc desc = trigdata->tg_relation->rd_att;
         bool isnull;
         
-        char *insert_tbl = text_to_cstring((text*) DatumGetPointer(heap_getattr(newtup, 1, desc, &isnull)));
+        Datum insert_tbl_datum = heap_getattr(newtup, 1, desc, &isnull);
         if (isnull) ereport(ERROR, (errmsg("tbl cannot be NULL")));
+        char *insert_tbl = text_to_cstring((text*) DatumGetPointer(insert_tbl_datum));
         
-        bytea *insert_pk = (bytea*) DatumGetPointer(heap_getattr(newtup, 2, desc, &isnull));
+        // bytea columns are detoasted: an INSERT ... SELECT can hand over compressed or external datums
+        Datum insert_pk_datum = heap_getattr(newtup, 2, desc, &isnull);
         if (isnull) ereport(ERROR, (errmsg("pk cannot be NULL")));
+        bytea *insert_pk = DatumGetByteaPP(insert_pk_datum);
         int insert_pk_len = (int)(VARSIZE_ANY_EXHDR(insert_pk));
         
         Datum insert_name_datum = heap_getattr(newtup, 3, desc, &isnull);
@@ -3575,7 +3585,8 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
         bool is_tombstone = (strcmp(insert_name, CLOUDSYNC_TOMBSTONE_VALUE) == 0);
         
         // raw_insert_value is declared as bytea in the view (cloudsync-encoded value)
-        bytea *insert_value_encoded = (bytea*) DatumGetPointer(heap_getattr(newtup, 4, desc, &isnull));
+        Datum insert_value_datum = heap_getattr(newtup, 4, desc, &isnull);
+        bytea *insert_value_encoded = isnull ? NULL : DatumGetByteaPP(insert_value_datum);
         
         int64 insert_col_version = DatumGetInt64(heap_getattr(newtup, 5, desc, &isnull));
         if (isnull) ereport(ERROR, (errmsg("col_version cannot be NULL")));
@@ -3583,8 +3594,9 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
         int64 insert_db_version = DatumGetInt64(heap_getattr(newtup, 6, desc, &isnull));
         if (isnull) ereport(ERROR, (errmsg("db_version cannot be NULL")));
         
-        bytea *insert_site_id = (bytea*) DatumGetPointer(heap_getattr(newtup, 7, desc, &isnull));
+        Datum insert_site_id_datum = heap_getattr(newtup, 7, desc, &isnull);
         if (isnull) ereport(ERROR, (errmsg("site_id cannot be NULL")));
+        bytea *insert_site_id = DatumGetByteaPP(insert_site_id_datum);
         int insert_site_id_len = (int)(VARSIZE_ANY_EXHDR(insert_site_id));
         
         int64 insert_cl = DatumGetInt64(heap_getattr(newtup, 8, desc, &isnull));

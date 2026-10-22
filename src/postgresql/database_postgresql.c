@@ -138,6 +138,24 @@ static char *sql_escape_literal (const char *name, char *buffer, size_t bsize) {
     return sql_escape_character(name, buffer, bsize, '\'');
 }
 
+static char *sql_escape_literal_alloc (const char *name) {
+    // Heap version of sql_escape_literal sized to the input, so nothing is ever truncated
+    // Caller must free with cloudsync_memory_free
+    size_t len = strlen(name);
+    char *buffer = cloudsync_memory_alloc(len * 2 + 1);
+    if (!buffer) return NULL;
+    return sql_escape_character(name, buffer, len * 2 + 1, '\'');
+}
+
+static char *sql_build_base_ref_literal (const char *schema, const char *table_name) {
+    // The quoted base ref, escaped again so it can sit inside a '...' literal (e.g. to_regclass)
+    char *qualified = database_build_base_ref(schema, table_name);
+    if (!qualified) return NULL;
+    char *literal = sql_escape_literal_alloc(qualified);
+    cloudsync_memory_free(qualified);
+    return literal;
+}
+
 char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta) {
     // Escape the table name (doubles any embedded quotes)
     char escaped[512];
@@ -155,7 +173,7 @@ char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, boo
 
 char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_name, const char *schema) {
     UNUSED_PARAMETER(data);
-    char *qualified = database_build_base_ref(schema, table_name);
+    char *qualified = sql_build_base_ref_literal(schema, table_name);
     if (!qualified) return NULL;
 
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_NONPK_COLS_BY_PK, qualified);
@@ -171,7 +189,7 @@ char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_n
 
 char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name, const char *schema) {
     UNUSED_PARAMETER(data);
-    char *qualified = database_build_base_ref(schema, table_name);
+    char *qualified = sql_build_base_ref_literal(schema, table_name);
     if (!qualified) return NULL;
 
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_DELETE_ROW_BY_PK, qualified);
@@ -187,7 +205,7 @@ char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name, c
 
 char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_name, const char *schema) {
     UNUSED_PARAMETER(data);
-    char *qualified = database_build_base_ref(schema, table_name);
+    char *qualified = sql_build_base_ref_literal(schema, table_name);
     if (!qualified) return NULL;
 
     char *sql = cloudsync_memory_mprintf(SQL_BUILD_INSERT_PK_IGNORE, qualified);
@@ -203,11 +221,14 @@ char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_nam
 
 char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_name, const char *colname, const char *schema) {
     UNUSED_PARAMETER(data);
-    char *qualified = database_build_base_ref(schema, table_name);
+    char *qualified = sql_build_base_ref_literal(schema, table_name);
     if (!qualified) return NULL;
 
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_UPSERT_PK_AND_COL, qualified, colname, colname);
+    char *esc_colname = sql_escape_literal_alloc(colname);
+    if (!esc_colname) { cloudsync_memory_free(qualified); return NULL; }
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_UPSERT_PK_AND_COL, qualified, esc_colname, esc_colname);
     cloudsync_memory_free(qualified);
+    cloudsync_memory_free(esc_colname);
     if (!sql) return NULL;
 
     char *query = NULL;
@@ -220,12 +241,14 @@ char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_na
 char *sql_build_upsert_pk_and_multi_cols (cloudsync_context *data, const char *table_name, const char **colnames, int ncolnames, const char *schema) {
     if (ncolnames <= 0 || !colnames) return NULL;
 
-    char *qualified = database_build_base_ref(schema, table_name);
+    char *qualified = sql_build_base_ref_literal(schema, table_name);
     if (!qualified) return NULL;
 
     // Build VALUES list for column names: ('col_a',1),('col_b',2)
     // Column names are SQL literals here, so escape single quotes
-    size_t values_cap = (size_t)ncolnames * 128 + 1;
+    // each entry is ,('<escaped>'::text,N): escaping can double a name, plus fixed overhead
+    size_t values_cap = 1;
+    for (int i = 0; i < ncolnames; i++) values_cap += strlen(colnames[i]) * 2 + 32;
     char *col_values = cloudsync_memory_alloc(values_cap);
     if (!col_values) { cloudsync_memory_free(qualified); return NULL; }
 
@@ -233,8 +256,14 @@ char *sql_build_upsert_pk_and_multi_cols (cloudsync_context *data, const char *t
     for (int i = 0; i < ncolnames; i++) {
         char esc[1024];
         sql_escape_literal(colnames[i], esc, sizeof(esc));
-        vpos += snprintf(col_values + vpos, values_cap - vpos, "%s('%s'::text,%d)",
+        int n = snprintf(col_values + vpos, values_cap - vpos, "%s('%s'::text,%d)",
                          i > 0 ? "," : "", esc, i + 1);
+        if (n < 0 || (size_t)n >= values_cap - vpos) {
+            cloudsync_memory_free(col_values);
+            cloudsync_memory_free(qualified);
+            return NULL;
+        }
+        vpos += (size_t)n;
     }
 
     // Build meta-query that generates the final INSERT...ON CONFLICT SQL with proper types
@@ -284,11 +313,13 @@ char *sql_build_upsert_pk_and_multi_cols (cloudsync_context *data, const char *t
 char *sql_build_update_pk_and_multi_cols (cloudsync_context *data, const char *table_name, const char **colnames, int ncolnames, const char *schema) {
     if (ncolnames <= 0 || !colnames) return NULL;
 
-    char *qualified = database_build_base_ref(schema, table_name);
+    char *qualified = sql_build_base_ref_literal(schema, table_name);
     if (!qualified) return NULL;
 
     // Build VALUES list for column names: ('col_a',1),('col_b',2)
-    size_t values_cap = (size_t)ncolnames * 128 + 1;
+    // each entry is ,('<escaped>'::text,N): escaping can double a name, plus fixed overhead
+    size_t values_cap = 1;
+    for (int i = 0; i < ncolnames; i++) values_cap += strlen(colnames[i]) * 2 + 32;
     char *col_values = cloudsync_memory_alloc(values_cap);
     if (!col_values) { cloudsync_memory_free(qualified); return NULL; }
 
@@ -296,8 +327,14 @@ char *sql_build_update_pk_and_multi_cols (cloudsync_context *data, const char *t
     for (int i = 0; i < ncolnames; i++) {
         char esc[1024];
         sql_escape_literal(colnames[i], esc, sizeof(esc));
-        vpos += snprintf(col_values + vpos, values_cap - vpos, "%s('%s'::text,%d)",
+        int n = snprintf(col_values + vpos, values_cap - vpos, "%s('%s'::text,%d)",
                          i > 0 ? "," : "", esc, i + 1);
+        if (n < 0 || (size_t)n >= values_cap - vpos) {
+            cloudsync_memory_free(col_values);
+            cloudsync_memory_free(qualified);
+            return NULL;
+        }
+        vpos += (size_t)n;
     }
 
     // Build meta-query that generates UPDATE ... SET col=$ WHERE pk=$
@@ -342,11 +379,14 @@ char *sql_build_update_pk_and_multi_cols (cloudsync_context *data, const char *t
 
 char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_name, const char *colname, const char *schema) {
     UNUSED_PARAMETER(data);
-    char *qualified = database_build_base_ref(schema, table_name);
+    char *qualified = sql_build_base_ref_literal(schema, table_name);
     if (!qualified) return NULL;
 
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_COLS_BY_PK_FMT, qualified, colname);
+    char *esc_colname = sql_escape_literal_alloc(colname);
+    if (!esc_colname) { cloudsync_memory_free(qualified); return NULL; }
+    char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_COLS_BY_PK_FMT, qualified, esc_colname);
     cloudsync_memory_free(qualified);
+    cloudsync_memory_free(esc_colname);
     if (!sql) return NULL;
 
     char *query = NULL;
@@ -3206,23 +3246,23 @@ int database_rollback_savepoint (cloudsync_context *data, const char *savepoint_
 // Use palloc in TopMemoryContext for PostgreSQL memory management integration.
 // This provides memory tracking, debugging support, and proper cleanup on connection end.
 
+// Like sqlite3_malloc64, these return NULL on failure instead of raising an ERROR:
+// callers free what they hold on that path, while a longjmp would leak it for the
+// lifetime of the backend (everything here lives in TopMemoryContext).
 void *dbmem_alloc (uint64_t size) {
-    MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
-    void *ptr = palloc(size);
-    MemoryContextSwitchTo(old);
-    return ptr;
+    if (size > MaxAllocSize) return NULL;
+    return MemoryContextAllocExtended(TopMemoryContext, (Size)size, MCXT_ALLOC_NO_OOM);
 }
 
 void *dbmem_zeroalloc (uint64_t size) {
-    MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
-    void *ptr = palloc0(size);
-    MemoryContextSwitchTo(old);
-    return ptr;
+    if (size > MaxAllocSize) return NULL;
+    return MemoryContextAllocExtended(TopMemoryContext, (Size)size, MCXT_ALLOC_NO_OOM | MCXT_ALLOC_ZERO);
 }
 
 void *dbmem_realloc (void *ptr, uint64_t new_size) {
     // repalloc doesn't accept NULL, unlike realloc
     if (!ptr) return dbmem_alloc(new_size);
+    if (new_size > MaxAllocSize) return NULL;
     MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
     void *newptr = repalloc(ptr, new_size);
     MemoryContextSwitchTo(old);
