@@ -11,6 +11,8 @@
 #include "cloudsync_changes_sqlite.h"
 #include "../utils.h"
 #include "../dbutils.h"
+#include "../pk.h"
+#include "../khash.h"
 
 #ifndef SQLITE_CORE
 SQLITE_EXTENSION_INIT3
@@ -20,13 +22,81 @@ typedef struct cloudsync_changes_vtab {
     sqlite3_vtab            base;       // base class, must be first
     sqlite3                 *db;
     cloudsync_context       *data;
+    cloudsync_table_context **oversized; // tables whose visible-pk set exceeded the cap on this connection
+    int                     noversized;
 } cloudsync_changes_vtab;
 
 typedef struct cloudsync_changes_cursor {
     sqlite3_vtab_cursor     base;       // base class, must be first
     cloudsync_changes_vtab  *vtab;
     sqlite3_stmt            *vm;        // prepared statement
+    cloudsync_changes_scan  *scan;      // state of the current scan
 } cloudsync_changes_cursor;
+
+// A table's visible-pk set is built once its lookups in one scan have returned this many
+// hidden rows: below it the per-row lookups are cheaper than one scan of the base table.
+#define CHANGES_VISIBLE_SET_THRESHOLD   1000
+// Above this many visible rows the set is dropped and the scan keeps the per-row lookups.
+#define CHANGES_VISIBLE_SET_MAX_ROWS    8000000
+
+#define CHANGES_SCAN_PARAM              ":cloudsync_scan"
+#define CHANGES_SCAN_MAX_PKS            255
+
+KHASH_SET_INIT_INT(changes_pkset)
+
+typedef enum {
+    pkset_none = 0,
+    pkset_built,
+    pkset_off
+} changes_pkset_state_t;
+
+typedef enum {
+    pkset_build_ok = 0,
+    pkset_build_failed,
+    pkset_build_oversized
+} changes_pkset_build_t;
+
+typedef enum {
+    pk_affinity_blob = 0,
+    pk_affinity_text,
+    pk_affinity_integer,
+    pk_affinity_other
+} changes_pk_affinity_t;
+
+typedef struct {
+    cloudsync_table_context *table;
+    int64_t                 hidden;     // lookups that found no row
+    changes_pkset_state_t   state;
+    khash_t(changes_pkset)  *set;       // 32-bit hashes of the visible pks
+    uint8_t                 *affinity;  // per pk column
+    int                     npks;
+    sqlite3_int64           changes;    // sqlite3_total_changes64 when the set was built
+} changes_scan_table;
+
+struct cloudsync_changes_scan {
+    cloudsync_changes_vtab  *vtab;
+    changes_scan_table      *tables;
+    int                     ntables;
+    int                     capacity;
+
+    // last visible value, served to the second evaluation of the same row
+    cloudsync_table_context *value_table;
+    char                    *value_key; // col_name, NUL, pk
+    size_t                  value_keylen;
+    size_t                  value_keycap;
+    sqlite3_value           *value;
+};
+
+#if CLOUDSYNC_UNITTEST
+int64_t changes_visible_set_threshold = CHANGES_VISIBLE_SET_THRESHOLD;
+int64_t changes_visible_set_max_rows = CHANGES_VISIBLE_SET_MAX_ROWS;
+int64_t changes_visible_set_builds = 0;
+#define VISIBLE_SET_THRESHOLD       changes_visible_set_threshold
+#define VISIBLE_SET_MAX_ROWS        changes_visible_set_max_rows
+#else
+#define VISIBLE_SET_THRESHOLD       CHANGES_VISIBLE_SET_THRESHOLD
+#define VISIBLE_SET_MAX_ROWS        CHANGES_VISIBLE_SET_MAX_ROWS
+#endif
 
 char *cloudsync_changes_columns[] = {"tbl", "pk", "col_name", "col_value", "col_version", "db_version", "site_id", "cl", "seq"};
 #define COLNAME_FROM_INDEX(i)       cloudsync_changes_columns[i]
@@ -151,7 +221,7 @@ char *vtab_build_changes_sql (cloudsync_context *data, const char *idxs) {
     "        ''' || \"table_name_literal\" || ''' AS tbl, "
     "        t1.pk AS pk, "
     "        t1.col_name AS col_name, "
-    "        cloudsync_col_value(''' || \"table_name_literal\" || ''', t1.col_name, t1.pk) AS col_value, "
+    "        cloudsync_col_value(''' || \"table_name_literal\" || ''', t1.col_name, t1.pk, " CHANGES_SCAN_PARAM ") AS col_value, "
     "        t1.col_version AS col_version, "
     "        t1.db_version AS db_version, "
     "        site_tbl.site_id AS site_id, "
@@ -196,6 +266,291 @@ char *vtab_build_changes_sql (cloudsync_context *data, const char *idxs) {
     return (rc == DBRES_OK) ? value : NULL;
 }
 
+// MARK: - Scan state -
+
+// Under row-level security a change row is sent only when its pk lookup finds the row.
+// Once a scan has seen enough hidden rows of a table, one SELECT of that table's pks
+// (under the same RLS rule and read snapshot) replaces the lookups of the pks it doesn't
+// return. Pks it returns still go through the lookup, so a hash collision only costs one.
+
+static uint32_t changes_pk_hash (const void *pk, int pklen) {
+    const uint8_t *p = (const uint8_t *)pk;
+    uint64_t h = 1469598103934665603ULL;
+    for (int i = 0; i < pklen; ++i) {h ^= p[i]; h *= 1099511628211ULL;}
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdULL; h ^= h >> 33;
+    return (uint32_t)h;
+}
+
+static uint8_t changes_pk_affinity (const char *type) {
+    // SQLite's affinity rules for a declared column type, in their order
+    if (!type || !type[0]) return pk_affinity_blob;
+    if (sqlite3_strlike("%INT%", type, 0) == 0) return pk_affinity_integer;
+    if (sqlite3_strlike("%CHAR%", type, 0) == 0 || sqlite3_strlike("%CLOB%", type, 0) == 0 || sqlite3_strlike("%TEXT%", type, 0) == 0) return pk_affinity_text;
+    if (sqlite3_strlike("%BLOB%", type, 0) == 0) return pk_affinity_blob;
+    if (sqlite3_strlike("%REAL%", type, 0) == 0 || sqlite3_strlike("%FLOA%", type, 0) == 0 || sqlite3_strlike("%DOUB%", type, 0) == 0) return pk_affinity_other;
+    return pk_affinity_integer; // NUMERIC stores integers as integers
+}
+
+typedef struct {
+    changes_scan_table  *t;
+    const uint8_t       *pk;
+    size_t              pklen;
+    size_t              offset;     // where the value being checked starts in pk
+    bool                canonical;
+} changes_pk_check;
+
+static int changes_pk_check_callback (void *xdata, int index, int type, int64_t ival, double dval, char *pval) {
+    UNUSED_PARAMETER(dval);
+    changes_pk_check *check = (changes_pk_check *)xdata;
+    if (!check->canonical) return DBRES_OK;
+    if (index >= check->t->npks) {check->canonical = false; return DBRES_OK;}
+    uint8_t affinity = check->t->affinity[index];
+    const uint8_t *p = check->pk + check->offset;
+    size_t avail = check->pklen - check->offset;
+    switch (type) {
+        case DBTYPE_INTEGER: {
+            if (affinity != pk_affinity_integer && affinity != pk_affinity_blob) {check->canonical = false; break;}
+            // the decoder accepts several byte forms of one integer: only the encoder's one matches the set
+            char buffer[16];
+            size_t size = pk_encode_raw_int(buffer, ival);
+            if (size > avail || memcmp(p, buffer, size) != 0) {check->canonical = false; break;}
+            check->offset += size;
+        } break;
+        case DBTYPE_TEXT:
+        case DBTYPE_BLOB: {
+            if (type == DBTYPE_TEXT && affinity != pk_affinity_text && affinity != pk_affinity_blob) {check->canonical = false; break;}
+            // the length must be stored in the minimal number of bytes
+            size_t size = pk_encode_raw_size(type, ival);
+            if (size == SIZE_MAX || size > avail) {check->canonical = false; break;}
+            size_t nbytes = size - 1 - (size_t)ival;
+            if (p[0] != (uint8_t)((nbytes << 3) | (size_t)type) || (const uint8_t *)pval != p + 1 + nbytes) {check->canonical = false; break;}
+            check->offset += size;
+        } break;
+        default:
+            check->canonical = false;
+            break;
+    }
+    return DBRES_OK;
+}
+
+// True when a base row matching this pk under the lookup's `pk = ?` comparison would
+// encode to exactly these bytes: no affinity conversion applies and the bytes are the encoder's.
+static bool changes_pk_canonical (changes_scan_table *t, const void *pk, int pklen) {
+    changes_pk_check check = {.t = t, .pk = (const uint8_t *)pk, .pklen = (size_t)pklen, .offset = 1, .canonical = true};
+    if (pklen < 1) return false;
+    int count = pk_decode_prikey((char *)pk, (size_t)pklen, changes_pk_check_callback, &check);
+    return (check.canonical && count == t->npks && check.offset == (size_t)pklen);
+}
+
+static void changes_scan_table_clear (changes_scan_table *t) {
+    if (t->set) kh_destroy(changes_pkset, t->set);
+    if (t->affinity) cloudsync_memory_free(t->affinity);
+    t->set = NULL;
+    t->affinity = NULL;
+}
+
+static changes_pkset_build_t changes_scan_build_set (changes_scan_table *t, sqlite3 *db, const char *table_name, sqlite3_stmt *lookup) {
+    sqlite3_stmt *vm = NULL;
+    char *cols = NULL;
+    char *where = NULL;
+    changes_pkset_build_t result = pkset_build_failed;
+    int capacity = 0;
+
+    #if CLOUDSYNC_UNITTEST
+    changes_visible_set_builds++;
+    #endif
+
+    // pk columns with their declared types (for affinity), in pk order
+    int rc = sqlite3_prepare_v2(db, "SELECT name, type FROM pragma_table_info(?1) WHERE pk>0 ORDER BY pk;", -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    sqlite3_bind_text(vm, 1, table_name, -1, SQLITE_STATIC);
+    while ((rc = sqlite3_step(vm)) == SQLITE_ROW) {
+        if (t->npks == capacity) {
+            capacity = capacity ? capacity * 2 : 4;
+            uint8_t *affinity = cloudsync_memory_realloc(t->affinity, (uint64_t)capacity);
+            if (!affinity) goto cleanup;
+            t->affinity = affinity;
+        }
+        t->affinity[t->npks++] = changes_pk_affinity((const char *)sqlite3_column_text(vm, 1));
+        const char *name = (const char *)sqlite3_column_text(vm, 0);
+        cols = sqlite3_mprintf("%z%s\"%w\"", cols, cols ? "," : "", name);
+        where = sqlite3_mprintf("%z%s\"%w\"=?", where, where ? " AND " : "", name);
+        if (!cols || !where) goto cleanup;
+    }
+    if (rc != SQLITE_DONE || t->npks == 0 || t->npks > CHANGES_SCAN_MAX_PKS || t->npks != table_count_pks(t->table)) goto cleanup;
+    sqlite3_finalize(vm);
+    vm = NULL;
+
+    // the set encodes pks in the column order above, so it must be the order the lookup binds them in
+    char *expected = sqlite3_mprintf(" WHERE %s", where);
+    if (!expected) goto cleanup;
+    const char *lookup_sql = lookup ? sqlite3_sql(lookup) : NULL;
+    const char *found = lookup_sql ? strstr(lookup_sql, expected) : NULL;
+    char next = found ? found[strlen(expected)] : 0;
+    sqlite3_free(expected);
+    if (next != ';' && next != ' ') goto cleanup;
+
+    // a non-binary collation lets the lookup match a pk spelled differently from the stored one
+    rc = sqlite3_prepare_v2(db, "SELECT 1 FROM pragma_index_list(?1) AS l, pragma_index_xinfo(l.name) AS x "
+                                "WHERE l.origin = 'pk' AND x.key = 1 AND upper(x.coll) <> 'BINARY' LIMIT 1;", -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    sqlite3_bind_text(vm, 1, table_name, -1, SQLITE_STATIC);
+    rc = sqlite3_step(vm);
+    if (rc != SQLITE_DONE) goto cleanup;
+    sqlite3_finalize(vm);
+    vm = NULL;
+
+    char *sql = sqlite3_mprintf("SELECT %s FROM \"%w\";", cols, table_name);
+    if (!sql) goto cleanup;
+    rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    t->set = kh_init(changes_pkset);
+    if (!t->set) goto cleanup;
+    sqlite3_value *values[CHANGES_SCAN_MAX_PKS];
+    while ((rc = sqlite3_step(vm)) == SQLITE_ROW) {
+        for (int i = 0; i < t->npks; ++i) values[i] = sqlite3_column_value(vm, i);
+        char buffer[1024];
+        size_t pklen = sizeof(buffer);
+        char *pk = pk_encode_prikey((dbvalue_t **)values, t->npks, buffer, &pklen);
+        if (!pk) goto cleanup;
+        if (pk == PRIKEY_NULL_CONSTRAINT_ERROR) continue;
+        int ret = 0;
+        kh_put(changes_pkset, t->set, changes_pk_hash(pk, (int)pklen), &ret);
+        if (pk != buffer) cloudsync_memory_free(pk);
+        if (ret < 0) goto cleanup;
+        if (kh_size(t->set) > (khint_t)VISIBLE_SET_MAX_ROWS) {result = pkset_build_oversized; goto cleanup;}
+    }
+    if (rc != SQLITE_DONE) goto cleanup;
+    t->changes = sqlite3_total_changes64(db);
+    result = pkset_build_ok;
+
+cleanup:
+    if (vm) sqlite3_finalize(vm);
+    if (cols) sqlite3_free(cols);
+    if (where) sqlite3_free(where);
+    return result;
+}
+
+static bool changes_vtab_is_oversized (cloudsync_changes_vtab *vtab, cloudsync_table_context *table) {
+    for (int i = 0; i < vtab->noversized; ++i) {
+        if (vtab->oversized[i] == table) return true;
+    }
+    return false;
+}
+
+static void changes_vtab_set_oversized (cloudsync_changes_vtab *vtab, cloudsync_table_context *table) {
+    cloudsync_table_context **tables = cloudsync_memory_realloc(vtab->oversized, (uint64_t)(sizeof(cloudsync_table_context *) * (vtab->noversized + 1)));
+    if (!tables) return;
+    tables[vtab->noversized++] = table;
+    vtab->oversized = tables;
+}
+
+static changes_scan_table *changes_scan_table_get (cloudsync_changes_scan *scan, cloudsync_table_context *table) {
+    for (int i = 0; i < scan->ntables; ++i) {
+        if (scan->tables[i].table == table) return &scan->tables[i];
+    }
+    if (scan->ntables == scan->capacity) {
+        int capacity = scan->capacity ? scan->capacity * 2 : 4;
+        changes_scan_table *tables = cloudsync_memory_realloc(scan->tables, (uint64_t)(sizeof(changes_scan_table) * capacity));
+        if (!tables) return NULL;
+        scan->tables = tables;
+        scan->capacity = capacity;
+    }
+    changes_scan_table *t = &scan->tables[scan->ntables++];
+    memset(t, 0, sizeof(changes_scan_table));
+    t->table = table;
+    return t;
+}
+
+bool changes_scan_pk_hidden (cloudsync_changes_scan *scan, sqlite3 *db, cloudsync_table_context *table, const char *table_name, sqlite3_stmt *lookup, const void *pk, int pklen) {
+    changes_scan_table *t = changes_scan_table_get(scan, table);
+    if (!t || t->state == pkset_off) return false;
+    if (t->state == pkset_none) {
+        if (t->hidden < VISIBLE_SET_THRESHOLD) return false;
+        // a set over the cap is not built again on this connection: its scans keep the lookups
+        bool oversized = changes_vtab_is_oversized(scan->vtab, table);
+        changes_pkset_build_t built = oversized ? pkset_build_oversized : changes_scan_build_set(t, db, table_name, lookup);
+        if (built != pkset_build_ok) {
+            if (built == pkset_build_oversized && !oversized) changes_vtab_set_oversized(scan->vtab, table);
+            changes_scan_table_clear(t);
+            t->state = pkset_off;
+            return false;
+        }
+        t->state = pkset_built;
+    }
+
+    // A completed write on this connection since the build may have changed what a lookup
+    // finds. Writes not counted yet (a statement still running) leave the set answering as of
+    // its build, as lookups made before them would: SQLite leaves undefined whether a pending
+    // read sees changes the same connection makes after it started.
+    if (sqlite3_total_changes64(db) != t->changes) {
+        changes_scan_table_clear(t);
+        t->state = pkset_off;
+        return false;
+    }
+
+    if (!changes_pk_canonical(t, pk, pklen)) return false;
+    return (kh_get(changes_pkset, t->set, changes_pk_hash(pk, pklen)) == kh_end(t->set));
+}
+
+void changes_scan_note_hidden (cloudsync_changes_scan *scan, cloudsync_table_context *table) {
+    changes_scan_table *t = changes_scan_table_get(scan, table);
+    if (t) t->hidden++;
+}
+
+static void changes_scan_drop_value (cloudsync_changes_scan *scan) {
+    if (scan->value) sqlite3_value_free(scan->value);
+    scan->value = NULL;
+    scan->value_table = NULL;
+}
+
+// The scan's WHERE drops hidden rows by testing col_value, so SQLite evaluates
+// cloudsync_col_value once for the WHERE and again for the result column. The second
+// call for the same table, column and pk takes the value the first one read.
+bool changes_scan_take_value (cloudsync_changes_scan *scan, cloudsync_table_context *table, const char *col_name, const void *pk, int pklen, sqlite3_context *context) {
+    if (!scan->value || scan->value_table != table) return false;
+    size_t collen = strlen(col_name) + 1;
+    if (scan->value_keylen != collen + (size_t)pklen) return false;
+    if (memcmp(scan->value_key, col_name, collen) != 0) return false;
+    if (pklen > 0 && memcmp(scan->value_key + collen, pk, (size_t)pklen) != 0) return false;
+    sqlite3_result_value(context, scan->value);
+    changes_scan_drop_value(scan);
+    return true;
+}
+
+void changes_scan_keep_value (cloudsync_changes_scan *scan, cloudsync_table_context *table, const char *col_name, const void *pk, int pklen, sqlite3_value *value) {
+    changes_scan_drop_value(scan);
+    size_t collen = strlen(col_name) + 1;
+    size_t keylen = collen + (size_t)pklen;
+    if (keylen > scan->value_keycap) {
+        char *key = cloudsync_memory_realloc(scan->value_key, (uint64_t)keylen);
+        if (!key) return;
+        scan->value_key = key;
+        scan->value_keycap = keylen;
+    }
+    memcpy(scan->value_key, col_name, collen);
+    if (pklen > 0) memcpy(scan->value_key + collen, pk, (size_t)pklen);
+    scan->value_keylen = keylen;
+    scan->value = sqlite3_value_dup(value);
+    if (scan->value) scan->value_table = table;
+}
+
+static void changes_scan_reset (cloudsync_changes_scan *scan) {
+    for (int i = 0; i < scan->ntables; ++i) changes_scan_table_clear(&scan->tables[i]);
+    scan->ntables = 0;
+    changes_scan_drop_value(scan);
+}
+
+static void changes_scan_free (cloudsync_changes_scan *scan) {
+    if (!scan) return;
+    changes_scan_reset(scan);
+    if (scan->tables) cloudsync_memory_free(scan->tables);
+    if (scan->value_key) cloudsync_memory_free(scan->value_key);
+    cloudsync_memory_free(scan);
+}
+
 // MARK: -
 
 int cloudsync_changesvtab_connect (sqlite3 *db, void *aux, int argc, const char *const *argv, sqlite3_vtab **vtab, char **err) {
@@ -223,6 +578,7 @@ int cloudsync_changesvtab_disconnect (sqlite3_vtab *vtab) {
     DEBUG_VTAB("cloudsync_changesvtab_disconnect");
     
     cloudsync_changes_vtab *p = (cloudsync_changes_vtab *)vtab;
+    if (p->oversized) cloudsync_memory_free(p->oversized);
     sqlite3_free(p);
     return SQLITE_OK;
 }
@@ -248,6 +604,7 @@ int cloudsync_changesvtab_close (sqlite3_vtab_cursor *cursor) {
         sqlite3_finalize(c->vm);
         c->vm = NULL;
     }
+    changes_scan_free(c->scan);
     
     cloudsync_memory_free(cursor);
     return SQLITE_OK;
@@ -435,12 +792,28 @@ int cloudsync_changesvtab_filter (sqlite3_vtab_cursor *cursor, int idxn, const c
     if (c->vm) sqlite3_finalize(c->vm);
     c->vm = NULL;
     
+    // each xFilter starts a new scan
+    if (c->scan) changes_scan_reset(c->scan);
+    else c->scan = (cloudsync_changes_scan *)cloudsync_memory_zeroalloc(sizeof(cloudsync_changes_scan));
+    if (!c->scan) {
+        cloudsync_memory_free(sql);
+        return SQLITE_NOMEM;
+    }
+    c->scan->vtab = c->vtab;
+    
     int rc = sqlite3_prepare_v2(db, sql, -1, &c->vm, NULL);
     cloudsync_memory_free(sql);
     if (rc != SQLITE_OK) goto abort_filter;
     
-    for (int i=0; i<argc; ++i) {
-        rc = sqlite3_bind_value(c->vm, i+1, argv[i]);
+    // the constraint values fill the anonymous parameters in order
+    int scan_index = sqlite3_bind_parameter_index(c->vm, CHANGES_SCAN_PARAM);
+    for (int i=0, index=1; i<argc; ++index) {
+        if (index == scan_index) continue;
+        rc = sqlite3_bind_value(c->vm, index, argv[i++]);
+        if (rc != SQLITE_OK) goto abort_filter;
+    }
+    if (scan_index > 0) {
+        rc = sqlite3_bind_pointer(c->vm, scan_index, c->scan, CLOUDSYNC_CHANGES_SCAN_PTR, NULL);
         if (rc != SQLITE_OK) goto abort_filter;
     }
     
@@ -450,6 +823,7 @@ int cloudsync_changesvtab_filter (sqlite3_vtab_cursor *cursor, int idxn, const c
     if (rc == SQLITE_DONE) {
         sqlite3_finalize(c->vm);
         c->vm = NULL;
+        changes_scan_reset(c->scan);
     } else if (rc != SQLITE_ROW) {
         goto abort_filter;
     }
@@ -475,6 +849,7 @@ int cloudsync_changesvtab_next (sqlite3_vtab_cursor *cursor) {
     if (rc == SQLITE_DONE) {
         sqlite3_finalize(c->vm);
         c->vm = NULL;
+        changes_scan_reset(c->scan);
         rc = SQLITE_OK;
     } else if (rc == SQLITE_ROW) {
         rc = SQLITE_OK;
