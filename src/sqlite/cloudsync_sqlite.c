@@ -284,12 +284,17 @@ void dbsync_is_sync (sqlite3_context *context, int argc, sqlite3_value **argv) {
     sqlite3_result_int(context, (table) ? (table_enabled(table) == 0) : 0);
 }
 
+#if CLOUDSYNC_UNITTEST
+int64_t col_value_lookup_count = 0;
+#endif
+
 void dbsync_col_value (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // DEBUG_FUNCTION("cloudsync_col_value");
     
     // argv[0] -> table name
     // argv[1] -> column name
     // argv[2] -> encoded pk
+    // argv[3] -> scan state (only from cloudsync_changes, optional)
     
     // retrieve column name
     const char *col_name = (const char *)database_value_text(argv[1]);
@@ -344,19 +349,36 @@ void dbsync_col_value (sqlite3_context *context, int argc, sqlite3_value **argv)
         return;
     }
 
+    const void *pk = database_value_blob(argv[2]);
+    int pklen = database_value_bytes(argv[2]);
+    cloudsync_changes_scan *scan = (argc > 3) ? (cloudsync_changes_scan *)sqlite3_value_pointer(argv[3], CLOUDSYNC_CHANGES_SCAN_PTR) : NULL;
+    if (scan) {
+        if (changes_scan_take_value(scan, table, col_name, pk, pklen, context)) return;
+        if (changes_scan_pk_hidden(scan, sqlite3_context_db_handle(context), table, table_name, pk, pklen)) {
+            sqlite3_result_text(context, CLOUDSYNC_RLS_RESTRICTED_VALUE, -1, SQLITE_STATIC);
+            return;
+        }
+    }
+
     // bind primary key values
-    int rc = pk_decode_prikey((char *)database_value_blob(argv[2]), (size_t)database_value_bytes(argv[2]), pk_decode_bind_callback, (void *)vm);
+    int rc = pk_decode_prikey((char *)pk, (size_t)pklen, pk_decode_bind_callback, (void *)vm);
     if (rc < 0) goto cleanup;
 
     // execute vm
+    #if CLOUDSYNC_UNITTEST
+    col_value_lookup_count++;
+    #endif
     rc = databasevm_step(vm);
     if (rc == SQLITE_DONE) {
         rc = SQLITE_OK;
         sqlite3_result_text(context, CLOUDSYNC_RLS_RESTRICTED_VALUE, -1, SQLITE_STATIC);
+        if (scan) changes_scan_note_hidden(scan, table);
     } else if (rc == SQLITE_ROW) {
         // store value result
         rc = SQLITE_OK;
-        sqlite3_result_value(context, database_column_value(vm, 0));
+        sqlite3_value *value = database_column_value(vm, 0);
+        sqlite3_result_value(context, value);
+        if (scan) changes_scan_keep_value(scan, table, col_name, pk, pklen, value);
     }
 
 cleanup:
@@ -2258,6 +2280,9 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     if (rc != SQLITE_OK) return rc;
     
     rc = dbsync_register_function(db, "cloudsync_col_value", dbsync_col_value, 3, pzErrMsg, ctx, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbsync_register_function(db, "cloudsync_col_value", dbsync_col_value, 4, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
     rc = dbsync_register_pure_function(db, "cloudsync_pk_encode", dbsync_pk_encode, -1, pzErrMsg, ctx, NULL);
