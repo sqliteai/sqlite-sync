@@ -24,6 +24,7 @@ If you need different clients to see different subsets of data (for example, per
 - **Avoid auto-incrementing integers**: Integer primary keys cause conflicts across multiple devices.
 - **Use `cloudsync_uuid()`**: Generates UUIDv7 identifiers optimized for distributed systems.
 - **Note:** Any write operation with a NULL primary key value will be rejected with an error.
+- **Deleted rows**: A delete syncs as a delete marker that carries the row's primary key, and delete markers are delivered to every device that syncs the table, including under row-level security. If primary-key values are themselves sensitive, use opaque identifiers (UUID/ULID) or soft deletes (for example a `deleted_at` column).
 
 ```sql
 -- Recommended: Globally unique TEXT primary key
