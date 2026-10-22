@@ -80,6 +80,7 @@
 \ir 70_medium_review.sql
 \ir 71_low_review.sql
 \ir 72_rls_isolation.sql
+\ir 73_payload_chunks_null_values.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'
