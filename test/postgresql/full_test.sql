@@ -75,6 +75,7 @@
 \ir 65_payload_window_cap.sql
 \ir 66_db_version_per_transaction.sql
 \ir 67_payload_chunks_empty_final.sql
+\ir 68_hardening.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

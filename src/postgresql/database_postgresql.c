@@ -138,6 +138,40 @@ static char *sql_escape_literal (const char *name, char *buffer, size_t bsize) {
     return sql_escape_character(name, buffer, bsize, '\'');
 }
 
+// Returns a heap copy of name with single quotes doubled (no truncation, unlike the
+// fixed-buffer escapers). Caller frees with cloudsync_memory_free.
+static char *sql_literal_dup (const char *name) {
+    if (!name) name = "";
+    size_t n = strlen(name), q = 0;
+    for (size_t i = 0; i < n; i++) if (name[i] == '\'') q++;
+    char *out = cloudsync_memory_alloc(n + q + 1);
+    if (!out) return NULL;
+    size_t j = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (name[i] == '\'') out[j++] = '\'';
+        out[j++] = name[i];
+    }
+    out[j] = '\0';
+    return out;
+}
+
+// Formats a to_regclass()-style builder query, escaping every %s literal argument.
+static char *sql_build_with_literals (const char *fmt, const char *qualified, const char *col1, const char *col2) {
+    char *q = sql_literal_dup(qualified);
+    char *c1 = col1 ? sql_literal_dup(col1) : NULL;
+    char *c2 = col2 ? sql_literal_dup(col2) : NULL;
+    char *sql = NULL;
+    if (q && (!col1 || c1) && (!col2 || c2)) {
+        if (col2) sql = cloudsync_memory_mprintf(fmt, q, c1, c2);
+        else if (col1) sql = cloudsync_memory_mprintf(fmt, q, c1);
+        else sql = cloudsync_memory_mprintf(fmt, q);
+    }
+    if (q) cloudsync_memory_free(q);
+    if (c1) cloudsync_memory_free(c1);
+    if (c2) cloudsync_memory_free(c2);
+    return sql;
+}
+
 char *sql_build_drop_table (const char *table_name, char *buffer, int bsize, bool is_meta) {
     // Escape the table name (doubles any embedded quotes)
     char escaped[512];
@@ -158,7 +192,7 @@ char *sql_build_select_nonpk_by_pk (cloudsync_context *data, const char *table_n
     char *qualified = database_build_base_ref(schema, table_name);
     if (!qualified) return NULL;
 
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_NONPK_COLS_BY_PK, qualified);
+    char *sql = sql_build_with_literals(SQL_BUILD_SELECT_NONPK_COLS_BY_PK, qualified, NULL, NULL);
     cloudsync_memory_free(qualified);
     if (!sql) return NULL;
 
@@ -174,7 +208,7 @@ char *sql_build_delete_by_pk (cloudsync_context *data, const char *table_name, c
     char *qualified = database_build_base_ref(schema, table_name);
     if (!qualified) return NULL;
 
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_DELETE_ROW_BY_PK, qualified);
+    char *sql = sql_build_with_literals(SQL_BUILD_DELETE_ROW_BY_PK, qualified, NULL, NULL);
     cloudsync_memory_free(qualified);
     if (!sql) return NULL;
 
@@ -190,7 +224,7 @@ char *sql_build_insert_pk_ignore (cloudsync_context *data, const char *table_nam
     char *qualified = database_build_base_ref(schema, table_name);
     if (!qualified) return NULL;
 
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_INSERT_PK_IGNORE, qualified);
+    char *sql = sql_build_with_literals(SQL_BUILD_INSERT_PK_IGNORE, qualified, NULL, NULL);
     cloudsync_memory_free(qualified);
     if (!sql) return NULL;
 
@@ -206,7 +240,7 @@ char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_na
     char *qualified = database_build_base_ref(schema, table_name);
     if (!qualified) return NULL;
 
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_UPSERT_PK_AND_COL, qualified, colname, colname);
+    char *sql = sql_build_with_literals(SQL_BUILD_UPSERT_PK_AND_COL, qualified, colname, colname);
     cloudsync_memory_free(qualified);
     if (!sql) return NULL;
 
@@ -236,6 +270,9 @@ char *sql_build_upsert_pk_and_multi_cols (cloudsync_context *data, const char *t
         vpos += snprintf(col_values + vpos, values_cap - vpos, "%s('%s'::text,%d)",
                          i > 0 ? "," : "", esc, i + 1);
     }
+
+    char *qualified_lit = sql_literal_dup(qualified);
+    if (!qualified_lit) { cloudsync_memory_free(qualified); cloudsync_memory_free(col_values); return NULL; }
 
     // Build meta-query that generates the final INSERT...ON CONFLICT SQL with proper types
     char *meta_sql = cloudsync_memory_mprintf(
@@ -267,9 +304,10 @@ char *sql_build_upsert_pk_and_multi_cols (cloudsync_context *data, const char *t
         "  || ' ON CONFLICT (' || (SELECT string_agg(format('%%I', attname), ',' ORDER BY ord) FROM pk) || ')'"
         "  || ' DO UPDATE SET ' || (SELECT string_agg(format('%%I=EXCLUDED.%%I', colname, colname), ',' ORDER BY ord) FROM cols)"
         "  || ';';",
-        qualified, col_values
+        qualified_lit, col_values
     );
 
+    cloudsync_memory_free(qualified_lit);
     cloudsync_memory_free(qualified);
     cloudsync_memory_free(col_values);
     if (!meta_sql) return NULL;
@@ -300,6 +338,9 @@ char *sql_build_update_pk_and_multi_cols (cloudsync_context *data, const char *t
                          i > 0 ? "," : "", esc, i + 1);
     }
 
+    char *qualified_lit = sql_literal_dup(qualified);
+    if (!qualified_lit) { cloudsync_memory_free(qualified); cloudsync_memory_free(col_values); return NULL; }
+
     // Build meta-query that generates UPDATE ... SET col=$ WHERE pk=$
     char *meta_sql = cloudsync_memory_mprintf(
         "WITH tbl AS ("
@@ -326,9 +367,10 @@ char *sql_build_update_pk_and_multi_cols (cloudsync_context *data, const char *t
         "  || ' SET ' || (SELECT string_agg(format('%%I=$%%s::%%s', colname, (SELECT n FROM pk_count) + ord, coltype), ',' ORDER BY ord) FROM cols)"
         "  || ' WHERE ' || (SELECT string_agg(format('%%I=$%%s::%%s', attname, ord, coltype), ' AND ' ORDER BY ord) FROM pk)"
         "  || ';';",
-        qualified, col_values
+        qualified_lit, col_values
     );
 
+    cloudsync_memory_free(qualified_lit);
     cloudsync_memory_free(qualified);
     cloudsync_memory_free(col_values);
     if (!meta_sql) return NULL;
@@ -345,7 +387,7 @@ char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_na
     char *qualified = database_build_base_ref(schema, table_name);
     if (!qualified) return NULL;
 
-    char *sql = cloudsync_memory_mprintf(SQL_BUILD_SELECT_COLS_BY_PK_FMT, qualified, colname);
+    char *sql = sql_build_with_literals(SQL_BUILD_SELECT_COLS_BY_PK_FMT, qualified, colname, NULL);
     cloudsync_memory_free(qualified);
     if (!sql) return NULL;
 
@@ -360,7 +402,9 @@ char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, 
     char *meta_ref = database_build_meta_ref(cloudsync_schema(data), table_name);
     if (!meta_ref) return NULL;
 
-    char *result = cloudsync_memory_mprintf(SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL, meta_ref, except_col, meta_ref, meta_ref, except_col);
+    char *except_lit = sql_literal_dup(except_col);
+    char *result = except_lit ? cloudsync_memory_mprintf(SQL_CLOUDSYNC_REKEY_PK_AND_RESET_VERSION_EXCEPT_COL, meta_ref, except_lit, meta_ref, meta_ref, except_lit) : NULL;
+    if (except_lit) cloudsync_memory_free(except_lit);
     cloudsync_memory_free(meta_ref);
     return result;
 }
@@ -1374,6 +1418,17 @@ int database_create_metatable (cloudsync_context *data, const char *table_name) 
 
 // MARK: - TRIGGERS -
 
+// A name containing the dollar-quote tag would terminate the function body early and let
+// the remainder run as SQL: require exactly the two tags the template itself emits.
+static int database_exec_body (cloudsync_context *data, const char *sql) {
+    const char *tag = "$cloudsync_body$";
+    size_t tl = strlen(tag);
+    int count = 0;
+    for (const char *p = strstr(sql, tag); p; p = strstr(p + tl, tag)) count++;
+    if (count != 2) return cloudsync_set_error(data, "Invalid character sequence in table or column name", DBRES_MISUSE);
+    return database_exec(data, sql);
+}
+
 static int database_create_insert_trigger_internal (cloudsync_context *data, const char *table_name, char *trigger_when, const char *schema) {
     if (!table_name) return DBRES_MISUSE;
 
@@ -1412,18 +1467,18 @@ static int database_create_insert_trigger_internal (cloudsync_context *data, con
     }
 
     char *sql2 = cloudsync_memory_mprintf(
-        "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $$ "
+        "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $cloudsync_body$ "
         "BEGIN "
         "  IF cloudsync_is_sync('%s') THEN RETURN NEW; END IF; "
         "  PERFORM cloudsync_insert('%s', %s); "
         "  RETURN NEW; "
         "END; "
-        "$$ LANGUAGE plpgsql;",
+        "$cloudsync_body$ LANGUAGE plpgsql;",
         func_name, esc_tbl_literal, esc_tbl_literal, pk_list);
     cloudsync_memory_free(pk_list);
     if (!sql2) return DBRES_NOMEM;
 
-    rc = database_exec(data, sql2);
+    rc = database_exec_body(data, sql2);
     cloudsync_memory_free(sql2);
     if (rc != DBRES_OK) return rc;
 
@@ -1458,15 +1513,15 @@ static int database_create_update_trigger_gos_internal (cloudsync_context *data,
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
 
     char *sql = cloudsync_memory_mprintf(
-        "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $$ "
+        "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $cloudsync_body$ "
         "BEGIN "
         "  RAISE EXCEPTION 'Error: UPDATE operation is not allowed on table %s.'; "
         "END; "
-        "$$ LANGUAGE plpgsql;",
+        "$cloudsync_body$ LANGUAGE plpgsql;",
         func_name, esc_tbl_literal);
     if (!sql) return DBRES_NOMEM;
 
-    int rc = database_exec(data, sql);
+    int rc = database_exec_body(data, sql);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) return rc;
 
@@ -1507,7 +1562,7 @@ static int database_create_update_trigger_internal (cloudsync_context *data, con
     char sql[2048];
     snprintf(sql, sizeof(sql),
            "SELECT string_agg("
-           "  '(''%s'', NEW.' || quote_ident(kcu.column_name) || '::text, OLD.' || "
+           "  '(' || quote_literal('%s') || ', NEW.' || quote_ident(kcu.column_name) || '::text, OLD.' || "
            "quote_ident(kcu.column_name) || '::text)', "
            "  ', ' ORDER BY kcu.ordinal_position"
            ") "
@@ -1529,7 +1584,7 @@ static int database_create_update_trigger_internal (cloudsync_context *data, con
 
     snprintf(sql, sizeof(sql),
            "SELECT string_agg("
-           "  '(''%s'', NEW.' || quote_ident(c.column_name) || '::text, OLD.' || "
+           "  '(' || quote_literal('%s') || ', NEW.' || quote_ident(c.column_name) || '::text, OLD.' || "
            "quote_ident(c.column_name) || '::text)', "
            "  ', ' ORDER BY c.ordinal_position"
            ") "
@@ -1567,19 +1622,19 @@ static int database_create_update_trigger_internal (cloudsync_context *data, con
     if (!values_query) return DBRES_NOMEM;
 
     char *sql2 = cloudsync_memory_mprintf(
-        "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $$ "
+        "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $cloudsync_body$ "
         "BEGIN "
         "  IF cloudsync_is_sync('%s') THEN RETURN NEW; END IF; "
         "  PERFORM cloudsync_update(table_name, new_value, old_value) "
         "  FROM (%s) AS v(table_name, new_value, old_value); "
         "  RETURN NEW; "
         "END; "
-        "$$ LANGUAGE plpgsql;",
+        "$cloudsync_body$ LANGUAGE plpgsql;",
         func_name, esc_tbl_literal, values_query);
     cloudsync_memory_free(values_query);
     if (!sql2) return DBRES_NOMEM;
 
-    rc = database_exec(data, sql2);
+    rc = database_exec_body(data, sql2);
     cloudsync_memory_free(sql2);
     if (rc != DBRES_OK) return rc;
 
@@ -1614,15 +1669,15 @@ static int database_create_delete_trigger_gos_internal (cloudsync_context *data,
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
 
     char *sql = cloudsync_memory_mprintf(
-        "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $$ "
+        "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $cloudsync_body$ "
         "BEGIN "
         "  RAISE EXCEPTION 'Error: DELETE operation is not allowed on table %s.'; "
         "END; "
-        "$$ LANGUAGE plpgsql;",
+        "$cloudsync_body$ LANGUAGE plpgsql;",
         func_name, esc_tbl_literal);
     if (!sql) return DBRES_NOMEM;
 
-    int rc = database_exec(data, sql);
+    int rc = database_exec_body(data, sql);
     cloudsync_memory_free(sql);
     if (rc != DBRES_OK) return rc;
 
@@ -1680,18 +1735,18 @@ static int database_create_delete_trigger_internal (cloudsync_context *data, con
     }
 
     char *sql2 = cloudsync_memory_mprintf(
-        "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $$ "
+        "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $cloudsync_body$ "
         "BEGIN "
         "  IF cloudsync_is_sync('%s') THEN RETURN OLD; END IF; "
         "  PERFORM cloudsync_delete('%s', %s); "
         "  RETURN OLD; "
         "END; "
-        "$$ LANGUAGE plpgsql;",
+        "$cloudsync_body$ LANGUAGE plpgsql;",
         func_name, esc_tbl_literal, esc_tbl_literal, pk_list);
     cloudsync_memory_free(pk_list);
     if (!sql2) return DBRES_NOMEM;
 
-    rc = database_exec(data, sql2);
+    rc = database_exec_body(data, sql2);
     cloudsync_memory_free(sql2);
     if (rc != DBRES_OK) return rc;
 
@@ -2658,8 +2713,11 @@ const void *database_column_blob (dbvm_t *vm, int index, size_t *len) {
     if (index < 0 || index >= stmt->current_tupdesc->natts) return NULL;
 
     bool isnull = true;
-    Datum d = get_datum(stmt, index, &isnull, NULL);
+    Oid type = InvalidOid;
+    Datum d = get_datum(stmt, index, &isnull, &type);
     if (isnull) return NULL;
+    // only a bytea column can be read as a blob: anything else is not a varlena we can trust
+    if (type != BYTEAOID) return NULL;
     
     MemoryContext old = MemoryContextSwitchTo(stmt->row_mcxt);
     bytea *ba = DatumGetByteaP(d);
@@ -3009,6 +3067,18 @@ void *database_value_dup (dbvalue_t *value) {
         memcpy(copy->owned_detoast, src, len);
         copy->datum = PointerGetDatum(copy->owned_detoast);
         copy->detoasted = true;
+    } else if (!v->isnull) {
+        // any other pass-by-reference type (name, uuid, numeric, ...) must also outlive SPI_finish()
+        int16 typlen;
+        bool typbyval;
+        get_typlenbyval(v->typeid, &typlen, &typbyval);
+        if (!typbyval) {
+            MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
+            copy->owned_detoast = DatumGetPointer(datumCopy(v->datum, false, typlen));
+            MemoryContextSwitchTo(old);
+            copy->datum = PointerGetDatum(copy->owned_detoast);
+            copy->detoasted = true;
+        }
     }
     if (v->cstring) {
         MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);

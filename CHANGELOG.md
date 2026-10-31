@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **PostgreSQL: hardened PUBLIC-callable entry points.** `cloudsync_changes_insert_trigger` now refuses a table without the `cloudsync_changes` layout (attaching it to another table crashed the backend); a `name` value is no longer read as a varlena (`cloudsync_encode_value('x'::name)` read out of bounds); `cloudsync_update` copies every pass-by-reference argument it keeps; the payload and update aggregates refuse a window context; a non-bytea column is never read as a blob; table and column names with a single quote or a dollar-quote tag no longer break out of the generated SQL, and a table with a `'` in its name can now be initialized and updated.
 - **API.md: `send.serverVersion` is documented as the accepted version**, not the confirmed one. Only `send.status == "synced"` means every sent change is confirmed.
 
 ## [1.2.0] - 2026-09-28

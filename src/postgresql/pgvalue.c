@@ -8,6 +8,7 @@
 #include "catalog/pg_type.h"
 #include "utils/lsyscache.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "../utils.h"
 
 bool pgvalue_is_text_type(Oid typeid) {
@@ -15,7 +16,6 @@ bool pgvalue_is_text_type(Oid typeid) {
         case TEXTOID:
         case VARCHAROID:
         case BPCHAROID:
-        case NAMEOID:
         case JSONOID:
         case JSONBOID:
         case XMLOID:
@@ -58,6 +58,22 @@ void pgvalue_ensure_detoast(pgvalue_t *v) {
     if (!pgvalue_is_varlena(v->typeid) || v->isnull) return;
 
     v->owned_detoast = (void *)PG_DETOAST_DATUM_COPY(v->datum);
+    v->datum = PointerGetDatum(v->owned_detoast);
+    v->detoasted = true;
+}
+
+void pgvalue_retain(pgvalue_t *v) {
+    // Copy any pass-by-reference datum (uuid, numeric, box, ...) into the current memory
+    // context so the value survives the per-row memory of the call that produced it.
+    // pgvalue_ensure_detoast only covers a whitelist of varlena types.
+    if (!v || v->isnull || v->detoasted) return;
+
+    int16 typlen;
+    bool typbyval;
+    get_typlenbyval(v->typeid, &typlen, &typbyval);
+    if (typbyval) return;
+
+    v->owned_detoast = DatumGetPointer(datumCopy(v->datum, false, typlen));
     v->datum = PointerGetDatum(v->owned_detoast);
     v->detoasted = true;
 }
