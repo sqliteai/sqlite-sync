@@ -1706,7 +1706,20 @@ static dbvm_t *table_column_update_stmt (cloudsync_context *data, cloudsync_tabl
     return table->col_update_stmt[col_idx];
 }
 
+// A primary key blob that comes from outside (payload, cloudsync_changes insert) must declare
+// exactly as many components as the table has primary key columns: a shorter blob would bind
+// NULLs (or shift the column values onto the key slots), a longer one is not a key of this table.
+static int merge_check_pk_shape (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen) {
+    if (!pk || pklen < 1 || *(const uint8_t *)pk != (uint8_t)table_count_pks(table) || table_count_pks(table) > 255) {
+        return cloudsync_set_error(data, "Primary key does not match the table's primary key columns", DBRES_MISUSE);
+    }
+    return DBRES_OK;
+}
+
 int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen, const char *col_name, dbvalue_t *col_value, int64_t col_version, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid) {
+    int pk_rc = merge_check_pk_shape(data, table, pk, pklen);
+    if (pk_rc != DBRES_OK) return pk_rc;
+
     int index;
     dbvm_t *vm = table_column_lookup(table, col_name, true, &index);
     if (vm == NULL) return cloudsync_set_error(data, "Unable to retrieve column merge precompiled statement in merge_insert_col", DBRES_MISUSE);
@@ -1946,6 +1959,8 @@ cleanup:
 }
 
 int merge_sentinel_only_insert (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, int64_t cl, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid) {
+    int pk_rc = merge_check_pk_shape(data, table, pk, pklen);
+    if (pk_rc != DBRES_OK) return pk_rc;
 
     // reset return value
     *rowid = 0;
@@ -2224,6 +2239,9 @@ int table_col_index (cloudsync_table_context *table, const char *col_name) {
 }
 
 int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, int64_t insert_cl, const char *insert_name, dbvalue_t *insert_value, int64_t insert_col_version, int64_t insert_db_version, const char *insert_site_id, int insert_site_id_len, int64_t insert_seq, int64_t *rowid) {
+    int pk_rc = merge_check_pk_shape(data, table, insert_pk, insert_pk_len);
+    if (pk_rc != DBRES_OK) return pk_rc;
+
     // Handle DWS and AWS algorithms here
     // Delete-Wins Set (DWS): table_algo_crdt_dws
     // Add-Wins Set (AWS): table_algo_crdt_aws

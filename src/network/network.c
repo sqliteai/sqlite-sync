@@ -1288,6 +1288,33 @@ int network_extract_query_param (const char *query, const char *key, char *outpu
     return -3; // Key not found
 }
 
+// The address receives the credentials and the local changes: it must be https, or plain http
+// only towards the local machine (development servers, tests).
+static bool network_address_allowed (const char *address) {
+    if (strncmp(address, "https://", 8) == 0) return true;
+    if (strncmp(address, "http://", 7) != 0) return false;
+    const char *host = address + 7;
+    static const char *loopback[] = {"localhost", "127.", "[::1]"};
+    for (size_t i = 0; i < sizeof(loopback) / sizeof(loopback[0]); i++) {
+        size_t n = strlen(loopback[i]);
+        if (strncmp(host, loopback[i], n) != 0) continue;
+        // "127." is a prefix of the dotted address, the others must end the host name
+        if (i == 1) return true;
+        char c = host[n];
+        if (c == '\0' || c == ':' || c == '/') return true;
+    }
+    return false;
+}
+
+// The database id is pasted into the URL path: refuse anything that could change the path,
+// add a query or smuggle control characters.
+static bool network_database_id_allowed (const char *id) {
+    for (const unsigned char *p = (const unsigned char *)id; *p; p++) {
+        if (*p <= 0x20 || *p == 0x7F || *p == '/' || *p == '?' || *p == '#' || *p == '%' || *p == '\\') return false;
+    }
+    return true;
+}
+
 static bool network_compute_endpoints_with_address (sqlite3_context *context, network_data *data, const char *address, const char *managedDatabaseId) {
     if (!managedDatabaseId || managedDatabaseId[0] == '\0') {
         sqlite3_result_error(context, "managedDatabaseId cannot be empty", -1);
@@ -1299,6 +1326,30 @@ static bool network_compute_endpoints_with_address (sqlite3_context *context, ne
         sqlite3_result_error(context, "address cannot be empty", -1);
         sqlite3_result_error_code(context, SQLITE_ERROR);
         return false;
+    }
+
+    if (!network_address_allowed(address)) {
+        sqlite3_result_error(context, "address must be an https:// URL (http:// is accepted only for localhost)", -1);
+        sqlite3_result_error_code(context, SQLITE_ERROR);
+        return false;
+    }
+    if (!network_database_id_allowed(managedDatabaseId)) {
+        sqlite3_result_error(context, "managedDatabaseId contains invalid characters", -1);
+        sqlite3_result_error_code(context, SQLITE_ERROR);
+        return false;
+    }
+
+    // The credentials were given for the address in use: pointing the connection somewhere
+    // else must not carry them along.
+    if (data->check_endpoint) {
+        size_t alen = strlen(address);
+        bool same_address = (strncmp(data->check_endpoint, address, alen) == 0 && data->check_endpoint[alen] == '/');
+        if (!same_address) {
+            if (data->authentication) cloudsync_memory_free(data->authentication);
+            data->authentication = NULL;
+            if (data->org_id) cloudsync_memory_free(data->org_id);
+            data->org_id = NULL;
+        }
     }
 
     // build endpoints: {address}/v2/cloudsync/databases/{managedDatabaseId}/{siteId}/{action}
@@ -1458,10 +1509,28 @@ bool cloudsync_network_set_authentication_token (sqlite3_context *context, const
     return true;
 }
 
+// A NULL value would crash strlen, and a control character would split the HTTP header.
+static bool network_credential_valid (sqlite3_context *context, const char *value) {
+    if (!value) {
+        sqlite3_result_error(context, "The token/apikey cannot be NULL.", -1);
+        sqlite3_result_error_code(context, SQLITE_MISUSE);
+        return false;
+    }
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        if (*p < 0x20 || *p == 0x7F) {
+            sqlite3_result_error(context, "The token/apikey contains control characters.", -1);
+            sqlite3_result_error_code(context, SQLITE_MISUSE);
+            return false;
+        }
+    }
+    return true;
+}
+
 void cloudsync_network_set_token (sqlite3_context *context, int argc, sqlite3_value **argv) {
     DEBUG_FUNCTION("cloudsync_network_set_token");
     
     const char *value = (const char *)sqlite3_value_text(argv[0]);
+    if (!network_credential_valid(context, value)) return;
     bool result = cloudsync_network_set_authentication_token(context, value, true);
     (result) ? sqlite3_result_int(context, SQLITE_OK) : sqlite3_result_error_code(context, SQLITE_NOMEM);
 }
@@ -1470,6 +1539,7 @@ void cloudsync_network_set_apikey (sqlite3_context *context, int argc, sqlite3_v
     DEBUG_FUNCTION("cloudsync_network_set_apikey");
 
     const char *value = (const char *)sqlite3_value_text(argv[0]);
+    if (!network_credential_valid(context, value)) return;
     bool result = cloudsync_network_set_authentication_token(context, value, false);
     (result) ? sqlite3_result_int(context, SQLITE_OK) : sqlite3_result_error_code(context, SQLITE_NOMEM);
 }
@@ -3095,7 +3165,9 @@ void cloudsync_network_status (sqlite3_context *context, int argc, sqlite3_value
 // MARK: -
 
 int cloudsync_network_register (sqlite3 *db, char **pzErrMsg, void *ctx) {
-    const int DEFAULT_FLAGS = SQLITE_UTF8 | SQLITE_INNOCUOUS;
+    // These send local data and credentials over the network, change endpoints and may delete
+    // the synced tables: never callable from a view, trigger or CHECK of a (possibly foreign) schema.
+    const int DEFAULT_FLAGS = SQLITE_UTF8 | SQLITE_DIRECTONLY;
     int rc = SQLITE_OK;
     
     rc = sqlite3_create_function(db, "cloudsync_network_init", 1, DEFAULT_FLAGS, ctx, cloudsync_network_init, NULL, NULL);

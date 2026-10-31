@@ -926,6 +926,44 @@ static void test_payload_window_cap_paged(void) {
 }
 
 
+// The trigger helpers are callable from any SELECT: a wrong argument count is an error, not an
+// out-of-range read. A primary key blob from outside must have the table's key shape.
+static void test_wrong_argument_counts_and_pk_shape(void) {
+    sqlite3 *db = open_db();
+    CHECK(sql(db, "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, a TEXT);") == SQLITE_OK);
+    CHECK(sql(db, "CREATE TABLE k(a TEXT NOT NULL, b TEXT NOT NULL, c TEXT, PRIMARY KEY(a,b));") == SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_init('t'); SELECT cloudsync_init('k');") == SQLITE_OK);
+
+    CHECK(sql(db, "SELECT cloudsync_insert('t');") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_insert('t', 'a', 'b');") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_insert();") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_insert(1, 'a');") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_insert('k', 'a');") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_delete('t');") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_delete('k', 'a', 'b', 'c');") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_delete();") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_update('t', 'a', 'a');") == SQLITE_OK || true);   // must not crash
+    CHECK(sql(db, "SELECT cloudsync_update('k', 'a', 'a');") != SQLITE_OK);           // fewer values than key columns
+
+    // the correct shapes still work
+    CHECK(sql(db, "SELECT cloudsync_insert('t', 'x');") == SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_insert('k', 'x', 'y');") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO t VALUES('r1', 'v'); UPDATE t SET a = 'w'; DELETE FROM t;") == SQLITE_OK);
+
+    // primary key blobs with the wrong number of components never reach the table
+    const char *site = "X'0102030405060708090a0b0c0d0e0f10'";
+    char q[512];
+    const char *bad[] = {"X'00'", "X''", "X'01'", "X'0101'", "cloudsync_pk_encode('x')", "cloudsync_pk_encode('x','y','z')"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('k',%s,'c','hello',1,1,%s,1,0);", bad[i], site);
+        CHECK(sql(db, q) != SQLITE_OK);
+    }
+    CHECK(scalar(db, "SELECT count(*) FROM k") == 0);
+    snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('k',cloudsync_pk_encode('x','y'),'c','hello',1,1,%s,1,0);", site);
+    CHECK(sql(db, q) == SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM k WHERE a='x' AND b='y' AND c='hello'") == 1);
+    CHECK(close_db(db) == SQLITE_OK);
+}
 int main(void) {
     CHECK(sqlite3_config(SQLITE_CONFIG_GETMALLOC, &memory) == SQLITE_OK);
     sqlite3_mem_methods faults = memory;
@@ -934,6 +972,7 @@ int main(void) {
     CHECK(sqlite3_config(SQLITE_CONFIG_MALLOC, &faults) == SQLITE_OK);
     CHECK(sqlite3_initialize() == SQLITE_OK);
     test_clocks_and_double();
+    test_wrong_argument_counts_and_pk_shape();
     test_best_index();
     test_payload_errors();
     test_failed_apply_commit();

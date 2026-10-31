@@ -3583,8 +3583,9 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
         TupleDesc desc = trigdata->tg_relation->rd_att;
         bool isnull;
         
-        char *insert_tbl = text_to_cstring((text*) DatumGetPointer(heap_getattr(newtup, 1, desc, &isnull)));
+        Datum insert_tbl_datum = heap_getattr(newtup, 1, desc, &isnull);
         if (isnull) ereport(ERROR, (errmsg("tbl cannot be NULL")));
+        char *insert_tbl = text_to_cstring((text*) DatumGetPointer(insert_tbl_datum));
         
         bytea *insert_pk = (bytea*) DatumGetPointer(heap_getattr(newtup, 2, desc, &isnull));
         if (isnull) ereport(ERROR, (errmsg("pk cannot be NULL")));
