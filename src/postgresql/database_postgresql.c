@@ -1418,6 +1418,20 @@ int database_create_metatable (cloudsync_context *data, const char *table_name) 
 
 // MARK: - TRIGGERS -
 
+// Prefix ("schema".) that pins the cloudsync functions called by the generated trigger bodies and
+// WHEN clauses to the schema the extension is installed in, so that a function of the same name
+// created by another role in a schema of the firing session's search_path cannot take their place.
+// Empty when the schema cannot be resolved.
+static void database_extension_prefix (cloudsync_context *data, char *buffer, size_t bsize) {
+    buffer[0] = '\0';
+    char *schema = NULL;
+    int rc = database_select_text(data,
+        "SELECT quote_ident(n.nspname) FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'cloudsync';",
+        &schema);
+    if (rc == DBRES_OK && schema && schema[0]) snprintf(buffer, bsize, "%s.", schema);
+    if (schema) cloudsync_memory_free(schema);
+}
+
 // A name containing the dollar-quote tag would terminate the function body early and let
 // the remainder run as SQL: require exactly the two tags the template itself emits.
 static int database_exec_body (cloudsync_context *data, const char *sql) {
@@ -1446,6 +1460,8 @@ static int database_create_insert_trigger_internal (cloudsync_context *data, con
     char esc_tbl_literal[1024], esc_schema_literal[1024];
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
     sql_escape_literal(schema_param, esc_schema_literal, sizeof(esc_schema_literal));
+    char ext[300];
+    database_extension_prefix(data, ext, sizeof(ext));
 
     char sql[2048];
     snprintf(sql, sizeof(sql),
@@ -1469,12 +1485,12 @@ static int database_create_insert_trigger_internal (cloudsync_context *data, con
     char *sql2 = cloudsync_memory_mprintf(
         "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $cloudsync_body$ "
         "BEGIN "
-        "  IF cloudsync_is_sync('%s') THEN RETURN NEW; END IF; "
-        "  PERFORM cloudsync_insert('%s', %s); "
+        "  IF %scloudsync_is_sync('%s') THEN RETURN NEW; END IF; "
+        "  PERFORM %scloudsync_insert('%s', %s); "
         "  RETURN NEW; "
         "END; "
         "$cloudsync_body$ LANGUAGE plpgsql;",
-        func_name, esc_tbl_literal, esc_tbl_literal, pk_list);
+        func_name, ext, esc_tbl_literal, ext, esc_tbl_literal, pk_list);
     cloudsync_memory_free(pk_list);
     if (!sql2) return DBRES_NOMEM;
 
@@ -1511,6 +1527,8 @@ static int database_create_update_trigger_gos_internal (cloudsync_context *data,
 
     char esc_tbl_literal[1024];
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
+    char ext[300];
+    database_extension_prefix(data, ext, sizeof(ext));
 
     char *sql = cloudsync_memory_mprintf(
         "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $cloudsync_body$ "
@@ -1530,9 +1548,9 @@ static int database_create_update_trigger_gos_internal (cloudsync_context *data,
 
     sql = cloudsync_memory_mprintf(
         "CREATE TRIGGER \"%s\" BEFORE UPDATE ON %s "
-        "FOR EACH ROW WHEN (cloudsync_is_enabled('%s') = true) "
+        "FOR EACH ROW WHEN (%scloudsync_is_enabled('%s') = true) "
         "EXECUTE FUNCTION \"%s\"();",
-        trigger_name, base_ref, esc_tbl_literal, func_name);
+        trigger_name, base_ref, ext, esc_tbl_literal, func_name);
     cloudsync_memory_free(base_ref);
     if (!sql) return DBRES_NOMEM;
 
@@ -1558,6 +1576,8 @@ static int database_create_update_trigger_internal (cloudsync_context *data, con
     char esc_tbl_literal[1024], esc_schema_literal[1024];
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
     sql_escape_literal(schema_param, esc_schema_literal, sizeof(esc_schema_literal));
+    char ext[300];
+    database_extension_prefix(data, ext, sizeof(ext));
 
     char sql[2048];
     snprintf(sql, sizeof(sql),
@@ -1624,13 +1644,13 @@ static int database_create_update_trigger_internal (cloudsync_context *data, con
     char *sql2 = cloudsync_memory_mprintf(
         "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $cloudsync_body$ "
         "BEGIN "
-        "  IF cloudsync_is_sync('%s') THEN RETURN NEW; END IF; "
-        "  PERFORM cloudsync_update(table_name, new_value, old_value) "
+        "  IF %scloudsync_is_sync('%s') THEN RETURN NEW; END IF; "
+        "  PERFORM %scloudsync_update(table_name, new_value, old_value) "
         "  FROM (%s) AS v(table_name, new_value, old_value); "
         "  RETURN NEW; "
         "END; "
         "$cloudsync_body$ LANGUAGE plpgsql;",
-        func_name, esc_tbl_literal, values_query);
+        func_name, ext, esc_tbl_literal, ext, values_query);
     cloudsync_memory_free(values_query);
     if (!sql2) return DBRES_NOMEM;
 
@@ -1667,6 +1687,8 @@ static int database_create_delete_trigger_gos_internal (cloudsync_context *data,
 
     char esc_tbl_literal[1024];
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
+    char ext[300];
+    database_extension_prefix(data, ext, sizeof(ext));
 
     char *sql = cloudsync_memory_mprintf(
         "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $cloudsync_body$ "
@@ -1686,9 +1708,9 @@ static int database_create_delete_trigger_gos_internal (cloudsync_context *data,
 
     sql = cloudsync_memory_mprintf(
         "CREATE TRIGGER \"%s\" BEFORE DELETE ON %s "
-        "FOR EACH ROW WHEN (cloudsync_is_enabled('%s') = true) "
+        "FOR EACH ROW WHEN (%scloudsync_is_enabled('%s') = true) "
         "EXECUTE FUNCTION \"%s\"();",
-        trigger_name, base_ref, esc_tbl_literal, func_name);
+        trigger_name, base_ref, ext, esc_tbl_literal, func_name);
     cloudsync_memory_free(base_ref);
     if (!sql) return DBRES_NOMEM;
 
@@ -1714,6 +1736,8 @@ static int database_create_delete_trigger_internal (cloudsync_context *data, con
     char esc_tbl_literal[1024], esc_schema_literal[1024];
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
     sql_escape_literal(schema_param, esc_schema_literal, sizeof(esc_schema_literal));
+    char ext[300];
+    database_extension_prefix(data, ext, sizeof(ext));
 
     char sql[2048];
     snprintf(sql, sizeof(sql),
@@ -1737,12 +1761,12 @@ static int database_create_delete_trigger_internal (cloudsync_context *data, con
     char *sql2 = cloudsync_memory_mprintf(
         "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS trigger AS $cloudsync_body$ "
         "BEGIN "
-        "  IF cloudsync_is_sync('%s') THEN RETURN OLD; END IF; "
-        "  PERFORM cloudsync_delete('%s', %s); "
+        "  IF %scloudsync_is_sync('%s') THEN RETURN OLD; END IF; "
+        "  PERFORM %scloudsync_delete('%s', %s); "
         "  RETURN OLD; "
         "END; "
         "$cloudsync_body$ LANGUAGE plpgsql;",
-        func_name, esc_tbl_literal, esc_tbl_literal, pk_list);
+        func_name, ext, esc_tbl_literal, ext, esc_tbl_literal, pk_list);
     cloudsync_memory_free(pk_list);
     if (!sql2) return DBRES_NOMEM;
 
@@ -1811,25 +1835,27 @@ static void database_build_trigger_when(
 
     char esc_tbl[512];
     sql_escape_literal(table_name, esc_tbl, sizeof(esc_tbl));
+    char ext[300];
+    database_extension_prefix(data, ext, sizeof(ext));
 
     if (new_filter_str) {
         snprintf(when_new, when_new_size,
-            "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false AND (%s))",
-            esc_tbl, new_filter_str);
+            "FOR EACH ROW WHEN (%scloudsync_is_sync('%s') = false AND (%s))",
+            ext, esc_tbl, new_filter_str);
     } else {
         snprintf(when_new, when_new_size,
-            "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false)",
-            esc_tbl);
+            "FOR EACH ROW WHEN (%scloudsync_is_sync('%s') = false)",
+            ext, esc_tbl);
     }
 
     if (old_filter_str) {
         snprintf(when_old, when_old_size,
-            "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false AND (%s))",
-            esc_tbl, old_filter_str);
+            "FOR EACH ROW WHEN (%scloudsync_is_sync('%s') = false AND (%s))",
+            ext, esc_tbl, old_filter_str);
     } else {
         snprintf(when_old, when_old_size,
-            "FOR EACH ROW WHEN (cloudsync_is_sync('%s') = false)",
-            esc_tbl);
+            "FOR EACH ROW WHEN (%scloudsync_is_sync('%s') = false)",
+            ext, esc_tbl);
     }
 
     if (new_filter_str) cloudsync_memory_free(new_filter_str);

@@ -423,7 +423,7 @@ void dbsync_pk_decode (sqlite3_context *context, int argc, sqlite3_value **argv)
 // MARK: -
 
 void dbsync_insert (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    DEBUG_FUNCTION("cloudsync_insert %s", database_value_text(argv[0]));
+    DEBUG_FUNCTION("cloudsync_insert %s", argc > 0 ? database_value_text(argv[0]) : "");
     // debug_values(argc-1, &argv[1]);
     
     // argv[0] is table name
@@ -442,10 +442,18 @@ void dbsync_insert (sqlite3_context *context, int argc, sqlite3_value **argv) {
     cloudsync_reset_error(data);
     
     // lookup table
+    if (argc < 1 || sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
+        sqlite3_result_error(context, "cloudsync_insert requires a table name and the primary key value(s).", -1);
+        return;
+    }
     const char *table_name = (const char *)database_value_text(argv[0]);
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) {
         dbsync_set_error(context, "Unable to retrieve table name %s in cloudsync_insert.", table_name);
+        return;
+    }
+    if (argc - 1 != table_count_pks(table)) {
+        dbsync_set_error(context, "cloudsync_insert on table %s expects %d primary key value(s), got %d.", table_name, table_count_pks(table), argc - 1);
         return;
     }
     
@@ -499,7 +507,7 @@ cleanup:
 }
 
 void dbsync_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    DEBUG_FUNCTION("cloudsync_delete %s", database_value_text(argv[0]));
+    DEBUG_FUNCTION("cloudsync_delete %s", argc > 0 ? database_value_text(argv[0]) : "");
     // debug_values(argc-1, &argv[1]);
     
     // retrieve context
@@ -507,10 +515,18 @@ void dbsync_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
     cloudsync_reset_error(data);
     
     // lookup table
+    if (argc < 1 || sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
+        sqlite3_result_error(context, "cloudsync_delete requires a table name and the primary key value(s).", -1);
+        return;
+    }
     const char *table_name = (const char *)database_value_text(argv[0]);
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) {
         dbsync_set_error(context, "Unable to retrieve table name %s in cloudsync_delete.", table_name);
+        return;
+    }
+    if (argc - 1 != table_count_pks(table)) {
+        dbsync_set_error(context, "cloudsync_delete on table %s expects %d primary key value(s), got %d.", table_name, table_count_pks(table), argc - 1);
         return;
     }
     
@@ -616,6 +632,11 @@ void dbsync_update_step (sqlite3_context *context, int argc, sqlite3_value **arg
     // argv[1] => new_column_value
     // argv[2] => old_column_value
     
+    if (argc != 3) {
+        sqlite3_result_error(context, "cloudsync_update requires the table name, the new value and the old value.", -1);
+        return;
+    }
+
     // allocate/get the update payload
     cloudsync_update_payload *payload = (cloudsync_update_payload *)sqlite3_aggregate_context(context, sizeof(cloudsync_update_payload));
     if (!payload) {sqlite3_result_error_nomem(context); return;}
@@ -638,6 +659,13 @@ void dbsync_update_final (sqlite3_context *context) {
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) {
         dbsync_set_error(context, "Unable to retrieve table name %s in cloudsync_update.", table_name);
+        dbsync_update_payload_free(payload);
+        return;
+    }
+
+    // the aggregated rows must cover every primary key and at most every column
+    if (payload->count < table_count_pks(table) || payload->count > table_count_pks(table) + table_count_cols(table)) {
+        dbsync_set_error(context, "cloudsync_update on table %s received %d value(s), expected between %d and %d.", table_name, payload->count, table_count_pks(table), table_count_pks(table) + table_count_cols(table));
         dbsync_update_payload_free(payload);
         return;
     }
@@ -711,6 +739,7 @@ void dbsync_update_final (sqlite3_context *context) {
     // compare NEW and OLD values (excluding primary keys) to handle column updates
     for (int i=0; i<table_count_cols(table); i++) {
         int col_index = table_count_pks(table) + i;  // Regular columns start after primary keys
+        if (col_index >= payload->count) break;
 
         if (dbutils_value_compare(payload->old_values[col_index], payload->new_values[col_index]) != 0) {
             if (table_col_algo(table, i) == col_algo_block) {

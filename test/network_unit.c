@@ -843,6 +843,7 @@ static int http_check_steps;
 static int http_nreq, http_napply, http_nstatus, http_nupload, http_nput, http_ncheck;
 static char http_req_endpoint[HTTP_MAX_REQ][8];
 static bool http_req_defer[HTTP_MAX_REQ];
+static bool http_req_auth[HTTP_MAX_REQ];   // the request carried an Authorization header
 static char http_apply_batch[HTTP_MAX_REQ][48];
 static int64_t http_apply_chunk[HTTP_MAX_REQ], http_apply_min[HTTP_MAX_REQ];
 static bool http_apply_url[HTTP_MAX_REQ], http_apply_final[HTTP_MAX_REQ];
@@ -902,6 +903,7 @@ static void http_handle(int c) {
     int i = http_nreq < HTTP_MAX_REQ ? http_nreq++ : HTTP_MAX_REQ - 1;
     snprintf(http_req_endpoint[i], sizeof(http_req_endpoint[i]), "%s", endpoint);
     http_req_defer[i] = capabilities && strstr(capabilities, "apply-defer");
+    http_req_auth[i] = http_header(head, "Authorization") != NULL;
 
     if (strcmp(endpoint, "apply") == 0) {
         sqlite3 *probe = NULL;
@@ -1145,6 +1147,7 @@ static bool test_apply_defer_transport(void) {
     return ok;
 }
 
+
 // /apply refused as busy: the server's errors[0].code, or the fallback when there is none.
 static void http_busy_apply(int code, const char *retry_after, const char *error_code) {
     http_apply_code = code;
@@ -1184,6 +1187,53 @@ static char *sql_text(sqlite3 *db, const char *sql) {
 
 static bool reset_retry(sqlite3 *db) {
     return db_exec(db, "SELECT cloudsync_network_reset_retry_after();") == SQLITE_OK;
+}
+
+// Credentials belong to the address they were set for: pointing the connection at another
+// origin must not carry the token along, and re-initializing the same address must keep it.
+// Addresses outside https (and plain http outside the local machine) are refused, and so is
+// a database id that would change the URL path.
+static bool test_credentials_follow_address(void) {
+    pthread_t thread;
+    if (!http_start(&thread)) return false;
+    http_nreq = http_napply = http_nstatus = http_nupload = http_nput = http_ncheck = 0;
+
+    char a[160], b[160];
+    snprintf(a, sizeof(a), "SELECT cloudsync_network_init_custom('http://127.0.0.1:%u', 'test-managed-database-id');", http_port);
+    snprintf(b, sizeof(b), "SELECT cloudsync_network_init_custom('http://localhost:%u', 'test-managed-database-id');", http_port);
+    sqlite3 *db = stream_db(false);
+    bool ok = expect(db && db_exec(db, a) == SQLITE_OK, "init on the first address", NULL);
+    ok = ok && db_exec(db, "SELECT cloudsync_network_set_token('secret-token');") == SQLITE_OK;
+    http_script(200, 0, 0, 0, 0, NULL);
+
+    // same address again: the token stays
+    ok = ok && db_exec(db, a) == SQLITE_OK;
+    int before = http_nreq;
+    sql_text(db, "SELECT cloudsync_network_status()");
+    ok = ok && expect(http_nreq > before && http_req_auth[http_nreq - 1], "same address keeps the token", NULL);
+
+    // another origin: the request goes out without it
+    ok = ok && db_exec(db, b) == SQLITE_OK;
+    before = http_nreq;
+    sql_text(db, "SELECT cloudsync_network_status()");
+    ok = ok && expect(http_nreq > before && !http_req_auth[http_nreq - 1], "another address does not receive the token", NULL);
+
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://example.com', 'x');") != SQLITE_OK, "plain http to a remote host is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://localhost.evil.com', 'x');") != SQLITE_OK, "a host that only starts with localhost is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('ftp://example.com', 'x');") != SQLITE_OK, "a non-http scheme is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('https://example.com', 'a/../b');") != SQLITE_OK, "a database id with a slash is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('https://example.com', 'a?x=1');") != SQLITE_OK, "a database id with a query is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_set_token(NULL);") != SQLITE_OK, "a NULL token is an error, not a crash", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_set_apikey(NULL);") != SQLITE_OK, "a NULL apikey is an error, not a crash", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_set_token('a' || char(13, 10) || 'X-Evil: 1');") != SQLITE_OK, "a token with CR/LF is refused", NULL);
+
+    // never callable from a view / trigger of a schema
+    ok = ok && db_exec(db, "CREATE VIEW v_net AS SELECT cloudsync_network_has_unsent_changes() AS x;") == SQLITE_OK;
+    ok = ok && expect(db_exec(db, "SELECT * FROM v_net;") != SQLITE_OK, "network functions are direct-only", NULL);
+
+    stream_close(db);
+    http_shutdown(thread);
+    return ok;
 }
 
 // A busy server (429, or 503 with Retry-After) is a result, not an error: the send keeps
@@ -1494,6 +1544,7 @@ int main(void) {
     check("runtime deadlines (cloudsync_set) and interrupt of a call:", test_runtime_deadlines());
     check("apply-defer over HTTP: header, 202 lifecycle, rollback, 503/409:", test_apply_defer_transport());
     check("soft overload over HTTP: busy send/receive, Retry-After budget:", test_soft_overload_transport());
+    check("credentials follow their address; address and id are validated:", test_credentials_follow_address());
 #endif
     if (failures) { printf("\n%d test(s) FAILED\n", failures); return 1; }
     printf("\nAll network unit tests passed\n");
