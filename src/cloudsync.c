@@ -1152,6 +1152,22 @@ bool table_ensure_capacity (cloudsync_context *data) {
     return true;
 }
 
+#ifdef CLOUDSYNC_POSTGRESQL_BUILD
+static char *sql_literal_dup (const char *name) {
+    size_t n = strlen(name), q = 0;
+    for (size_t i = 0; i < n; i++) if (name[i] == '\'') q++;
+    char *out = cloudsync_memory_alloc(n + q + 1);
+    if (!out) return NULL;
+    size_t j = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (name[i] == '\'') out[j++] = '\'';
+        out[j++] = name[i];
+    }
+    out[j] = '\0';
+    return out;
+}
+#endif
+
 bool table_add_to_context (cloudsync_context *data, table_algo algo, const char *table_name) {
     DEBUG_DBFUNCTION("cloudsync_context_add_table %s", table_name);
 
@@ -1215,8 +1231,19 @@ bool table_add_to_context (cloudsync_context *data, table_algo algo, const char 
 
         // Pass empty string when schema is NULL; SQL will fall back to current_schema()
         const char *schema = table->schema ? table->schema : "";
+#ifdef CLOUDSYNC_POSTGRESQL_BUILD
+        // The PostgreSQL template embeds the names in plain '%s' literals (SQLite's %q escapes
+        // them itself), so double any single quote first.
+        char *esc_table = sql_literal_dup(table_name);
+        char *esc_schema = sql_literal_dup(schema);
+        char *sql = (esc_table && esc_schema) ? cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID,
+                                              esc_table, esc_schema, esc_table, esc_schema) : NULL;
+        if (esc_table) cloudsync_memory_free(esc_table);
+        if (esc_schema) cloudsync_memory_free(esc_schema);
+#else
         char *sql = cloudsync_memory_mprintf(SQL_PRAGMA_TABLEINFO_LIST_NONPK_NAME_CID,
                                               table_name, schema, table_name, schema);
+#endif
         if (!sql) goto abort_add_table;
         rc = database_exec_callback(data, sql, table_add_to_context_cb, (void *)table);
         cloudsync_memory_free(sql);

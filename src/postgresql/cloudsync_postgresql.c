@@ -1039,6 +1039,10 @@ Datum cloudsync_payload_encode_transfn (PG_FUNCTION_ARGS) {
 // Aggregate function: cloudsync_payload_encode finalize function
 PG_FUNCTION_INFO_V1(cloudsync_payload_encode_finalfn);
 Datum cloudsync_payload_encode_finalfn (PG_FUNCTION_ARGS) {
+    // The final function consumes its state: it cannot run more than once on it.
+    if (AggCheckCallContext(fcinfo, NULL) == AGG_CONTEXT_WINDOW) {
+        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_payload_encode cannot be used as a window function")));
+    }
     if (PG_ARGISNULL(0)) {
         PG_RETURN_NULL();
     }
@@ -2470,6 +2474,9 @@ Datum cloudsync_update_transfn (PG_FUNCTION_ARGS) {
     if (table_name) pgvalue_ensure_detoast(table_name);
     if (new_value) pgvalue_ensure_detoast(new_value);
     if (old_value) pgvalue_ensure_detoast(old_value);
+    pgvalue_retain(table_name);
+    pgvalue_retain(new_value);
+    pgvalue_retain(old_value);
     MemoryContextSwitchTo(old_ctx);
 
     if (!table_name || !new_value || !old_value) {
@@ -2491,6 +2498,10 @@ Datum cloudsync_update_transfn (PG_FUNCTION_ARGS) {
 
 PG_FUNCTION_INFO_V1(cloudsync_update_finalfn);
 Datum cloudsync_update_finalfn (PG_FUNCTION_ARGS) {
+    // The final function consumes (frees) its state: it cannot run more than once on it.
+    if (AggCheckCallContext(fcinfo, NULL) == AGG_CONTEXT_WINDOW) {
+        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_update cannot be used as a window function")));
+    }
     if (PG_ARGISNULL(0)) {
         PG_RETURN_BOOL(true);
     }
@@ -3299,9 +3310,9 @@ static char * build_union_sql (void) {
             if (has_blocks_table) {
                 appendStringInfo(&caseexpr,
                     "WHEN t1.col_name LIKE '%%' || chr(31) || '%%' THEN "
-                    "(SELECT cloudsync_encode_value(blk.col_value) FROM %s.\"%s_cloudsync_blocks\" blk "
+                    "(SELECT cloudsync_encode_value(blk.col_value) FROM %s.%s blk "
                     "WHERE blk.pk = t1.pk AND blk.col_name = t1.col_name) ",
-                    quote_identifier(nsp), base);
+                    quote_identifier(nsp), quote_identifier(psprintf("%s_cloudsync_blocks", base)));
             }
             appendStringInfoString(&caseexpr,
                                    "ELSE CASE t1.col_name "
@@ -3549,6 +3560,22 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
     if (!CALLED_AS_TRIGGER(fcinfo)) ereport(ERROR, (errmsg("cloudsync_changes_insert_trigger must be called as trigger")));
     if (!TRIGGER_FIRED_BY_INSERT(trigdata->tg_event)) ereport(ERROR, (errmsg("Only INSERT allowed on cloudsync_changes")));
     
+    // The function is PUBLIC-callable: refuse to read the new tuple with the hard-coded
+    // cloudsync_changes layout unless the relation really has it (text, bytea, text, bytea,
+    // int8, int8, bytea, int8, int8). Otherwise a trigger attached to an arbitrary table
+    // would deform its tuple with the wrong types.
+    {
+        static const Oid expected[9] = {TEXTOID, BYTEAOID, TEXTOID, BYTEAOID, INT8OID, INT8OID, BYTEAOID, INT8OID, INT8OID};
+        TupleDesc d = trigdata->tg_relation->rd_att;
+        bool ok = (d->natts == 9);
+        for (int i = 0; ok && i < 9; i++) {
+            Form_pg_attribute att = TupleDescAttr(d, i);
+            if (att->attisdropped || att->atttypid != expected[i]) ok = false;
+        }
+        if (!ok) ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                                 errmsg("cloudsync_changes_insert_trigger can only be used on the cloudsync_changes view")));
+    }
+
     HeapTuple newtup = trigdata->tg_trigtuple;
     pgvalue_t *col_value = NULL;
     PG_TRY();
