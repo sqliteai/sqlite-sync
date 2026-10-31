@@ -31,6 +31,7 @@
 #include "network_private.h"
 
 #define JSMN_STATIC
+#define JSMN_STRICT
 #include "jsmn.h"
 
 #ifndef SQLITE_WASM_EXTRA_INIT
@@ -96,6 +97,7 @@ struct network_data {
     char        *apply_endpoint;
     char        *status_endpoint;
     int         ticket_enabled;
+    int         curl_global;     // this object holds one curl_global_init reference
     // Best-effort spool cursor for the chunked /check download drain. The durable
     // receive cursor (check_dbversion/check_seq) is frozen at "since" for the whole
     // drain, so the server (which is stateless across /check calls) needs the client
@@ -353,6 +355,10 @@ void network_data_free (network_data *data) {
     if (data->status_endpoint) cloudsync_memory_free(data->status_endpoint);
     if (data->send_retry_code) cloudsync_memory_free(data->send_retry_code);
     if (data->check_retry_code) cloudsync_memory_free(data->check_retry_code);
+#ifndef CLOUDSYNC_OMIT_CURL
+    // libcurl counts its global references: release exactly the one this object took
+    if (data->curl_global) curl_global_cleanup();
+#endif
     cloudsync_memory_free(data);
 }
 
@@ -422,6 +428,27 @@ void network_data_update_ticket (network_data *data, const char *ticket, const c
 #endif
 }
 
+// Only the API may hand out a session ticket: an artifact host (a server-supplied URL) must
+// not be able to replace it.
+bool network_data_accepts_ticket_from (network_data *data, const char *endpoint) {
+    return network_endpoint_is_api(data, endpoint);
+}
+
+// A deadline from cloudsync_settings, read for every request so cloudsync_set applies to
+// the next one. A missing or non-positive value keeps the compiled default.
+static long network_deadline_setting (network_data *data, const char *key, long fallback, long ceiling) {
+    int64_t value = (data && data->cloudsync) ? dbutils_settings_get_int64_value(data->cloudsync, key) : 0;
+    if (value <= 0) return fallback;
+    return (value > ceiling) ? ceiling : (long)value;
+}
+
+// The total time a request may take, for transports that have no per-handle deadlines.
+long network_data_timeout_seconds (network_data *data, const char *endpoint) {
+    return network_endpoint_is_api(data, endpoint)
+        ? network_deadline_setting(data, CLOUDSYNC_KEY_NETWORK_REQUEST_TIMEOUT, CLOUDSYNC_REQUEST_TIMEOUT_SECONDS, CLOUDSYNC_NETWORK_MAX_SECONDS)
+        : network_deadline_setting(data, CLOUDSYNC_KEY_NETWORK_ARTIFACT_TIMEOUT, CLOUDSYNC_ARTIFACT_TIMEOUT_SECONDS, CLOUDSYNC_NETWORK_MAX_SECONDS);
+}
+
 #ifndef CLOUDSYNC_OMIT_CURL
 static bool network_curl_pool_enabled(network_data *data) {
     if (!data) return false;
@@ -436,14 +463,6 @@ static bool network_curl_pool_enabled(network_data *data) {
 // so sqlite3_interrupt() on the connection cancels a network call in flight.
 static int network_curl_progress (void *xdata, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
     return network_db_interrupted(((network_data *)xdata)->db) ? 1 : 0;
-}
-
-// A deadline from cloudsync_settings, read for every request so cloudsync_set applies to
-// the next one. A missing or non-positive value keeps the compiled default.
-static long network_deadline_setting (network_data *data, const char *key, long fallback, long ceiling) {
-    int64_t value = (data && data->cloudsync) ? dbutils_settings_get_int64_value(data->cloudsync, key) : 0;
-    if (value <= 0) return fallback;
-    return (value > ceiling) ? ceiling : (long)value;
 }
 
 // API calls carry small JSON, so a cap on elapsed time is the right shape for them.
@@ -522,6 +541,14 @@ bool network_test_curl_timeout(const char *url, bool use_pool, bool as_api) {
     if (data.api_curl) curl_easy_cleanup(data.api_curl);
     if (data.artifact_curl) curl_easy_cleanup(data.artifact_curl);
     return ok;
+}
+
+// Which endpoints may hand out a session ticket: the API ones only.
+bool network_test_ticket_policy (const char *api_url, const char *other_url) {
+    network_data data = {0};
+    data.check_endpoint = (char *)api_url;
+    return network_data_accepts_ticket_from(&data, api_url) && !network_data_accepts_ticket_from(&data, other_url) &&
+           !network_data_accepts_ticket_from(&data, NULL) && !network_data_accepts_ticket_from(NULL, api_url);
 }
 
 // One real request through network_receive_buffer, to observe what a hostile answer does
@@ -646,6 +673,10 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
 #ifdef CLOUDSYNC_UNITTEST
     if (network_test_responder) return network_test_responder(endpoint, json_payload);
 #endif
+    if (!endpoint) {
+        // set_token before init leaves every endpoint unset
+        return (NETWORK_RESULT){CLOUDSYNC_NETWORK_ERROR, cloudsync_string_dup("Network endpoint is not set: call cloudsync_network_init first."), 0, NULL, NULL, 0, false, 0};
+    }
     char *buffer = NULL;
     size_t blen = 0;
     struct curl_slist* headers = NULL;
@@ -739,7 +770,7 @@ NETWORK_RESULT network_receive_buffer (network_data *data, const char *endpoint,
     if (rc == CURLE_OK) {
         buffer = netdata.buffer;
         blen = netdata.bused;
-        if (response_code < 400 && ticket_headers.ticket) {
+        if (response_code >= 200 && response_code < 300 && ticket_headers.ticket && network_data_accepts_ticket_from(data, endpoint)) {
             network_data_update_ticket(data, ticket_headers.ticket, ticket_headers.expires_at);
         }
     } else if (netdata.buffer) {
@@ -757,7 +788,7 @@ cleanup:
     result.http_status = (rc == CURLE_OK) ? response_code : 0;
     result.has_retry_after = (rc == CURLE_OK && ticket_headers.retry_after >= 0);
     result.retry_after = result.has_retry_after ? ticket_headers.retry_after : 0;
-    if (rc == CURLE_OK && response_code < 400) {
+    if (rc == CURLE_OK && response_code >= 200 && response_code < 300) {
         result.code = (buffer && blen) ? CLOUDSYNC_NETWORK_BUFFER : CLOUDSYNC_NETWORK_OK;
         result.buffer = buffer;
         result.blen = blen;
@@ -802,6 +833,8 @@ bool network_send_buffer (network_data *data, const char *endpoint, const char *
 #ifdef CLOUDSYNC_NETWORK_TRACE
     double trace_start_ms = network_trace_now_ms();
 #endif
+
+    if (!endpoint) return false;
 
     // init/reuse curl
     CURL *curl = network_curl_for_endpoint(data, endpoint, &pooled);
@@ -875,7 +908,8 @@ bool network_send_buffer (network_data *data, const char *endpoint, const char *
     // perform the upload
     rc = curl_easy_perform(curl);
     if (curl) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
-    if (rc == CURLE_OK) result = true;
+    // a redirect or any other non-2xx answer means the object was not stored
+    if (rc == CURLE_OK && response_code >= 200 && response_code < 300) result = true;
        
 cleanup:
     #ifdef CLOUDSYNC_NETWORK_TRACE
@@ -1437,13 +1471,15 @@ network_data *cloudsync_network_data (sqlite3_context *context) {
 }
 
 static void cloudsync_network_init_internal (sqlite3_context *context, const char *address, const char *managedDatabaseId) {
-    #ifndef CLOUDSYNC_OMIT_CURL
-    curl_global_init(CURL_GLOBAL_ALL);
-    #endif
-
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
     network_data *netdata = cloudsync_network_data(context);
     if (!netdata) goto abort_memory;
+    #ifndef CLOUDSYNC_OMIT_CURL
+    if (!netdata->curl_global) {
+        curl_global_init(CURL_GLOBAL_ALL);
+        netdata->curl_global = 1;
+    }
+    #endif
     // A wait the server asked for belongs to the previous database.
     network_retry_clear(netdata);
 
@@ -1497,10 +1533,6 @@ void cloudsync_network_cleanup_internal (sqlite3_context *context) {
     network_data *netdata = cloudsync_network_data(context);
     cloudsync_set_auxdata(data, NULL);
     network_data_free(netdata);
-    
-    #ifndef CLOUDSYNC_OMIT_CURL
-    curl_global_cleanup();
-    #endif
 }
 
 void cloudsync_network_cleanup (sqlite3_context *context, int argc, sqlite3_value **argv) {

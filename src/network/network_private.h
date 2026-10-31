@@ -81,6 +81,8 @@ char *network_data_get_orgid (network_data *data);
 char *network_data_get_ticket (network_data *data);
 bool network_data_should_use_ticket (network_data *data, const char *endpoint, const char *authentication);
 void network_data_update_ticket (network_data *data, const char *ticket, const char *expires_at);
+bool network_data_accepts_ticket_from (network_data *data, const char *endpoint);
+long network_data_timeout_seconds (network_data *data, const char *endpoint);
 bool network_data_set_endpoints (network_data *data, char *auth, char *check, char *upload, char *apply, char *status);
 
 bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size);

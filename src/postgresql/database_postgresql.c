@@ -27,6 +27,7 @@
 #include "funcapi.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "mb/pg_wchar.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -251,6 +252,26 @@ char *sql_build_upsert_pk_and_col (cloudsync_context *data, const char *table_na
     return (rc == DBRES_OK) ? query : NULL;
 }
 
+// ('col_a'::text,1),('col_b'::text,2) with every name escaped in full: a name made of quotes
+// doubles in size, so no fixed per-column budget is enough.
+static char *sql_build_colname_values (const char **colnames, int ncolnames) {
+    size_t cap = 1;
+    for (int i = 0; i < ncolnames; i++) cap += strlen(colnames[i]) * 2 + 40;
+    char *out = cloudsync_memory_alloc(cap);
+    if (!out) return NULL;
+
+    size_t pos = 0;
+    for (int i = 0; i < ncolnames; i++) {
+        char *esc = sql_literal_dup(colnames[i]);
+        if (!esc) { cloudsync_memory_free(out); return NULL; }
+        int n = snprintf(out + pos, cap - pos, "%s('%s'::text,%d)", i > 0 ? "," : "", esc, i + 1);
+        cloudsync_memory_free(esc);
+        if (n < 0 || (size_t)n >= cap - pos) { cloudsync_memory_free(out); return NULL; }
+        pos += (size_t)n;
+    }
+    return out;
+}
+
 char *sql_build_upsert_pk_and_multi_cols (cloudsync_context *data, const char *table_name, const char **colnames, int ncolnames, const char *schema) {
     if (ncolnames <= 0 || !colnames) return NULL;
 
@@ -259,17 +280,8 @@ char *sql_build_upsert_pk_and_multi_cols (cloudsync_context *data, const char *t
 
     // Build VALUES list for column names: ('col_a',1),('col_b',2)
     // Column names are SQL literals here, so escape single quotes
-    size_t values_cap = (size_t)ncolnames * 128 + 1;
-    char *col_values = cloudsync_memory_alloc(values_cap);
+    char *col_values = sql_build_colname_values(colnames, ncolnames);
     if (!col_values) { cloudsync_memory_free(qualified); return NULL; }
-
-    size_t vpos = 0;
-    for (int i = 0; i < ncolnames; i++) {
-        char esc[1024];
-        sql_escape_literal(colnames[i], esc, sizeof(esc));
-        vpos += snprintf(col_values + vpos, values_cap - vpos, "%s('%s'::text,%d)",
-                         i > 0 ? "," : "", esc, i + 1);
-    }
 
     char *qualified_lit = sql_literal_dup(qualified);
     if (!qualified_lit) { cloudsync_memory_free(qualified); cloudsync_memory_free(col_values); return NULL; }
@@ -326,17 +338,8 @@ char *sql_build_update_pk_and_multi_cols (cloudsync_context *data, const char *t
     if (!qualified) return NULL;
 
     // Build VALUES list for column names: ('col_a',1),('col_b',2)
-    size_t values_cap = (size_t)ncolnames * 128 + 1;
-    char *col_values = cloudsync_memory_alloc(values_cap);
+    char *col_values = sql_build_colname_values(colnames, ncolnames);
     if (!col_values) { cloudsync_memory_free(qualified); return NULL; }
-
-    size_t vpos = 0;
-    for (int i = 0; i < ncolnames; i++) {
-        char esc[1024];
-        sql_escape_literal(colnames[i], esc, sizeof(esc));
-        vpos += snprintf(col_values + vpos, values_cap - vpos, "%s('%s'::text,%d)",
-                         i > 0 ? "," : "", esc, i + 1);
-    }
 
     char *qualified_lit = sql_literal_dup(qualified);
     if (!qualified_lit) { cloudsync_memory_free(qualified); cloudsync_memory_free(col_values); return NULL; }
@@ -1272,6 +1275,49 @@ bool database_trigger_exists (cloudsync_context *data, const char *name) {
     return database_system_exists(data, name, "trigger", false, NULL);
 }
 
+// PostgreSQL silently cuts identifiers at 63 bytes, so two long table names sharing a prefix
+// would share a trigger and function name and overwrite each other's. A name that fits keeps
+// its historical form; a longer one gets the table shortened and a hash of the whole table
+// name added. legacy is the form PostgreSQL used to cut it to (empty when the same): an
+// install that already has it keeps working and is dropped with the rest.
+typedef struct {
+    char trigger[128];      // raw, for catalog lookups
+    char trigger_sql[256];  // quoted-identifier body
+    char func_sql[256];
+    char legacy[128];
+} pg_object_names;
+
+static void database_object_name (char *out, size_t cap, const char *prefix, const char *table, const char *suffix, bool legacy) {
+    char full[1200];
+    snprintf(full, sizeof(full), "%s%s%s", prefix, table, suffix);
+    int len = (int)strlen(full);
+    if (len <= 63) { snprintf(out, cap, "%s", full); return; }
+    if (legacy) {
+        int n = pg_mbcliplen(full, len, 63);
+        memcpy(out, full, (size_t)n);
+        out[n] = '\0';
+        return;
+    }
+    uint64_t h = 14695981039346656037ULL;
+    for (const char *c = table; *c; c++) { h ^= (unsigned char)*c; h *= 1099511628211ULL; }
+    char tag[16];
+    snprintf(tag, sizeof(tag), "_%08x", (unsigned)(h ^ (h >> 32)));
+    int room = 63 - (int)strlen(prefix) - (int)strlen(suffix) - (int)strlen(tag);
+    int n = pg_mbcliplen(table, (int)strlen(table), room);
+    snprintf(out, cap, "%s%.*s%s%s", prefix, n, table, tag, suffix);
+}
+
+static void database_object_names (pg_object_names *names, const char *prefix, const char *table) {
+    char func[128], legacy_func[128];
+    database_object_name(names->trigger, sizeof(names->trigger), prefix, table, "", false);
+    database_object_name(func, sizeof(func), prefix, table, "_fn", false);
+    database_object_name(names->legacy, sizeof(names->legacy), prefix, table, "", true);
+    database_object_name(legacy_func, sizeof(legacy_func), prefix, table, "_fn", true);
+    sql_escape_identifier(names->trigger, names->trigger_sql, sizeof(names->trigger_sql));
+    sql_escape_identifier(func, names->func_sql, sizeof(names->func_sql));
+    if (strcmp(names->legacy, names->trigger) == 0) names->legacy[0] = '\0';
+}
+
 // A trigger name is only unique per table: look it up on the table being initialised, not
 // across the database, or a same-named trigger on someone else's table makes cloudsync_init
 // skip creating its own and tracking is silently lost.
@@ -1468,14 +1514,13 @@ static int database_create_insert_trigger_internal (cloudsync_context *data, con
 
     const char *schema_param = (schema && schema[0]) ? schema : "";
 
-    char trigger_name[1024];
-    char func_name[1024];
-    char escaped_tbl[512];
-    sql_escape_identifier(table_name, escaped_tbl, sizeof(escaped_tbl));
-    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_insert_%s", escaped_tbl);
-    snprintf(func_name, sizeof(func_name), "cloudsync_after_insert_%s_fn", escaped_tbl);
+    pg_object_names names;
+    database_object_names(&names, "cloudsync_after_insert_", table_name);
+    const char *trigger_name = names.trigger_sql;
+    const char *func_name = names.func_sql;
 
-    if (database_table_trigger_exists(data, trigger_name, table_name, schema_param)) return DBRES_OK;
+    if (database_table_trigger_exists(data, names.trigger, table_name, schema_param) ||
+        (names.legacy[0] && database_table_trigger_exists(data, names.legacy, table_name, schema_param))) return DBRES_OK;
 
     char esc_tbl_literal[1024], esc_schema_literal[1024];
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
@@ -1536,14 +1581,13 @@ static int database_create_insert_trigger_internal (cloudsync_context *data, con
 static int database_create_update_trigger_gos_internal (cloudsync_context *data, const char *table_name, const char *schema) {
     if (!table_name) return DBRES_MISUSE;
 
-    char trigger_name[1024];
-    char func_name[1024];
-    char escaped_tbl[512];
-    sql_escape_identifier(table_name, escaped_tbl, sizeof(escaped_tbl));
-    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_update_%s", escaped_tbl);
-    snprintf(func_name, sizeof(func_name), "cloudsync_before_update_%s_fn", escaped_tbl);
+    pg_object_names names;
+    database_object_names(&names, "cloudsync_before_update_", table_name);
+    const char *trigger_name = names.trigger_sql;
+    const char *func_name = names.func_sql;
 
-    if (database_table_trigger_exists(data, trigger_name, table_name, schema)) return DBRES_OK;
+    if (database_table_trigger_exists(data, names.trigger, table_name, schema) ||
+        (names.legacy[0] && database_table_trigger_exists(data, names.legacy, table_name, schema))) return DBRES_OK;
 
     char esc_tbl_literal[1024];
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
@@ -1584,14 +1628,13 @@ static int database_create_update_trigger_internal (cloudsync_context *data, con
 
     const char *schema_param = (schema && schema[0]) ? schema : "";
 
-    char trigger_name[1024];
-    char func_name[1024];
-    char escaped_tbl[512];
-    sql_escape_identifier(table_name, escaped_tbl, sizeof(escaped_tbl));
-    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_update_%s", escaped_tbl);
-    snprintf(func_name, sizeof(func_name), "cloudsync_after_update_%s_fn", escaped_tbl);
+    pg_object_names names;
+    database_object_names(&names, "cloudsync_after_update_", table_name);
+    const char *trigger_name = names.trigger_sql;
+    const char *func_name = names.func_sql;
 
-    if (database_table_trigger_exists(data, trigger_name, table_name, schema_param)) return DBRES_OK;
+    if (database_table_trigger_exists(data, names.trigger, table_name, schema_param) ||
+        (names.legacy[0] && database_table_trigger_exists(data, names.legacy, table_name, schema_param))) return DBRES_OK;
 
     char esc_tbl_literal[1024], esc_schema_literal[1024];
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
@@ -1696,14 +1739,13 @@ static int database_create_update_trigger_internal (cloudsync_context *data, con
 static int database_create_delete_trigger_gos_internal (cloudsync_context *data, const char *table_name, const char *schema) {
     if (!table_name) return DBRES_MISUSE;
 
-    char trigger_name[1024];
-    char func_name[1024];
-    char escaped_tbl[512];
-    sql_escape_identifier(table_name, escaped_tbl, sizeof(escaped_tbl));
-    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_delete_%s", escaped_tbl);
-    snprintf(func_name, sizeof(func_name), "cloudsync_before_delete_%s_fn", escaped_tbl);
+    pg_object_names names;
+    database_object_names(&names, "cloudsync_before_delete_", table_name);
+    const char *trigger_name = names.trigger_sql;
+    const char *func_name = names.func_sql;
 
-    if (database_table_trigger_exists(data, trigger_name, table_name, schema)) return DBRES_OK;
+    if (database_table_trigger_exists(data, names.trigger, table_name, schema) ||
+        (names.legacy[0] && database_table_trigger_exists(data, names.legacy, table_name, schema))) return DBRES_OK;
 
     char esc_tbl_literal[1024];
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
@@ -1744,14 +1786,13 @@ static int database_create_delete_trigger_internal (cloudsync_context *data, con
 
     const char *schema_param = (schema && schema[0]) ? schema : "";
 
-    char trigger_name[1024];
-    char func_name[1024];
-    char escaped_tbl[512];
-    sql_escape_identifier(table_name, escaped_tbl, sizeof(escaped_tbl));
-    snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_delete_%s", escaped_tbl);
-    snprintf(func_name, sizeof(func_name), "cloudsync_after_delete_%s_fn", escaped_tbl);
+    pg_object_names names;
+    database_object_names(&names, "cloudsync_after_delete_", table_name);
+    const char *trigger_name = names.trigger_sql;
+    const char *func_name = names.func_sql;
 
-    if (database_table_trigger_exists(data, trigger_name, table_name, schema_param)) return DBRES_OK;
+    if (database_table_trigger_exists(data, names.trigger, table_name, schema_param) ||
+        (names.legacy[0] && database_table_trigger_exists(data, names.legacy, table_name, schema_param))) return DBRES_OK;
 
     char esc_tbl_literal[1024], esc_schema_literal[1024];
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
@@ -1922,62 +1963,40 @@ int database_create_triggers (cloudsync_context *data, const char *table_name, t
     return rc;
 }
 
+// Drops one trigger or function under the name PostgreSQL has always cut it to and, for a
+// long table name, under the hashed name too.
+static void database_drop_object (cloudsync_context *data, const char *prefix, const char *table, const char *base_ref, bool function) {
+    pg_object_names names;
+    database_object_names(&names, prefix, table);
+    char legacy_func[128], legacy_sql[256];
+    database_object_name(legacy_func, sizeof(legacy_func), prefix, table, "_fn", true);
+    sql_escape_identifier(function ? legacy_func : names.trigger, legacy_sql, sizeof(legacy_sql));
+    const char *hashed = function ? names.func_sql : names.trigger_sql;
+
+    // the historical name first: for a short table it is the only one
+    char legacy_trigger_sql[256];
+    sql_escape_identifier(names.legacy[0] ? names.legacy : names.trigger, legacy_trigger_sql, sizeof(legacy_trigger_sql));
+    const char *old_name = function ? legacy_sql : legacy_trigger_sql;
+    for (int pass = 0; pass < 2; pass++) {
+        const char *name = pass == 0 ? old_name : hashed;
+        if (pass == 1 && strcmp(name, old_name) == 0) break;
+        char *sql = function
+            ? cloudsync_memory_mprintf("DROP FUNCTION IF EXISTS \"%s\"() CASCADE;", name)
+            : cloudsync_memory_mprintf("DROP TRIGGER IF EXISTS \"%s\" ON %s;", name, base_ref);
+        if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
+    }
+}
+
 int database_delete_triggers (cloudsync_context *data, const char *table) {
     char *base_ref = database_build_base_ref(cloudsync_schema(data), table);
     if (!base_ref) return DBRES_NOMEM;
 
-    char escaped_tbl[512];
-    sql_escape_identifier(table, escaped_tbl, sizeof(escaped_tbl));
-
-    char *sql = cloudsync_memory_mprintf(
-             "DROP TRIGGER IF EXISTS \"cloudsync_after_insert_%s\" ON %s;",
-             escaped_tbl, base_ref);
-    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
-
-    sql = cloudsync_memory_mprintf(
-             "DROP FUNCTION IF EXISTS \"cloudsync_after_insert_%s_fn\"() CASCADE;",
-             escaped_tbl);
-    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
-
-    sql = cloudsync_memory_mprintf(
-             "DROP TRIGGER IF EXISTS \"cloudsync_after_update_%s\" ON %s;",
-             escaped_tbl, base_ref);
-    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
-
-    sql = cloudsync_memory_mprintf(
-             "DROP TRIGGER IF EXISTS \"cloudsync_before_update_%s\" ON %s;",
-             escaped_tbl, base_ref);
-    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
-
-    sql = cloudsync_memory_mprintf(
-             "DROP FUNCTION IF EXISTS \"cloudsync_after_update_%s_fn\"() CASCADE;",
-             escaped_tbl);
-    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
-
-    sql = cloudsync_memory_mprintf(
-             "DROP FUNCTION IF EXISTS \"cloudsync_before_update_%s_fn\"() CASCADE;",
-             escaped_tbl);
-    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
-
-    sql = cloudsync_memory_mprintf(
-             "DROP TRIGGER IF EXISTS \"cloudsync_after_delete_%s\" ON %s;",
-             escaped_tbl, base_ref);
-    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
-
-    sql = cloudsync_memory_mprintf(
-             "DROP TRIGGER IF EXISTS \"cloudsync_before_delete_%s\" ON %s;",
-             escaped_tbl, base_ref);
-    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
-
-    sql = cloudsync_memory_mprintf(
-             "DROP FUNCTION IF EXISTS \"cloudsync_after_delete_%s_fn\"() CASCADE;",
-             escaped_tbl);
-    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
-
-    sql = cloudsync_memory_mprintf(
-             "DROP FUNCTION IF EXISTS \"cloudsync_before_delete_%s_fn\"() CASCADE;",
-             escaped_tbl);
-    if (sql) { database_exec(data, sql); cloudsync_memory_free(sql); }
+    static const char *const prefixes[] = {"cloudsync_after_insert_", "cloudsync_after_update_", "cloudsync_before_update_",
+                                           "cloudsync_after_delete_", "cloudsync_before_delete_"};
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+        database_drop_object(data, prefixes[i], table, base_ref, false);
+        database_drop_object(data, prefixes[i], table, base_ref, true);
+    }
 
     cloudsync_memory_free(base_ref);
     return DBRES_OK;
@@ -3032,6 +3051,7 @@ const char *database_value_text (dbvalue_t *value) {
     if (!v || v->isnull) return NULL;
 
     if (!v->cstring && !v->owns_cstring) {
+        MemoryContext oldcontext = CurrentMemoryContext;
         PG_TRY();
         {
             if (pgvalue_is_text_type(v->typeid) && v->typeid != JSONBOID) {
@@ -3048,11 +3068,15 @@ const char *database_value_text (dbvalue_t *value) {
         }
         PG_CATCH();
         {
-            MemoryContextSwitchTo(CurrentMemoryContext);
+            MemoryContextSwitchTo(oldcontext);
             ErrorData *edata = CopyErrorData();
+            FlushErrorState();
+            // Only a failed conversion of this value is swallowed. There is no subtransaction
+            // here, so anything else (a cancel, a timeout, a shutdown, an out of memory) must
+            // keep propagating instead of being turned into a NULL.
+            if (ERRCODE_TO_CATEGORY(edata->sqlerrcode) != ERRCODE_DATA_EXCEPTION) ReThrowError(edata);
             elog(WARNING, "database_value_text: conversion failed for type %u: %s", v->typeid, edata->message);
             FreeErrorData(edata);
-            FlushErrorState();
             v->cstring = NULL;
             v->owns_cstring = true;  // prevents retry of failed conversion
         }
