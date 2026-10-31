@@ -20,6 +20,7 @@
 #include "fmgr.h"
 #include "funcapi.h"
 #include "pgvalue.h"
+#include "meta_tables.h"
 #include "storage/ipc.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -1381,8 +1382,7 @@ static int64 payload_chunks_pg_metadata_max(bytea *site_id, int64 lower) {
     int rc = SPI_execute(
         "SELECT n.nspname, c.relname FROM pg_class c "
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog','information_schema') "
-        "AND c.relname LIKE '%\\_cloudsync' ESCAPE '\\'", true, 0);
+        "WHERE " CLOUDSYNC_PG_META_TABLE_FILTER, true, 0);
     if (rc != SPI_OK_SELECT || !SPI_tuptable) ereport(ERROR, (errmsg("cloudsync: SPI_execute failed while listing *_cloudsync")));
 
     // One ORDER BY db_version DESC LIMIT 1 per table: it walks the db_version index back
@@ -3140,10 +3140,8 @@ static char * build_union_sql (void) {
         "SELECT n.nspname, c.relname "
         "FROM pg_class c "
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE c.relkind = 'r' "
-        "  AND n.nspname NOT IN ('pg_catalog','information_schema') "
-        "  AND c.relname LIKE '%\\_cloudsync' ESCAPE '\\' "
-        "ORDER BY n.nspname, c.relname";
+        "WHERE " CLOUDSYNC_PG_META_TABLE_FILTER
+        " ORDER BY n.nspname, c.relname";
         
         int rc = SPI_execute(sql, true, 0);
         if (rc != SPI_OK_SELECT || !SPI_tuptable) {

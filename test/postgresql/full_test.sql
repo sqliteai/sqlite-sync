@@ -77,6 +77,7 @@
 \ir 67_payload_chunks_empty_final.sql
 \ir 68_hardening.sql
 \ir 69_security_review.sql
+\ir 70_medium_review.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

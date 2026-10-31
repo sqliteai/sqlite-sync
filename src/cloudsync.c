@@ -4119,6 +4119,29 @@ static int cloudsync_payload_apply_reassembled_fragment (cloudsync_context *data
     }
     total_size = total_size_max;
 
+    // total_size comes from the sender: allocate only what is really staged, never what a
+    // fragment claims, so a forged value cannot make us reserve gigabytes up front
+    if (total_size <= 0 || total_size > CLOUDSYNC_PAYLOAD_MAX_EXPANDED_SIZE) {
+        return cloudsync_set_error(data, "Error on cloudsync_payload_apply: inconsistent v3 fragments", DBRES_MISUSE);
+    }
+    rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_SELECT, &vm, 0);
+    if (rc != DBRES_OK) return rc;
+    rc = databasevm_bind_text(vm, 1, value_id, -1);
+    int64_t staged = 0;
+    while (rc == DBRES_OK && (rc = databasevm_step(vm)) == DBRES_ROW) {
+        size_t frag_len = 0;
+        (void)database_column_blob(vm, 0, &frag_len);
+        staged += (int64_t)frag_len;
+        rc = DBRES_OK;
+        if (staged > total_size) break;
+    }
+    databasevm_finalize(vm);
+    vm = NULL;
+    if (rc != DBRES_OK && rc != DBRES_DONE) return rc;
+    if (staged != total_size) {
+        return cloudsync_set_error(data, "Error on cloudsync_payload_apply: inconsistent v3 fragments", DBRES_MISUSE);
+    }
+
     value = cloudsync_memory_alloc((uint64_t)total_size);
     if (!value) return DBRES_NOMEM;
 
@@ -4527,7 +4550,7 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         // must not make us allocate gigabytes. A genuinely large payload stays loadable,
         // whatever its size. INT_MAX is LZ4's own API limit: past it the cast below turns
         // negative and LZ4_decompress_safe does not validate a negative capacity.
-        if (header.expanded_size > INT_MAX ||
+        if (header.expanded_size > CLOUDSYNC_PAYLOAD_MAX_EXPANDED_SIZE ||
             (uint64_t)header.expanded_size > (uint64_t)buf_len * CLOUDSYNC_PAYLOAD_LZ4_MAX_RATIO + 64) {
             return cloudsync_set_error(data, "Error on cloudsync_payload_apply: declared expanded size is inconsistent with the compressed payload", DBRES_MISUSE);
         }

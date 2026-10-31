@@ -1989,6 +1989,14 @@ int dbsync_register_function (sqlite3 *db, const char *name, void (*xfunc)(sqlit
     return dbsync_register(db, name, xfunc, NULL, NULL, nargs, pzErrMsg, ctx, ctx_free);
 }
 
+// file-system functions: never callable from a view, trigger, CHECK or generated column
+// of a database the caller did not write
+int dbsync_register_direct_function (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_context*,int,sqlite3_value**), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
+    const int FLAGS_DIRECT = SQLITE_UTF8 | SQLITE_DIRECTONLY;
+    DEBUG_DBFUNCTION("dbsync_register_direct_function %s", name);
+    return dbsync_register_with_flags(db, name, xfunc, NULL, NULL, nargs, FLAGS_DIRECT, pzErrMsg, ctx, ctx_free);
+}
+
 int dbsync_register_pure_function (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_context*,int,sqlite3_value**), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
     const int FLAGS_PURE = SQLITE_UTF8 | SQLITE_INNOCUOUS | SQLITE_DETERMINISTIC;
     DEBUG_DBFUNCTION("dbsync_register_pure_function %s", name);
@@ -2288,10 +2296,10 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     if (rc != SQLITE_OK) return rc;
 
     #ifdef CLOUDSYNC_DESKTOP_OS
-    rc = dbsync_register_function(db, "cloudsync_payload_save", dbsync_payload_save, 1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_direct_function(db, "cloudsync_payload_save", dbsync_payload_save, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_payload_load", dbsync_payload_load, 1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_direct_function(db, "cloudsync_payload_load", dbsync_payload_load, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     #endif
     

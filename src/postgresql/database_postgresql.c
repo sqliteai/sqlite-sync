@@ -1272,6 +1272,26 @@ bool database_trigger_exists (cloudsync_context *data, const char *name) {
     return database_system_exists(data, name, "trigger", false, NULL);
 }
 
+// A trigger name is only unique per table: look it up on the table being initialised, not
+// across the database, or a same-named trigger on someone else's table makes cloudsync_init
+// skip creating its own and tracking is silently lost.
+static bool database_table_trigger_exists (cloudsync_context *data, const char *name, const char *table_name, const char *schema) {
+    cloudsync_reset_error(data);
+    Oid argtypes[3] = {TEXTOID, TEXTOID, TEXTOID};
+    Datum values[3] = {CStringGetTextDatum(name), CStringGetTextDatum(table_name), CStringGetTextDatum((schema && schema[0]) ? schema : "")};
+    char nulls[3] = {' ', ' ', ' '};
+    int rc = SPI_execute_with_args(
+        "SELECT 1 FROM pg_trigger WHERE tgname = $1 AND tgrelid = "
+        "to_regclass(quote_ident(COALESCE(NULLIF($3, ''), current_schema())) || '.' || quote_ident($2))::oid",
+        3, argtypes, values, nulls, true, 0);
+    bool exists = (rc >= 0 && SPI_processed > 0);
+    if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
+    pfree(DatumGetPointer(values[0]));
+    pfree(DatumGetPointer(values[1]));
+    pfree(DatumGetPointer(values[2]));
+    return exists;
+}
+
 // MARK: - SCHEMA INFO -
 
 static int64_t database_count_bind (cloudsync_context *data, const char *sql, const char *table_name, const char *schema) {
@@ -1455,7 +1475,7 @@ static int database_create_insert_trigger_internal (cloudsync_context *data, con
     snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_insert_%s", escaped_tbl);
     snprintf(func_name, sizeof(func_name), "cloudsync_after_insert_%s_fn", escaped_tbl);
 
-    if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
+    if (database_table_trigger_exists(data, trigger_name, table_name, schema_param)) return DBRES_OK;
 
     char esc_tbl_literal[1024], esc_schema_literal[1024];
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
@@ -1523,7 +1543,7 @@ static int database_create_update_trigger_gos_internal (cloudsync_context *data,
     snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_update_%s", escaped_tbl);
     snprintf(func_name, sizeof(func_name), "cloudsync_before_update_%s_fn", escaped_tbl);
 
-    if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
+    if (database_table_trigger_exists(data, trigger_name, table_name, schema)) return DBRES_OK;
 
     char esc_tbl_literal[1024];
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
@@ -1571,7 +1591,7 @@ static int database_create_update_trigger_internal (cloudsync_context *data, con
     snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_update_%s", escaped_tbl);
     snprintf(func_name, sizeof(func_name), "cloudsync_after_update_%s_fn", escaped_tbl);
 
-    if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
+    if (database_table_trigger_exists(data, trigger_name, table_name, schema_param)) return DBRES_OK;
 
     char esc_tbl_literal[1024], esc_schema_literal[1024];
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
@@ -1683,7 +1703,7 @@ static int database_create_delete_trigger_gos_internal (cloudsync_context *data,
     snprintf(trigger_name, sizeof(trigger_name), "cloudsync_before_delete_%s", escaped_tbl);
     snprintf(func_name, sizeof(func_name), "cloudsync_before_delete_%s_fn", escaped_tbl);
 
-    if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
+    if (database_table_trigger_exists(data, trigger_name, table_name, schema)) return DBRES_OK;
 
     char esc_tbl_literal[1024];
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));
@@ -1731,7 +1751,7 @@ static int database_create_delete_trigger_internal (cloudsync_context *data, con
     snprintf(trigger_name, sizeof(trigger_name), "cloudsync_after_delete_%s", escaped_tbl);
     snprintf(func_name, sizeof(func_name), "cloudsync_after_delete_%s_fn", escaped_tbl);
 
-    if (database_trigger_exists(data, trigger_name)) return DBRES_OK;
+    if (database_table_trigger_exists(data, trigger_name, table_name, schema_param)) return DBRES_OK;
 
     char esc_tbl_literal[1024], esc_schema_literal[1024];
     sql_escape_literal(table_name, esc_tbl_literal, sizeof(esc_tbl_literal));

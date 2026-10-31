@@ -48,6 +48,10 @@ static size_t cacert_len = sizeof(cacert_pem) - 1;
 #endif
  
 #define CLOUDSYNC_NETWORK_MINBUF_SIZE           512
+#ifndef CLOUDSYNC_NETWORK_MAX_RESPONSE_SIZE
+// SQLite's default blob limit: a larger response could not be returned as a value anyway
+#define CLOUDSYNC_NETWORK_MAX_RESPONSE_SIZE     1000000000U
+#endif
 #define CLOUDSYNC_SESSION_TOKEN_MAXSIZE         4096
 
 #ifndef CLOUDSYNC_CURL_MAXCONNECTS
@@ -520,6 +524,14 @@ bool network_test_curl_timeout(const char *url, bool use_pool, bool as_api) {
     return ok;
 }
 
+// One real request through network_receive_buffer, to observe what a hostile answer does
+// to its buffer: the result is handed back to the caller, who frees it.
+NETWORK_RESULT network_test_receive(const char *url, bool zero_terminated) {
+    network_data data = {0};
+    data.curl_pool_enabled = -1;
+    return network_receive_buffer(&data, url, NULL, zero_terminated, false, NULL, NULL, 0);
+}
+
 // A transfer against a server that never answers, on a connection already interrupted:
 // the progress callback must abort it at once instead of waiting for a deadline.
 bool network_test_curl_interrupt(const char *url, sqlite3 *db) {
@@ -557,13 +569,19 @@ static bool network_buffer_check (network_buffer *data, size_t needed) {
 static size_t network_receive_callback (void *ptr, size_t size, size_t nmemb, void *xdata) {
     network_buffer *data = (network_buffer *)xdata;
     
-    size_t ptr_size = (size*nmemb);
-    if (data->zero_term) ptr_size += 1;
+    // a server must not be able to exhaust memory: stop the transfer past the cap
+    size_t chunk = (size*nmemb);
+    if (size != 0 && chunk / size != nmemb) return CURL_WRITEFUNC_ERROR;
+    if (chunk > CLOUDSYNC_NETWORK_MAX_RESPONSE_SIZE - data->bused) return CURL_WRITEFUNC_ERROR;
+
+    // always keep a trailing NUL: an error body is used as a C string even when the
+    // caller asked for a binary buffer
+    size_t ptr_size = chunk + 1;
     
     if (network_buffer_check(data, ptr_size) == false) return CURL_WRITEFUNC_ERROR;
-    memcpy(data->buffer+data->bused, ptr, size*nmemb);
-    data->bused += size*nmemb;
-    if (data->zero_term) data->buffer[data->bused] = 0;
+    memcpy(data->buffer+data->bused, ptr, chunk);
+    data->bused += chunk;
+    data->buffer[data->bused] = 0;
     
     return (size * nmemb);
 }
