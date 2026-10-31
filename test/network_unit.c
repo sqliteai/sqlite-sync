@@ -945,6 +945,20 @@ static void http_handle(int c) {
         http_reply(c, code, code < 400 ? "{\"data\":{\"lastOptimisticVersion\":0,\"lastConfirmedVersion\":0,\"gaps\":[]}}"
                                        : "{\"errors\":[{\"status\":\"429\",\"code\":\"check_rate_limited\",\"title\":\"Busy\"}]}",
                    step >= 0 ? http_check_retry[step] : NULL);
+    } else if (strcmp(endpoint, "boom") == 0) {
+        http_reply(c, 503, "upstream failure", NULL);
+    } else if (strncmp(endpoint, "big", 3) == 0) {
+        size_t n = (size_t)strtoull(endpoint + 3, NULL, 10);
+        char head_big[160];
+        int hl = snprintf(head_big, sizeof(head_big), "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", n);
+        char chunk[4096];
+        memset(chunk, 'a', sizeof(chunk));
+        bool alive = write(c, head_big, (size_t)hl) > 0;
+        for (size_t sent = 0; alive && sent < n; ) {
+            size_t part = n - sent < sizeof(chunk) ? n - sent : sizeof(chunk);
+            ssize_t w = write(c, chunk, part);
+            if (w <= 0) alive = false; else sent += (size_t)w;
+        }
     } else {
         http_nput++;
         http_reply(c, 200, "", NULL);
@@ -1232,6 +1246,39 @@ static bool test_credentials_follow_address(void) {
     ok = ok && expect(db_exec(db, "SELECT * FROM v_net;") != SQLITE_OK, "network functions are direct-only", NULL);
 
     stream_close(db);
+    http_shutdown(thread);
+    return ok;
+}
+
+extern NETWORK_RESULT network_test_receive(const char *url, bool zero_terminated);
+
+// A hostile server must not be able to read past a buffer or exhaust memory: an error body is
+// always NUL-terminated, even when the caller asked for binary data, and a response past
+// the cap (65536 bytes in this build) aborts the transfer.
+static bool test_response_limits(void) {
+    pthread_t thread;
+    if (!http_start(&thread)) return false;
+    char url[96];
+    bool ok = true;
+
+    for (int zero_terminated = 0; zero_terminated < 2; zero_terminated++) {
+        snprintf(url, sizeof(url), "http://127.0.0.1:%u/boom", http_port);
+        NETWORK_RESULT r = network_test_receive(url, zero_terminated);
+        ok = ok && expect(r.code == CLOUDSYNC_NETWORK_ERROR && r.buffer && strcmp(r.buffer, "upstream failure") == 0 &&
+                          r.blen == strlen("upstream failure"), "an error body is a bounded C string", r.buffer);
+        if (r.buffer) free(r.buffer);
+    }
+
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/big60000", http_port);
+    NETWORK_RESULT r = network_test_receive(url, false);
+    ok = ok && expect(r.code == CLOUDSYNC_NETWORK_BUFFER && r.blen == 60000 && r.buffer && r.buffer[60000] == 0, "a response under the cap is kept", NULL);
+    if (r.buffer) free(r.buffer);
+
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/big200000", http_port);
+    r = network_test_receive(url, false);
+    ok = ok && expect(r.code == CLOUDSYNC_NETWORK_ERROR && r.http_status == 0, "a response past the cap aborts the transfer", NULL);
+    if (r.buffer) free(r.buffer);
+
     http_shutdown(thread);
     return ok;
 }
@@ -1545,6 +1592,7 @@ int main(void) {
     check("apply-defer over HTTP: header, 202 lifecycle, rollback, 503/409:", test_apply_defer_transport());
     check("soft overload over HTTP: busy send/receive, Retry-After budget:", test_soft_overload_transport());
     check("credentials follow their address; address and id are validated:", test_credentials_follow_address());
+    check("response size cap and NUL-terminated error bodies:", test_response_limits());
 #endif
     if (failures) { printf("\n%d test(s) FAILED\n", failures); return 1; }
     printf("\nAll network unit tests passed\n");

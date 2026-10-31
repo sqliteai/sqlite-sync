@@ -7,6 +7,7 @@
 //
 
 #include "../sql.h"
+#include "meta_tables.h"
 
 // MARK: Settings
 
@@ -47,16 +48,27 @@ const char * const SQL_CREATE_SETTINGS_TABLE =
     "CREATE TABLE IF NOT EXISTS public.app_schema_version ("
     "version BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY"
     ");"
-    "CREATE OR REPLACE FUNCTION bump_app_schema_version() "
-    "RETURNS event_trigger AS $$ "
+    // Idempotent and tolerant: any role may run cloudsync_init, only the owner (or a superuser)
+    // can replace the function or the event trigger. The function runs as its owner with a
+    // pinned search_path so every role's DDL can bump the version without write access to it.
+    "DO $cloudsync_do$ BEGIN "
+    "BEGIN "
+    "CREATE OR REPLACE FUNCTION public.bump_app_schema_version() "
+    "RETURNS event_trigger SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $cloudsync_fn$ "
     "BEGIN "
     "INSERT INTO public.app_schema_version DEFAULT VALUES; "
     "END;"
-    "$$ LANGUAGE plpgsql;"
-    "DROP EVENT TRIGGER IF EXISTS app_schema_change;"
-    "CREATE EVENT TRIGGER app_schema_change "
-    "ON ddl_command_end "
-    "EXECUTE FUNCTION bump_app_schema_version();";
+    "$cloudsync_fn$ LANGUAGE plpgsql; "
+    "EXCEPTION WHEN insufficient_privilege THEN NULL; END; "
+    "BEGIN "
+    "GRANT SELECT ON public.app_schema_version TO PUBLIC; "
+    "EXCEPTION WHEN insufficient_privilege THEN NULL; END; "
+    "BEGIN "
+    "DROP EVENT TRIGGER IF EXISTS app_schema_change; "
+    "CREATE EVENT TRIGGER app_schema_change ON ddl_command_end "
+    "EXECUTE FUNCTION public.bump_app_schema_version(); "
+    "EXCEPTION WHEN insufficient_privilege THEN NULL; END; "
+    "END $cloudsync_do$;";
 
 // format strings (snprintf) are also static SQL templates
 const char * const SQL_INSERT_SETTINGS_STR_FORMAT =
@@ -91,9 +103,9 @@ const char * const SQL_SETTINGS_CLEANUP_DROP_ALL =
 
 const char * const SQL_DBVERSION_BUILD_QUERY =
     "WITH table_names AS ("
-    "SELECT quote_ident(schemaname) || '.' || quote_ident(tablename) as tbl_name "
-    "FROM pg_tables "
-    "WHERE tablename LIKE '%_cloudsync'"
+    "SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) as tbl_name "
+    "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE " CLOUDSYNC_PG_META_TABLE_FILTER
     "), "
     "query_parts AS ("
     "SELECT tbl_name, "

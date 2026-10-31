@@ -362,8 +362,37 @@ static void test_fragment_retention(void) {
     CHECK(scalar(db, big) == 1);
     CHECK(close_db(db) == SQLITE_OK);
 
+    // total_size is the sender's claim: a group whose pieces all agree on a size that the
+    // staged bytes do not add up to is refused instead of allocating that size.
+    const char *forge = "CREATE TRIGGER forge AFTER INSERT ON cloudsync_payload_fragments BEGIN "
+                        "UPDATE cloudsync_payload_fragments SET total_size = %lld WHERE value_id = NEW.value_id; END";
+    const long long sizes[] = {900000000LL, 4000000000LL, 5};
+    for (int s = 0; s < 3; s++) {
+        char trigger[400];
+        snprintf(trigger, sizeof(trigger), forge, sizes[s]);
+        db = frag_target(NULL);
+        CHECK(sql(db, trigger) == SQLITE_OK);
+        for (int i = 0; i < frag_count - 1; i++) CHECK(frag_apply(db, i) == SQLITE_ROW);
+        CHECK(frag_apply(db, frag_count - 1) != SQLITE_ROW);
+        CHECK(strstr(sqlite3_errmsg(db), "inconsistent v3 fragments") != NULL);
+        CHECK(scalar(db, "SELECT count(*) FROM f") == 0);
+        CHECK(close_db(db) == SQLITE_OK);
+    }
+
     for (int i = 0; i < frag_count; i++) free(frag_data[i]);
 }
+#ifdef CLOUDSYNC_DESKTOP_OS
+static void test_file_functions_are_direct_only(void) {
+    sqlite3 *db = open_db();
+    CHECK(sql(db, "CREATE VIEW v_save AS SELECT cloudsync_payload_save('/tmp/cloudsync_never_written') AS x;") == SQLITE_OK);
+    CHECK(sql(db, "CREATE VIEW v_load AS SELECT cloudsync_payload_load('/etc/hosts') AS x;") == SQLITE_OK);
+    CHECK(sql(db, "SELECT * FROM v_save") != SQLITE_OK);
+    CHECK(strstr(sqlite3_errmsg(db), "unsafe use") != NULL);
+    CHECK(sql(db, "SELECT * FROM v_load") != SQLITE_OK);
+    CHECK(strstr(sqlite3_errmsg(db), "unsafe use") != NULL);
+    CHECK(close_db(db) == SQLITE_OK);
+}
+#endif
 static bool text_is(sqlite3 *db, const char *query, const char *expected) {
     sqlite3_stmt *vm = NULL;
     bool ok = sqlite3_prepare_v2(db, query, -1, &vm, NULL) == SQLITE_OK && sqlite3_step(vm) == SQLITE_ROW &&
@@ -980,6 +1009,9 @@ int main(void) {
     test_resurrected_group_rollback();
     test_batched_update_missing_row();
     test_fragment_retention();
+#ifdef CLOUDSYNC_DESKTOP_OS
+    test_file_functions_are_direct_only();
+#endif
     test_db_version_per_transaction();
     test_db_version_apply_in_transaction();
     test_block_write_errors();
