@@ -331,6 +331,16 @@ $(DIST_DIR)/network_unit$(EXE): $(CURL_LIB) $(NT_OBJ)
 network-unittest: $(DIST_DIR)/network_unit$(EXE)
 	@./$(DIST_DIR)/network_unit$(EXE)
 
+# Mutation fuzzing of payload apply (fragments and block merge) under ASan + UBSan.
+# FUZZ_ITER and FUZZ_SEED tune the run; see test/fuzz/README.md for TSan and MSan.
+FUZZ_ITER ?= 3000
+FUZZ_SEED ?= 1
+fuzz-apply:
+	./test/fuzz/build.sh address,undefined build/fuzz/fuzz_apply
+	./build/fuzz/fuzz_apply $(FUZZ_ITER) $(FUZZ_SEED)
+
+.PHONY: fuzz-apply
+
 # Run end-to-end integration tests
 e2e: $(TARGET) $(DIST_DIR)/integration$(EXE)
 	@if [ -f .env ]; then \

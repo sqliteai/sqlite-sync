@@ -254,8 +254,11 @@ int pk_decode (char *buffer, size_t blen, int count, size_t *seek, int skip_deco
                     size_t slice_len = bseek - initial_bseek;
                     if (cb) if (cb(xdata, (int)i, DBTYPE_BLOB, (int64_t)slice_len, 0.0, (char *)(buffer + initial_bseek)) != DBRES_OK) return -1;
                 } else {
-                    int64_t value = (int64_t)u;
-                    if (raw_type == DATABASE_TYPE_NEGATIVE_INTEGER) value = -value;
+                    // the encoder never produces a magnitude past INT64_MAX (or 2^63 for INT64_MIN):
+                    // negating anything larger would overflow a signed integer
+                    if (u > (uint64_t)INT64_MAX && !(raw_type == DATABASE_TYPE_NEGATIVE_INTEGER && u == (uint64_t)INT64_MAX + 1)) return -1;
+                    int64_t value = (u == (uint64_t)INT64_MAX + 1) ? INT64_MIN : (int64_t)u;
+                    if (raw_type == DATABASE_TYPE_NEGATIVE_INTEGER && value != INT64_MIN) value = -value;
                     if (cb) if (cb(xdata, (int)i, DBTYPE_INTEGER, value, 0.0, NULL) != DBRES_OK) return -1;
                 }
             }

@@ -1195,6 +1195,12 @@ static bool payload_chunks_fetch_current(PayloadChunksState *st) {
 
     if (old_value_ctx) MemoryContextSwitchTo(old_value_ctx);
 
+    // a change without a key or a site cannot be encoded: later code reads both as varlenas
+    if (!st->pk || !st->site_id) {
+        SPI_tuptable = NULL;
+        ereport(ERROR, (errmsg("cloudsync: change row without a primary key or site id")));
+    }
+
     SPI_tuptable = NULL;
     st->has_current = true;
     return true;
@@ -1206,7 +1212,7 @@ static void payload_chunks_make_pgvalues(PayloadChunksState *st, pgvalue_t **val
     vals[0] = pgvalue_create(PointerGetDatum(owned_texts[0]), TEXTOID, -1, InvalidOid, false);
     vals[1] = pgvalue_create(PointerGetDatum(st->pk), BYTEAOID, -1, InvalidOid, false);
     vals[2] = pgvalue_create(PointerGetDatum(owned_texts[1]), TEXTOID, -1, InvalidOid, false);
-    vals[3] = pgvalue_create(PointerGetDatum(st->col_value), BYTEAOID, -1, InvalidOid, false);
+    vals[3] = pgvalue_create(st->col_value ? PointerGetDatum(st->col_value) : (Datum)0, BYTEAOID, -1, InvalidOid, st->col_value == NULL);
     vals[4] = pgvalue_create(Int64GetDatum(st->col_version), INT8OID, -1, InvalidOid, false);
     vals[5] = pgvalue_create(Int64GetDatum(st->db_version), INT8OID, -1, InvalidOid, false);
     vals[6] = pgvalue_create(PointerGetDatum(st->site_id), BYTEAOID, -1, InvalidOid, false);
@@ -1271,7 +1277,10 @@ static bytea *payload_chunks_emit_pg_fragment(PayloadChunksState *st, cloudsync_
 // fragment carry the same part index. The plan (frag_target/frag_count) is a
 // deterministic function of the row, so a resumed fragment tiles identically.
 static void payload_chunks_pg_begin_fragment(PayloadChunksState *st, cloudsync_context *data, int64 start_offset) {
+    // only a real value can be fragmented, and the resume offset is the caller's
+    if (!st->col_value) ereport(ERROR, (errmsg("cloudsync: cannot resume inside a NULL value")));
     st->frag_total = VARSIZE_ANY_EXHDR(st->col_value);
+    if (start_offset < 0 || start_offset >= st->frag_total) ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("cloudsync: resume_frag_offset is outside the value")));
     st->frag_offset = start_offset;
     st->frag_target = cloudsync_payload_fragment_data_size(data,
         st->tbl, -1,
@@ -2763,7 +2772,12 @@ static int cloudsync_decode_value_cb (void *xdata, int index, int type, int64_t 
             out->dval = dval;
             break;
         case DBTYPE_TEXT:
-            out->pval = pnstrdup(pval, (int)ival);
+            // PostgreSQL text cannot hold a NUL, and a copy that stopped at one would be
+            // shorter than the declared length the consumer reads back
+            if (ival < 0 || (ival > 0 && memchr(pval, '\0', (size_t)ival) != NULL)) return DBRES_ERROR;
+            out->pval = (char *)palloc((size_t)ival + 1);
+            if (ival > 0) memcpy(out->pval, pval, (size_t)ival);
+            out->pval[ival] = '\0';
             out->len = ival;
             break;
         case DBTYPE_BLOB:

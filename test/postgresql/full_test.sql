@@ -78,6 +78,8 @@
 \ir 68_hardening.sql
 \ir 69_security_review.sql
 \ir 70_medium_review.sql
+\ir 71_low_review.sql
+\ir 72_rls_isolation.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

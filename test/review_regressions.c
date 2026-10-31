@@ -957,6 +957,135 @@ static void test_payload_window_cap_paged(void) {
 
 // The trigger helpers are callable from any SELECT: a wrong argument count is an error, not an
 // out-of-range read. A primary key blob from outside must have the table's key shape.
+static void test_fuzz_review_findings(void) {
+    const char *site = "X'0102030405060708090a0b0c0d0e0f10'";
+    char q[700];
+    sqlite3 *db = open_db();
+
+    // variadic functions called without their argument
+    CHECK(sql(db, "SELECT cloudsync_payload_decode();") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_payload_apply();") != SQLITE_OK);
+
+    // a resume offset that points outside the value is refused, not read through
+    CHECK(sql(db, "CREATE TABLE big(id TEXT PRIMARY KEY NOT NULL, a TEXT); SELECT cloudsync_init('big');") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO big VALUES('k', replace(hex(zeroblob(400000)),'0','xy'));") == SQLITE_OK);
+    CHECK(sql(db, "SELECT * FROM cloudsync_payload_chunks(NULL,NULL,NULL,NULL,1,0,9223372036854775807);") != SQLITE_OK);
+
+    // a table called <anychar>cloudsync is not a metadata table
+    CHECK(sql(db, "CREATE TABLE xcloudsync(id INTEGER PRIMARY KEY, v TEXT); CREATE TABLE ok1(id TEXT PRIMARY KEY NOT NULL, v TEXT);") == SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_init('ok1');") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO ok1 VALUES('a','b'); SELECT count(*) FROM cloudsync_changes;") == SQLITE_OK);
+    CHECK(sql(db, "SELECT count(*) FROM (SELECT * FROM cloudsync_payload_chunks())") == SQLITE_OK);
+
+    // clock values out of range are refused and leave the local clock alone
+    int64_t before = scalar(db, "SELECT cloudsync_db_version()");
+    const char *bad[] = {"9223372036854775807,1,0", "4611686018427387904,1,0", "-1,1,0", "5,1,-1", "5,-3,0"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        char vals[80];
+        snprintf(vals, sizeof(vals), "%s", bad[i]);
+        int64_t dbv = 0, cv = 1, seq = 0;
+        sscanf(vals, "%lld,%lld,%lld", (long long *)&dbv, (long long *)&cv, (long long *)&seq);
+        snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('ok1',cloudsync_pk_encode('z'),'v','x',%lld,%lld,%s,1,%lld);",
+                 (long long)cv, (long long)dbv, site, (long long)seq);
+        CHECK(sql(db, q) != SQLITE_OK);
+    }
+    CHECK(sql(db, "INSERT INTO ok1 VALUES('c','d');") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == before + 1);
+    CHECK(close_db(db) == SQLITE_OK);
+
+    // block columns on tables whose names need quoting; the name never runs as SQL
+    db = open_db();
+    CHECK(sql(db, "CREATE TABLE \"my table\"(id TEXT PRIMARY KEY NOT NULL, body TEXT); SELECT cloudsync_init('my table');") == SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_set_column('my table','body','algo','block');") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO \"my table\" VALUES('r','one'||char(10)||'two');") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM sqlite_master WHERE name='my table_cloudsync_blocks'") == 1);
+    CHECK(sql(db, "CREATE TABLE \"b1 (pk BLOB); CREATE TABLE pwned(x); --\"(id TEXT PRIMARY KEY NOT NULL, v TEXT);") == SQLITE_OK);
+    sql(db, "SELECT cloudsync_init('b1 (pk BLOB); CREATE TABLE pwned(x); --'); SELECT cloudsync_set_column('b1 (pk BLOB); CREATE TABLE pwned(x); --','v','algo','block');");
+    CHECK(scalar(db, "SELECT count(*) FROM sqlite_master WHERE name='pwned'") == 0);
+    CHECK(close_db(db) == SQLITE_OK);
+
+    // a filter that does not compile keeps the tracking the table had
+    db = open_db();
+    CHECK(sql(db, "CREATE TABLE tr(id TEXT PRIMARY KEY NOT NULL, v TEXT); SELECT cloudsync_init('tr');") == SQLITE_OK);
+    int64_t triggers = scalar(db, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='tr'");
+    CHECK(triggers > 0);
+    CHECK(sql(db, "SELECT cloudsync_set_filter('tr','bogus syntax (');") != SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='tr'") == triggers);
+    CHECK(sql(db, "SELECT cloudsync_set_filter('tr','nosuchcolumn = 1');") != SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='tr'") == triggers);
+    CHECK(sql(db, "INSERT INTO tr VALUES('a','b');") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM tr_cloudsync") > 0);
+    CHECK(sql(db, "SELECT cloudsync_set_filter('tr','v IS NOT NULL');") == SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_clear_filter('tr');") == SQLITE_OK);
+    CHECK(close_db(db) == SQLITE_OK);
+
+    // lookalike metadata tables: wrong shape, and the right shape without a base table
+    db = open_db();
+    CHECK(sql(db, "CREATE TABLE junk_cloudsync(anything TEXT);"
+                  "CREATE TABLE orphan_cloudsync(pk BLOB NOT NULL, col_name TEXT NOT NULL, col_version INTEGER, db_version INTEGER, site_id INTEGER, seq INTEGER);"
+                  "INSERT INTO orphan_cloudsync VALUES(x'01','c',1,999999,0,0);"
+                  "CREATE TABLE real_t(id TEXT PRIMARY KEY NOT NULL, v TEXT);") == SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_init('real_t');") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO real_t VALUES('a','b');") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 1);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_changes") == 1);
+    CHECK(scalar(db, "SELECT count(*) FROM (SELECT * FROM cloudsync_payload_chunks())") >= 1);
+
+    // the rowid is evaluated by SQLite itself, as a filter and as an order
+    CHECK(sql(db, "SELECT * FROM cloudsync_changes WHERE rowid = 5;") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_changes WHERE rowid > 0") == 1);
+    CHECK(sql(db, "SELECT * FROM cloudsync_changes ORDER BY rowid;") == SQLITE_OK);
+    CHECK(sql(db, "SELECT * FROM cloudsync_changes ORDER BY db_version DESC, rowid;") == SQLITE_OK);
+    CHECK(sql(db, "DELETE FROM cloudsync_changes WHERE rowid = 1073741824;") != SQLITE_OK);
+    CHECK(strstr(sqlite3_errmsg(db), "Only INSERT and SELECT") != NULL);
+    CHECK(close_db(db) == SQLITE_OK);
+}
+static void test_low_findings(void) {
+    const char *site = "X'0102030405060708090a0b0c0d0e0f10'";
+    char q[600];
+    sqlite3 *db = open_db();
+    CHECK(sql(db, "CREATE TABLE d(id TEXT PRIMARY KEY NOT NULL, body TEXT, note TEXT); SELECT cloudsync_init('d'); SELECT cloudsync_set_column('d','body','algo','block');") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO d VALUES('r1', 'hello', 'keep');") == SQLITE_OK);
+
+    // a site id is a UUID: any other length is refused, 16 bytes applies
+    const char *sites[] = {"X''", "X'01'", "X'0102030405060708'", "X'0102030405060708090a0b0c0d0e0f1011'"};
+    for (size_t i = 0; i < sizeof(sites) / sizeof(sites[0]); i++) {
+        snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('d',cloudsync_pk_encode('r2'),'note','x',1,50,%s,1,0);", sites[i]);
+        CHECK(sql(db, q) != SQLITE_OK);
+    }
+    CHECK(scalar(db, "SELECT count(*) FROM d WHERE id='r2'") == 0);
+    snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('d',cloudsync_pk_encode('r2'),'note','x',1,50,%s,1,0);", site);
+    CHECK(sql(db, q) == SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM d WHERE id='r2' AND note='x'") == 1);
+
+    // a block-style column name addresses a block column only
+    snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('d',cloudsync_pk_encode('r1'),'note'||char(31)||'a0','pwned',9,60,%s,1,0);", site);
+    CHECK(sql(db, q) != SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM d WHERE id='r1' AND note='keep'") == 1);
+    snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('d',cloudsync_pk_encode('r1'),'nosuch'||char(31)||'a0','pwned',9,61,%s,1,0);", site);
+    CHECK(sql(db, q) != SQLITE_OK);
+    // position ids outside the printable range or empty never reach the indexing arithmetic
+    const char *positions[] = {"''", "char(1)", "char(200)", "char(127)", "'a '", "'a!'", "'a0 '", "'1'", "'A'||replace(hex(zeroblob(40)),'00','0')"};
+    for (size_t i = 0; i < sizeof(positions) / sizeof(positions[0]); i++) {
+        snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('d',cloudsync_pk_encode('r1'),'body'||char(31)||%s,'z',9,62,%s,1,0);", positions[i], site);
+        CHECK(sql(db, q) != SQLITE_OK);
+    }
+    snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('d',cloudsync_pk_encode('r1'),'body'||char(31)||'a5','tail',9,63,%s,1,0);", site);
+    CHECK(sql(db, q) == SQLITE_OK);
+
+    // integer keys at the edge of int64: the extreme value round-trips, a magnitude that no
+    // encoder produces is refused instead of overflowing on negation
+    CHECK(scalar(db, "SELECT cloudsync_pk_decode(cloudsync_pk_encode(-9223372036854775807-1), 1) = -9223372036854775807-1") == 1);
+    CHECK(scalar(db, "SELECT cloudsync_pk_decode(cloudsync_pk_encode(9223372036854775807), 1) = 9223372036854775807") == 1);
+    CHECK(scalar(db, "SELECT cloudsync_pk_decode(cloudsync_pk_encode(-9223372036854775807), 1) = -9223372036854775807") == 1);
+    CHECK(scalar(db, "SELECT cloudsync_pk_decode(X'0140' || X'8000000000000000', 1) IS NULL OR cloudsync_pk_decode(X'0140' || X'8000000000000000', 1) = -9223372036854775807-1") == 1);
+    sqlite3_stmt *vm = NULL;
+    CHECK(sqlite3_prepare_v2(db, "SELECT cloudsync_pk_decode(X'0141' || X'8000000000000000', 1)", -1, &vm, NULL) == SQLITE_OK);
+    int rc = sqlite3_step(vm);
+    CHECK(rc != SQLITE_ROW || sqlite3_column_type(vm, 0) == SQLITE_NULL);
+    sqlite3_finalize(vm);
+    CHECK(close_db(db) == SQLITE_OK);
+}
 static void test_wrong_argument_counts_and_pk_shape(void) {
     sqlite3 *db = open_db();
     CHECK(sql(db, "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, a TEXT);") == SQLITE_OK);
@@ -1002,6 +1131,8 @@ int main(void) {
     CHECK(sqlite3_initialize() == SQLITE_OK);
     test_clocks_and_double();
     test_wrong_argument_counts_and_pk_shape();
+    test_low_findings();
+    test_fuzz_review_findings();
     test_best_index();
     test_payload_errors();
     test_failed_apply_commit();

@@ -13,15 +13,45 @@ void network_buffer_cleanup (void *xdata) {
     if (xdata) CFRelease(xdata);
 }
 
+// nil for a NULL pointer or bytes that are not valid UTF-8: -[NSString stringWithUTF8String:]
+// returns nil for both, and a nil URL string throws once it reaches NSURL.
+static NSString *network_nsstring (const char *s) {
+    return s ? [NSString stringWithUTF8String:s] : nil;
+}
+
+// Redirects are not followed, as with libcurl: a redirect answer is returned as is (and is
+// not a success), so the ticket, the organization and the credentials never go to a host
+// the endpoint did not name.
+@interface CloudSyncSessionDelegate : NSObject <NSURLSessionTaskDelegate>
+@end
+
+@implementation CloudSyncSessionDelegate
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+willPerformHTTPRedirection:(NSHTTPURLResponse *)response
+        newRequest:(NSURLRequest *)request
+ completionHandler:(void (^)(NSURLRequest * _Nullable))completionHandler {
+    completionHandler(nil);
+}
+@end
+
+static NSURLSession *network_session (network_data *data, const char *endpoint) {
+    NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    NSTimeInterval timeout = (NSTimeInterval)network_data_timeout_seconds(data, endpoint);
+    config.timeoutIntervalForRequest = timeout;
+    config.timeoutIntervalForResource = timeout;
+    return [NSURLSession sessionWithConfiguration:config delegate:[CloudSyncSessionDelegate new] delegateQueue:nil];
+}
+
 bool network_send_buffer(network_data *data, const char *endpoint, const char *authentication, const void *blob, int blob_size) {
 #ifdef CLOUDSYNC_NETWORK_TRACE
     double trace_start_ms = network_trace_now_ms();
 #endif
-    NSString *urlString = [NSString stringWithUTF8String:endpoint];
-    NSURL *url = [NSURL URLWithString:urlString];
+    NSString *urlString = network_nsstring(endpoint);
+    NSURL *url = urlString ? [NSURL URLWithString:urlString] : nil;
     if (!url) {
         #ifdef CLOUDSYNC_NETWORK_TRACE
-        network_trace_log(data, "PUT", endpoint, 0, CLOUDSYNC_NETWORK_ERROR, (size_t)blob_size, 0, network_trace_now_ms() - trace_start_ms);
+        network_trace_log(data, "PUT", endpoint ? endpoint : "", 0, CLOUDSYNC_NETWORK_ERROR, (size_t)blob_size, 0, network_trace_now_ms() - trace_start_ms);
         #endif
         return false;
     }
@@ -38,7 +68,8 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
 
     char *org_id = network_data_get_orgid(data);
     if (org_id) {
-        [request setValue:[NSString stringWithUTF8String:org_id] forHTTPHeaderField:@CLOUDSYNC_HEADER_ORG];
+        NSString *org = network_nsstring(org_id);
+        if (org) [request setValue:org forHTTPHeaderField:@CLOUDSYNC_HEADER_ORG];
     }
 
     NSData *bodyData = [NSData dataWithBytes:blob length:blob_size];
@@ -48,8 +79,7 @@ bool network_send_buffer(network_data *data, const char *endpoint, const char *a
     __block NSInteger statusCode = 0;
     dispatch_semaphore_t sema = dispatch_semaphore_create(0);
 
-    NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    NSURLSession *session = network_session(data, endpoint);
 
     NSURLSessionDataTask *task = [session dataTaskWithRequest:request
                                             completionHandler:^(NSData * _Nullable responseBody,
@@ -89,8 +119,8 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
     (void)method;
 #endif
     
-    NSString *urlString = [NSString stringWithUTF8String:endpoint];
-    NSURL *url = [NSURL URLWithString:urlString];
+    NSString *urlString = network_nsstring(endpoint);
+    NSURL *url = urlString ? [NSURL URLWithString:urlString] : nil;
     if (!url) {
         NETWORK_RESULT result = {};
         NSString *msg = [NSString stringWithCString:"Malformed URL" encoding:NSUTF8StringEncoding];
@@ -99,7 +129,7 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
         result.xdata = (void *)CFBridgingRetain(msg);
         result.xfree = network_buffer_cleanup;
         #ifdef CLOUDSYNC_NETWORK_TRACE
-        network_trace_log(data, method, endpoint, 0, result.code, request_bytes, 0, network_trace_now_ms() - trace_start_ms);
+        network_trace_log(data, method, endpoint ? endpoint : "", 0, result.code, request_bytes, 0, network_trace_now_ms() - trace_start_ms);
         #endif
         return result;
     }
@@ -108,7 +138,8 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
     request.HTTPMethod = (json_payload || is_post_request) ? @"POST" : @"GET";
 
     for (int i = 0; i < nextra_headers; i++) {
-        NSString *header = [NSString stringWithUTF8String:extra_headers[i]];
+        NSString *header = network_nsstring(extra_headers[i]);
+        if (!header) continue;
         NSRange sep = [header rangeOfString:@": "];
         if (sep.location != NSNotFound) {
             NSString *name = [header substringToIndex:sep.location];
@@ -119,7 +150,8 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
 
     char *org_id = network_data_get_orgid(data);
     if (org_id) {
-        [request setValue:[NSString stringWithUTF8String:org_id] forHTTPHeaderField:@CLOUDSYNC_HEADER_ORG];
+        NSString *org = network_nsstring(org_id);
+        if (org) [request setValue:org forHTTPHeaderField:@CLOUDSYNC_HEADER_ORG];
     }
 
     if (authentication) {
@@ -127,8 +159,8 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
         [request setValue:authString forHTTPHeaderField:@"Authorization"];
     }
     if (using_ticket) {
-        char *ticket = network_data_get_ticket(data);
-        [request setValue:[NSString stringWithUTF8String:ticket] forHTTPHeaderField:@CLOUDSYNC_HEADER_TICKET];
+        NSString *ticket = network_nsstring(network_data_get_ticket(data));
+        if (ticket) [request setValue:ticket forHTTPHeaderField:@CLOUDSYNC_HEADER_TICKET];
     }
 
     if (json_payload) {
@@ -149,8 +181,7 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
 
     dispatch_semaphore_t sema = dispatch_semaphore_create(0);
 
-    NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    NSURLSession *session = network_session(data, endpoint);
     NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *responseBody, NSURLResponse *response, NSError *error) {
         responseData = responseBody;
         if (error) {
@@ -181,7 +212,8 @@ NETWORK_RESULT network_receive_buffer(network_data *data, const char *endpoint, 
     dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
     [session finishTasksAndInvalidate];
 
-    if (!responseError && (statusCode >= 200 && statusCode < 300) && responseTicket && [responseTicket length] > 0) {
+    if (!responseError && (statusCode >= 200 && statusCode < 300) && responseTicket && [responseTicket length] > 0 &&
+        network_data_accepts_ticket_from(data, endpoint)) {
         network_data_update_ticket(data, [responseTicket UTF8String],
                                    responseTicketExpiresAt ? [responseTicketExpiresAt UTF8String] : NULL);
     }

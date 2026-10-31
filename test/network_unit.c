@@ -9,6 +9,8 @@
 //  no external server is contacted.
 //
 
+#include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
@@ -822,7 +824,7 @@ static bool test_bounded_send(void) {
 #define HTTP_MAX_REQ 64
 static int http_fd = -1;
 static unsigned http_port;
-static volatile bool http_stop;
+static atomic_bool http_stop;   // written by the test thread, polled by the server thread
 static int http_apply_code, http_status_code;
 static char http_apply_body[512], http_status_body[512];
 static char http_partial_body[512];   // when set, /apply's answer to a non-final chunk
@@ -947,6 +949,9 @@ static void http_handle(int c) {
                    step >= 0 ? http_check_retry[step] : NULL);
     } else if (strcmp(endpoint, "boom") == 0) {
         http_reply(c, 503, "upstream failure", NULL);
+    } else if (strcmp(endpoint, "redir") == 0) {
+        const char *redirect = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        if (write(c, redirect, strlen(redirect)) < 0) { /* the client went away */ }
     } else if (strncmp(endpoint, "big", 3) == 0) {
         size_t n = (size_t)strtoull(endpoint + 3, NULL, 10);
         char head_big[160];
@@ -971,7 +976,7 @@ static void http_handle(int c) {
 // failing listener ends the thread instead of spinning.
 static void *http_serve(void *arg) {
     (void)arg;
-    while (!http_stop) {
+    while (!atomic_load(&http_stop)) {
         struct pollfd p = {http_fd, POLLIN, 0};
         int n = poll(&p, 1, 100);
         if (n < 0 && errno != EINTR) break;
@@ -988,16 +993,18 @@ static void *http_serve(void *arg) {
 }
 
 static bool http_start(pthread_t *thread) {
+    // a client that gives up mid-answer (the response cap does) must not kill the test with SIGPIPE
+    signal(SIGPIPE, SIG_IGN);
     http_fd = loopback_listen(&http_port);
     if (http_fd < 0) return false;
-    http_stop = false;
+    atomic_store(&http_stop, false);
     if (pthread_create(thread, NULL, http_serve, NULL) == 0) return true;
     close(http_fd);
     return false;
 }
 
 static void http_shutdown(pthread_t thread) {
-    http_stop = true;
+    atomic_store(&http_stop, true);
     pthread_join(thread, NULL);
     close(http_fd);
 }
@@ -1279,6 +1286,54 @@ static bool test_response_limits(void) {
     ok = ok && expect(r.code == CLOUDSYNC_NETWORK_ERROR && r.http_status == 0, "a response past the cap aborts the transfer", NULL);
     if (r.buffer) free(r.buffer);
 
+    // a redirect is not a success and is not followed
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/redir", http_port);
+    r = network_test_receive(url, true);
+    ok = ok && expect(r.code == CLOUDSYNC_NETWORK_ERROR && r.http_status == 302, "a 3xx answer is not a success", NULL);
+    if (r.buffer) free(r.buffer);
+
+    http_shutdown(thread);
+    return ok;
+}
+
+extern bool network_test_ticket_policy(const char *api_url, const char *other_url);
+
+// The ticket belongs to the API: a download host cannot replace it. An unbalanced cleanup
+// or a malformed JSON answer must not hurt either, and a call before init has no endpoint.
+static bool test_network_robustness(void) {
+    pthread_t thread;
+    if (!http_start(&thread)) return false;
+    bool ok = expect(network_test_ticket_policy("http://127.0.0.1:1/check", "http://example.com/object"), "only API endpoints may set the ticket", NULL);
+
+    char a[160];
+    snprintf(a, sizeof(a), "SELECT cloudsync_network_init_custom('http://127.0.0.1:%u', 'test-managed-database-id');", http_port);
+    sqlite3 *live = stream_db(false);
+    sqlite3 *other = stream_db(false);
+    ok = ok && live && other && db_exec(live, a) == SQLITE_OK;
+    http_script(200, 0, 0, 0, 0, NULL);
+    http_nreq = 0;
+
+    // cleanup without init, twice, on another connection
+    ok = ok && db_exec(other, "SELECT cloudsync_network_cleanup();") == SQLITE_OK;
+    ok = ok && db_exec(other, "SELECT cloudsync_network_cleanup();") == SQLITE_OK;
+    sql_text(live, "SELECT cloudsync_network_status()");
+    ok = ok && expect(http_nreq == 1, "the live connection still reaches the server after extra cleanups", NULL);
+
+    // a token set before init: the call fails cleanly, it does not touch a missing endpoint
+    ok = ok && db_exec(other, "SELECT cloudsync_network_set_token('t');") == SQLITE_OK;
+    ok = ok && expect(strncmp(sql_text(other, "SELECT cloudsync_network_status()"), "ERROR:", 6) == 0 ||
+                      strstr(sql_text(other, "SELECT cloudsync_network_status()"), "rror") != NULL, "status before init is an error", NULL);
+
+    // strict JSON: a truncated or trailing-garbage document yields nothing
+    char *v = network_test_extract_string("{\"a\":\"x\"}", "a");
+    ok = ok && expect(v && strcmp(v, "x") == 0, "valid JSON is read", v);
+    free(v);
+    v = network_test_extract_string("{\"a\":\"x\" garbage", "a");
+    ok = ok && expect(v == NULL, "malformed JSON is rejected", v);
+    free(v);
+
+    stream_close(live);
+    stream_close(other);
     http_shutdown(thread);
     return ok;
 }
@@ -1593,6 +1648,7 @@ int main(void) {
     check("soft overload over HTTP: busy send/receive, Retry-After budget:", test_soft_overload_transport());
     check("credentials follow their address; address and id are validated:", test_credentials_follow_address());
     check("response size cap and NUL-terminated error bodies:", test_response_limits());
+    check("ticket policy, unbalanced cleanup, no endpoint, strict JSON:", test_network_robustness());
 #endif
     if (failures) { printf("\n%d test(s) FAILED\n", failures); return 1; }
     printf("\nAll network unit tests passed\n");

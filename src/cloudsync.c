@@ -24,6 +24,7 @@
 #include "utils.h"
 #include "dbutils.h"
 #include "block.h"
+#include "fractional_indexing.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -1709,15 +1710,63 @@ static dbvm_t *table_column_update_stmt (cloudsync_context *data, cloudsync_tabl
 // A primary key blob that comes from outside (payload, cloudsync_changes insert) must declare
 // exactly as many components as the table has primary key columns: a shorter blob would bind
 // NULLs (or shift the column values onto the key slots), a longer one is not a key of this table.
-static int merge_check_pk_shape (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen) {
+static int merge_check_pk_shape (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen, int site_len) {
     if (!pk || pklen < 1 || *(const uint8_t *)pk != (uint8_t)table_count_pks(table) || table_count_pks(table) > 255) {
         return cloudsync_set_error(data, "Primary key does not match the table's primary key columns", DBRES_MISUSE);
+    }
+    // a site id is always a UUID: any other length is forged or corrupt, and the batch path
+    // would store a truncated copy of it
+    if (site_len != UUID_LEN) {
+        return cloudsync_set_error(data, "Invalid site_id length", DBRES_MISUSE);
     }
     return DBRES_OK;
 }
 
+// Clock values come off the wire and feed arithmetic (db_version + 1, rowid = db_version << 30 | seq,
+// col_version + 1): a value outside the range a real database reaches would overflow it, and
+// an enormous db_version would also move the local counter past anything it could send.
+static int merge_check_clock_bounds (cloudsync_context *data, int64_t cl, int64_t col_version, int64_t db_version, int64_t seq) {
+    if (cl < 0 || col_version < 0 || col_version >= INT64_MAX / 4 ||
+        db_version < 0 || db_version >= ((int64_t)1 << 33) ||
+        seq < 0 || seq >= INT64_MAX / 4) {
+        return cloudsync_set_error(data, "Change clock values are out of range", DBRES_MISUSE);
+    }
+    return DBRES_OK;
+}
+
+// A name with the block separator only addresses a block column: anything else would let a
+// peer write materialized text over an ordinary column.
+static int merge_check_block_colname (cloudsync_context *data, cloudsync_table_context *table, const char *col_name) {
+    if (!col_name || !block_is_block_colname(col_name)) return DBRES_OK;
+    char *base = block_extract_base_colname(col_name);
+    bool ok = false;
+    if (base) {
+        for (int i = 0; i < table->ncols; i++) {
+            if (strcasecmp(table->col_name[i], base) == 0) { ok = (table->col_algo[i] == col_algo_block); break; }
+        }
+        cloudsync_memory_free(base);
+    }
+    if (!ok) return cloudsync_set_error(data, "Block column name does not address a block column", DBRES_MISUSE);
+
+    // the position id comes off the wire and is fed to the fractional-indexing arithmetic,
+    // which indexes its digit alphabet (base 62) by character: a digit outside it, or a key
+    // that is not a well-formed order key, would read before that table
+    const char *pos = strchr(col_name, BLOCK_SEPARATOR) + 1;
+    size_t pos_len = strlen(pos);
+    bool pos_ok = pos_len > 0 && pos_len <= 64;
+    for (size_t i = 0; pos_ok && i < pos_len; i++) {
+        unsigned char c = (unsigned char)pos[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) pos_ok = false;
+    }
+    if (pos_ok && !validate_order_key(pos)) pos_ok = false;
+    if (!pos_ok) return cloudsync_set_error(data, "Invalid block position id", DBRES_MISUSE);
+    return DBRES_OK;
+}
+
 int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen, const char *col_name, dbvalue_t *col_value, int64_t col_version, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid) {
-    int pk_rc = merge_check_pk_shape(data, table, pk, pklen);
+    int pk_rc = merge_check_pk_shape(data, table, pk, pklen, site_len);
+    if (pk_rc != DBRES_OK) return pk_rc;
+    pk_rc = merge_check_block_colname(data, table, col_name);
     if (pk_rc != DBRES_OK) return pk_rc;
 
     int index;
@@ -1937,12 +1986,16 @@ int merge_did_cid_win (cloudsync_context *data, cloudsync_table_context *table, 
     
     rc = databasevm_step(vm);
     if (rc == DBRES_ROW) {
-        const void *local_site_id = database_column_blob(vm, 0, NULL);
+        size_t local_len = 0;
+        const void *local_site_id = database_column_blob(vm, 0, &local_len);
         if (!local_site_id) {
             dbvm_reset(vm);
             return cloudsync_set_error(data, "NULL site_id in cloudsync table, table is probably corrupted", DBRES_ERROR);
         }
-        ret = memcmp(site_id, local_site_id, site_len);
+        // never read past the shorter of the two, and let the length break a tie
+        size_t common = ((size_t)site_len < local_len) ? (size_t)site_len : local_len;
+        ret = memcmp(site_id, local_site_id, common);
+        if (ret == 0) ret = ((size_t)site_len > local_len) - ((size_t)site_len < local_len);
         *didwin_flag = (ret > 0);
         dbvm_reset(vm);
         return DBRES_OK;
@@ -1959,7 +2012,7 @@ cleanup:
 }
 
 int merge_sentinel_only_insert (cloudsync_context *data, cloudsync_table_context *table, const char *pk, int pklen, int64_t cl, int64_t db_version, const char *site_id, int site_len, int64_t seq, int64_t *rowid) {
-    int pk_rc = merge_check_pk_shape(data, table, pk, pklen);
+    int pk_rc = merge_check_pk_shape(data, table, pk, pklen, site_len);
     if (pk_rc != DBRES_OK) return pk_rc;
 
     // reset return value
@@ -2239,7 +2292,11 @@ int table_col_index (cloudsync_table_context *table, const char *col_name) {
 }
 
 int merge_insert (cloudsync_context *data, cloudsync_table_context *table, const char *insert_pk, int insert_pk_len, int64_t insert_cl, const char *insert_name, dbvalue_t *insert_value, int64_t insert_col_version, int64_t insert_db_version, const char *insert_site_id, int insert_site_id_len, int64_t insert_seq, int64_t *rowid) {
-    int pk_rc = merge_check_pk_shape(data, table, insert_pk, insert_pk_len);
+    int pk_rc = merge_check_pk_shape(data, table, insert_pk, insert_pk_len, insert_site_id_len);
+    if (pk_rc != DBRES_OK) return pk_rc;
+    pk_rc = merge_check_block_colname(data, table, insert_name);
+    if (pk_rc != DBRES_OK) return pk_rc;
+    pk_rc = merge_check_clock_bounds(data, insert_cl, insert_col_version, insert_db_version, insert_seq);
     if (pk_rc != DBRES_OK) return pk_rc;
 
     // Handle DWS and AWS algorithms here
@@ -4567,13 +4624,16 @@ int cloudsync_payload_apply (cloudsync_context *data, const char *payload, int b
         buf_len = (size_t)header.expanded_size;
     }
 
+    // every version carries the nine cloudsync_changes columns: the header count drives the
+    // per-row decode, so a different one leaves insert parameters unbound or ignores fields
+    if (header.ncols != CLOUDSYNC_CHANGES_NCOLS) {
+        if (clone) cloudsync_memory_free(clone);
+        return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid column count", DBRES_MISUSE);
+    }
+
     if (header.version == CLOUDSYNC_PAYLOAD_VERSION_3) {
         int rc = DBRES_OK;
         int applied_rows = 0;
-        if (header.ncols != CLOUDSYNC_CHANGES_NCOLS) {
-            if (clone) cloudsync_memory_free(clone);
-            return cloudsync_set_error(data, "Error on cloudsync_payload_apply: invalid v3 column count", DBRES_MISUSE);
-        }
         // Without a watermark the stream end falls back to the last applied position,
         // but a fragment's final chunk may apply nothing new (its pieces belong to a
         // value this stream already applied), which leaves no position to checkpoint:
@@ -4848,7 +4908,7 @@ int local_block_update(cloudsync_context *data, cloudsync_table_context *table,
 #ifdef CLOUDSYNC_POSTGRESQL_BUILD
     sql = cloudsync_memory_mprintf("SELECT col_name, col_value FROM %s WHERE pk=$1 ORDER BY col_name COLLATE \"C\"", table_blocks_ref(table));
 #else
-    sql = cloudsync_memory_mprintf("SELECT col_name, col_value FROM %s WHERE pk=?1 ORDER BY col_name COLLATE BINARY", table_blocks_ref(table));
+    sql = cloudsync_memory_mprintf("SELECT col_name, col_value FROM \"%w\" WHERE pk=?1 ORDER BY col_name COLLATE BINARY", table_blocks_ref(table));
 #endif
     if (!sql) goto done;
     rc = databasevm_prepare(data, sql, &vm, 0);

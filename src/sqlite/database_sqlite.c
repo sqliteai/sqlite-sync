@@ -668,7 +668,7 @@ int database_count_notnull_without_default (cloudsync_context *data, const char 
 }
 
 int database_cleanup (cloudsync_context *data) {
-    char *sql = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'cloudsync_%' AND name NOT LIKE '%_cloudsync';";
+    char *sql = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'cloudsync_%' AND name NOT LIKE '%\\_cloudsync' ESCAPE '\\';";
     sqlite3 *db = (sqlite3 *)cloudsync_db(data);
     
     char **result = NULL;
