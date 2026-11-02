@@ -1,5 +1,5 @@
 -- Follow-up review regressions: which metadata tables count toward db_version and
--- cloudsync_changes, and clock bounds on grow-only tables.
+-- cloudsync_changes, clock bounds on grow-only tables, and text with a NUL from a SQLite peer.
 
 \set testid '74-review-followup'
 \ir helper_test_init.sql
@@ -7,8 +7,10 @@
 \connect postgres
 \ir helper_psql_conn_setup.sql
 DROP DATABASE IF EXISTS cloudsync_test_74;
+DROP DATABASE IF EXISTS cloudsync_test_74_nul;
 DROP ROLE IF EXISTS cs74_owner;
 CREATE DATABASE cloudsync_test_74;
+CREATE DATABASE cloudsync_test_74_nul;
 CREATE ROLE cs74_owner NOLOGIN;
 
 \connect cloudsync_test_74
@@ -99,8 +101,36 @@ SELECT (:grow_accepted = 0 AND :grow_rows = 0 AND cloudsync_db_version() < 1000)
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
+-- 5. A payload from a SQLite peer with rows 'a', 'x' || NUL || 'y' and 'c' (site id
+-- 0102..10) applies whole; the text with the NUL is cut at it. The payload carries the schema
+-- hash of a database with this table only.
+\connect cloudsync_test_74_nul
+\ir helper_psql_conn_setup.sql
+CREATE EXTENSION IF NOT EXISTS cloudsync;
+CREATE TABLE public.nul_text (id text PRIMARY KEY NOT NULL, v text);
+SELECT cloudsync_init('nul_text') AS _init_nul \gset
+SET client_min_messages = error;
+DO $$
+BEGIN
+    PERFORM cloudsync_payload_apply(decode('434C535902010200000000920009000000033E867FD22B4308B9C7AD2A4368C6FB210B086E756C5F746578740C04010B01610B01760B0161090109010C100102030405060708090A0B0C0D0E0F10090109003000106230008F0378007909010902320012106332006D0163090109033000501009010900', 'hex'));
+    PERFORM set_config('cloudsync.t74', 'applied', false);
+EXCEPTION WHEN OTHERS THEN
+    PERFORM set_config('cloudsync.t74', 'error: ' || SQLERRM, false);
+END $$;
+SET client_min_messages = warning;
+SELECT current_setting('cloudsync.t74') AS nul_result \gset
+SELECT string_agg(id || '=' || v, ',' ORDER BY id) AS nul_rows FROM public.nul_text \gset
+SELECT (:'nul_result' = 'applied' AND :'nul_rows' = 'a=a,b=x,c=c') AS nul_ok \gset
+\if :nul_ok
+\echo [PASS] (:testid) a SQLite text value with a NUL is cut at the NUL, the payload applies
+\else
+\echo [FAIL] (:testid) SQLite text value with a NUL: :'nul_result' rows :'nul_rows'
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
 \ir helper_test_cleanup.sql
 \if :should_cleanup
 DROP DATABASE IF EXISTS cloudsync_test_74;
+DROP DATABASE IF EXISTS cloudsync_test_74_nul;
 DROP ROLE IF EXISTS cs74_owner;
 \endif

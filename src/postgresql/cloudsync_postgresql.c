@@ -2806,15 +2806,21 @@ static int cloudsync_decode_value_cb (void *xdata, int index, int type, int64_t 
         case DBTYPE_FLOAT:
             out->dval = dval;
             break;
-        case DBTYPE_TEXT:
-            // PostgreSQL text cannot hold a NUL, and a copy that stopped at one would be
-            // shorter than the declared length the consumer reads back
-            if (ival < 0 || (ival > 0 && memchr(pval, '\0', (size_t)ival) != NULL)) return DBRES_ERROR;
+        case DBTYPE_TEXT: {
+            if (ival < 0) return DBRES_ERROR;
+            // PostgreSQL text cannot hold a NUL: keep the text before it instead of failing
+            // the whole payload
+            const char *nul = (ival > 0) ? memchr(pval, '\0', (size_t)ival) : NULL;
+            if (nul) {
+                ival = nul - pval;
+                ereport(WARNING, (errmsg("cloudsync: text value truncated at an embedded NUL character")));
+            }
             out->pval = (char *)palloc((size_t)ival + 1);
             if (ival > 0) memcpy(out->pval, pval, (size_t)ival);
             out->pval[ival] = '\0';
             out->len = ival;
             break;
+        }
         case DBTYPE_BLOB:
             if (ival > 0) {
                 out->pval = (char *)palloc((size_t)ival);

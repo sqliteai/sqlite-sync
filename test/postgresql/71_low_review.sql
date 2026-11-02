@@ -169,12 +169,13 @@ SELECT (:'apply_result' = 'ok' AND :applied = 1) AS quote_ok \gset
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
--- 3. A text value whose bytes hold a NUL is refused: it cannot be a PostgreSQL text, and the
--- copy of it used to stop at the NUL while the declared length did not.
+-- 3. A text value whose bytes hold a NUL cannot be a PostgreSQL text: it is cut at the NUL,
+-- and the stored copy matches its length.
 \connect cloudsync_test_71_dst
 \ir helper_psql_conn_setup.sql
 CREATE TABLE nultext (id text PRIMARY KEY NOT NULL, v text);
 SELECT cloudsync_init('nultext') AS _n \gset
+SET client_min_messages = error;
 DO $$
 DECLARE
     enc bytea := cloudsync_encode_value('abcde'::text);
@@ -188,11 +189,12 @@ BEGIN
         PERFORM set_config('cloudsync.t71', 'refused', false);
     END;
 END $$;
-SELECT (current_setting('cloudsync.t71') = 'refused' AND (SELECT count(*) FROM nultext WHERE v IS NOT NULL) = 0) AS nul_ok \gset
+SET client_min_messages = warning;
+SELECT (current_setting('cloudsync.t71') = 'accepted' AND (SELECT count(*) FROM nultext WHERE v = 'a') = 1) AS nul_ok \gset
 \if :nul_ok
-\echo [PASS] (:testid) a text value with an embedded NUL is refused
+\echo [PASS] (:testid) a text value with an embedded NUL is cut at the NUL
 \else
-\echo [FAIL] (:testid) a text value with an embedded NUL was accepted
+\echo [FAIL] (:testid) a text value with an embedded NUL was not cut at the NUL
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
