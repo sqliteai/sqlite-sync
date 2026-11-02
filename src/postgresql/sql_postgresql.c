@@ -43,32 +43,46 @@ const char * const SQL_SETTINGS_LOAD_GLOBAL =
 const char * const SQL_SETTINGS_LOAD_TABLE =
     "SELECT lower(tbl_name), lower(col_name), key, value FROM cloudsync_table_settings ORDER BY tbl_name, col_name;";
 
+// Idempotent and tolerant: any role may run cloudsync_init, only the owner (or a superuser)
+// can replace the function or the event trigger. The function runs as its owner with a
+// pinned search_path so every role's DDL can bump the version without write access to it.
+#define SQL_SCHEMA_VERSION_TRIGGER_BLOCK \
+    "DO $cloudsync_do$ BEGIN " \
+    "BEGIN " \
+    "CREATE OR REPLACE FUNCTION public.bump_app_schema_version() " \
+    "RETURNS event_trigger SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $cloudsync_fn$ " \
+    "BEGIN " \
+    "INSERT INTO public.app_schema_version DEFAULT VALUES; " \
+    "END;" \
+    "$cloudsync_fn$ LANGUAGE plpgsql; " \
+    "EXCEPTION WHEN insufficient_privilege THEN NULL; END; " \
+    "BEGIN " \
+    "GRANT SELECT ON public.app_schema_version TO PUBLIC; " \
+    "EXCEPTION WHEN insufficient_privilege THEN NULL; END; " \
+    "BEGIN " \
+    "DROP EVENT TRIGGER IF EXISTS app_schema_change; " \
+    "CREATE EVENT TRIGGER app_schema_change ON ddl_command_end " \
+    "EXECUTE FUNCTION public.bump_app_schema_version(); " \
+    "EXCEPTION WHEN insufficient_privilege THEN NULL; END; " \
+    "END $cloudsync_do$;"
+
 const char * const SQL_CREATE_SETTINGS_TABLE =
     "CREATE TABLE IF NOT EXISTS cloudsync_settings (key TEXT PRIMARY KEY NOT NULL, value TEXT);"
     "CREATE TABLE IF NOT EXISTS public.app_schema_version ("
     "version BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY"
     ");"
-    // Idempotent and tolerant: any role may run cloudsync_init, only the owner (or a superuser)
-    // can replace the function or the event trigger. The function runs as its owner with a
-    // pinned search_path so every role's DDL can bump the version without write access to it.
-    "DO $cloudsync_do$ BEGIN "
-    "BEGIN "
-    "CREATE OR REPLACE FUNCTION public.bump_app_schema_version() "
-    "RETURNS event_trigger SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $cloudsync_fn$ "
-    "BEGIN "
-    "INSERT INTO public.app_schema_version DEFAULT VALUES; "
-    "END;"
-    "$cloudsync_fn$ LANGUAGE plpgsql; "
-    "EXCEPTION WHEN insufficient_privilege THEN NULL; END; "
-    "BEGIN "
-    "GRANT SELECT ON public.app_schema_version TO PUBLIC; "
-    "EXCEPTION WHEN insufficient_privilege THEN NULL; END; "
-    "BEGIN "
-    "DROP EVENT TRIGGER IF EXISTS app_schema_change; "
-    "CREATE EVENT TRIGGER app_schema_change ON ddl_command_end "
-    "EXECUTE FUNCTION public.bump_app_schema_version(); "
-    "EXCEPTION WHEN insufficient_privilege THEN NULL; END; "
-    "END $cloudsync_do$;";
+    SQL_SCHEMA_VERSION_TRIGGER_BLOCK;
+
+const char * const SQL_SCHEMA_VERSION_TRIGGER =
+    SQL_SCHEMA_VERSION_TRIGGER_BLOCK;
+
+// 1 when public.bump_app_schema_version() predates SECURITY DEFINER and this session could
+// replace it: it owns the function and can write.
+const char * const SQL_SCHEMA_VERSION_TRIGGER_OUTDATED =
+    "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+    "WHERE n.nspname = 'public' AND p.proname = 'bump_app_schema_version' AND NOT p.prosecdef "
+    "AND pg_has_role(p.proowner, 'USAGE') AND NOT pg_is_in_recovery() "
+    "AND current_setting('transaction_read_only') = 'off';";
 
 // format strings (snprintf) are also static SQL templates
 const char * const SQL_INSERT_SETTINGS_STR_FORMAT =

@@ -38,6 +38,7 @@
 #include "../database.h"
 #include "../dbutils.h"
 #include "../pk.h"
+#include "../sql.h"
 #include "../utils.h"
 
 // Note: network.h is not needed for PostgreSQL implementation
@@ -62,6 +63,18 @@ Datum database_column_datum (dbvm_t *vm, int index);
 // Global context stored per backend
 static cloudsync_context *pg_cloudsync_context = NULL;
 
+// Installs from before bump_app_schema_version() ran as its owner keep a function that only
+// roles with write access to app_schema_version can fire: replace it once, when this session
+// can. Errors (a concurrent replacement, say) are left for the next session.
+static void cloudsync_pg_upgrade_schema_version_trigger (cloudsync_context *data) {
+    int64_t outdated = 0;
+    if (database_select_int(data, SQL_SCHEMA_VERSION_TRIGGER_OUTDATED, &outdated) != DBRES_OK || outdated == 0) return;
+    if (database_begin_savepoint(data, "cloudsync_schema_version_trigger") != DBRES_OK) return;
+    if (database_exec(data, SQL_SCHEMA_VERSION_TRIGGER) == DBRES_OK) database_commit_savepoint(data, "cloudsync_schema_version_trigger");
+    else database_rollback_savepoint(data, "cloudsync_schema_version_trigger");
+    cloudsync_reset_error(data);
+}
+
 static void cloudsync_pg_context_init (cloudsync_context *data) {
     int spi_rc = SPI_connect();
     if (spi_rc != SPI_OK_CONNECT) {
@@ -82,6 +95,8 @@ static void cloudsync_pg_context_init (cloudsync_context *data) {
 
             // make sure to update internal version to current version
             dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
+
+            cloudsync_pg_upgrade_schema_version_trigger(data);
         }
 
         if (SPI_tuptable) {

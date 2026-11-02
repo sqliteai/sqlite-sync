@@ -1,5 +1,6 @@
 -- Follow-up review regressions: which metadata tables count toward db_version and
--- cloudsync_changes, clock bounds on grow-only tables, and text with a NUL from a SQLite peer.
+-- cloudsync_changes, clock bounds on grow-only tables, text with a NUL from a SQLite peer, and
+-- the upgrade of a schema-version function created by an older release.
 
 \set testid '74-review-followup'
 \ir helper_test_init.sql
@@ -8,9 +9,12 @@
 \ir helper_psql_conn_setup.sql
 DROP DATABASE IF EXISTS cloudsync_test_74;
 DROP DATABASE IF EXISTS cloudsync_test_74_nul;
+DROP DATABASE IF EXISTS cloudsync_test_74_bump;
 DROP ROLE IF EXISTS cs74_owner;
+DROP ROLE IF EXISTS cs74_ddl;
 CREATE DATABASE cloudsync_test_74;
 CREATE DATABASE cloudsync_test_74_nul;
+CREATE DATABASE cloudsync_test_74_bump;
 CREATE ROLE cs74_owner NOLOGIN;
 
 \connect cloudsync_test_74
@@ -128,9 +132,49 @@ SELECT (:'nul_result' = 'applied' AND :'nul_rows' = 'a=a,b=x,c=c') AS nul_ok \gs
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
+-- 6. A schema-version function from an older release (not SECURITY DEFINER) is replaced when
+-- a new session loads the context, so a role without INSERT on app_schema_version can run DDL.
+\connect cloudsync_test_74_bump
+\ir helper_psql_conn_setup.sql
+CREATE EXTENSION IF NOT EXISTS cloudsync;
+CREATE TABLE public.bump (id text PRIMARY KEY NOT NULL, v text);
+SELECT cloudsync_init('bump') AS _init_bump \gset
+CREATE OR REPLACE FUNCTION public.bump_app_schema_version() RETURNS event_trigger AS $fn$
+BEGIN
+    INSERT INTO public.app_schema_version DEFAULT VALUES;
+END;
+$fn$ LANGUAGE plpgsql;
+CREATE ROLE cs74_ddl NOLOGIN;
+CREATE SCHEMA s74 AUTHORIZATION cs74_ddl;
+SELECT NOT prosecdef AS bump_old FROM pg_proc WHERE oid = 'public.bump_app_schema_version()'::regprocedure \gset
+\connect cloudsync_test_74_bump
+\ir helper_psql_conn_setup.sql
+SELECT cloudsync_db_version() AS _dbv_bump \gset
+SELECT (prosecdef AND 'search_path=pg_catalog, pg_temp' = ANY(proconfig)) AS bump_secdef
+FROM pg_proc WHERE oid = 'public.bump_app_schema_version()'::regprocedure \gset
+SET ROLE cs74_ddl;
+DO $$
+BEGIN
+    CREATE TABLE s74.t (x int);
+    PERFORM set_config('cloudsync.t74', 'ok', false);
+EXCEPTION WHEN OTHERS THEN
+    PERFORM set_config('cloudsync.t74', 'error: ' || SQLERRM, false);
+END $$;
+RESET ROLE;
+SELECT current_setting('cloudsync.t74') AS bump_ddl \gset
+SELECT (:'bump_old'::bool AND :'bump_secdef'::bool AND :'bump_ddl' = 'ok') AS bump_ok \gset
+\if :bump_ok
+\echo [PASS] (:testid) an older schema-version function is upgraded to SECURITY DEFINER
+\else
+\echo [FAIL] (:testid) schema-version function upgrade: old=:bump_old secdef=:bump_secdef ddl=:'bump_ddl'
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
 \ir helper_test_cleanup.sql
 \if :should_cleanup
 DROP DATABASE IF EXISTS cloudsync_test_74;
 DROP DATABASE IF EXISTS cloudsync_test_74_nul;
+DROP DATABASE IF EXISTS cloudsync_test_74_bump;
 DROP ROLE IF EXISTS cs74_owner;
+DROP ROLE IF EXISTS cs74_ddl;
 \endif
