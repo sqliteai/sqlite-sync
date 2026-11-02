@@ -249,6 +249,8 @@ int pk_decode (char *buffer, size_t blen, int count, size_t *seek, int skip_deco
                 if (nbytes < 1 || nbytes > 8) return -1;
                 uint64_t u = 0;
                 if (!pk_decode_uint64(ubuf, blen, &bseek, nbytes, &u)) return -1;
+                // the encoder never emits a negative zero: it would alias the key 0
+                if (raw_type == DATABASE_TYPE_NEGATIVE_INTEGER && u == 0) return -1;
                 
                 if (skip_decode) {
                     size_t slice_len = bseek - initial_bseek;

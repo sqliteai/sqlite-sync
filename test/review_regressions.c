@@ -1084,6 +1084,13 @@ static void test_low_findings(void) {
     int rc = sqlite3_step(vm);
     CHECK(rc != SQLITE_ROW || sqlite3_column_type(vm, 0) == SQLITE_NULL);
     sqlite3_finalize(vm);
+    // zero is always encoded as a positive integer, and a negative zero is refused
+    CHECK(scalar(db, "SELECT cloudsync_pk_encode(0) = X'010900' AND cloudsync_pk_encode(-0) = X'010900'") == 1);
+    CHECK(scalar(db, "SELECT cloudsync_pk_decode(X'010900', 1) = 0") == 1);
+    CHECK(sqlite3_prepare_v2(db, "SELECT cloudsync_pk_decode(X'010800', 1)", -1, &vm, NULL) == SQLITE_OK);
+    rc = sqlite3_step(vm);
+    CHECK(rc != SQLITE_ROW || sqlite3_column_type(vm, 0) == SQLITE_NULL);
+    sqlite3_finalize(vm);
     CHECK(close_db(db) == SQLITE_OK);
 }
 static void test_wrong_argument_counts_and_pk_shape(void) {
