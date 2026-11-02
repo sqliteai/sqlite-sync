@@ -21,6 +21,10 @@
 #define BLOCK_SEPARATOR_STR     "\x1F"
 #define BLOCK_DEFAULT_DELIMITER "\n"
 
+// Upper bound for a received position id: keys grow with repeated inserts at the same
+// spot, and the fractional-indexing arithmetic recurses once per character.
+#define BLOCK_POSITION_MAX_LEN  1024
+
 // Column-level algorithm for block tracking
 typedef enum {
     col_algo_normal = 0,

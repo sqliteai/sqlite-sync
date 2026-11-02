@@ -1753,7 +1753,7 @@ static int merge_check_block_colname (cloudsync_context *data, cloudsync_table_c
     // that is not a well-formed order key, would read before that table
     const char *pos = strchr(col_name, BLOCK_SEPARATOR) + 1;
     size_t pos_len = strlen(pos);
-    bool pos_ok = pos_len > 0 && pos_len <= 64;
+    bool pos_ok = pos_len > 0 && pos_len <= BLOCK_POSITION_MAX_LEN;
     for (size_t i = 0; pos_ok && i < pos_len; i++) {
         unsigned char c = (unsigned char)pos[i];
         if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) pos_ok = false;

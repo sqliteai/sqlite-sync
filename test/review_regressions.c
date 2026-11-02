@@ -499,6 +499,32 @@ static void test_block_not_null_payload(void) {
     CHECK(close_db(source) == SQLITE_OK);
     CHECK(close_db(target) == SQLITE_OK);
 }
+static void test_block_long_positions(void) {
+    // Repeated inserts at the same spot lengthen the position ids by about one character
+    // every few edits: a document edited that way must still apply on another database.
+    sqlite3 *source = open_db(), *target = open_db();
+    const char *schema = "CREATE TABLE docs(id TEXT PRIMARY KEY NOT NULL, body TEXT);"
+                         "SELECT cloudsync_init('docs'); SELECT cloudsync_set_column('docs','body','algo','block');";
+    CHECK(sql(source, schema) == SQLITE_OK && sql(target, schema) == SQLITE_OK);
+    CHECK(sql(source, "INSERT INTO docs VALUES('1','head' || char(10) || 'foot')") == SQLITE_OK);
+    char q[160];
+    for (int i = 0; i < 400; i++) {
+        snprintf(q, sizeof(q), "UPDATE docs SET body=replace(body, char(10) || 'foot', char(10) || 'line%d' || char(10) || 'foot') WHERE id='1'", i);
+        CHECK(sql(source, q) == SQLITE_OK);
+    }
+    CHECK(scalar(source, "SELECT max(length(col_name)) FROM docs_cloudsync") > 64 + 5);
+    CHECK(apply_payload(source, target) == SQLITE_ROW);
+    CHECK(scalar(target, "SELECT count(*) FROM docs") == 1);
+    sqlite3_stmt *a = NULL, *b = NULL;
+    CHECK(sqlite3_prepare_v2(source, "SELECT body FROM docs WHERE id='1'", -1, &a, NULL) == SQLITE_OK);
+    CHECK(sqlite3_prepare_v2(target, "SELECT body FROM docs WHERE id='1'", -1, &b, NULL) == SQLITE_OK);
+    CHECK(sqlite3_step(a) == SQLITE_ROW && sqlite3_step(b) == SQLITE_ROW);
+    CHECK(strcmp((const char *)sqlite3_column_text(a, 0), (const char *)sqlite3_column_text(b, 0)) == 0);
+    sqlite3_finalize(a);
+    sqlite3_finalize(b);
+    CHECK(close_db(source) == SQLITE_OK);
+    CHECK(close_db(target) == SQLITE_OK);
+}
 static void test_refill_error(void) {
     sqlite3 *db = open_db();
     CHECK(sql(db, "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL,a TEXT,b TEXT); SELECT cloudsync_init('t'); INSERT INTO t VALUES('1','a','b'),('2','a','b'); DELETE FROM t_cloudsync WHERE col_name='a';") == SQLITE_OK);
@@ -1065,7 +1091,7 @@ static void test_low_findings(void) {
     snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('d',cloudsync_pk_encode('r1'),'nosuch'||char(31)||'a0','pwned',9,61,%s,1,0);", site);
     CHECK(sql(db, q) != SQLITE_OK);
     // position ids outside the printable range or empty never reach the indexing arithmetic
-    const char *positions[] = {"''", "char(1)", "char(200)", "char(127)", "'a '", "'a!'", "'a0 '", "'1'", "'A'||replace(hex(zeroblob(40)),'00','0')"};
+    const char *positions[] = {"''", "char(1)", "char(200)", "char(127)", "'a '", "'a!'", "'a0 '", "'1'", "'A'||replace(hex(zeroblob(40)),'00','0')", "'a'||replace(hex(zeroblob(1024)),'00','1')"};
     for (size_t i = 0; i < sizeof(positions) / sizeof(positions[0]); i++) {
         snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('d',cloudsync_pk_encode('r1'),'body'||char(31)||%s,'z',9,62,%s,1,0);", positions[i], site);
         CHECK(sql(db, q) != SQLITE_OK);
@@ -1156,6 +1182,7 @@ int main(void) {
     test_block_materialize_errors();
     test_block_migration_orphan();
     test_block_not_null_payload();
+    test_block_long_positions();
     test_block_group_atomicity();
     test_payload_window_cap();
     test_payload_window_cap_paged();
