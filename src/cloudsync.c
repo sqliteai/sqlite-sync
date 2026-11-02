@@ -1768,6 +1768,9 @@ int merge_insert_col (cloudsync_context *data, cloudsync_table_context *table, c
     if (pk_rc != DBRES_OK) return pk_rc;
     pk_rc = merge_check_block_colname(data, table, col_name);
     if (pk_rc != DBRES_OK) return pk_rc;
+    // grow-only tables reach this without going through merge_insert
+    pk_rc = merge_check_clock_bounds(data, 0, col_version, db_version, seq);
+    if (pk_rc != DBRES_OK) return pk_rc;
 
     int index;
     dbvm_t *vm = table_column_lookup(table, col_name, true, &index);

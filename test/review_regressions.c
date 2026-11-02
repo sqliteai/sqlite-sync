@@ -51,6 +51,28 @@ static void test_clocks_and_double(void) {
     CHECK(scalar(db, "SELECT cloudsync_pk_decode(cloudsync_pk_encode(-1.5),1)=-1.5") == 1);
     CHECK(close_db(db) == SQLITE_OK);
 }
+static void test_grow_only_clock_bounds(void) {
+    // A grow-only table applies changes through its own path: out-of-range clocks are
+    // refused there too.
+    const char *site = "X'0102030405060708090a0b0c0d0e0f10'";
+    char q[400];
+    sqlite3 *db = open_db();
+    CHECK(sql(db, "CREATE TABLE g(id TEXT PRIMARY KEY NOT NULL, v TEXT); SELECT cloudsync_init('g', 'gos');") == SQLITE_OK);
+    // col_version, db_version, seq
+    const char *clocks[][3] = {{"9223372036854775000", "1", "0"}, {"1", "9223372036854775000", "0"},
+                               {"1", "1", "9223372036854775000"}, {"-1", "1", "0"}, {"1", "-1", "0"}};
+    for (size_t i = 0; i < sizeof(clocks) / sizeof(clocks[0]); i++) {
+        snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('g',cloudsync_pk_encode('r1'),'v','x',%s,%s,%s,1,%s);",
+                 clocks[i][0], clocks[i][1], site, clocks[i][2]);
+        CHECK(sql(db, q) != SQLITE_OK);
+    }
+    CHECK(scalar(db, "SELECT count(*) FROM g") == 0);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") < 1000);
+    snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('g',cloudsync_pk_encode('r1'),'v','x',1,5,%s,1,0);", site);
+    CHECK(sql(db, q) == SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM g WHERE id='r1' AND v='x'") == 1);
+    CHECK(close_db(db) == SQLITE_OK);
+}
 static void test_best_index(void) {
     struct sqlite3_index_constraint constraints[3] = {
         {.iColumn=0, .op=SQLITE_INDEX_CONSTRAINT_EQ, .usable=0},
@@ -1208,6 +1230,7 @@ int main(void) {
     CHECK(sqlite3_config(SQLITE_CONFIG_MALLOC, &faults) == SQLITE_OK);
     CHECK(sqlite3_initialize() == SQLITE_OK);
     test_clocks_and_double();
+    test_grow_only_clock_bounds();
     test_wrong_argument_counts_and_pk_shape();
     test_low_findings();
     test_meta_tables_registered();
