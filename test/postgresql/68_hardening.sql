@@ -165,6 +165,29 @@ SELECT (:fail::int + 1) AS fail \gset
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
+-- A hashed aggregate on the inner side of a nested loop is rescanned without being rebuilt:
+-- the executor finalizes the same group states again, and every pass must return the same payload.
+CREATE TEMP TABLE t68_changes AS SELECT * FROM cloudsync_changes WHERE tbl = 'refvals';
+SELECT md5(cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq)) AS enc_md5
+FROM t68_changes \gset
+BEGIN;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_material = off;
+SET LOCAL enable_memoize = off;
+SET LOCAL enable_sort = off;
+SELECT (count(*) = 3 AND count(DISTINCT m) = 1 AND min(m) = :'enc_md5') AS rescan_agg_ok FROM (
+    SELECT md5(s.p) AS m FROM generate_series(1, 3) g LEFT JOIN (
+        SELECT tbl, cloudsync_payload_encode(tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq) AS p
+        FROM t68_changes GROUP BY tbl) s ON true) r \gset
+COMMIT;
+\if :rescan_agg_ok
+\echo [PASS] (:testid) a rescanned payload aggregate returns the same payload on every pass
+\else
+\echo [FAIL] (:testid) a rescanned payload aggregate returned a different payload
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
 -- 6. A column that is not bytea is never read as a blob. The block migration scan reads the
 -- pk column of the metadata table; with that column and the blocks table's pk both retyped
 -- to bigint the scan query still prepares, so the read really reaches database_column_blob,

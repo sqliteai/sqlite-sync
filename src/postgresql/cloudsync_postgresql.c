@@ -997,11 +997,21 @@ Datum pg_cloudsync_commit_alter (PG_FUNCTION_ARGS) {
 
 // MARK: - Payload Functions -
 
+// Aggregate state of cloudsync_payload_encode: the payload context follows this header.
+// The executor may finalize the same state more than once (a rescanned hashed aggregate
+// reuses its groups), so the final function caches its result instead of re-encoding.
+typedef struct {
+    bool    finalized;
+    bytea   *result;
+} cloudsync_payload_encode_state;
+
+#define PAYLOAD_ENCODE_STATE_PAYLOAD(st) ((cloudsync_payload_context *)((char *)(st) + MAXALIGN(sizeof(cloudsync_payload_encode_state))))
+
 // Aggregate function: cloudsync_payload_encode transition function
 PG_FUNCTION_INFO_V1(cloudsync_payload_encode_transfn);
 Datum cloudsync_payload_encode_transfn (PG_FUNCTION_ARGS) {
     MemoryContext aggContext;
-    cloudsync_payload_context *payload = NULL;
+    cloudsync_payload_encode_state *st = NULL;
 
     if (!AggCheckCallContext(fcinfo, &aggContext)) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("cloudsync_payload_encode_transfn called in non-aggregate context")));
@@ -1010,11 +1020,15 @@ Datum cloudsync_payload_encode_transfn (PG_FUNCTION_ARGS) {
     // Get or allocate aggregate state
     if (PG_ARGISNULL(0)) {
         MemoryContext oldContext = MemoryContextSwitchTo(aggContext);
-        payload = (cloudsync_payload_context *)palloc0(cloudsync_payload_context_size(NULL));
+        st = (cloudsync_payload_encode_state *)palloc0(MAXALIGN(sizeof(cloudsync_payload_encode_state)) + cloudsync_payload_context_size(NULL));
         MemoryContextSwitchTo(oldContext);
     } else {
-        payload = (cloudsync_payload_context *)PG_GETARG_POINTER(0);
+        st = (cloudsync_payload_encode_state *)PG_GETARG_POINTER(0);
     }
+    if (st->finalized) {
+        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_payload_encode state was already finalized")));
+    }
+    cloudsync_payload_context *payload = PAYLOAD_ENCODE_STATE_PAYLOAD(st);
 
     int argc = 0;
     cloudsync_context *data = get_cloudsync_context();
@@ -1034,42 +1048,47 @@ Datum cloudsync_payload_encode_transfn (PG_FUNCTION_ARGS) {
     }
     if (argv) cloudsync_memory_free(argv);
 
-    PG_RETURN_POINTER(payload);
+    PG_RETURN_POINTER(st);
 }
 
 // Aggregate function: cloudsync_payload_encode finalize function
 PG_FUNCTION_INFO_V1(cloudsync_payload_encode_finalfn);
 Datum cloudsync_payload_encode_finalfn (PG_FUNCTION_ARGS) {
-    // The final function consumes its state: it cannot run more than once on it.
-    if (AggCheckCallContext(fcinfo, NULL) == AGG_CONTEXT_WINDOW) {
+    // The encoded state takes no further rows: a window frame cannot reuse it.
+    MemoryContext aggContext;
+    if (AggCheckCallContext(fcinfo, &aggContext) == AGG_CONTEXT_WINDOW) {
         ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_payload_encode cannot be used as a window function")));
     }
     if (PG_ARGISNULL(0)) {
         PG_RETURN_NULL();
     }
 
-    cloudsync_payload_context *payload = (cloudsync_payload_context *)PG_GETARG_POINTER(0);
-    cloudsync_context *data = get_cloudsync_context();
+    cloudsync_payload_encode_state *st = (cloudsync_payload_encode_state *)PG_GETARG_POINTER(0);
+    if (!st->finalized) {
+        cloudsync_payload_context *payload = PAYLOAD_ENCODE_STATE_PAYLOAD(st);
+        cloudsync_context *data = get_cloudsync_context();
 
-    int rc = cloudsync_payload_encode_final(payload, data);
-    if (rc != DBRES_OK) {
-        ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
+        int rc = cloudsync_payload_encode_final(payload, data);
+        if (rc != DBRES_OK) {
+            ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
+        }
+
+        int64_t blob_size = 0;
+        char *blob = cloudsync_payload_blob(payload, &blob_size, NULL);
+        if (blob) {
+            st->result = (bytea *)MemoryContextAlloc(aggContext, VARHDRSZ + blob_size);
+            SET_VARSIZE(st->result, VARHDRSZ + blob_size);
+            memcpy(VARDATA(st->result), blob, blob_size);
+            cloudsync_memory_free(blob);
+        }
+        st->finalized = true;
     }
 
-    int64_t blob_size = 0;
-    char *blob = cloudsync_payload_blob(payload, &blob_size, NULL);
-
-    if (!blob) {
+    if (!st->result) {
         PG_RETURN_NULL();
     }
 
-    bytea *result = (bytea *)palloc(VARHDRSZ + blob_size);
-    SET_VARSIZE(result, VARHDRSZ + blob_size);
-    memcpy(VARDATA(result), blob, blob_size);
-
-    cloudsync_memory_free(blob);
-
-    PG_RETURN_BYTEA_P(result);
+    PG_RETURN_BYTEA_P((bytea *)PG_DETOAST_DATUM_COPY(PointerGetDatum(st->result)));
 }
 
 typedef struct {
