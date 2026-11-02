@@ -2800,6 +2800,7 @@ typedef struct {
     char *pval;
     int64_t len;
     bool isnull;
+    bool truncated;
 } cloudsync_decoded_value;
 
 // Decode a single pk-encoded value into a typed representation
@@ -2828,7 +2829,7 @@ static int cloudsync_decode_value_cb (void *xdata, int index, int type, int64_t 
             const char *nul = (ival > 0) ? memchr(pval, '\0', (size_t)ival) : NULL;
             if (nul) {
                 ival = nul - pval;
-                ereport(WARNING, (errmsg("cloudsync: text value truncated at an embedded NUL character")));
+                out->truncated = true;
             }
             out->pval = (char *)palloc((size_t)ival + 1);
             if (ival > 0) memcpy(out->pval, pval, (size_t)ival);
@@ -2928,9 +2929,10 @@ static Oid get_column_oid(const char *schema, const char *table_name, const char
 
 // Decode encoded bytea into a pgvalue_t with the decoded base type.
 // Type casting to the target column type is handled by the SQL statement.
-static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, bool *out_isnull) {
+static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, bool *out_isnull, bool *out_truncated) {
     // Decode input guardrails.
     if (out_isnull) *out_isnull = true;
+    if (out_truncated) *out_truncated = false;
     if (!encoded) return NULL;
 
     // Decode bytea into C types with dbtype info.
@@ -2939,6 +2941,7 @@ static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, bool *out_i
     int decoded = pk_decode((char *)VARDATA_ANY(encoded), (size_t)blen, 1, NULL, -1, cloudsync_decode_value_cb, &dv);
     if (decoded != 1) ereport(ERROR, (errmsg("cloudsync: failed to decode encoded value")));
     if (out_isnull) *out_isnull = dv.isnull;
+    if (out_truncated) *out_truncated = dv.truncated;
     if (dv.isnull) return NULL;
 
     // Map decoded C types into a PostgreSQL Datum with the base type.
@@ -3717,7 +3720,11 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
         // This ensures type consistency across all calls, as SPI caches parameter types on first prepare.
         if (!is_tombstone) {
             bool value_is_null = false;
-            col_value = cloudsync_decode_bytea_to_pgvalue(insert_value_encoded, &value_is_null);
+            bool value_truncated = false;
+            col_value = cloudsync_decode_bytea_to_pgvalue(insert_value_encoded, &value_is_null, &value_truncated);
+            if (value_truncated) {
+                ereport(WARNING, (errmsg("cloudsync: text value for %s.%s truncated at an embedded NUL character", insert_tbl, insert_name)));
+            }
 
             // When value is NULL, create a typed NULL pgvalue with the decoded type.
             // We map the column's actual Oid to the corresponding decoded Oid (e.g., INT4OID → INT8OID).
