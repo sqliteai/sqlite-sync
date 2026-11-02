@@ -32,6 +32,65 @@ SELECT current_setting('cloudsync.t68') = 'refused' AS trigger_ok \gset
 SELECT (:fail::int + 1) AS fail \gset
 \endif
 
+-- 1b. With the view's layout it still runs only as a row-level INSTEAD OF INSERT trigger on
+-- the extension's cloudsync_changes view: a statement-level trigger has no tuple to read.
+CREATE TABLE same_layout (tbl text, pk bytea, col_name text, col_value bytea, col_version int8,
+    db_version int8, site_id bytea, cl int8, seq int8);
+CREATE TRIGGER same_layout_stmt BEFORE INSERT ON same_layout
+    FOR EACH STATEMENT EXECUTE FUNCTION cloudsync_changes_insert_trigger();
+DO $$
+BEGIN
+    INSERT INTO same_layout VALUES ('x', '\x01', 'c', NULL, 1, 1, '\x00', 1, 1);
+    PERFORM set_config('cloudsync.t68', 'no-error', false);
+EXCEPTION WHEN feature_not_supported THEN
+    PERFORM set_config('cloudsync.t68', 'refused', false);
+END $$;
+SELECT current_setting('cloudsync.t68') = 'refused' AS trigger_stmt_ok \gset
+\if :trigger_stmt_ok
+\echo [PASS] (:testid) the changes trigger refuses a statement-level attachment
+\else
+\echo [FAIL] (:testid) the changes trigger accepted a statement-level attachment
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+DROP TRIGGER same_layout_stmt ON same_layout;
+CREATE TRIGGER same_layout_row BEFORE INSERT ON same_layout
+    FOR EACH ROW EXECUTE FUNCTION cloudsync_changes_insert_trigger();
+DO $$
+BEGIN
+    INSERT INTO same_layout VALUES ('x', '\x01', 'c', NULL, 1, 1, '\x00', 1, 1);
+    PERFORM set_config('cloudsync.t68', 'no-error', false);
+EXCEPTION WHEN feature_not_supported THEN
+    PERFORM set_config('cloudsync.t68', 'refused', false);
+END $$;
+SELECT current_setting('cloudsync.t68') = 'refused' AS trigger_before_ok \gset
+\if :trigger_before_ok
+\echo [PASS] (:testid) the changes trigger refuses a BEFORE trigger on a table with its layout
+\else
+\echo [FAIL] (:testid) the changes trigger accepted a BEFORE trigger on a table with its layout
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+
+CREATE SCHEMA t68_other;
+CREATE VIEW t68_other.cloudsync_changes AS SELECT * FROM same_layout;
+CREATE TRIGGER other_changes_ins INSTEAD OF INSERT ON t68_other.cloudsync_changes
+    FOR EACH ROW EXECUTE FUNCTION cloudsync_changes_insert_trigger();
+DO $$
+BEGIN
+    INSERT INTO t68_other.cloudsync_changes VALUES ('x', '\x01', 'c', NULL, 1, 1, '\x00', 1, 1);
+    PERFORM set_config('cloudsync.t68', 'no-error', false);
+EXCEPTION WHEN feature_not_supported THEN
+    PERFORM set_config('cloudsync.t68', 'refused', false);
+END $$;
+SELECT current_setting('cloudsync.t68') = 'refused' AS trigger_view_ok \gset
+\if :trigger_view_ok
+\echo [PASS] (:testid) the changes trigger refuses a cloudsync_changes view outside the extension schema
+\else
+\echo [FAIL] (:testid) the changes trigger accepted a cloudsync_changes view outside the extension schema
+SELECT (:fail::int + 1) AS fail \gset
+\endif
+DROP SCHEMA t68_other CASCADE;
+
 -- 2. A name value is encoded as the text it spells, not read as a varlena.
 SELECT (cloudsync_encode_value('@A'::name) = cloudsync_encode_value('@A'::text)) AS name_ok \gset
 \if :name_ok

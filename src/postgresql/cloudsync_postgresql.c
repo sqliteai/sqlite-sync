@@ -14,6 +14,7 @@
 #include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_class.h"
 #include "executor/spi.h"
 #include "utils/lsyscache.h"
 #include "utils/array.h"
@@ -3591,10 +3592,22 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
     if (!CALLED_AS_TRIGGER(fcinfo)) ereport(ERROR, (errmsg("cloudsync_changes_insert_trigger must be called as trigger")));
     if (!TRIGGER_FIRED_BY_INSERT(trigdata->tg_event)) ereport(ERROR, (errmsg("Only INSERT allowed on cloudsync_changes")));
     
-    // The function is PUBLIC-callable: refuse to read the new tuple with the hard-coded
-    // cloudsync_changes layout unless the relation really has it (text, bytea, text, bytea,
-    // int8, int8, bytea, int8, int8). Otherwise a trigger attached to an arbitrary table
-    // would deform its tuple with the wrong types.
+    // The function is PUBLIC-callable: run only as the extension declares it, a row-level
+    // INSTEAD OF INSERT trigger on its own cloudsync_changes view. A statement-level trigger
+    // has no tuple, and another relation is not an insert into the changes view.
+    {
+        Relation rel = trigdata->tg_relation;
+        if (!TRIGGER_FIRED_FOR_ROW(trigdata->tg_event) || !TRIGGER_FIRED_INSTEAD(trigdata->tg_event) ||
+            rel->rd_rel->relkind != RELKIND_VIEW ||
+            strcmp(RelationGetRelationName(rel), "cloudsync_changes") != 0 ||
+            RelationGetNamespace(rel) != get_func_namespace(fcinfo->flinfo->fn_oid)) {
+            ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                            errmsg("cloudsync_changes_insert_trigger can only be used on the cloudsync_changes view")));
+        }
+    }
+
+    // Refuse to read the new tuple with the hard-coded cloudsync_changes layout unless the
+    // view really has it (text, bytea, text, bytea, int8, int8, bytea, int8, int8).
     {
         static const Oid expected[9] = {TEXTOID, BYTEAOID, TEXTOID, BYTEAOID, INT8OID, INT8OID, BYTEAOID, INT8OID, INT8OID};
         TupleDesc d = trigdata->tg_relation->rd_att;
