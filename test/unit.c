@@ -31,6 +31,10 @@
 extern char *OUT_OF_MEMORY_BUFFER;
 extern bool force_vtab_filter_abort;
 extern bool force_uncompressed_blob;
+extern int64_t changes_visible_set_threshold;
+extern int64_t changes_visible_set_max_rows;
+extern int64_t changes_visible_set_builds;
+extern int64_t col_value_lookup_count;
 static char test_directory[192];
 
 void dbvm_reset (dbvm_t *stmt);
@@ -13697,6 +13701,465 @@ finalize:
     return result;
 }
 
+// MARK: - Visible-pk set -
+
+#define TEST_VIS_NTABLES    3
+static const char *test_vis_tables[TEST_VIS_NTABLES] = {"vis_a", "vis_b", "vis_c"};
+
+static uint64_t test_fp_bytes (uint64_t h, const void *p, int n) {
+    const unsigned char *b = (const unsigned char *)p;
+    for (int i = 0; i < n; ++i) h = (h ^ b[i]) * 1099511628211ULL;
+    return (h ^ 0xFF) * 1099511628211ULL;
+}
+
+static uint64_t test_fp_columns (uint64_t h, sqlite3_stmt *stmt, int ncols) {
+    for (int i = 0; i < ncols; ++i) {
+        int type = sqlite3_column_type(stmt, i);
+        h = (h ^ (uint64_t)type) * 1099511628211ULL;
+        if (type == SQLITE_INTEGER) {
+            int64_t v = sqlite3_column_int64(stmt, i);
+            h = test_fp_bytes(h, &v, sizeof(v));
+        } else if (type == SQLITE_FLOAT) {
+            double v = sqlite3_column_double(stmt, i);
+            h = test_fp_bytes(h, &v, sizeof(v));
+        } else if (type == SQLITE_TEXT) {
+            h = test_fp_bytes(h, sqlite3_column_text(stmt, i), sqlite3_column_bytes(stmt, i));
+        } else if (type == SQLITE_BLOB) {
+            h = test_fp_bytes(h, sqlite3_column_blob(stmt, i), sqlite3_column_bytes(stmt, i));
+        }
+    }
+    return h;
+}
+
+typedef struct {
+    uint64_t    fp;
+    int         rows;
+    int         values[TEST_VIS_NTABLES];   // emitted non-tombstone rows per table
+    int64_t     lookups;
+} test_vis_result;
+
+static int test_vis_table_index (const char *name) {
+    for (int i = 0; i < TEST_VIS_NTABLES; ++i) if (name && strcmp(name, test_vis_tables[i]) == 0) return i;
+    return -1;
+}
+
+// Hash every row cloudsync_changes returns above since. When reveal_after > 0, the rows
+// of workspace 50 are made visible again after that many rows, in the middle of the scan.
+static bool test_vis_changes (sqlite3 *db, int64_t since, int reveal_after, test_vis_result *r) {
+    sqlite3_stmt *stmt = NULL;
+    memset(r, 0, sizeof(*r));
+    r->fp = 1469598103934665603ULL;
+    int64_t lookups = col_value_lookup_count;
+    if (sqlite3_prepare_v2(db, "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                               "FROM cloudsync_changes WHERE db_version > ?1;", -1, &stmt, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_int64(stmt, 1, since);
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        r->fp = test_fp_columns(r->fp, stmt, 9);
+        int t = test_vis_table_index((const char *)sqlite3_column_text(stmt, 0));
+        if (t < 0) break;
+        if (strcmp((const char *)sqlite3_column_text(stmt, 2), CLOUDSYNC_TOMBSTONE_VALUE) != 0) r->values[t]++;
+        if (++r->rows == reveal_after) {
+            if (sqlite3_exec(db, "INSERT INTO vis_a SELECT * FROM vis_a_stash WHERE ws = 50; "
+                                 "DELETE FROM vis_a_stash WHERE ws = 50;", NULL, NULL, NULL) != SQLITE_OK) break;
+        }
+    }
+    sqlite3_finalize(stmt);
+    r->lookups = col_value_lookup_count - lookups;
+    return (rc == SQLITE_DONE);
+}
+
+// Drain cloudsync_payload_chunks the way a stateless receive does: one chunk per call,
+// resuming at the cursor the previous chunk reported, and a new window from the
+// watermark of a window the byte cap ended early.
+static bool test_vis_chunks (sqlite3 *db, int64_t since, int64_t cap, test_vis_result *r) {
+    static const unsigned char site[16] = {0x0B,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B,0x32};
+    const char *cols = "payload, rows, db_version_min, db_version_max, watermark_db_version, next_db_version, next_seq, next_frag_offset, is_final, window_capped, window_bytes";
+    sqlite3_stmt *first = NULL, *next = NULL;
+    bool result = false;
+    memset(r, 0, sizeof(*r));
+    r->fp = 1469598103934665603ULL;
+
+    char *sql = sqlite3_mprintf("SELECT %s FROM cloudsync_payload_chunks(?1, ?2, NULL, 1, NULL, NULL, NULL, ?3) LIMIT 1;", cols);
+    int rc = sqlite3_prepare_v2(db, sql, -1, &first, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) goto done;
+    sql = sqlite3_mprintf("SELECT %s FROM cloudsync_payload_chunks(NULL, ?1, ?2, 1, ?3, ?4, ?5, ?6, ?7) LIMIT 1;", cols);
+    rc = sqlite3_prepare_v2(db, sql, -1, &next, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) goto done;
+
+    for (int guard = 0; guard < 1000; ++guard) {
+        sqlite3_stmt *q = first;
+        sqlite3_reset(first);
+        sqlite3_bind_int64(first, 1, since);
+        sqlite3_bind_blob(first, 2, site, 16, SQLITE_STATIC);
+        sqlite3_bind_int64(first, 3, cap);
+        rc = sqlite3_step(q);
+        if (rc == SQLITE_DONE) {result = true; goto done;}
+        if (rc != SQLITE_ROW) goto done;
+        r->fp = test_fp_columns(r->fp, q, 11);
+        r->rows++;
+        while (sqlite3_column_int(q, 8) == 0) {
+            int64_t wm = sqlite3_column_int64(q, 4), ndbv = sqlite3_column_int64(q, 5);
+            int64_t nseq = sqlite3_column_int64(q, 6), nfrag = sqlite3_column_int64(q, 7);
+            int64_t wbytes = sqlite3_column_int64(q, 10);
+            sqlite3_reset(next);
+            sqlite3_bind_blob(next, 1, site, 16, SQLITE_STATIC);
+            sqlite3_bind_int64(next, 2, wm);
+            sqlite3_bind_int64(next, 3, ndbv);
+            sqlite3_bind_int64(next, 4, nseq);
+            sqlite3_bind_int64(next, 5, nfrag);
+            sqlite3_bind_int64(next, 6, cap);
+            sqlite3_bind_int64(next, 7, wbytes);
+            q = next;
+            if (sqlite3_step(q) != SQLITE_ROW) goto done;
+            r->fp = test_fp_columns(r->fp, q, 11);
+            r->rows++;
+        }
+        // a capped window is checkpointed at its watermark and the next one starts there
+        if (sqlite3_column_int(q, 9) == 0) {result = true; goto done;}
+        since = sqlite3_column_int64(q, 4);
+    }
+
+done:
+    if (first) sqlite3_finalize(first);
+    if (next) sqlite3_finalize(next);
+    return result;
+}
+
+// Emulate a row-level security rule that shows the rows of workspaces below visible_ws:
+// the other rows are parked in stash tables, out of reach of the sync triggers (dropped
+// after setup), so the metadata keeps every change while the lookups stop finding them.
+static bool test_vis_set_visible (sqlite3 *db, int visible_ws) {
+    char *sql = sqlite3_mprintf(
+        "BEGIN;"
+        "INSERT INTO vis_a SELECT * FROM vis_a_stash; DELETE FROM vis_a_stash;"
+        "INSERT INTO vis_b SELECT * FROM vis_b_stash; DELETE FROM vis_b_stash;"
+        "INSERT INTO vis_c SELECT * FROM vis_c_stash; DELETE FROM vis_c_stash;"
+        "INSERT INTO vis_a_stash SELECT * FROM vis_a WHERE ws >= %d; DELETE FROM vis_a WHERE ws >= %d;"
+        "INSERT INTO vis_b_stash SELECT * FROM vis_b WHERE ws >= %d; DELETE FROM vis_b WHERE ws >= %d;"
+        "INSERT INTO vis_c_stash SELECT * FROM vis_c WHERE ws >= %d; DELETE FROM vis_c WHERE ws >= %d;"
+        "COMMIT;", visible_ws, visible_ws, visible_ws, visible_ws, visible_ws, visible_ws);
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    sqlite3_free(sql);
+    return (rc == SQLITE_OK);
+}
+
+static int64_t test_vis_select_int (sqlite3 *db, const char *sql, int64_t arg) {
+    sqlite3_stmt *stmt = NULL;
+    int64_t value = -1;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(stmt, 1, arg);
+    if (sqlite3_step(stmt) == SQLITE_ROW) value = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return value;
+}
+
+// Once a scan has seen enough hidden rows, cloudsync_col_value answers the pks a single
+// SELECT of the table doesn't return without looking them up. The output must stay
+// byte-identical to the per-row lookups for any hidden share, window, paging and cap,
+// each visible change must be looked up once, and a hidden one never after the switch.
+bool do_test_changes_visible_pk_set (bool print_result) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+    const char *step = "setup";
+    int64_t saved_threshold = changes_visible_set_threshold;
+
+    db = do_create_database();
+    if (!db) goto finalize;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE vis_a (id TEXT PRIMARY KEY NOT NULL, ws INTEGER, body BLOB, n INTEGER DEFAULT 0);"
+        "CREATE TABLE vis_b (k1 INTEGER NOT NULL, k2 TEXT NOT NULL, ws INTEGER, note TEXT, PRIMARY KEY (k1, k2));"
+        "CREATE TABLE vis_c (id TEXT PRIMARY KEY NOT NULL COLLATE NOCASE, ws INTEGER, note TEXT);"
+        "SELECT cloudsync_init('vis_a'); SELECT cloudsync_init('vis_b'); SELECT cloudsync_init('vis_c');"
+        "SELECT cloudsync_set('payload_max_chunk_size', '262144');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // history: inserts in many small transactions, then updates and deletes (tombstones)
+    for (int t = 0; t < 100; ++t) {
+        char *sql = sqlite3_mprintf(
+            "BEGIN;"
+            "WITH RECURSIVE c(i) AS (SELECT %d UNION ALL SELECT i+1 FROM c WHERE i < %d) "
+            "INSERT INTO vis_a(id, ws, body) SELECT printf('vis-%%05d', i), i %% 100, randomblob(300) FROM c;"
+            "WITH RECURSIVE c(i) AS (SELECT %d UNION ALL SELECT i+1 FROM c WHERE i < %d) "
+            "INSERT INTO vis_b(k1, k2, ws, note) SELECT i, printf('k-%%d', i %% 7), i %% 100, 'note' FROM c;"
+            "WITH RECURSIVE c(i) AS (SELECT %d UNION ALL SELECT i+1 FROM c WHERE i < %d) "
+            "INSERT INTO vis_c(id, ws, note) SELECT printf('Vis-%%05d', i), i %% 100, 'note' FROM c;"
+            "COMMIT;", t * 30, t * 30 + 29, t * 12, t * 12 + 11, t * 12, t * 12 + 11);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+    for (int t = 0; t < 30; ++t) {
+        char *sql = sqlite3_mprintf(
+            "UPDATE vis_a SET n = n + 1 WHERE CAST(substr(id, 5) AS INTEGER) %% 30 = %d;"
+            "UPDATE vis_b SET note = 'edited' WHERE k1 %% 30 = %d;", t, t);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
+        if (rc != SQLITE_OK) goto finalize;
+    }
+    rc = sqlite3_exec(db,
+        "DELETE FROM vis_a WHERE CAST(substr(id, 5) AS INTEGER) % 50 = 7;"
+        "DELETE FROM vis_b WHERE k1 % 60 = 11;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    // from here on base-table edits stand for what the caller can see, not for changes
+    if (sqlite3_prepare_v2(db, "SELECT group_concat(format('DROP TRIGGER \"%w\";', name), '') FROM sqlite_master "
+                               "WHERE type = 'trigger' AND tbl_name IN ('vis_a', 'vis_b', 'vis_c');", -1, &stmt, NULL) != SQLITE_OK) goto finalize;
+    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_type(stmt, 0) != SQLITE_TEXT) goto finalize;
+    rc = sqlite3_exec(db, (const char *)sqlite3_column_text(stmt, 0), NULL, NULL, NULL);
+    sqlite3_finalize(stmt); stmt = NULL;
+    if (rc != SQLITE_OK) goto finalize;
+    rc = sqlite3_exec(db,
+        "CREATE TABLE vis_a_stash AS SELECT * FROM vis_a WHERE 0;"
+        "CREATE TABLE vis_b_stash AS SELECT * FROM vis_b WHERE 0;"
+        "CREATE TABLE vis_c_stash AS SELECT * FROM vis_c WHERE 0;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    int64_t maxv = test_vis_select_int(db, "SELECT max(db_version) FROM vis_a_cloudsync WHERE ?1 = ?1;", 0);
+    if (maxv < 100) goto finalize;
+    const char *needs_lookup_sql[TEST_VIS_NTABLES] = {
+        "SELECT count(*) FROM vis_a_cloudsync WHERE db_version > ?1 AND col_name <> '" CLOUDSYNC_TOMBSTONE_VALUE "';",
+        "SELECT count(*) FROM vis_b_cloudsync WHERE db_version > ?1 AND col_name <> '" CLOUDSYNC_TOMBSTONE_VALUE "';",
+        "SELECT count(*) FROM vis_c_cloudsync WHERE db_version > ?1 AND col_name <> '" CLOUDSYNC_TOMBSTONE_VALUE "';"
+    };
+
+    // visible workspaces out of 100: 0%, 90%, 99% and 100% of the rows hidden
+    const int visible_ws[] = {100, 10, 1, 0};
+    const int64_t windows[] = {0, maxv / 2, maxv - 3};
+    const int64_t thresholds[] = {1000, 100, 1};
+    for (size_t v = 0; v < sizeof(visible_ws) / sizeof(visible_ws[0]); ++v) {
+        step = "set visible";
+        if (!test_vis_set_visible(db, visible_ws[v])) goto finalize;
+        for (size_t w = 0; w < sizeof(windows) / sizeof(windows[0]); ++w) {
+            int64_t since = windows[w];
+            int64_t needs_lookup[TEST_VIS_NTABLES];
+            for (int t = 0; t < TEST_VIS_NTABLES; ++t) needs_lookup[t] = test_vis_select_int(db, needs_lookup_sql[t], since);
+
+            // reference: no set, every change row looked up exactly once
+            test_vis_result base, base_chunks, base_capped;
+            changes_visible_set_threshold = INT64_MAX;
+            step = "baseline";
+            if (!test_vis_changes(db, since, 0, &base)) goto finalize;
+            if (base.lookups != needs_lookup[0] + needs_lookup[1] + needs_lookup[2]) goto finalize;
+            if (!test_vis_chunks(db, since, 0, &base_chunks)) goto finalize;
+            if (!test_vis_chunks(db, since, 200000, &base_capped)) goto finalize;
+            if (visible_ws[v] == 100 && since == 0 && (base_chunks.rows < 3 || base_capped.rows <= base_chunks.rows)) goto finalize;
+
+            for (size_t h = 0; h < sizeof(thresholds) / sizeof(thresholds[0]); ++h) {
+                int64_t threshold = thresholds[h];
+                changes_visible_set_threshold = threshold;
+                test_vis_result r;
+                step = "changes";
+                if (!test_vis_changes(db, since, 0, &r)) goto finalize;
+                if (r.fp != base.fp || r.rows != base.rows) goto finalize;
+
+                // hidden rows are looked up until the threshold, never after; the NOCASE
+                // table keeps its lookups, since its pk comparison isn't byte equality
+                int64_t expected = needs_lookup[2];
+                for (int t = 0; t < 2; ++t) {
+                    int64_t hidden = needs_lookup[t] - r.values[t];
+                    expected += r.values[t] + (hidden < threshold ? hidden : threshold);
+                }
+                step = "lookups";
+                if (r.lookups != expected) goto finalize;
+
+                step = "chunks";
+                if (!test_vis_chunks(db, since, 0, &r)) goto finalize;
+                if (r.fp != base_chunks.fp || r.rows != base_chunks.rows) goto finalize;
+                step = "capped chunks";
+                if (!test_vis_chunks(db, since, 200000, &r)) goto finalize;
+                if (r.fp != base_capped.fp || r.rows != base_capped.rows) goto finalize;
+            }
+        }
+    }
+
+    // a write on the connection in the middle of a scan stops using the set: rows it
+    // makes visible are found by the lookups that follow, exactly as without the set
+    {
+        test_vis_result base, r, before;
+        step = "mid-scan write";
+        changes_visible_set_threshold = INT64_MAX;
+        if (!test_vis_set_visible(db, 1)) goto finalize;
+        if (!test_vis_changes(db, 0, 0, &before)) goto finalize;
+        if (!test_vis_changes(db, 0, 5, &base)) goto finalize;
+        if (base.rows <= before.rows) goto finalize;
+        changes_visible_set_threshold = 1;
+        if (!test_vis_set_visible(db, 1)) goto finalize;
+        if (!test_vis_changes(db, 0, 5, &r)) goto finalize;
+        if (r.fp != base.fp || r.rows != base.rows) goto finalize;
+    }
+
+    result = true;
+
+finalize:
+    if (!result && print_result) {
+        printf("do_test_changes_visible_pk_set error at %s: %s\n", step, db ? sqlite3_errmsg(db) : "no db");
+    }
+    changes_visible_set_threshold = saved_threshold;
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) close_db(db);
+    return result;
+}
+
+// Fingerprint every row cloudsync_changes returns (rows hidden by RLS are left out).
+static bool test_vis_scan (sqlite3 *db, uint64_t *fp, int *rows, int64_t *lookups) {
+    sqlite3_stmt *stmt = NULL;
+    *fp = 1469598103934665603ULL; *rows = 0;
+    int64_t start = col_value_lookup_count;
+    if (sqlite3_prepare_v2(db, "SELECT tbl, pk, col_name, col_value, col_version, db_version, site_id, cl, seq "
+                               "FROM cloudsync_changes;", -1, &stmt, NULL) != SQLITE_OK) return false;
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        *fp = test_fp_columns(*fp, stmt, 9);
+        (*rows)++;
+    }
+    sqlite3_finalize(stmt);
+    *lookups = col_value_lookup_count - start;
+    return (rc == SQLITE_DONE);
+}
+
+// Base-table edits after this stand for what the caller can see, not for changes.
+static bool test_vis_drop_triggers (sqlite3 *db, const char *table) {
+    sqlite3_stmt *stmt = NULL;
+    bool result = false;
+    if (sqlite3_prepare_v2(db, "SELECT group_concat(format('DROP TRIGGER \"%w\";', name), '') FROM sqlite_master "
+                               "WHERE type = 'trigger' AND tbl_name = ?1;", -1, &stmt, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, table, -1, SQLITE_STATIC);
+    if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) == SQLITE_TEXT) {
+        result = (sqlite3_exec(db, (const char *)sqlite3_column_text(stmt, 0), NULL, NULL, NULL) == SQLITE_OK);
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+// A pk received from a peer may decode to a valid row while its bytes differ from the
+// encoder's (a zero with the negative-integer tag, a magnitude above INT64_MAX). Those
+// rows must be found by the lookup, not answered as hidden because the set misses them.
+bool do_test_changes_visible_pk_noncanonical (bool print_result) {
+    sqlite3 *db = NULL;
+    bool result = false;
+    const char *step = "setup";
+    int64_t saved_threshold = changes_visible_set_threshold;
+
+    db = do_create_database();
+    if (!db) goto finalize;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE \"Vis_N\" (id INTEGER PRIMARY KEY NOT NULL, ws INTEGER, note TEXT);"
+        "SELECT cloudsync_init('Vis_N', 'cls', 1);"
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 40) "
+        "INSERT INTO \"Vis_N\"(id, ws, note) SELECT i, i % 2, 'local' FROM c;"
+        // id 0 tagged as a negative integer, and -(2^63-1) stored as an unsigned 2^63+1
+        "INSERT INTO cloudsync_changes (tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES "
+        "('Vis_N',x'010800','note','peer zero',1,1,x'0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F',1,0);"
+        "INSERT INTO cloudsync_changes (tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES "
+        "('Vis_N',x'01418000000000000001','note','peer wide',1,2,x'0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F',1,0);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+    step = "peer rows";
+    if (test_vis_select_int(db, "SELECT count(*) FROM \"Vis_N\" WHERE id IN (0, -9223372036854775807) AND ?1 = ?1;", 0) != 2) goto finalize;
+
+    // hide the odd workspace from the lookups
+    step = "hide";
+    if (!test_vis_drop_triggers(db, "Vis_N")) goto finalize;
+    if (sqlite3_exec(db, "DELETE FROM \"Vis_N\" WHERE ws = 1;", NULL, NULL, NULL) != SQLITE_OK) goto finalize;
+
+    // 40 local changes of the even ids and the 2 peer changes are visible
+    uint64_t base_fp, fp;
+    int base_rows, rows;
+    int64_t base_lookups, lookups;
+    step = "baseline";
+    changes_visible_set_threshold = INT64_MAX;
+    if (!test_vis_scan(db, &base_fp, &base_rows, &base_lookups)) goto finalize;
+    if (base_rows != 42 || base_lookups != 82) goto finalize;
+    step = "set";
+    changes_visible_set_threshold = 1;
+    if (!test_vis_scan(db, &fp, &rows, &lookups)) goto finalize;
+    if (fp != base_fp || rows != base_rows) goto finalize;
+    // the set is in use: a hidden pk is looked up only until the threshold
+    if (lookups != 43) goto finalize;
+
+    result = true;
+
+finalize:
+    if (!result && print_result) {
+        printf("do_test_changes_visible_pk_noncanonical error at %s: %s\n", step, db ? sqlite3_errmsg(db) : "no db");
+    }
+    changes_visible_set_threshold = saved_threshold;
+    if (db) close_db(db);
+    return result;
+}
+
+// The set is skipped, with output unchanged, when it would not match the lookups: pk
+// columns now declared in another order than the one the metadata was encoded in. A set
+// over the row cap is dropped and not built again by later scans on the same connection.
+bool do_test_changes_visible_pk_fallbacks (bool print_result) {
+    sqlite3 *db = NULL;
+    bool result = false;
+    const char *step = "setup";
+    int64_t saved_threshold = changes_visible_set_threshold;
+    int64_t saved_max_rows = changes_visible_set_max_rows;
+
+    db = do_create_database();
+    if (!db) goto finalize;
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE vis_order (k1 TEXT NOT NULL, k2 TEXT NOT NULL, ws INTEGER, note TEXT, PRIMARY KEY (k1, k2));"
+        "CREATE TABLE vis_cap (id TEXT PRIMARY KEY NOT NULL, ws INTEGER, note TEXT);"
+        "SELECT cloudsync_init('vis_order'); SELECT cloudsync_init('vis_cap');"
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 40) "
+        "INSERT INTO vis_order(k1, k2, ws, note) SELECT printf('a-%d', i), printf('b-%d', i), i % 2, 'note' FROM c;"
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 60) "
+        "INSERT INTO vis_cap(id, ws, note) SELECT printf('cap-%03d', i), i % 2, 'note' FROM c;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    step = "hide";
+    if (!test_vis_drop_triggers(db, "vis_order") || !test_vis_drop_triggers(db, "vis_cap")) goto finalize;
+    rc = sqlite3_exec(db,
+        "CREATE TABLE vis_order_swap (k1 TEXT NOT NULL, k2 TEXT NOT NULL, ws INTEGER, note TEXT, PRIMARY KEY (k2, k1));"
+        "INSERT INTO vis_order_swap SELECT * FROM vis_order WHERE ws = 0;"
+        "DROP TABLE vis_order; ALTER TABLE vis_order_swap RENAME TO vis_order;"
+        "DELETE FROM vis_cap WHERE ws = 1;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto finalize;
+
+    uint64_t base_fp, fp;
+    int base_rows, rows;
+    int64_t base_lookups, lookups;
+    step = "baseline";
+    changes_visible_set_threshold = INT64_MAX;
+    if (!test_vis_scan(db, &base_fp, &base_rows, &base_lookups)) goto finalize;
+    if (base_rows != 100 || base_lookups != 200) goto finalize;
+
+    // vis_order (20 visible pks) keeps its lookups; vis_cap's 30 visible pks exceed a cap of 25
+    step = "fallback";
+    changes_visible_set_threshold = 1;
+    changes_visible_set_max_rows = 25;
+    int64_t builds = changes_visible_set_builds;
+    if (!test_vis_scan(db, &fp, &rows, &lookups)) goto finalize;
+    if (fp != base_fp || rows != base_rows || lookups != base_lookups) goto finalize;
+    if (changes_visible_set_builds - builds != 2) goto finalize;
+
+    step = "oversized remembered";
+    builds = changes_visible_set_builds;
+    if (!test_vis_scan(db, &fp, &rows, &lookups)) goto finalize;
+    if (fp != base_fp || rows != base_rows || lookups != base_lookups) goto finalize;
+    if (changes_visible_set_builds - builds != 1) goto finalize;
+
+    result = true;
+
+finalize:
+    if (!result && print_result) {
+        printf("do_test_changes_visible_pk_fallbacks error at %s: %s\n", step, db ? sqlite3_errmsg(db) : "no db");
+    }
+    changes_visible_set_threshold = saved_threshold;
+    changes_visible_set_max_rows = saved_max_rows;
+    if (db) close_db(db);
+    return result;
+}
+
 bool do_test_payload_idempotency (int nclients, bool print_result, bool cleanup_databases) {
     sqlite3 *db[2] = {NULL, NULL};
     bool result = false;
@@ -14292,6 +14755,9 @@ int main (int argc, const char * argv[]) {
     result += test_report("Payload Chunks Uninitialized:", do_test_payload_chunks_uninitialized(print_result, cleanup_databases));
     result += test_report("Payload Chunks Empty Final:", do_test_payload_chunks_empty_final(print_result, cleanup_databases));
     result += test_report("Changes Vtab Missing Meta Tables:", do_test_changes_vtab_missing_meta_tables(print_result));
+    result += test_report("Changes Visible PK Set:", do_test_changes_visible_pk_set(print_result));
+    result += test_report("Changes Visible PK Noncanonical:", do_test_changes_visible_pk_noncanonical(print_result));
+    result += test_report("Changes Visible PK Fallbacks:", do_test_changes_visible_pk_fallbacks(print_result));
 
     // close local database
     close_db(db);

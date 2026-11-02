@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - **A download window with nothing visible to the caller still moves the checkpoint forward.** `cloudsync_payload_chunks()` now ends such a window with an empty final chunk that carries the watermark, so the same window is no longer scanned again on every request. Clients from 1.1.0 on already apply it.
+- **SQLite: reading changes under row-level security now scales with what the caller can see.** First syncs from large shared tables skip almost all lookups of rows the caller can't see, and each visible row is looked up once instead of twice. The output is unchanged.
 - **`cloudsync_network_has_unsent_changes()` returns 1 until the server has confirmed the local changes, not just accepted them**, so it is safe to check before logging out. While `send.status` is `syncing`, stop calling `cloudsync_network_send_changes()` in a loop.
 
 ### Fixed
