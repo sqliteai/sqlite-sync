@@ -1066,6 +1066,51 @@ static void test_fuzz_review_findings(void) {
     CHECK(strstr(sqlite3_errmsg(db), "Only INSERT and SELECT") != NULL);
     CHECK(close_db(db) == SQLITE_OK);
 }
+static sqlite3 *open_file_db(const char *path) {
+    sqlite3 *db = NULL;
+    CHECK(sqlite3_open(path, &db) == SQLITE_OK);
+    CHECK(sqlite3_cloudsync_init(db, NULL, NULL) == SQLITE_OK);
+    return db;
+}
+static void test_meta_tables_registered(void) {
+    // A metadata table counts when its table is registered, whatever the case of the name
+    // given to cloudsync_init; a dropped base table keeps counting toward db_version.
+    char path[512];
+    CHECK(scratch_create());
+    snprintf(path, sizeof(path), "%s/meta.db", scratch_dir);
+    sqlite3 *db = open_file_db(path);
+    CHECK(sql(db, "CREATE TABLE users(id TEXT PRIMARY KEY NOT NULL, name TEXT); SELECT cloudsync_init('Users');"
+                  "INSERT INTO users VALUES('u1','a'); INSERT INTO users VALUES('u2','b');") == SQLITE_OK);
+    CHECK(close_db(db) == SQLITE_OK);
+    db = open_file_db(path);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 2);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_changes") == 2);
+
+    CHECK(sql(db, "CREATE TABLE t2(id TEXT PRIMARY KEY NOT NULL, v TEXT); SELECT cloudsync_init('t2');") == SQLITE_OK);
+    for (int i = 0; i < 5; i++) {
+        char q[96];
+        snprintf(q, sizeof(q), "INSERT INTO t2 VALUES('k%d','v')", i);
+        CHECK(sql(db, q) == SQLITE_OK);
+    }
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 7);
+    CHECK(sql(db, "DROP TABLE t2") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 7);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_changes") == 2);
+
+    // unregistered lookalikes with the metadata shape are ignored
+    CHECK(sql(db, "CREATE TABLE junk_cloudsync(pk BLOB NOT NULL, col_name TEXT NOT NULL, col_version INTEGER, db_version INTEGER, site_id INTEGER, seq INTEGER);"
+                  "INSERT INTO junk_cloudsync VALUES(x'01','c',1,999999,0,0);"
+                  "CREATE TABLE junk(id TEXT PRIMARY KEY NOT NULL);") == SQLITE_OK);
+    CHECK(close_db(db) == SQLITE_OK);
+    db = open_file_db(path);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 7);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_changes") == 2);
+    CHECK(sql(db, "INSERT INTO users VALUES('u3','c')") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 8);
+    CHECK(close_db(db) == SQLITE_OK);
+    const char *names[] = {"meta.db", "meta.db-journal"};
+    scratch_remove(names, 2);
+}
 static void test_low_findings(void) {
     const char *site = "X'0102030405060708090a0b0c0d0e0f10'";
     char q[600];
@@ -1165,6 +1210,7 @@ int main(void) {
     test_clocks_and_double();
     test_wrong_argument_counts_and_pk_shape();
     test_low_findings();
+    test_meta_tables_registered();
     test_fuzz_review_findings();
     test_best_index();
     test_payload_errors();

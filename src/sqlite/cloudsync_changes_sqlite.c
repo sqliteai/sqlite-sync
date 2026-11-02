@@ -214,7 +214,7 @@ char *vtab_build_changes_sql (cloudsync_context *data, const char *idxs) {
     "WITH table_names AS ( "
     "    SELECT format('%q',SUBSTR(tbl_name, 1, LENGTH(tbl_name) - 10)) AS table_name_literal, format('%w',SUBSTR(tbl_name, 1, LENGTH(tbl_name) - 10)) AS table_name_identifier, format('%w',tbl_name) AS table_meta "
     "    FROM sqlite_master "
-    "    WHERE type = 'table' AND " CLOUDSYNC_SQLITE_META_FILTER " "
+    "    WHERE type = 'table' AND " CLOUDSYNC_SQLITE_META_WITH_BASE_FILTER " "
     "), "
     "changes_query AS ( "
     "    SELECT "
@@ -773,7 +773,7 @@ int cloudsync_changesvtab_filter (sqlite3_vtab_cursor *cursor, int idxn, const c
         // that skipped the meta tables): still not an OOM
         sqlite3_stmt *vm = NULL;
         bool meta_missing = false;
-        if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND " CLOUDSYNC_SQLITE_META_FILTER " LIMIT 1;", -1, &vm, NULL) == SQLITE_OK) {
+        if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND " CLOUDSYNC_SQLITE_META_WITH_BASE_FILTER " LIMIT 1;", -1, &vm, NULL) == SQLITE_OK) {
             meta_missing = (sqlite3_step(vm) != SQLITE_ROW);
         }
         if (vm) sqlite3_finalize(vm);

@@ -1402,12 +1402,27 @@ static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_con
     return result;
 }
 
+// The metadata table filters read cloudsync_table_settings, created by the first cloudsync_init.
+// Requires SPI.
+static bool pg_table_settings_exists (void) {
+    int rc = SPI_execute("SELECT to_regclass('cloudsync_table_settings') IS NOT NULL", true, 1);
+    bool exists = false;
+    if (rc == SPI_OK_SELECT && SPI_processed > 0) {
+        bool isnull = false;
+        Datum d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
+        exists = !isnull && DatumGetBool(d);
+    }
+    if (SPI_tuptable) { SPI_freetuptable(SPI_tuptable); SPI_tuptable = NULL; }
+    return exists;
+}
+
 // Highest db_version above `lower` recorded by any site other than site_id, read from the
 // metadata tables rather than through cloudsync_changes_select. That function drops the
 // rows the caller cannot read, so its MAX stops at the last visible change: a caller that
 // can read nothing would get 0 and never move past changes it will never receive.
 // Requires SPI.
 static int64 payload_chunks_pg_metadata_max(bytea *site_id, int64 lower) {
+    if (!pg_table_settings_exists()) return 0;
     int rc = SPI_execute(
         "SELECT n.nspname, c.relname FROM pg_class c "
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -3170,12 +3185,14 @@ static char * build_union_sql (void) {
     
     PG_TRY();
     {
-        const char *sql =
+        // before the first cloudsync_init there is no settings table, so no metadata table
+        const char *sql = pg_table_settings_exists() ?
         "SELECT n.nspname, c.relname "
         "FROM pg_class c "
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE " CLOUDSYNC_PG_META_TABLE_FILTER
-        " ORDER BY n.nspname, c.relname";
+        "WHERE " CLOUDSYNC_PG_META_TABLE_WITH_BASE_FILTER
+        " ORDER BY n.nspname, c.relname" :
+        "SELECT NULL::name, NULL::name WHERE false";
         
         int rc = SPI_execute(sql, true, 0);
         if (rc != SPI_OK_SELECT || !SPI_tuptable) {
