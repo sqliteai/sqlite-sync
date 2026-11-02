@@ -14053,14 +14053,14 @@ bool do_test_changes_visible_pk_noncanonical (bool print_result) {
         "SELECT cloudsync_init('Vis_N', 'cls', 1);"
         "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 40) "
         "INSERT INTO \"Vis_N\"(id, ws, note) SELECT i, i % 2, 'local' FROM c;"
-        // id 0 tagged as a negative integer, and -(2^63-1) stored as an unsigned 2^63+1
+        // id 0 tagged as a negative integer, and 300 stored in 3 bytes instead of 2
         "INSERT INTO cloudsync_changes (tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES "
         "('Vis_N',x'010800','note','peer zero',1,1,x'0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F',1,0);"
         "INSERT INTO cloudsync_changes (tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES "
-        "('Vis_N',x'01418000000000000001','note','peer wide',1,2,x'0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F',1,0);", NULL, NULL, NULL);
+        "('Vis_N',x'011900012C','note','peer wide',1,2,x'0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F',1,0);", NULL, NULL, NULL);
     if (rc != SQLITE_OK) goto finalize;
     step = "peer rows";
-    if (test_vis_select_int(db, "SELECT count(*) FROM \"Vis_N\" WHERE id IN (0, -9223372036854775807) AND ?1 = ?1;", 0) != 2) goto finalize;
+    if (test_vis_select_int(db, "SELECT count(*) FROM \"Vis_N\" WHERE id IN (0, 300) AND ?1 = ?1;", 0) != 2) goto finalize;
 
     // hide the odd workspace from the lookups
     step = "hide";
