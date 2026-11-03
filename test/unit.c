@@ -14162,11 +14162,9 @@ finalize:
 
 // MARK: - Change visibility -
 
-// Changes respect visibility for every change type: the sentinel of a live row (resurrected
-// row, new pk after a pk change, row of a pk-only table) and block-column values are returned
-// only when the base row can be read, like column changes. Delete sentinels have no base row
-// and are always returned. Rows of workspace 2 are parked in stash tables (sync triggers
-// dropped first), so their metadata stays while the lookups no longer find them.
+// Changes respect row visibility for every change type. Rows of workspace 2 are parked in
+// stash tables (sync triggers dropped first), so their metadata stays while the lookups no
+// longer find them.
 bool do_test_changes_visibility_all_types (bool print_result) {
     sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;

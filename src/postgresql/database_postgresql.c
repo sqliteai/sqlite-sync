@@ -402,18 +402,8 @@ char *sql_build_select_cols_by_pk (cloudsync_context *data, const char *table_na
 }
 
 char *sql_build_select_row_by_pk (cloudsync_context *data, const char *table_name, const char *schema) {
-    char *qualified = database_build_base_ref(schema, table_name);
-    if (!qualified) return NULL;
-
-    char *sql = sql_build_with_literals(SQL_BUILD_SELECT_ROW_BY_PK_FMT, qualified, NULL, NULL);
-    cloudsync_memory_free(qualified);
-    if (!sql) return NULL;
-
-    char *query = NULL;
-    int rc = database_select_text(data, sql, &query);
-    cloudsync_memory_free(sql);
-
-    return (rc == DBRES_OK) ? query : NULL;
+    // unused: PostgreSQL checks row visibility with a join in the changes query
+    return NULL;
 }
 
 char *sql_build_rekey_pk_and_reset_version_except_col (cloudsync_context *data, const char *table_name, const char *except_col) {

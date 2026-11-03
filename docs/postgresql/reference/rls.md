@@ -23,7 +23,7 @@ Once the policy allows the rows (or the rows it depends on have been applied), d
 
 ### Deleted rows
 
-Changes are sent only for rows the caller's policies allow it to read. A deleted row can no longer be checked against a policy, so its delete marker, which carries the primary key, is delivered to every device that syncs the table. If primary-key values are themselves sensitive, use opaque identifiers (UUID/ULID) or soft deletes (for example a `deleted_at` column), so that the deletion syncs as an ordinary update filtered by your policies.
+A delete syncs as a delete marker that carries the row's primary key, and delete markers are delivered to every device that syncs the table, including under row-level security. If primary-key values are themselves sensitive, use opaque identifiers (UUID/ULID) or soft deletes (for example a `deleted_at` column).
 
 ## Quick Setup
 

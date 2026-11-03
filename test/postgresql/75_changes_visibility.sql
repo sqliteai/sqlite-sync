@@ -1,7 +1,4 @@
--- Changes respect row visibility for every change type: the sentinel of a live row
--- (resurrected row, new pk after a pk change, row of a pk-only table) and block-column
--- values are returned only when the caller can read the base row, like column changes.
--- Delete sentinels (even causal length) have no base row and are always returned.
+-- Changes respect row visibility for every change type.
 
 \set testid '75-changes-visibility'
 \ir helper_test_init.sql
