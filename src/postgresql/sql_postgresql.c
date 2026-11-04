@@ -154,7 +154,7 @@ const char * const SQL_PAYLOAD_FRAGMENTS_UPSERT =
 
 const char * const SQL_PAYLOAD_FRAGMENTS_COUNT =
     "SELECT COUNT(*), MIN(part_count), MAX(part_count), MIN(total_size), MAX(total_size), "
-    "MIN(checksum), MAX(checksum), MIN(part_index), MAX(part_index) "
+    "MIN(checksum), MAX(checksum), MIN(part_index), MAX(part_index), SUM(length(fragment)) "
     "FROM cloudsync_payload_fragments WHERE value_id=$1;";
 
 const char * const SQL_PAYLOAD_FRAGMENTS_SELECT =

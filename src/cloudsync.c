@@ -4169,6 +4169,7 @@ static int cloudsync_payload_apply_reassembled_fragment (cloudsync_context *data
     if (checksum_max) snprintf(checksum_max_copy, sizeof(checksum_max_copy), "%s", checksum_max);
     int64_t part_index_min = database_column_int(vm, 7);
     int64_t part_index_max = database_column_int(vm, 8);
+    int64_t staged = database_column_int(vm, 9);
     databasevm_finalize(vm);
     vm = NULL;
     if (have <= 0 || part_count_min <= 0 || have < part_count_max) return DBRES_OK;
@@ -4181,24 +4182,7 @@ static int cloudsync_payload_apply_reassembled_fragment (cloudsync_context *data
 
     // total_size comes from the sender: allocate only what is really staged, never what a
     // fragment claims, so a forged value cannot make us reserve gigabytes up front
-    if (total_size <= 0 || total_size > CLOUDSYNC_PAYLOAD_MAX_EXPANDED_SIZE) {
-        return cloudsync_set_error(data, "Error on cloudsync_payload_apply: inconsistent v3 fragments", DBRES_MISUSE);
-    }
-    rc = databasevm_prepare(data, SQL_PAYLOAD_FRAGMENTS_SELECT, &vm, 0);
-    if (rc != DBRES_OK) return rc;
-    rc = databasevm_bind_text(vm, 1, value_id, -1);
-    int64_t staged = 0;
-    while (rc == DBRES_OK && (rc = databasevm_step(vm)) == DBRES_ROW) {
-        size_t frag_len = 0;
-        (void)database_column_blob(vm, 0, &frag_len);
-        staged += (int64_t)frag_len;
-        rc = DBRES_OK;
-        if (staged > total_size) break;
-    }
-    databasevm_finalize(vm);
-    vm = NULL;
-    if (rc != DBRES_OK && rc != DBRES_DONE) return rc;
-    if (staged != total_size) {
+    if (total_size <= 0 || total_size > CLOUDSYNC_PAYLOAD_MAX_EXPANDED_SIZE || staged != total_size) {
         return cloudsync_set_error(data, "Error on cloudsync_payload_apply: inconsistent v3 fragments", DBRES_MISUSE);
     }
 
