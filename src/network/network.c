@@ -1340,20 +1340,42 @@ int network_extract_query_param (const char *query, const char *key, char *outpu
     return -3; // Key not found
 }
 
+static bool network_has_prefix_nocase (const char *s, const char *prefix) {
+    for (; *prefix; s++, prefix++) {
+        if (tolower((unsigned char)*s) != *prefix) return false;
+    }
+    return true;
+}
+
 // The address receives the credentials and the local changes: it must be https, or plain http
 // only towards the local machine (development servers, tests).
 static bool network_address_allowed (const char *address) {
-    if (strncmp(address, "https://", 8) == 0) return true;
-    if (strncmp(address, "http://", 7) != 0) return false;
+    if (network_has_prefix_nocase(address, "https://")) return true;
+    if (!network_has_prefix_nocase(address, "http://")) return false;
+
+    // authority ends at the path, query or fragment; userinfo could hide the real host
     const char *host = address + 7;
-    static const char *loopback[] = {"localhost", "127.", "[::1]"};
-    for (size_t i = 0; i < sizeof(loopback) / sizeof(loopback[0]); i++) {
-        size_t n = strlen(loopback[i]);
-        if (strncmp(host, loopback[i], n) != 0) continue;
-        // "127." is a prefix of the dotted address, the others must end the host name
-        if (i == 1) return true;
-        char c = host[n];
-        if (c == '\0' || c == ':' || c == '/') return true;
+    size_t authority_len = strcspn(host, "/?#");
+    if (memchr(host, '@', authority_len)) return false;
+
+    size_t host_len;
+    if (host[0] == '[') {
+        const char *end = memchr(host, ']', authority_len);
+        if (!end) return false;
+        host_len = (size_t)(end - host) + 1;
+    } else {
+        const char *colon = memchr(host, ':', authority_len);
+        host_len = colon ? (size_t)(colon - host) : authority_len;
+    }
+    if (host_len != authority_len && host[host_len] != ':') return false;
+
+    if (host_len == 9 && network_has_prefix_nocase(host, "localhost")) return true;
+    if (host_len == 5 && memcmp(host, "[::1]", 5) == 0) return true;
+    if (host_len > 4 && memcmp(host, "127.", 4) == 0) {
+        for (size_t i = 4; i < host_len; i++) {
+            if (!isdigit((unsigned char)host[i]) && host[i] != '.') return false;
+        }
+        return true;
     }
     return false;
 }

@@ -1241,6 +1241,14 @@ static bool test_credentials_follow_address(void) {
 
     ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://example.com', 'x');") != SQLITE_OK, "plain http to a remote host is refused", NULL);
     ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://localhost.evil.com', 'x');") != SQLITE_OK, "a host that only starts with localhost is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://127.0.0.1.example.com', 'x');") != SQLITE_OK, "a host that only starts with 127. is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://127.0.0.1@example.com/', 'x');") != SQLITE_OK, "userinfo before a remote host is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://localhost@example.com', 'x');") != SQLITE_OK, "userinfo named localhost is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://[::1].example.com', 'x');") != SQLITE_OK, "a host that only starts with [::1] is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('HTTPS://example.com', 'x');") == SQLITE_OK, "an uppercase https scheme is accepted", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://LOCALHOST:1', 'x');") == SQLITE_OK, "an uppercase localhost is accepted", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://127.0.0.1?x', 'x');") == SQLITE_OK, "a loopback address followed by a query is accepted", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://[::1]:1/', 'x');") == SQLITE_OK, "the IPv6 loopback with a port is accepted", NULL);
     ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('ftp://example.com', 'x');") != SQLITE_OK, "a non-http scheme is refused", NULL);
     ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('https://example.com', 'a/../b');") != SQLITE_OK, "a database id with a slash is refused", NULL);
     ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('https://example.com', 'a?x=1');") != SQLITE_OK, "a database id with a query is refused", NULL);
