@@ -27,6 +27,8 @@ extern const char * const SQL_INSERT_SITE_ID_ROWID;
 extern const char * const SQL_CREATE_TABLE_SETTINGS_TABLE;
 extern const char * const SQL_CREATE_SCHEMA_VERSIONS_TABLE;
 extern const char * const SQL_SETTINGS_CLEANUP_DROP_ALL;
+extern const char * const SQL_SCHEMA_VERSION_TRIGGER;            // PostgreSQL only
+extern const char * const SQL_SCHEMA_VERSION_TRIGGER_OUTDATED;   // PostgreSQL only
 
 // CLOUDSYNC
 extern const char * const SQL_DBVERSION_BUILD_QUERY;

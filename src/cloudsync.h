@@ -22,6 +22,8 @@ extern "C" {
 // LZ4's block format cannot expand input by more than 255:1, so a compressed payload
 // declaring a larger expansion is forged or corrupt (see cloudsync_payload_apply).
 #define CLOUDSYNC_PAYLOAD_LZ4_MAX_RATIO         255
+// largest value or decompressed payload accepted from a peer: SQLite's own default blob limit
+#define CLOUDSYNC_PAYLOAD_MAX_EXPANDED_SIZE     1000000000U
 #define CLOUDSYNC_MAX_TABLENAME_LEN             512
 
 #define CLOUDSYNC_VALUE_NOTSET                  -1

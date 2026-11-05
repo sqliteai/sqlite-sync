@@ -94,6 +94,7 @@ This preserves PostgreSQL-native organization while maintaining SQLite compatibi
 The PostgreSQL integration is actively evolving. Current limitations include:
 
 * **Table Creation**: Tables must currently be created manually in PostgreSQL before synchronization. We are implementing automatic translation of SQLite CREATE TABLE statements to PostgreSQL syntax.
+* **Text with NUL characters**: PostgreSQL `TEXT` cannot hold a NUL character, so a text value synced from SQLite is stored up to its first NUL and the server logs a warning naming the table and column. Store binary or encrypted data in `BLOB` (SQLite) / `BYTEA` (Postgres) columns.
 * **Beta Status**: While extensively tested, the PostgreSQL sync stack should currently be considered **beta software**. Please report any issues; we are committed to resolving them quickly.
 
 # Next

@@ -51,6 +51,28 @@ static void test_clocks_and_double(void) {
     CHECK(scalar(db, "SELECT cloudsync_pk_decode(cloudsync_pk_encode(-1.5),1)=-1.5") == 1);
     CHECK(close_db(db) == SQLITE_OK);
 }
+static void test_grow_only_clock_bounds(void) {
+    // A grow-only table applies changes through its own path: out-of-range clocks are
+    // refused there too.
+    const char *site = "X'0102030405060708090a0b0c0d0e0f10'";
+    char q[400];
+    sqlite3 *db = open_db();
+    CHECK(sql(db, "CREATE TABLE g(id TEXT PRIMARY KEY NOT NULL, v TEXT); SELECT cloudsync_init('g', 'gos');") == SQLITE_OK);
+    // col_version, db_version, seq
+    const char *clocks[][3] = {{"9223372036854775000", "1", "0"}, {"1", "9223372036854775000", "0"},
+                               {"1", "1", "9223372036854775000"}, {"-1", "1", "0"}, {"1", "-1", "0"}};
+    for (size_t i = 0; i < sizeof(clocks) / sizeof(clocks[0]); i++) {
+        snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('g',cloudsync_pk_encode('r1'),'v','x',%s,%s,%s,1,%s);",
+                 clocks[i][0], clocks[i][1], site, clocks[i][2]);
+        CHECK(sql(db, q) != SQLITE_OK);
+    }
+    CHECK(scalar(db, "SELECT count(*) FROM g") == 0);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") < 1000);
+    snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('g',cloudsync_pk_encode('r1'),'v','x',1,5,%s,1,0);", site);
+    CHECK(sql(db, q) == SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM g WHERE id='r1' AND v='x'") == 1);
+    CHECK(close_db(db) == SQLITE_OK);
+}
 static void test_best_index(void) {
     struct sqlite3_index_constraint constraints[3] = {
         {.iColumn=0, .op=SQLITE_INDEX_CONSTRAINT_EQ, .usable=0},
@@ -362,8 +384,37 @@ static void test_fragment_retention(void) {
     CHECK(scalar(db, big) == 1);
     CHECK(close_db(db) == SQLITE_OK);
 
+    // total_size is the sender's claim: a group whose pieces all agree on a size that the
+    // staged bytes do not add up to is refused instead of allocating that size.
+    const char *forge = "CREATE TRIGGER forge AFTER INSERT ON cloudsync_payload_fragments BEGIN "
+                        "UPDATE cloudsync_payload_fragments SET total_size = %lld WHERE value_id = NEW.value_id; END";
+    const long long sizes[] = {900000000LL, 4000000000LL, 5};
+    for (int s = 0; s < 3; s++) {
+        char trigger[400];
+        snprintf(trigger, sizeof(trigger), forge, sizes[s]);
+        db = frag_target(NULL);
+        CHECK(sql(db, trigger) == SQLITE_OK);
+        for (int i = 0; i < frag_count - 1; i++) CHECK(frag_apply(db, i) == SQLITE_ROW);
+        CHECK(frag_apply(db, frag_count - 1) != SQLITE_ROW);
+        CHECK(strstr(sqlite3_errmsg(db), "inconsistent v3 fragments") != NULL);
+        CHECK(scalar(db, "SELECT count(*) FROM f") == 0);
+        CHECK(close_db(db) == SQLITE_OK);
+    }
+
     for (int i = 0; i < frag_count; i++) free(frag_data[i]);
 }
+#ifdef CLOUDSYNC_DESKTOP_OS
+static void test_file_functions_are_direct_only(void) {
+    sqlite3 *db = open_db();
+    CHECK(sql(db, "CREATE VIEW v_save AS SELECT cloudsync_payload_save('/tmp/cloudsync_never_written') AS x;") == SQLITE_OK);
+    CHECK(sql(db, "CREATE VIEW v_load AS SELECT cloudsync_payload_load('/etc/hosts') AS x;") == SQLITE_OK);
+    CHECK(sql(db, "SELECT * FROM v_save") != SQLITE_OK);
+    CHECK(strstr(sqlite3_errmsg(db), "unsafe use") != NULL);
+    CHECK(sql(db, "SELECT * FROM v_load") != SQLITE_OK);
+    CHECK(strstr(sqlite3_errmsg(db), "unsafe use") != NULL);
+    CHECK(close_db(db) == SQLITE_OK);
+}
+#endif
 static bool text_is(sqlite3 *db, const char *query, const char *expected) {
     sqlite3_stmt *vm = NULL;
     bool ok = sqlite3_prepare_v2(db, query, -1, &vm, NULL) == SQLITE_OK && sqlite3_step(vm) == SQLITE_ROW &&
@@ -467,6 +518,32 @@ static void test_block_not_null_payload(void) {
     CHECK(sql(source, "INSERT INTO docs VALUES('1','alice','line 1' || char(10) || 'line 2')") == SQLITE_OK);
     CHECK(apply_payload(source, target) == SQLITE_ROW);
     CHECK(scalar(target, "SELECT count(*) FROM docs WHERE id='1' AND owner='alice' AND body='line 1' || char(10) || 'line 2'") == 1);
+    CHECK(close_db(source) == SQLITE_OK);
+    CHECK(close_db(target) == SQLITE_OK);
+}
+static void test_block_long_positions(void) {
+    // Repeated inserts at the same spot lengthen the position ids by about one character
+    // every few edits: a document edited that way must still apply on another database.
+    sqlite3 *source = open_db(), *target = open_db();
+    const char *schema = "CREATE TABLE docs(id TEXT PRIMARY KEY NOT NULL, body TEXT);"
+                         "SELECT cloudsync_init('docs'); SELECT cloudsync_set_column('docs','body','algo','block');";
+    CHECK(sql(source, schema) == SQLITE_OK && sql(target, schema) == SQLITE_OK);
+    CHECK(sql(source, "INSERT INTO docs VALUES('1','head' || char(10) || 'foot')") == SQLITE_OK);
+    char q[160];
+    for (int i = 0; i < 400; i++) {
+        snprintf(q, sizeof(q), "UPDATE docs SET body=replace(body, char(10) || 'foot', char(10) || 'line%d' || char(10) || 'foot') WHERE id='1'", i);
+        CHECK(sql(source, q) == SQLITE_OK);
+    }
+    CHECK(scalar(source, "SELECT max(length(col_name)) FROM docs_cloudsync") > 64 + 5);
+    CHECK(apply_payload(source, target) == SQLITE_ROW);
+    CHECK(scalar(target, "SELECT count(*) FROM docs") == 1);
+    sqlite3_stmt *a = NULL, *b = NULL;
+    CHECK(sqlite3_prepare_v2(source, "SELECT body FROM docs WHERE id='1'", -1, &a, NULL) == SQLITE_OK);
+    CHECK(sqlite3_prepare_v2(target, "SELECT body FROM docs WHERE id='1'", -1, &b, NULL) == SQLITE_OK);
+    CHECK(sqlite3_step(a) == SQLITE_ROW && sqlite3_step(b) == SQLITE_ROW);
+    CHECK(strcmp((const char *)sqlite3_column_text(a, 0), (const char *)sqlite3_column_text(b, 0)) == 0);
+    sqlite3_finalize(a);
+    sqlite3_finalize(b);
     CHECK(close_db(source) == SQLITE_OK);
     CHECK(close_db(target) == SQLITE_OK);
 }
@@ -926,6 +1003,225 @@ static void test_payload_window_cap_paged(void) {
 }
 
 
+// The trigger helpers are callable from any SELECT: a wrong argument count is an error, not an
+// out-of-range read. A primary key blob from outside must have the table's key shape.
+static void test_fuzz_review_findings(void) {
+    const char *site = "X'0102030405060708090a0b0c0d0e0f10'";
+    char q[700];
+    sqlite3 *db = open_db();
+
+    // variadic functions called without their argument
+    CHECK(sql(db, "SELECT cloudsync_payload_decode();") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_payload_apply();") != SQLITE_OK);
+
+    // a resume offset that points outside the value is refused, not read through
+    CHECK(sql(db, "CREATE TABLE big(id TEXT PRIMARY KEY NOT NULL, a TEXT); SELECT cloudsync_init('big');") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO big VALUES('k', replace(hex(zeroblob(400000)),'0','xy'));") == SQLITE_OK);
+    CHECK(sql(db, "SELECT * FROM cloudsync_payload_chunks(NULL,NULL,NULL,NULL,1,0,9223372036854775807);") != SQLITE_OK);
+
+    // a table called <anychar>cloudsync is not a metadata table
+    CHECK(sql(db, "CREATE TABLE xcloudsync(id INTEGER PRIMARY KEY, v TEXT); CREATE TABLE ok1(id TEXT PRIMARY KEY NOT NULL, v TEXT);") == SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_init('ok1');") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO ok1 VALUES('a','b'); SELECT count(*) FROM cloudsync_changes;") == SQLITE_OK);
+    CHECK(sql(db, "SELECT count(*) FROM (SELECT * FROM cloudsync_payload_chunks())") == SQLITE_OK);
+
+    // clock values out of range are refused and leave the local clock alone
+    int64_t before = scalar(db, "SELECT cloudsync_db_version()");
+    const char *bad[] = {"9223372036854775807,1,0", "4611686018427387904,1,0", "-1,1,0", "5,1,-1", "5,-3,0"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        char vals[80];
+        snprintf(vals, sizeof(vals), "%s", bad[i]);
+        int64_t dbv = 0, cv = 1, seq = 0;
+        sscanf(vals, "%lld,%lld,%lld", (long long *)&dbv, (long long *)&cv, (long long *)&seq);
+        snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('ok1',cloudsync_pk_encode('z'),'v','x',%lld,%lld,%s,1,%lld);",
+                 (long long)cv, (long long)dbv, site, (long long)seq);
+        CHECK(sql(db, q) != SQLITE_OK);
+    }
+    CHECK(sql(db, "INSERT INTO ok1 VALUES('c','d');") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == before + 1);
+    CHECK(close_db(db) == SQLITE_OK);
+
+    // block columns on tables whose names need quoting; the name never runs as SQL
+    db = open_db();
+    CHECK(sql(db, "CREATE TABLE \"my table\"(id TEXT PRIMARY KEY NOT NULL, body TEXT); SELECT cloudsync_init('my table');") == SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_set_column('my table','body','algo','block');") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO \"my table\" VALUES('r','one'||char(10)||'two');") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM sqlite_master WHERE name='my table_cloudsync_blocks'") == 1);
+    CHECK(sql(db, "CREATE TABLE \"b1 (pk BLOB); CREATE TABLE pwned(x); --\"(id TEXT PRIMARY KEY NOT NULL, v TEXT);") == SQLITE_OK);
+    sql(db, "SELECT cloudsync_init('b1 (pk BLOB); CREATE TABLE pwned(x); --'); SELECT cloudsync_set_column('b1 (pk BLOB); CREATE TABLE pwned(x); --','v','algo','block');");
+    CHECK(scalar(db, "SELECT count(*) FROM sqlite_master WHERE name='pwned'") == 0);
+    CHECK(close_db(db) == SQLITE_OK);
+
+    // a filter that does not compile keeps the tracking the table had
+    db = open_db();
+    CHECK(sql(db, "CREATE TABLE tr(id TEXT PRIMARY KEY NOT NULL, v TEXT); SELECT cloudsync_init('tr');") == SQLITE_OK);
+    int64_t triggers = scalar(db, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='tr'");
+    CHECK(triggers > 0);
+    CHECK(sql(db, "SELECT cloudsync_set_filter('tr','bogus syntax (');") != SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='tr'") == triggers);
+    CHECK(sql(db, "SELECT cloudsync_set_filter('tr','nosuchcolumn = 1');") != SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='tr'") == triggers);
+    CHECK(sql(db, "INSERT INTO tr VALUES('a','b');") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM tr_cloudsync") > 0);
+    CHECK(sql(db, "SELECT cloudsync_set_filter('tr','v IS NOT NULL');") == SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_clear_filter('tr');") == SQLITE_OK);
+    CHECK(close_db(db) == SQLITE_OK);
+
+    // lookalike metadata tables: wrong shape, and the right shape without a base table
+    db = open_db();
+    CHECK(sql(db, "CREATE TABLE junk_cloudsync(anything TEXT);"
+                  "CREATE TABLE orphan_cloudsync(pk BLOB NOT NULL, col_name TEXT NOT NULL, col_version INTEGER, db_version INTEGER, site_id INTEGER, seq INTEGER);"
+                  "INSERT INTO orphan_cloudsync VALUES(x'01','c',1,999999,0,0);"
+                  "CREATE TABLE real_t(id TEXT PRIMARY KEY NOT NULL, v TEXT);") == SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_init('real_t');") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO real_t VALUES('a','b');") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 1);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_changes") == 1);
+    CHECK(scalar(db, "SELECT count(*) FROM (SELECT * FROM cloudsync_payload_chunks())") >= 1);
+
+    // the rowid is evaluated by SQLite itself, as a filter and as an order
+    CHECK(sql(db, "SELECT * FROM cloudsync_changes WHERE rowid = 5;") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_changes WHERE rowid > 0") == 1);
+    CHECK(sql(db, "SELECT * FROM cloudsync_changes ORDER BY rowid;") == SQLITE_OK);
+    CHECK(sql(db, "SELECT * FROM cloudsync_changes ORDER BY db_version DESC, rowid;") == SQLITE_OK);
+    CHECK(sql(db, "DELETE FROM cloudsync_changes WHERE rowid = 1073741824;") != SQLITE_OK);
+    CHECK(strstr(sqlite3_errmsg(db), "Only INSERT and SELECT") != NULL);
+    CHECK(close_db(db) == SQLITE_OK);
+}
+static sqlite3 *open_file_db(const char *path) {
+    sqlite3 *db = NULL;
+    CHECK(sqlite3_open(path, &db) == SQLITE_OK);
+    CHECK(sqlite3_cloudsync_init(db, NULL, NULL) == SQLITE_OK);
+    return db;
+}
+static void test_meta_tables_registered(void) {
+    // A metadata table counts when its table is registered, whatever the case of the name
+    // given to cloudsync_init; a dropped base table keeps counting toward db_version.
+    char path[512];
+    CHECK(scratch_create());
+    snprintf(path, sizeof(path), "%s/meta.db", scratch_dir);
+    sqlite3 *db = open_file_db(path);
+    CHECK(sql(db, "CREATE TABLE users(id TEXT PRIMARY KEY NOT NULL, name TEXT); SELECT cloudsync_init('Users');"
+                  "INSERT INTO users VALUES('u1','a'); INSERT INTO users VALUES('u2','b');") == SQLITE_OK);
+    CHECK(close_db(db) == SQLITE_OK);
+    db = open_file_db(path);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 2);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_changes") == 2);
+
+    CHECK(sql(db, "CREATE TABLE t2(id TEXT PRIMARY KEY NOT NULL, v TEXT); SELECT cloudsync_init('t2');") == SQLITE_OK);
+    for (int i = 0; i < 5; i++) {
+        char q[96];
+        snprintf(q, sizeof(q), "INSERT INTO t2 VALUES('k%d','v')", i);
+        CHECK(sql(db, q) == SQLITE_OK);
+    }
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 7);
+    CHECK(sql(db, "DROP TABLE t2") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 7);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_changes") == 2);
+
+    // unregistered lookalikes with the metadata shape are ignored
+    CHECK(sql(db, "CREATE TABLE junk_cloudsync(pk BLOB NOT NULL, col_name TEXT NOT NULL, col_version INTEGER, db_version INTEGER, site_id INTEGER, seq INTEGER);"
+                  "INSERT INTO junk_cloudsync VALUES(x'01','c',1,999999,0,0);"
+                  "CREATE TABLE junk(id TEXT PRIMARY KEY NOT NULL);") == SQLITE_OK);
+    CHECK(close_db(db) == SQLITE_OK);
+    db = open_file_db(path);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 7);
+    CHECK(scalar(db, "SELECT count(*) FROM cloudsync_changes") == 2);
+    CHECK(sql(db, "INSERT INTO users VALUES('u3','c')") == SQLITE_OK);
+    CHECK(scalar(db, "SELECT cloudsync_db_version()") == 8);
+    CHECK(close_db(db) == SQLITE_OK);
+    const char *names[] = {"meta.db", "meta.db-journal"};
+    scratch_remove(names, 2);
+}
+static void test_low_findings(void) {
+    const char *site = "X'0102030405060708090a0b0c0d0e0f10'";
+    char q[600];
+    sqlite3 *db = open_db();
+    CHECK(sql(db, "CREATE TABLE d(id TEXT PRIMARY KEY NOT NULL, body TEXT, note TEXT); SELECT cloudsync_init('d'); SELECT cloudsync_set_column('d','body','algo','block');") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO d VALUES('r1', 'hello', 'keep');") == SQLITE_OK);
+
+    // a site id is a UUID: any other length is refused, 16 bytes applies
+    const char *sites[] = {"X''", "X'01'", "X'0102030405060708'", "X'0102030405060708090a0b0c0d0e0f1011'"};
+    for (size_t i = 0; i < sizeof(sites) / sizeof(sites[0]); i++) {
+        snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('d',cloudsync_pk_encode('r2'),'note','x',1,50,%s,1,0);", sites[i]);
+        CHECK(sql(db, q) != SQLITE_OK);
+    }
+    CHECK(scalar(db, "SELECT count(*) FROM d WHERE id='r2'") == 0);
+    snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('d',cloudsync_pk_encode('r2'),'note','x',1,50,%s,1,0);", site);
+    CHECK(sql(db, q) == SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM d WHERE id='r2' AND note='x'") == 1);
+
+    // a block-style column name addresses a block column only
+    snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('d',cloudsync_pk_encode('r1'),'note'||char(31)||'a0','pwned',9,60,%s,1,0);", site);
+    CHECK(sql(db, q) != SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM d WHERE id='r1' AND note='keep'") == 1);
+    snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('d',cloudsync_pk_encode('r1'),'nosuch'||char(31)||'a0','pwned',9,61,%s,1,0);", site);
+    CHECK(sql(db, q) != SQLITE_OK);
+    // position ids outside the printable range or empty never reach the indexing arithmetic
+    const char *positions[] = {"''", "char(1)", "char(200)", "char(127)", "'a '", "'a!'", "'a0 '", "'1'", "'A'||replace(hex(zeroblob(40)),'00','0')", "'a'||replace(hex(zeroblob(1024)),'00','1')"};
+    for (size_t i = 0; i < sizeof(positions) / sizeof(positions[0]); i++) {
+        snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('d',cloudsync_pk_encode('r1'),'body'||char(31)||%s,'z',9,62,%s,1,0);", positions[i], site);
+        CHECK(sql(db, q) != SQLITE_OK);
+    }
+    snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('d',cloudsync_pk_encode('r1'),'body'||char(31)||'a5','tail',9,63,%s,1,0);", site);
+    CHECK(sql(db, q) == SQLITE_OK);
+
+    // integer keys at the edge of int64: the extreme value round-trips, a magnitude that no
+    // encoder produces is refused instead of overflowing on negation
+    CHECK(scalar(db, "SELECT cloudsync_pk_decode(cloudsync_pk_encode(-9223372036854775807-1), 1) = -9223372036854775807-1") == 1);
+    CHECK(scalar(db, "SELECT cloudsync_pk_decode(cloudsync_pk_encode(9223372036854775807), 1) = 9223372036854775807") == 1);
+    CHECK(scalar(db, "SELECT cloudsync_pk_decode(cloudsync_pk_encode(-9223372036854775807), 1) = -9223372036854775807") == 1);
+    CHECK(scalar(db, "SELECT cloudsync_pk_decode(X'0140' || X'8000000000000000', 1) IS NULL OR cloudsync_pk_decode(X'0140' || X'8000000000000000', 1) = -9223372036854775807-1") == 1);
+    sqlite3_stmt *vm = NULL;
+    CHECK(sqlite3_prepare_v2(db, "SELECT cloudsync_pk_decode(X'0141' || X'8000000000000000', 1)", -1, &vm, NULL) == SQLITE_OK);
+    int rc = sqlite3_step(vm);
+    CHECK(rc != SQLITE_ROW || sqlite3_column_type(vm, 0) == SQLITE_NULL);
+    sqlite3_finalize(vm);
+    // zero is always encoded as a positive integer, and a negative zero is refused
+    CHECK(scalar(db, "SELECT cloudsync_pk_encode(0) = X'010900' AND cloudsync_pk_encode(-0) = X'010900'") == 1);
+    CHECK(scalar(db, "SELECT cloudsync_pk_decode(X'010900', 1) = 0") == 1);
+    CHECK(sqlite3_prepare_v2(db, "SELECT cloudsync_pk_decode(X'010800', 1)", -1, &vm, NULL) == SQLITE_OK);
+    rc = sqlite3_step(vm);
+    CHECK(rc != SQLITE_ROW || sqlite3_column_type(vm, 0) == SQLITE_NULL);
+    sqlite3_finalize(vm);
+    CHECK(close_db(db) == SQLITE_OK);
+}
+static void test_wrong_argument_counts_and_pk_shape(void) {
+    sqlite3 *db = open_db();
+    CHECK(sql(db, "CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, a TEXT);") == SQLITE_OK);
+    CHECK(sql(db, "CREATE TABLE k(a TEXT NOT NULL, b TEXT NOT NULL, c TEXT, PRIMARY KEY(a,b));") == SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_init('t'); SELECT cloudsync_init('k');") == SQLITE_OK);
+
+    CHECK(sql(db, "SELECT cloudsync_insert('t');") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_insert('t', 'a', 'b');") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_insert();") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_insert(1, 'a');") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_insert('k', 'a');") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_delete('t');") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_delete('k', 'a', 'b', 'c');") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_delete();") != SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_update('t', 'a', 'a');") == SQLITE_OK || true);   // must not crash
+    CHECK(sql(db, "SELECT cloudsync_update('k', 'a', 'a');") != SQLITE_OK);           // fewer values than key columns
+
+    // the correct shapes still work
+    CHECK(sql(db, "SELECT cloudsync_insert('t', 'x');") == SQLITE_OK);
+    CHECK(sql(db, "SELECT cloudsync_insert('k', 'x', 'y');") == SQLITE_OK);
+    CHECK(sql(db, "INSERT INTO t VALUES('r1', 'v'); UPDATE t SET a = 'w'; DELETE FROM t;") == SQLITE_OK);
+
+    // primary key blobs with the wrong number of components never reach the table
+    const char *site = "X'0102030405060708090a0b0c0d0e0f10'";
+    char q[512];
+    const char *bad[] = {"X'00'", "X''", "X'01'", "X'0101'", "cloudsync_pk_encode('x')", "cloudsync_pk_encode('x','y','z')"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('k',%s,'c','hello',1,1,%s,1,0);", bad[i], site);
+        CHECK(sql(db, q) != SQLITE_OK);
+    }
+    CHECK(scalar(db, "SELECT count(*) FROM k") == 0);
+    snprintf(q, sizeof(q), "INSERT INTO cloudsync_changes(tbl,pk,col_name,col_value,col_version,db_version,site_id,cl,seq) VALUES('k',cloudsync_pk_encode('x','y'),'c','hello',1,1,%s,1,0);", site);
+    CHECK(sql(db, q) == SQLITE_OK);
+    CHECK(scalar(db, "SELECT count(*) FROM k WHERE a='x' AND b='y' AND c='hello'") == 1);
+    CHECK(close_db(db) == SQLITE_OK);
+}
 int main(void) {
     CHECK(sqlite3_config(SQLITE_CONFIG_GETMALLOC, &memory) == SQLITE_OK);
     sqlite3_mem_methods faults = memory;
@@ -934,6 +1230,11 @@ int main(void) {
     CHECK(sqlite3_config(SQLITE_CONFIG_MALLOC, &faults) == SQLITE_OK);
     CHECK(sqlite3_initialize() == SQLITE_OK);
     test_clocks_and_double();
+    test_grow_only_clock_bounds();
+    test_wrong_argument_counts_and_pk_shape();
+    test_low_findings();
+    test_meta_tables_registered();
+    test_fuzz_review_findings();
     test_best_index();
     test_payload_errors();
     test_failed_apply_commit();
@@ -941,12 +1242,16 @@ int main(void) {
     test_resurrected_group_rollback();
     test_batched_update_missing_row();
     test_fragment_retention();
+#ifdef CLOUDSYNC_DESKTOP_OS
+    test_file_functions_are_direct_only();
+#endif
     test_db_version_per_transaction();
     test_db_version_apply_in_transaction();
     test_block_write_errors();
     test_block_materialize_errors();
     test_block_migration_orphan();
     test_block_not_null_payload();
+    test_block_long_positions();
     test_block_group_atomicity();
     test_payload_window_cap();
     test_payload_window_cap_paged();

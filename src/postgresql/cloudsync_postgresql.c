@@ -14,12 +14,14 @@
 #include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_class.h"
 #include "executor/spi.h"
 #include "utils/lsyscache.h"
 #include "utils/array.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "pgvalue.h"
+#include "meta_tables.h"
 #include "storage/ipc.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -36,6 +38,7 @@
 #include "../database.h"
 #include "../dbutils.h"
 #include "../pk.h"
+#include "../sql.h"
 #include "../utils.h"
 
 // Note: network.h is not needed for PostgreSQL implementation
@@ -60,6 +63,18 @@ Datum database_column_datum (dbvm_t *vm, int index);
 // Global context stored per backend
 static cloudsync_context *pg_cloudsync_context = NULL;
 
+// Installs from before bump_app_schema_version() ran as its owner keep a function that only
+// roles with write access to app_schema_version can fire: replace it once, when this session
+// can. Errors (a concurrent replacement, say) are left for the next session.
+static void cloudsync_pg_upgrade_schema_version_trigger (cloudsync_context *data) {
+    int64_t outdated = 0;
+    if (database_select_int(data, SQL_SCHEMA_VERSION_TRIGGER_OUTDATED, &outdated) != DBRES_OK || outdated == 0) return;
+    if (database_begin_savepoint(data, "cloudsync_schema_version_trigger") != DBRES_OK) return;
+    if (database_exec(data, SQL_SCHEMA_VERSION_TRIGGER) == DBRES_OK) database_commit_savepoint(data, "cloudsync_schema_version_trigger");
+    else database_rollback_savepoint(data, "cloudsync_schema_version_trigger");
+    cloudsync_reset_error(data);
+}
+
 static void cloudsync_pg_context_init (cloudsync_context *data) {
     int spi_rc = SPI_connect();
     if (spi_rc != SPI_OK_CONNECT) {
@@ -80,6 +95,8 @@ static void cloudsync_pg_context_init (cloudsync_context *data) {
 
             // make sure to update internal version to current version
             dbutils_settings_set_key_value(data, CLOUDSYNC_KEY_LIBVERSION, CLOUDSYNC_VERSION);
+
+            cloudsync_pg_upgrade_schema_version_trigger(data);
         }
 
         if (SPI_tuptable) {
@@ -996,11 +1013,21 @@ Datum pg_cloudsync_commit_alter (PG_FUNCTION_ARGS) {
 
 // MARK: - Payload Functions -
 
+// Aggregate state of cloudsync_payload_encode: the payload context follows this header.
+// The executor may finalize the same state more than once (a rescanned hashed aggregate
+// reuses its groups), so the final function caches its result instead of re-encoding.
+typedef struct {
+    bool    finalized;
+    bytea   *result;
+} cloudsync_payload_encode_state;
+
+#define PAYLOAD_ENCODE_STATE_PAYLOAD(st) ((cloudsync_payload_context *)((char *)(st) + MAXALIGN(sizeof(cloudsync_payload_encode_state))))
+
 // Aggregate function: cloudsync_payload_encode transition function
 PG_FUNCTION_INFO_V1(cloudsync_payload_encode_transfn);
 Datum cloudsync_payload_encode_transfn (PG_FUNCTION_ARGS) {
     MemoryContext aggContext;
-    cloudsync_payload_context *payload = NULL;
+    cloudsync_payload_encode_state *st = NULL;
 
     if (!AggCheckCallContext(fcinfo, &aggContext)) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR), errmsg("cloudsync_payload_encode_transfn called in non-aggregate context")));
@@ -1009,11 +1036,15 @@ Datum cloudsync_payload_encode_transfn (PG_FUNCTION_ARGS) {
     // Get or allocate aggregate state
     if (PG_ARGISNULL(0)) {
         MemoryContext oldContext = MemoryContextSwitchTo(aggContext);
-        payload = (cloudsync_payload_context *)palloc0(cloudsync_payload_context_size(NULL));
+        st = (cloudsync_payload_encode_state *)palloc0(MAXALIGN(sizeof(cloudsync_payload_encode_state)) + cloudsync_payload_context_size(NULL));
         MemoryContextSwitchTo(oldContext);
     } else {
-        payload = (cloudsync_payload_context *)PG_GETARG_POINTER(0);
+        st = (cloudsync_payload_encode_state *)PG_GETARG_POINTER(0);
     }
+    if (st->finalized) {
+        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_payload_encode state was already finalized")));
+    }
+    cloudsync_payload_context *payload = PAYLOAD_ENCODE_STATE_PAYLOAD(st);
 
     int argc = 0;
     cloudsync_context *data = get_cloudsync_context();
@@ -1033,38 +1064,47 @@ Datum cloudsync_payload_encode_transfn (PG_FUNCTION_ARGS) {
     }
     if (argv) cloudsync_memory_free(argv);
 
-    PG_RETURN_POINTER(payload);
+    PG_RETURN_POINTER(st);
 }
 
 // Aggregate function: cloudsync_payload_encode finalize function
 PG_FUNCTION_INFO_V1(cloudsync_payload_encode_finalfn);
 Datum cloudsync_payload_encode_finalfn (PG_FUNCTION_ARGS) {
+    // The encoded state takes no further rows: a window frame cannot reuse it.
+    MemoryContext aggContext;
+    if (AggCheckCallContext(fcinfo, &aggContext) == AGG_CONTEXT_WINDOW) {
+        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_payload_encode cannot be used as a window function")));
+    }
     if (PG_ARGISNULL(0)) {
         PG_RETURN_NULL();
     }
 
-    cloudsync_payload_context *payload = (cloudsync_payload_context *)PG_GETARG_POINTER(0);
-    cloudsync_context *data = get_cloudsync_context();
+    cloudsync_payload_encode_state *st = (cloudsync_payload_encode_state *)PG_GETARG_POINTER(0);
+    if (!st->finalized) {
+        cloudsync_payload_context *payload = PAYLOAD_ENCODE_STATE_PAYLOAD(st);
+        cloudsync_context *data = get_cloudsync_context();
 
-    int rc = cloudsync_payload_encode_final(payload, data);
-    if (rc != DBRES_OK) {
-        ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
+        int rc = cloudsync_payload_encode_final(payload, data);
+        if (rc != DBRES_OK) {
+            ereport(ERROR, (errcode(cloudsync_error_sqlstate(data)), errmsg("%s", cloudsync_errmsg(data))));
+        }
+
+        int64_t blob_size = 0;
+        char *blob = cloudsync_payload_blob(payload, &blob_size, NULL);
+        if (blob) {
+            st->result = (bytea *)MemoryContextAlloc(aggContext, VARHDRSZ + blob_size);
+            SET_VARSIZE(st->result, VARHDRSZ + blob_size);
+            memcpy(VARDATA(st->result), blob, blob_size);
+            cloudsync_memory_free(blob);
+        }
+        st->finalized = true;
     }
 
-    int64_t blob_size = 0;
-    char *blob = cloudsync_payload_blob(payload, &blob_size, NULL);
-
-    if (!blob) {
+    if (!st->result) {
         PG_RETURN_NULL();
     }
 
-    bytea *result = (bytea *)palloc(VARHDRSZ + blob_size);
-    SET_VARSIZE(result, VARHDRSZ + blob_size);
-    memcpy(VARDATA(result), blob, blob_size);
-
-    cloudsync_memory_free(blob);
-
-    PG_RETURN_BYTEA_P(result);
+    PG_RETURN_BYTEA_P((bytea *)PG_DETOAST_DATUM_COPY(PointerGetDatum(st->result)));
 }
 
 typedef struct {
@@ -1190,6 +1230,12 @@ static bool payload_chunks_fetch_current(PayloadChunksState *st) {
 
     if (old_value_ctx) MemoryContextSwitchTo(old_value_ctx);
 
+    // a change without a key or a site cannot be encoded: later code reads both as varlenas
+    if (!st->pk || !st->site_id) {
+        SPI_tuptable = NULL;
+        ereport(ERROR, (errmsg("cloudsync: change row without a primary key or site id")));
+    }
+
     SPI_tuptable = NULL;
     st->has_current = true;
     return true;
@@ -1201,7 +1247,7 @@ static void payload_chunks_make_pgvalues(PayloadChunksState *st, pgvalue_t **val
     vals[0] = pgvalue_create(PointerGetDatum(owned_texts[0]), TEXTOID, -1, InvalidOid, false);
     vals[1] = pgvalue_create(PointerGetDatum(st->pk), BYTEAOID, -1, InvalidOid, false);
     vals[2] = pgvalue_create(PointerGetDatum(owned_texts[1]), TEXTOID, -1, InvalidOid, false);
-    vals[3] = pgvalue_create(PointerGetDatum(st->col_value), BYTEAOID, -1, InvalidOid, false);
+    vals[3] = pgvalue_create(st->col_value ? PointerGetDatum(st->col_value) : (Datum)0, BYTEAOID, -1, InvalidOid, st->col_value == NULL);
     vals[4] = pgvalue_create(Int64GetDatum(st->col_version), INT8OID, -1, InvalidOid, false);
     vals[5] = pgvalue_create(Int64GetDatum(st->db_version), INT8OID, -1, InvalidOid, false);
     vals[6] = pgvalue_create(PointerGetDatum(st->site_id), BYTEAOID, -1, InvalidOid, false);
@@ -1266,7 +1312,10 @@ static bytea *payload_chunks_emit_pg_fragment(PayloadChunksState *st, cloudsync_
 // fragment carry the same part index. The plan (frag_target/frag_count) is a
 // deterministic function of the row, so a resumed fragment tiles identically.
 static void payload_chunks_pg_begin_fragment(PayloadChunksState *st, cloudsync_context *data, int64 start_offset) {
+    // only a real value can be fragmented, and the resume offset is the caller's
+    if (!st->col_value) ereport(ERROR, (errmsg("cloudsync: cannot resume inside a NULL value")));
     st->frag_total = VARSIZE_ANY_EXHDR(st->col_value);
+    if (start_offset < 0 || start_offset >= st->frag_total) ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("cloudsync: resume_frag_offset is outside the value")));
     st->frag_offset = start_offset;
     st->frag_target = cloudsync_payload_fragment_data_size(data,
         st->tbl, -1,
@@ -1368,17 +1417,31 @@ static bytea *payload_chunks_build_pg_next(PayloadChunksState *st, cloudsync_con
     return result;
 }
 
+// The metadata table filters read cloudsync_table_settings, created by the first cloudsync_init.
+// Requires SPI.
+static bool pg_table_settings_exists (void) {
+    int rc = SPI_execute("SELECT to_regclass('cloudsync_table_settings') IS NOT NULL", true, 1);
+    bool exists = false;
+    if (rc == SPI_OK_SELECT && SPI_processed > 0) {
+        bool isnull = false;
+        Datum d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
+        exists = !isnull && DatumGetBool(d);
+    }
+    if (SPI_tuptable) { SPI_freetuptable(SPI_tuptable); SPI_tuptable = NULL; }
+    return exists;
+}
+
 // Highest db_version above `lower` recorded by any site other than site_id, read from the
 // metadata tables rather than through cloudsync_changes_select. That function drops the
 // rows the caller cannot read, so its MAX stops at the last visible change: a caller that
 // can read nothing would get 0 and never move past changes it will never receive.
 // Requires SPI.
 static int64 payload_chunks_pg_metadata_max(bytea *site_id, int64 lower) {
+    if (!pg_table_settings_exists()) return 0;
     int rc = SPI_execute(
         "SELECT n.nspname, c.relname FROM pg_class c "
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog','information_schema') "
-        "AND c.relname LIKE '%\\_cloudsync' ESCAPE '\\'", true, 0);
+        "WHERE " CLOUDSYNC_PG_META_TABLE_FILTER, true, 0);
     if (rc != SPI_OK_SELECT || !SPI_tuptable) ereport(ERROR, (errmsg("cloudsync: SPI_execute failed while listing *_cloudsync")));
 
     // One ORDER BY db_version DESC LIMIT 1 per table: it walks the db_version index back
@@ -2470,6 +2533,9 @@ Datum cloudsync_update_transfn (PG_FUNCTION_ARGS) {
     if (table_name) pgvalue_ensure_detoast(table_name);
     if (new_value) pgvalue_ensure_detoast(new_value);
     if (old_value) pgvalue_ensure_detoast(old_value);
+    pgvalue_retain(table_name);
+    pgvalue_retain(new_value);
+    pgvalue_retain(old_value);
     MemoryContextSwitchTo(old_ctx);
 
     if (!table_name || !new_value || !old_value) {
@@ -2491,6 +2557,10 @@ Datum cloudsync_update_transfn (PG_FUNCTION_ARGS) {
 
 PG_FUNCTION_INFO_V1(cloudsync_update_finalfn);
 Datum cloudsync_update_finalfn (PG_FUNCTION_ARGS) {
+    // The final function consumes (frees) its state: it cannot run more than once on it.
+    if (AggCheckCallContext(fcinfo, NULL) == AGG_CONTEXT_WINDOW) {
+        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cloudsync_update cannot be used as a window function")));
+    }
     if (PG_ARGISNULL(0)) {
         PG_RETURN_BOOL(true);
     }
@@ -2730,6 +2800,7 @@ typedef struct {
     char *pval;
     int64_t len;
     bool isnull;
+    bool truncated;
 } cloudsync_decoded_value;
 
 // Decode a single pk-encoded value into a typed representation
@@ -2751,10 +2822,21 @@ static int cloudsync_decode_value_cb (void *xdata, int index, int type, int64_t 
         case DBTYPE_FLOAT:
             out->dval = dval;
             break;
-        case DBTYPE_TEXT:
-            out->pval = pnstrdup(pval, (int)ival);
+        case DBTYPE_TEXT: {
+            if (ival < 0) return DBRES_ERROR;
+            // PostgreSQL text cannot hold a NUL: keep the text before it instead of failing
+            // the whole payload
+            const char *nul = (ival > 0) ? memchr(pval, '\0', (size_t)ival) : NULL;
+            if (nul) {
+                ival = nul - pval;
+                out->truncated = true;
+            }
+            out->pval = (char *)palloc((size_t)ival + 1);
+            if (ival > 0) memcpy(out->pval, pval, (size_t)ival);
+            out->pval[ival] = '\0';
             out->len = ival;
             break;
+        }
         case DBTYPE_BLOB:
             if (ival > 0) {
                 out->pval = (char *)palloc((size_t)ival);
@@ -2847,9 +2929,10 @@ static Oid get_column_oid(const char *schema, const char *table_name, const char
 
 // Decode encoded bytea into a pgvalue_t with the decoded base type.
 // Type casting to the target column type is handled by the SQL statement.
-static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, bool *out_isnull) {
+static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, bool *out_isnull, bool *out_truncated) {
     // Decode input guardrails.
     if (out_isnull) *out_isnull = true;
+    if (out_truncated) *out_truncated = false;
     if (!encoded) return NULL;
 
     // Decode bytea into C types with dbtype info.
@@ -2858,6 +2941,7 @@ static pgvalue_t *cloudsync_decode_bytea_to_pgvalue (bytea *encoded, bool *out_i
     int decoded = pk_decode((char *)VARDATA_ANY(encoded), (size_t)blen, 1, NULL, -1, cloudsync_decode_value_cb, &dv);
     if (decoded != 1) ereport(ERROR, (errmsg("cloudsync: failed to decode encoded value")));
     if (out_isnull) *out_isnull = dv.isnull;
+    if (out_truncated) *out_truncated = dv.truncated;
     if (dv.isnull) return NULL;
 
     // Map decoded C types into a PostgreSQL Datum with the base type.
@@ -3125,14 +3209,14 @@ static char * build_union_sql (void) {
     
     PG_TRY();
     {
-        const char *sql =
+        // before the first cloudsync_init there is no settings table, so no metadata table
+        const char *sql = pg_table_settings_exists() ?
         "SELECT n.nspname, c.relname "
         "FROM pg_class c "
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE c.relkind = 'r' "
-        "  AND n.nspname NOT IN ('pg_catalog','information_schema') "
-        "  AND c.relname LIKE '%\\_cloudsync' ESCAPE '\\' "
-        "ORDER BY n.nspname, c.relname";
+        "WHERE " CLOUDSYNC_PG_META_TABLE_WITH_BASE_FILTER
+        " ORDER BY n.nspname, c.relname" :
+        "SELECT NULL::name, NULL::name WHERE false";
         
         int rc = SPI_execute(sql, true, 0);
         if (rc != SPI_OK_SELECT || !SPI_tuptable) {
@@ -3299,9 +3383,9 @@ static char * build_union_sql (void) {
             if (has_blocks_table) {
                 appendStringInfo(&caseexpr,
                     "WHEN t1.col_name LIKE '%%' || chr(31) || '%%' THEN "
-                    "(SELECT cloudsync_encode_value(blk.col_value) FROM %s.\"%s_cloudsync_blocks\" blk "
+                    "(SELECT cloudsync_encode_value(blk.col_value) FROM %s.%s blk "
                     "WHERE blk.pk = t1.pk AND blk.col_name = t1.col_name) ",
-                    quote_identifier(nsp), base);
+                    quote_identifier(nsp), quote_identifier(psprintf("%s_cloudsync_blocks", base)));
             }
             appendStringInfoString(&caseexpr,
                                    "ELSE CASE t1.col_name "
@@ -3549,6 +3633,34 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
     if (!CALLED_AS_TRIGGER(fcinfo)) ereport(ERROR, (errmsg("cloudsync_changes_insert_trigger must be called as trigger")));
     if (!TRIGGER_FIRED_BY_INSERT(trigdata->tg_event)) ereport(ERROR, (errmsg("Only INSERT allowed on cloudsync_changes")));
     
+    // The function is PUBLIC-callable: run only as the extension declares it, a row-level
+    // INSTEAD OF INSERT trigger on its own cloudsync_changes view. A statement-level trigger
+    // has no tuple, and another relation is not an insert into the changes view.
+    {
+        Relation rel = trigdata->tg_relation;
+        if (!TRIGGER_FIRED_FOR_ROW(trigdata->tg_event) || !TRIGGER_FIRED_INSTEAD(trigdata->tg_event) ||
+            rel->rd_rel->relkind != RELKIND_VIEW ||
+            strcmp(RelationGetRelationName(rel), "cloudsync_changes") != 0 ||
+            RelationGetNamespace(rel) != get_func_namespace(fcinfo->flinfo->fn_oid)) {
+            ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                            errmsg("cloudsync_changes_insert_trigger can only be used on the cloudsync_changes view")));
+        }
+    }
+
+    // Refuse to read the new tuple with the hard-coded cloudsync_changes layout unless the
+    // view really has it (text, bytea, text, bytea, int8, int8, bytea, int8, int8).
+    {
+        static const Oid expected[9] = {TEXTOID, BYTEAOID, TEXTOID, BYTEAOID, INT8OID, INT8OID, BYTEAOID, INT8OID, INT8OID};
+        TupleDesc d = trigdata->tg_relation->rd_att;
+        bool ok = (d->natts == 9);
+        for (int i = 0; ok && i < 9; i++) {
+            Form_pg_attribute att = TupleDescAttr(d, i);
+            if (att->attisdropped || att->atttypid != expected[i]) ok = false;
+        }
+        if (!ok) ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                                 errmsg("cloudsync_changes_insert_trigger can only be used on the cloudsync_changes view")));
+    }
+
     HeapTuple newtup = trigdata->tg_trigtuple;
     pgvalue_t *col_value = NULL;
     PG_TRY();
@@ -3556,8 +3668,9 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
         TupleDesc desc = trigdata->tg_relation->rd_att;
         bool isnull;
         
-        char *insert_tbl = text_to_cstring((text*) DatumGetPointer(heap_getattr(newtup, 1, desc, &isnull)));
+        Datum insert_tbl_datum = heap_getattr(newtup, 1, desc, &isnull);
         if (isnull) ereport(ERROR, (errmsg("tbl cannot be NULL")));
+        char *insert_tbl = text_to_cstring((text*) DatumGetPointer(insert_tbl_datum));
         
         bytea *insert_pk = (bytea*) DatumGetPointer(heap_getattr(newtup, 2, desc, &isnull));
         if (isnull) ereport(ERROR, (errmsg("pk cannot be NULL")));
@@ -3607,7 +3720,11 @@ Datum cloudsync_changes_insert_trigger (PG_FUNCTION_ARGS) {
         // This ensures type consistency across all calls, as SPI caches parameter types on first prepare.
         if (!is_tombstone) {
             bool value_is_null = false;
-            col_value = cloudsync_decode_bytea_to_pgvalue(insert_value_encoded, &value_is_null);
+            bool value_truncated = false;
+            col_value = cloudsync_decode_bytea_to_pgvalue(insert_value_encoded, &value_is_null, &value_truncated);
+            if (value_truncated) {
+                ereport(WARNING, (errmsg("cloudsync: text value for %s.%s truncated at an embedded NUL character", insert_tbl, insert_name)));
+            }
 
             // When value is NULL, create a typed NULL pgvalue with the decoded type.
             // We map the column's actual Oid to the corresponding decoded Oid (e.g., INT4OID → INT8OID).

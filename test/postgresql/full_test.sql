@@ -75,6 +75,13 @@
 \ir 65_payload_window_cap.sql
 \ir 66_db_version_per_transaction.sql
 \ir 67_payload_chunks_empty_final.sql
+\ir 68_hardening.sql
+\ir 69_security_review.sql
+\ir 70_medium_review.sql
+\ir 71_low_review.sql
+\ir 72_rls_isolation.sql
+\ir 73_payload_chunks_null_values.sql
+\ir 74_review_followup.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

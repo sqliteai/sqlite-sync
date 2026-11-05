@@ -9,6 +9,8 @@
 //  no external server is contacted.
 //
 
+#include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
@@ -822,7 +824,7 @@ static bool test_bounded_send(void) {
 #define HTTP_MAX_REQ 64
 static int http_fd = -1;
 static unsigned http_port;
-static volatile bool http_stop;
+static atomic_bool http_stop;   // written by the test thread, polled by the server thread
 static int http_apply_code, http_status_code;
 static char http_apply_body[512], http_status_body[512];
 static char http_partial_body[512];   // when set, /apply's answer to a non-final chunk
@@ -843,6 +845,7 @@ static int http_check_steps;
 static int http_nreq, http_napply, http_nstatus, http_nupload, http_nput, http_ncheck;
 static char http_req_endpoint[HTTP_MAX_REQ][8];
 static bool http_req_defer[HTTP_MAX_REQ];
+static bool http_req_auth[HTTP_MAX_REQ];   // the request carried an Authorization header
 static char http_apply_batch[HTTP_MAX_REQ][48];
 static int64_t http_apply_chunk[HTTP_MAX_REQ], http_apply_min[HTTP_MAX_REQ];
 static bool http_apply_url[HTTP_MAX_REQ], http_apply_final[HTTP_MAX_REQ];
@@ -902,6 +905,7 @@ static void http_handle(int c) {
     int i = http_nreq < HTTP_MAX_REQ ? http_nreq++ : HTTP_MAX_REQ - 1;
     snprintf(http_req_endpoint[i], sizeof(http_req_endpoint[i]), "%s", endpoint);
     http_req_defer[i] = capabilities && strstr(capabilities, "apply-defer");
+    http_req_auth[i] = http_header(head, "Authorization") != NULL;
 
     if (strcmp(endpoint, "apply") == 0) {
         sqlite3 *probe = NULL;
@@ -943,6 +947,23 @@ static void http_handle(int c) {
         http_reply(c, code, code < 400 ? "{\"data\":{\"lastOptimisticVersion\":0,\"lastConfirmedVersion\":0,\"gaps\":[]}}"
                                        : "{\"errors\":[{\"status\":\"429\",\"code\":\"check_rate_limited\",\"title\":\"Busy\"}]}",
                    step >= 0 ? http_check_retry[step] : NULL);
+    } else if (strcmp(endpoint, "boom") == 0) {
+        http_reply(c, 503, "upstream failure", NULL);
+    } else if (strcmp(endpoint, "redir") == 0) {
+        const char *redirect = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        if (write(c, redirect, strlen(redirect)) < 0) { /* the client went away */ }
+    } else if (strncmp(endpoint, "big", 3) == 0) {
+        size_t n = (size_t)strtoull(endpoint + 3, NULL, 10);
+        char head_big[160];
+        int hl = snprintf(head_big, sizeof(head_big), "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", n);
+        char chunk[4096];
+        memset(chunk, 'a', sizeof(chunk));
+        bool alive = write(c, head_big, (size_t)hl) > 0;
+        for (size_t sent = 0; alive && sent < n; ) {
+            size_t part = n - sent < sizeof(chunk) ? n - sent : sizeof(chunk);
+            ssize_t w = write(c, chunk, part);
+            if (w <= 0) alive = false; else sent += (size_t)w;
+        }
     } else {
         http_nput++;
         http_reply(c, 200, "", NULL);
@@ -955,7 +976,7 @@ static void http_handle(int c) {
 // failing listener ends the thread instead of spinning.
 static void *http_serve(void *arg) {
     (void)arg;
-    while (!http_stop) {
+    while (!atomic_load(&http_stop)) {
         struct pollfd p = {http_fd, POLLIN, 0};
         int n = poll(&p, 1, 100);
         if (n < 0 && errno != EINTR) break;
@@ -972,16 +993,18 @@ static void *http_serve(void *arg) {
 }
 
 static bool http_start(pthread_t *thread) {
+    // a client that gives up mid-answer (the response cap does) must not kill the test with SIGPIPE
+    signal(SIGPIPE, SIG_IGN);
     http_fd = loopback_listen(&http_port);
     if (http_fd < 0) return false;
-    http_stop = false;
+    atomic_store(&http_stop, false);
     if (pthread_create(thread, NULL, http_serve, NULL) == 0) return true;
     close(http_fd);
     return false;
 }
 
 static void http_shutdown(pthread_t thread) {
-    http_stop = true;
+    atomic_store(&http_stop, true);
     pthread_join(thread, NULL);
     close(http_fd);
 }
@@ -1145,6 +1168,7 @@ static bool test_apply_defer_transport(void) {
     return ok;
 }
 
+
 // /apply refused as busy: the server's errors[0].code, or the fallback when there is none.
 static void http_busy_apply(int code, const char *retry_after, const char *error_code) {
     http_apply_code = code;
@@ -1184,6 +1208,142 @@ static char *sql_text(sqlite3 *db, const char *sql) {
 
 static bool reset_retry(sqlite3 *db) {
     return db_exec(db, "SELECT cloudsync_network_reset_retry_after();") == SQLITE_OK;
+}
+
+// Credentials belong to the address they were set for: pointing the connection at another
+// origin must not carry the token along, and re-initializing the same address must keep it.
+// Addresses outside https (and plain http outside the local machine) are refused, and so is
+// a database id that would change the URL path.
+static bool test_credentials_follow_address(void) {
+    pthread_t thread;
+    if (!http_start(&thread)) return false;
+    http_nreq = http_napply = http_nstatus = http_nupload = http_nput = http_ncheck = 0;
+
+    char a[160], b[160];
+    snprintf(a, sizeof(a), "SELECT cloudsync_network_init_custom('http://127.0.0.1:%u', 'test-managed-database-id');", http_port);
+    snprintf(b, sizeof(b), "SELECT cloudsync_network_init_custom('http://localhost:%u', 'test-managed-database-id');", http_port);
+    sqlite3 *db = stream_db(false);
+    bool ok = expect(db && db_exec(db, a) == SQLITE_OK, "init on the first address", NULL);
+    ok = ok && db_exec(db, "SELECT cloudsync_network_set_token('secret-token');") == SQLITE_OK;
+    http_script(200, 0, 0, 0, 0, NULL);
+
+    // same address again: the token stays
+    ok = ok && db_exec(db, a) == SQLITE_OK;
+    int before = http_nreq;
+    sql_text(db, "SELECT cloudsync_network_status()");
+    ok = ok && expect(http_nreq > before && http_req_auth[http_nreq - 1], "same address keeps the token", NULL);
+
+    // another origin: the request goes out without it
+    ok = ok && db_exec(db, b) == SQLITE_OK;
+    before = http_nreq;
+    sql_text(db, "SELECT cloudsync_network_status()");
+    ok = ok && expect(http_nreq > before && !http_req_auth[http_nreq - 1], "another address does not receive the token", NULL);
+
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://example.com', 'x');") != SQLITE_OK, "plain http to a remote host is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://localhost.evil.com', 'x');") != SQLITE_OK, "a host that only starts with localhost is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://127.0.0.1.example.com', 'x');") != SQLITE_OK, "a host that only starts with 127. is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://127.0.0.1@example.com/', 'x');") != SQLITE_OK, "userinfo before a remote host is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://localhost@example.com', 'x');") != SQLITE_OK, "userinfo named localhost is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://[::1].example.com', 'x');") != SQLITE_OK, "a host that only starts with [::1] is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('HTTPS://example.com', 'x');") == SQLITE_OK, "an uppercase https scheme is accepted", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://LOCALHOST:1', 'x');") == SQLITE_OK, "an uppercase localhost is accepted", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://127.0.0.1?x', 'x');") == SQLITE_OK, "a loopback address followed by a query is accepted", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('http://[::1]:1/', 'x');") == SQLITE_OK, "the IPv6 loopback with a port is accepted", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('ftp://example.com', 'x');") != SQLITE_OK, "a non-http scheme is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('https://example.com', 'a/../b');") != SQLITE_OK, "a database id with a slash is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_init_custom('https://example.com', 'a?x=1');") != SQLITE_OK, "a database id with a query is refused", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_set_token(NULL);") != SQLITE_OK, "a NULL token is an error, not a crash", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_set_apikey(NULL);") != SQLITE_OK, "a NULL apikey is an error, not a crash", NULL);
+    ok = ok && expect(db_exec(db, "SELECT cloudsync_network_set_token('a' || char(13, 10) || 'X-Evil: 1');") != SQLITE_OK, "a token with CR/LF is refused", NULL);
+
+    // never callable from a view / trigger of a schema
+    ok = ok && db_exec(db, "CREATE VIEW v_net AS SELECT cloudsync_network_has_unsent_changes() AS x;") == SQLITE_OK;
+    ok = ok && expect(db_exec(db, "SELECT * FROM v_net;") != SQLITE_OK, "network functions are direct-only", NULL);
+
+    stream_close(db);
+    http_shutdown(thread);
+    return ok;
+}
+
+extern NETWORK_RESULT network_test_receive(const char *url, bool zero_terminated);
+
+// A hostile server must not be able to read past a buffer or exhaust memory: an error body is
+// always NUL-terminated, even when the caller asked for binary data, and a response past
+// the cap (65536 bytes in this build) aborts the transfer.
+static bool test_response_limits(void) {
+    pthread_t thread;
+    if (!http_start(&thread)) return false;
+    char url[96];
+    bool ok = true;
+
+    for (int zero_terminated = 0; zero_terminated < 2; zero_terminated++) {
+        snprintf(url, sizeof(url), "http://127.0.0.1:%u/boom", http_port);
+        NETWORK_RESULT r = network_test_receive(url, zero_terminated);
+        ok = ok && expect(r.code == CLOUDSYNC_NETWORK_ERROR && r.buffer && strcmp(r.buffer, "upstream failure") == 0 &&
+                          r.blen == strlen("upstream failure"), "an error body is a bounded C string", r.buffer);
+        if (r.buffer) cloudsync_memory_free(r.buffer);
+    }
+
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/big60000", http_port);
+    NETWORK_RESULT r = network_test_receive(url, false);
+    ok = ok && expect(r.code == CLOUDSYNC_NETWORK_BUFFER && r.blen == 60000 && r.buffer && r.buffer[60000] == 0, "a response under the cap is kept", NULL);
+    if (r.buffer) cloudsync_memory_free(r.buffer);
+
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/big200000", http_port);
+    r = network_test_receive(url, false);
+    ok = ok && expect(r.code == CLOUDSYNC_NETWORK_ERROR && r.http_status == 0, "a response past the cap aborts the transfer", NULL);
+    if (r.buffer) cloudsync_memory_free(r.buffer);
+
+    // a redirect is not a success and is not followed
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/redir", http_port);
+    r = network_test_receive(url, true);
+    ok = ok && expect(r.code == CLOUDSYNC_NETWORK_ERROR && r.http_status == 302, "a 3xx answer is not a success", NULL);
+    if (r.buffer) cloudsync_memory_free(r.buffer);
+
+    http_shutdown(thread);
+    return ok;
+}
+
+extern bool network_test_ticket_policy(const char *api_url, const char *other_url);
+
+// The ticket belongs to the API: a download host cannot replace it. An unbalanced cleanup
+// or a malformed JSON answer must not hurt either, and a call before init has no endpoint.
+static bool test_network_robustness(void) {
+    pthread_t thread;
+    if (!http_start(&thread)) return false;
+    bool ok = expect(network_test_ticket_policy("http://127.0.0.1:1/check", "http://example.com/object"), "only API endpoints may set the ticket", NULL);
+
+    char a[160];
+    snprintf(a, sizeof(a), "SELECT cloudsync_network_init_custom('http://127.0.0.1:%u', 'test-managed-database-id');", http_port);
+    sqlite3 *live = stream_db(false);
+    sqlite3 *other = stream_db(false);
+    ok = ok && live && other && db_exec(live, a) == SQLITE_OK;
+    http_script(200, 0, 0, 0, 0, NULL);
+    http_nreq = 0;
+
+    // cleanup without init, twice, on another connection
+    ok = ok && db_exec(other, "SELECT cloudsync_network_cleanup();") == SQLITE_OK;
+    ok = ok && db_exec(other, "SELECT cloudsync_network_cleanup();") == SQLITE_OK;
+    sql_text(live, "SELECT cloudsync_network_status()");
+    ok = ok && expect(http_nreq == 1, "the live connection still reaches the server after extra cleanups", NULL);
+
+    // a token set before init: the call fails cleanly, it does not touch a missing endpoint
+    ok = ok && db_exec(other, "SELECT cloudsync_network_set_token('t');") == SQLITE_OK;
+    ok = ok && expect(strncmp(sql_text(other, "SELECT cloudsync_network_status()"), "ERROR:", 6) == 0 ||
+                      strstr(sql_text(other, "SELECT cloudsync_network_status()"), "rror") != NULL, "status before init is an error", NULL);
+
+    // strict JSON: a truncated or trailing-garbage document yields nothing
+    char *v = network_test_extract_string("{\"a\":\"x\"}", "a");
+    ok = ok && expect(v && strcmp(v, "x") == 0, "valid JSON is read", v);
+    cloudsync_memory_free(v);
+    v = network_test_extract_string("{\"a\":\"x\" garbage", "a");
+    ok = ok && expect(v == NULL, "malformed JSON is rejected", v);
+    cloudsync_memory_free(v);
+
+    stream_close(live);
+    stream_close(other);
+    http_shutdown(thread);
+    return ok;
 }
 
 // A busy server (429, or 503 with Retry-After) is a result, not an error: the send keeps
@@ -1494,6 +1654,9 @@ int main(void) {
     check("runtime deadlines (cloudsync_set) and interrupt of a call:", test_runtime_deadlines());
     check("apply-defer over HTTP: header, 202 lifecycle, rollback, 503/409:", test_apply_defer_transport());
     check("soft overload over HTTP: busy send/receive, Retry-After budget:", test_soft_overload_transport());
+    check("credentials follow their address; address and id are validated:", test_credentials_follow_address());
+    check("response size cap and NUL-terminated error bodies:", test_response_limits());
+    check("ticket policy, unbalanced cleanup, no endpoint, strict JSON:", test_network_robustness());
 #endif
     if (failures) { printf("\n%d test(s) FAILED\n", failures); return 1; }
     printf("\nAll network unit tests passed\n");

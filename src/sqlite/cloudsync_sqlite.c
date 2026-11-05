@@ -5,6 +5,7 @@
 //  Created by Marco Bambini on 05/12/25.
 //
 
+#include "meta_tables.h"
 #include "cloudsync_sqlite.h"
 #include "cloudsync_changes_sqlite.h"
 #include "../pk.h"
@@ -445,7 +446,7 @@ void dbsync_pk_decode (sqlite3_context *context, int argc, sqlite3_value **argv)
 // MARK: -
 
 void dbsync_insert (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    DEBUG_FUNCTION("cloudsync_insert %s", database_value_text(argv[0]));
+    DEBUG_FUNCTION("cloudsync_insert %s", argc > 0 ? database_value_text(argv[0]) : "");
     // debug_values(argc-1, &argv[1]);
     
     // argv[0] is table name
@@ -464,10 +465,18 @@ void dbsync_insert (sqlite3_context *context, int argc, sqlite3_value **argv) {
     cloudsync_reset_error(data);
     
     // lookup table
+    if (argc < 1 || sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
+        sqlite3_result_error(context, "cloudsync_insert requires a table name and the primary key value(s).", -1);
+        return;
+    }
     const char *table_name = (const char *)database_value_text(argv[0]);
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) {
         dbsync_set_error(context, "Unable to retrieve table name %s in cloudsync_insert.", table_name);
+        return;
+    }
+    if (argc - 1 != table_count_pks(table)) {
+        dbsync_set_error(context, "cloudsync_insert on table %s expects %d primary key value(s), got %d.", table_name, table_count_pks(table), argc - 1);
         return;
     }
     
@@ -521,7 +530,7 @@ cleanup:
 }
 
 void dbsync_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    DEBUG_FUNCTION("cloudsync_delete %s", database_value_text(argv[0]));
+    DEBUG_FUNCTION("cloudsync_delete %s", argc > 0 ? database_value_text(argv[0]) : "");
     // debug_values(argc-1, &argv[1]);
     
     // retrieve context
@@ -529,10 +538,18 @@ void dbsync_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
     cloudsync_reset_error(data);
     
     // lookup table
+    if (argc < 1 || sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
+        sqlite3_result_error(context, "cloudsync_delete requires a table name and the primary key value(s).", -1);
+        return;
+    }
     const char *table_name = (const char *)database_value_text(argv[0]);
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) {
         dbsync_set_error(context, "Unable to retrieve table name %s in cloudsync_delete.", table_name);
+        return;
+    }
+    if (argc - 1 != table_count_pks(table)) {
+        dbsync_set_error(context, "cloudsync_delete on table %s expects %d primary key value(s), got %d.", table_name, table_count_pks(table), argc - 1);
         return;
     }
     
@@ -638,6 +655,11 @@ void dbsync_update_step (sqlite3_context *context, int argc, sqlite3_value **arg
     // argv[1] => new_column_value
     // argv[2] => old_column_value
     
+    if (argc != 3) {
+        sqlite3_result_error(context, "cloudsync_update requires the table name, the new value and the old value.", -1);
+        return;
+    }
+
     // allocate/get the update payload
     cloudsync_update_payload *payload = (cloudsync_update_payload *)sqlite3_aggregate_context(context, sizeof(cloudsync_update_payload));
     if (!payload) {sqlite3_result_error_nomem(context); return;}
@@ -660,6 +682,13 @@ void dbsync_update_final (sqlite3_context *context) {
     cloudsync_table_context *table = table_lookup(data, table_name);
     if (!table) {
         dbsync_set_error(context, "Unable to retrieve table name %s in cloudsync_update.", table_name);
+        dbsync_update_payload_free(payload);
+        return;
+    }
+
+    // the aggregated rows must cover every primary key and at most every column
+    if (payload->count < table_count_pks(table) || payload->count > table_count_pks(table) + table_count_cols(table)) {
+        dbsync_set_error(context, "cloudsync_update on table %s received %d value(s), expected between %d and %d.", table_name, payload->count, table_count_pks(table), table_count_pks(table) + table_count_cols(table));
         dbsync_update_payload_free(payload);
         return;
     }
@@ -733,6 +762,7 @@ void dbsync_update_final (sqlite3_context *context) {
     // compare NEW and OLD values (excluding primary keys) to handle column updates
     for (int i=0; i<table_count_cols(table); i++) {
         int col_index = table_count_pks(table) + i;  // Regular columns start after primary keys
+        if (col_index >= payload->count) break;
 
         if (dbutils_value_compare(payload->old_values[col_index], payload->new_values[col_index]) != 0) {
             if (table_col_algo(table, i) == col_algo_block) {
@@ -980,6 +1010,13 @@ void dbsync_payload_decode (sqlite3_context *context, int argc, sqlite3_value **
     DEBUG_FUNCTION("dbsync_payload_decode");
     //debug_values(argc, argv);
     
+    // registered variadic: a call with no argument has no payload
+    if (argc < 1) {
+        sqlite3_result_error(context, "Error on cloudsync_payload_decode: a payload is required.", -1);
+        sqlite3_result_error_code(context, SQLITE_MISUSE);
+        return;
+    }
+
     // sanity check payload type
     if (database_value_type(argv[0]) != SQLITE_BLOB) {
         sqlite3_result_error(context, "Error on cloudsync_payload_decode: value must be a BLOB.", -1);
@@ -1215,6 +1252,8 @@ static int payload_chunks_begin_fragment(cloudsync_payload_chunks_cursor *c, int
     c->value_data = (const char *)database_value_blob(col_value);
     c->value_data_len = raw_len;
     c->frag_total = header_len + raw_len;
+    // the resume offset is the caller's: it must point inside the value
+    if (start_offset < 0 || start_offset >= c->frag_total) return SQLITE_MISUSE;
     c->frag_offset = start_offset;
     int rc = payload_chunks_plan_fragment(c);
     if (rc != SQLITE_OK) return rc;
@@ -1228,7 +1267,8 @@ static int payload_chunks_emit_fragment(cloudsync_payload_chunks_cursor *c) {
     cloudsync_context *data = c->vtab->data;
     if (c->payload) { cloudsync_memory_free(c->payload); c->payload = NULL; }
     int64_t remaining = c->frag_total - c->frag_offset;
-    int frag_len = remaining > c->frag_target ? c->frag_target : (int)remaining;
+    if (remaining <= 0) return SQLITE_CORRUPT;
+    int frag_len = remaining > (int64_t)c->frag_target ? c->frag_target : (int)remaining;
     if (frag_len <= 0) return SQLITE_CORRUPT;
     char *frag = cloudsync_memory_alloc((uint64_t)frag_len);
     if (!frag) return SQLITE_NOMEM;
@@ -1416,7 +1456,7 @@ static int payload_chunks_advance(cloudsync_payload_chunks_cursor *c) {
 static int payload_chunks_metadata_max(sqlite3 *db, const void *site_id, int site_id_len, int64_t lower, int64_t *out) {
     *out = 0;
     sqlite3_stmt *list = NULL;
-    int rc = sqlite3_prepare_v2(db, "SELECT tbl_name FROM sqlite_master WHERE type='table' AND tbl_name LIKE '%_cloudsync';", -1, &list, NULL);
+    int rc = sqlite3_prepare_v2(db, "SELECT tbl_name FROM sqlite_master WHERE type='table' AND " CLOUDSYNC_SQLITE_META_FILTER ";", -1, &list, NULL);
     if (rc != SQLITE_OK) return rc;
 
     // One ORDER BY db_version DESC LIMIT 1 per table: it walks the db_version index back
@@ -1960,6 +2000,14 @@ int dbsync_register_function (sqlite3 *db, const char *name, void (*xfunc)(sqlit
     return dbsync_register(db, name, xfunc, NULL, NULL, nargs, pzErrMsg, ctx, ctx_free);
 }
 
+// file-system functions: never callable from a view, trigger, CHECK or generated column
+// of a database the caller did not write
+int dbsync_register_direct_function (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_context*,int,sqlite3_value**), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
+    const int FLAGS_DIRECT = SQLITE_UTF8 | SQLITE_DIRECTONLY;
+    DEBUG_DBFUNCTION("dbsync_register_direct_function %s", name);
+    return dbsync_register_with_flags(db, name, xfunc, NULL, NULL, nargs, FLAGS_DIRECT, pzErrMsg, ctx, ctx_free);
+}
+
 int dbsync_register_pure_function (sqlite3 *db, const char *name, void (*xfunc)(sqlite3_context*,int,sqlite3_value**), int nargs, char **pzErrMsg, void *ctx, void (*ctx_free)(void *)) {
     const int FLAGS_PURE = SQLITE_UTF8 | SQLITE_INNOCUOUS | SQLITE_DETERMINISTIC;
     DEBUG_DBFUNCTION("dbsync_register_pure_function %s", name);
@@ -2065,6 +2113,15 @@ void dbsync_set_filter (sqlite3_context *context, int argc, sqlite3_value **argv
         return;
     }
 
+    // The old triggers are dropped before the new ones are built: a filter that does not
+    // compile must not leave the table without change tracking, so all of it is one unit.
+    int rc = database_begin_savepoint(data, "cloudsync_set_filter");
+    if (rc != DBRES_OK) {
+        dbsync_set_error(context, "cloudsync_set_filter: unable to start a savepoint");
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+
     // Store filter in table settings
     dbutils_table_settings_set_key_value(data, tbl, "*", "filter", filter_expr);
 
@@ -2074,9 +2131,10 @@ void dbsync_set_filter (sqlite3_context *context, int argc, sqlite3_value **argv
 
     // Drop and recreate triggers with the filter
     database_delete_triggers(data, tbl);
-    int rc = database_create_triggers(data, tbl, algo, filter_expr);
+    rc = database_create_triggers(data, tbl, algo, filter_expr);
     if (rc != DBRES_OK) {
-        dbsync_set_error(context, "cloudsync_set_filter: error recreating triggers");
+        database_rollback_savepoint(data, "cloudsync_set_filter");
+        dbsync_set_error(context, "cloudsync_set_filter: error recreating triggers (the previous triggers are kept)");
         sqlite3_result_error_code(context, rc);
         return;
     }
@@ -2084,7 +2142,15 @@ void dbsync_set_filter (sqlite3_context *context, int argc, sqlite3_value **argv
     // Clean and refill metatable with the new filter
     rc = cloudsync_reset_metatable(data, tbl);
     if (rc != DBRES_OK) {
+        database_rollback_savepoint(data, "cloudsync_set_filter");
         dbsync_set_error(context, "cloudsync_set_filter: error resetting metatable");
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+
+    rc = database_commit_savepoint(data, "cloudsync_set_filter");
+    if (rc != DBRES_OK) {
+        dbsync_set_error(context, "cloudsync_set_filter: unable to commit the new filter");
         sqlite3_result_error_code(context, rc);
         return;
     }
@@ -2112,6 +2178,14 @@ void dbsync_clear_filter (sqlite3_context *context, int argc, sqlite3_value **ar
         return;
     }
 
+    // one unit, as in cloudsync_set_filter: a failure keeps the previous triggers
+    int rc = database_begin_savepoint(data, "cloudsync_clear_filter");
+    if (rc != DBRES_OK) {
+        dbsync_set_error(context, "cloudsync_clear_filter: unable to start a savepoint");
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+
     // Remove filter from table settings (set to NULL/empty)
     dbutils_table_settings_set_key_value(data, tbl, "*", "filter", NULL);
 
@@ -2121,9 +2195,10 @@ void dbsync_clear_filter (sqlite3_context *context, int argc, sqlite3_value **ar
 
     // Drop and recreate triggers without filter
     database_delete_triggers(data, tbl);
-    int rc = database_create_triggers(data, tbl, algo, NULL);
+    rc = database_create_triggers(data, tbl, algo, NULL);
     if (rc != DBRES_OK) {
-        dbsync_set_error(context, "cloudsync_clear_filter: error recreating triggers");
+        database_rollback_savepoint(data, "cloudsync_clear_filter");
+        dbsync_set_error(context, "cloudsync_clear_filter: error recreating triggers (the previous triggers are kept)");
         sqlite3_result_error_code(context, rc);
         return;
     }
@@ -2131,7 +2206,15 @@ void dbsync_clear_filter (sqlite3_context *context, int argc, sqlite3_value **ar
     // Clean and refill metatable without filter (all rows)
     rc = cloudsync_reset_metatable(data, tbl);
     if (rc != DBRES_OK) {
+        database_rollback_savepoint(data, "cloudsync_clear_filter");
         dbsync_set_error(context, "cloudsync_clear_filter: error resetting metatable");
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+
+    rc = database_commit_savepoint(data, "cloudsync_clear_filter");
+    if (rc != DBRES_OK) {
+        dbsync_set_error(context, "cloudsync_clear_filter: unable to commit");
         sqlite3_result_error_code(context, rc);
         return;
     }
@@ -2259,10 +2342,10 @@ int dbsync_register_functions (sqlite3 *db, char **pzErrMsg) {
     if (rc != SQLITE_OK) return rc;
 
     #ifdef CLOUDSYNC_DESKTOP_OS
-    rc = dbsync_register_function(db, "cloudsync_payload_save", dbsync_payload_save, 1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_direct_function(db, "cloudsync_payload_save", dbsync_payload_save, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = dbsync_register_function(db, "cloudsync_payload_load", dbsync_payload_load, 1, pzErrMsg, ctx, NULL);
+    rc = dbsync_register_direct_function(db, "cloudsync_payload_load", dbsync_payload_load, 1, pzErrMsg, ctx, NULL);
     if (rc != SQLITE_OK) return rc;
     #endif
     

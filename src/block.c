@@ -9,6 +9,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include "block.h"
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 #include "utils.h"
 #include "fractional_indexing.h"
 
@@ -149,13 +152,36 @@ static void *fi_calloc_wrapper(size_t count, size_t size) {
     return cloudsync_memory_zeroalloc((uint64_t)(count * size));
 }
 
+// The fractional-indexing allocator is one global of the submodule, and every connection
+// registers the extension: setting it again while another connection reads it is a data
+// race. It is set once per process, and a thread that loses the race waits for the winner.
+static volatile long fi_allocator_state;   // 0 unset, 1 being set, 2 set
+
 void block_init_allocator(void) {
-    fractional_indexing_allocator alloc = {
-        .malloc = fi_malloc_wrapper,
-        .calloc = fi_calloc_wrapper,
-        .free   = cloudsync_memory_free
-    };
-    fractional_indexing_set_allocator(&alloc);
+#if defined(_MSC_VER)
+    if (_InterlockedCompareExchange(&fi_allocator_state, 1, 0) == 0) {
+#else
+    long expected = 0;
+    if (__atomic_compare_exchange_n(&fi_allocator_state, &expected, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+#endif
+        fractional_indexing_allocator alloc = {
+            .malloc = fi_malloc_wrapper,
+            .calloc = fi_calloc_wrapper,
+            .free   = cloudsync_memory_free
+        };
+        fractional_indexing_set_allocator(&alloc);
+#if defined(_MSC_VER)
+        _InterlockedExchange(&fi_allocator_state, 2);
+#else
+        __atomic_store_n(&fi_allocator_state, 2, __ATOMIC_RELEASE);
+#endif
+        return;
+    }
+#if defined(_MSC_VER)
+    while (fi_allocator_state != 2) { }
+#else
+    while (__atomic_load_n(&fi_allocator_state, __ATOMIC_ACQUIRE) != 2) { }
+#endif
 }
 
 char *block_position_between(const char *before, const char *after) {

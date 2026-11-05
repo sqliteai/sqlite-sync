@@ -5,6 +5,7 @@
 //  Created by Marco Bambini on 23/09/24.
 //
 
+#include "meta_tables.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -213,7 +214,7 @@ char *vtab_build_changes_sql (cloudsync_context *data, const char *idxs) {
     "WITH table_names AS ( "
     "    SELECT format('%q',SUBSTR(tbl_name, 1, LENGTH(tbl_name) - 10)) AS table_name_literal, format('%w',SUBSTR(tbl_name, 1, LENGTH(tbl_name) - 10)) AS table_name_identifier, format('%w',tbl_name) AS table_meta "
     "    FROM sqlite_master "
-    "    WHERE type = 'table' AND tbl_name LIKE '%_cloudsync' "
+    "    WHERE type = 'table' AND " CLOUDSYNC_SQLITE_META_WITH_BASE_FILTER " "
     "), "
     "changes_query AS ( "
     "    SELECT "
@@ -653,7 +654,10 @@ int cloudsync_changesvtab_best_index (sqlite3_vtab *vtab, sqlite3_index_info *id
         int idx = constraint->iColumn;
         uint8_t op = constraint->op;
         
-        const char *colname = (idx >= 0 && idx < CLOUDSYNC_CHANGES_NCOLS) ? COLNAME_FROM_INDEX(idx) : "rowid";
+        // the rowid is not a column of the query behind the cursor: leave the constraint to
+        // SQLite, which evaluates it through xRowid
+        if (idx < 0 || idx >= CLOUDSYNC_CHANGES_NCOLS) continue;
+        const char *colname = COLNAME_FROM_INDEX(idx);
         const char *opname = vtab_opname_from_value(op);
         if (!opname) continue;
         
@@ -675,23 +679,18 @@ int cloudsync_changesvtab_best_index (sqlite3_vtab *vtab, sqlite3_index_info *id
         else if (idx == COL_SITEID_INDEX) idxnum |= 4;  // set bit 2
     }
     
-    // is there an ORDER BY clause ?
-    // if not use a default one
-    if (count2 > 0) sindex += snprintf(s+sindex, slen-sindex, " ORDER BY ");
-    else sindex += snprintf(s+sindex, slen-sindex, " ORDER BY db_version, seq ASC");
-    
+    // is there an ORDER BY clause ? Terms on the rowid cannot be pushed down: SQLite sorts
+    // for them itself (orderByConsumed = 0) and the cursor keeps a default order.
+    int nterms = 0;
     for (int i=0; i < count2; ++i) {
         struct sqlite3_index_orderby *orderby = &idxinfo->aOrderBy[i];
-        
-        // build next constraint
-        if (i > 0) sindex += snprintf(s+sindex, slen-sindex, ", ");
-        
         int idx = orderby->iColumn;
-        const char *colname = (idx >= 0 && idx < CLOUDSYNC_CHANGES_NCOLS) ? COLNAME_FROM_INDEX(idx) : "rowid";
+        if (idx < 0 || idx >= CLOUDSYNC_CHANGES_NCOLS) { orderconsumed = 0; continue; }
+        const char *colname = COLNAME_FROM_INDEX(idx);
         if (!vtab_colname_is_legal(colname)) orderconsumed = 0;
-        
-        sindex += snprintf(s+sindex, slen-sindex, "%s %s", colname, orderby->desc ? " DESC" : " ASC");
+        sindex += snprintf(s+sindex, slen-sindex, "%s%s %s", nterms++ ? ", " : " ORDER BY ", colname, orderby->desc ? " DESC" : " ASC");
     }
+    if (nterms == 0) sindex += snprintf(s+sindex, slen-sindex, " ORDER BY db_version, seq ASC");
     
     idxinfo->idxNum = idxnum;
     idxinfo->idxStr = s;
@@ -774,7 +773,7 @@ int cloudsync_changesvtab_filter (sqlite3_vtab_cursor *cursor, int idxn, const c
         // that skipped the meta tables): still not an OOM
         sqlite3_stmt *vm = NULL;
         bool meta_missing = false;
-        if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND tbl_name LIKE '%_cloudsync' LIMIT 1;", -1, &vm, NULL) == SQLITE_OK) {
+        if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND " CLOUDSYNC_SQLITE_META_WITH_BASE_FILTER " LIMIT 1;", -1, &vm, NULL) == SQLITE_OK) {
             meta_missing = (sqlite3_step(vm) != SQLITE_ROW);
         }
         if (vm) sqlite3_finalize(vm);

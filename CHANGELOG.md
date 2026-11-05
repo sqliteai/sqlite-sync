@@ -18,9 +18,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **A download window with nothing visible to the caller still moves the checkpoint forward.** `cloudsync_payload_chunks()` now ends such a window with an empty final chunk that carries the watermark, so the same window is no longer scanned again on every request. Clients from 1.1.0 on already apply it.
 - **SQLite: reading changes under row-level security now scales with what the caller can see.** First syncs from large shared tables skip almost all lookups of rows the caller can't see, and each visible row is looked up once instead of twice. The output is unchanged.
 - **`cloudsync_network_has_unsent_changes()` returns 1 until the server has confirmed the local changes, not just accepted them**, so it is safe to check before logging out. While `send.status` is `syncing`, stop calling `cloudsync_network_send_changes()` in a loop.
+- **Network and file functions can only be called directly.** `cloudsync_network_*`, `cloudsync_payload_save()` and `cloudsync_payload_load()` can no longer run from views, triggers or CHECK constraints.
+- **Stricter network configuration.** The address must use `https://` (`http://` only for localhost), and `cloudsync_network_init_custom()` with a different address clears the previous token, API key and organization: set them again after the call.
 
 ### Fixed
 
+- **Hardened payload validation (SQLite and PostgreSQL).** Malformed or out-of-range payload fields, primary keys, block positions and sizes are rejected.
+- **PostgreSQL: hardened PUBLIC-callable functions and generated SQL.** Covers argument and type validation, quoting of table and column names, schema-qualified calls in generated triggers, aggregate finalization, and NULL values in change payloads.
+- **SQLite: stricter argument checks and quoting in the cloudsync functions.** `cloudsync_set_filter()` keeps the previous filter when a new one doesn't compile.
+- **Network: stricter response handling.** Only 2xx counts as success, response sizes are capped and JSON is parsed strictly. On Apple, redirects are refused and request deadlines are honoured.
+- **Fixed a data race between connections** in the fractional-indexing allocator.
+- **`cloudsync_changes` accepts `rowid` filters**, and tables that only look like metadata tables are no longer treated as such.
+- **PostgreSQL: trigger and function names longer than 63 bytes no longer collide.**
 - **API.md: `send.serverVersion` is documented as the accepted version**, not the confirmed one. Only `send.status == "synced"` means every sent change is confirmed.
 
 ## [1.2.0] - 2026-09-28
