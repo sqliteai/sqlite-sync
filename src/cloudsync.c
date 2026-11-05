@@ -263,6 +263,7 @@ struct cloudsync_table_context {
     dbvm_t      *meta_site_id_stmt;
     
     dbvm_t      *real_col_values_stmt;          // retrieve all column values based on pk
+    dbvm_t      *real_row_lookup_stmt;          // lazily prepared check that a base row exists by pk
     dbvm_t      *real_merge_delete_stmt;
     dbvm_t      *real_merge_sentinel_stmt;
     
@@ -791,6 +792,23 @@ char *table_build_value_sql (cloudsync_table_context *table, const char *colname
     // SELECT age FROM customers WHERE first_name=? AND last_name=?;
     return sql_build_select_cols_by_pk(table->context, table->name, colname, table->schema);
 }
+
+// SELECT 1 FROM customers WHERE first_name=? AND last_name=?; prepared on first use
+dbvm_t *table_row_lookup_stmt (cloudsync_table_context *table) {
+    if (table->real_row_lookup_stmt) return table->real_row_lookup_stmt;
+
+    char *sql = NULL;
+    #if !CLOUDSYNC_DISABLE_ROWIDONLY_TABLES
+    if (table->rowid_only) sql = memory_mprintf(SQL_SELECT_COLS_BY_ROWID_FMT, "", "1", "", table->name);
+    else
+    #endif
+    sql = sql_build_select_row_by_pk(table->context, table->name, table->schema);
+    if (!sql) return NULL;
+    DEBUG_SQL("real_row_lookup_stmt: %s", sql);
+    databasevm_prepare(table->context, sql, (void **)&table->real_row_lookup_stmt, DBFLAG_PERSISTENT);
+    cloudsync_memory_free(sql);
+    return table->real_row_lookup_stmt;
+}
     
 cloudsync_table_context *table_create (cloudsync_context *data, const char *name, table_algo algo) {
     DEBUG_DBFUNCTION("table_create %s", name);
@@ -890,6 +908,7 @@ void table_free (cloudsync_table_context *table) {
     if (table->meta_site_id_stmt) databasevm_finalize(table->meta_site_id_stmt);
     
     if (table->real_col_values_stmt) databasevm_finalize(table->real_col_values_stmt);
+    if (table->real_row_lookup_stmt) databasevm_finalize(table->real_row_lookup_stmt);
     if (table->real_merge_delete_stmt) databasevm_finalize(table->real_merge_delete_stmt);
     if (table->real_merge_sentinel_stmt) databasevm_finalize(table->real_merge_sentinel_stmt);
     

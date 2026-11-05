@@ -167,6 +167,13 @@ const char * const SQL_BUILD_SELECT_COLS_BY_PK_FMT =
     ") "
     "SELECT 'SELECT %s%w%s FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'";
 
+const char * const SQL_BUILD_SELECT_ROW_BY_PK_FMT =
+    "WITH pk_where AS ("
+    "SELECT group_concat('\"' || format('%%w', name) || '\"', '=? AND ') || '=?' AS pk_clause "
+    "FROM pragma_table_info('%q') WHERE pk>0 ORDER BY pk"
+    ") "
+    "SELECT 'SELECT 1 FROM \"%w\" WHERE ' || (SELECT pk_clause FROM pk_where) || ';'";
+
 const char * const SQL_CLOUDSYNC_ROW_EXISTS_BY_PK =
     "SELECT EXISTS(SELECT 1 FROM \"%w\" WHERE pk = ? LIMIT 1);";
 

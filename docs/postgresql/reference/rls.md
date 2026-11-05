@@ -21,6 +21,10 @@ When RLS denies a write, `cloudsync_payload_apply` stops at that change and rais
 
 Once the policy allows the rows (or the rows it depends on have been applied), deliver the same payload again: it applies in full. A policy that depends on rows later in the same payload, such as a membership row that grants access to the rows before it, is not retried within the payload.
 
+### Deleted rows
+
+A delete syncs as a delete marker that carries the row's primary key, and delete markers are delivered to every device that syncs the table, including under row-level security. If primary-key values are themselves sensitive, use opaque identifiers (UUID/ULID) or soft deletes (for example a `deleted_at` column).
+
 ## Quick Setup
 
 Given a table with an ownership column (`user_id`):

@@ -106,6 +106,7 @@ Before initialization, `cloudsync_init` performs schema sanity checks to ensure 
 When designing your database schema for SQLite Sync, follow these essential requirements:
 
 - **Primary Keys**: Use TEXT primary keys with `cloudsync_uuid()` for globally unique identifiers. Avoid auto-incrementing integers.
+- **Deleted Rows**: A delete syncs as a delete marker that carries the row's primary key, and delete markers are delivered to every device that syncs the table, including under row-level security. If primary-key values are themselves sensitive, use opaque identifiers (UUID/ULID) or soft deletes (for example a `deleted_at` column).
 - **Column Constraints**: All NOT NULL columns (except primary keys) must have DEFAULT values to prevent synchronization errors.
 - **UNIQUE Constraints**: In multi-tenant scenarios, use composite UNIQUE constraints (e.g., `UNIQUE(tenant_id, email)`) instead of global uniqueness.
 - **Foreign Key Compatibility**: Be aware of potential conflicts during CRDT merge operations and RLS policy interactions.

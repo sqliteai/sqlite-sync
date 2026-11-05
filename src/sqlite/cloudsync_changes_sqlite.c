@@ -85,7 +85,7 @@ struct cloudsync_changes_scan {
     char                    *value_key; // col_name, NUL, pk
     size_t                  value_keylen;
     size_t                  value_keycap;
-    sqlite3_value           *value;
+    sqlite3_value           *value;     // NULL for a NULL value
 };
 
 #if CLOUDSYNC_UNITTEST
@@ -222,7 +222,8 @@ char *vtab_build_changes_sql (cloudsync_context *data, const char *idxs) {
     "        ''' || \"table_name_literal\" || ''' AS tbl, "
     "        t1.pk AS pk, "
     "        t1.col_name AS col_name, "
-    "        cloudsync_col_value(''' || \"table_name_literal\" || ''', t1.col_name, t1.pk, " CHANGES_SCAN_PARAM ") AS col_value, "
+    "        CASE WHEN t1.col_name = ''" CLOUDSYNC_TOMBSTONE_VALUE "'' AND t1.col_version % 2 = 0 THEN NULL "
+    "        ELSE cloudsync_col_value(''' || \"table_name_literal\" || ''', t1.col_name, t1.pk, " CHANGES_SCAN_PARAM ") END AS col_value, "
     "        t1.col_version AS col_version, "
     "        t1.db_version AS db_version, "
     "        site_tbl.site_id AS site_id, "
@@ -511,12 +512,13 @@ static void changes_scan_drop_value (cloudsync_changes_scan *scan) {
 // cloudsync_col_value once for the WHERE and again for the result column. The second
 // call for the same table, column and pk takes the value the first one read.
 bool changes_scan_take_value (cloudsync_changes_scan *scan, cloudsync_table_context *table, const char *col_name, const void *pk, int pklen, sqlite3_context *context) {
-    if (!scan->value || scan->value_table != table) return false;
+    if (!scan->value_table || scan->value_table != table) return false;
     size_t collen = strlen(col_name) + 1;
     if (scan->value_keylen != collen + (size_t)pklen) return false;
     if (memcmp(scan->value_key, col_name, collen) != 0) return false;
     if (pklen > 0 && memcmp(scan->value_key + collen, pk, (size_t)pklen) != 0) return false;
-    sqlite3_result_value(context, scan->value);
+    if (scan->value) sqlite3_result_value(context, scan->value);
+    else sqlite3_result_null(context);
     changes_scan_drop_value(scan);
     return true;
 }
@@ -534,8 +536,8 @@ void changes_scan_keep_value (cloudsync_changes_scan *scan, cloudsync_table_cont
     memcpy(scan->value_key, col_name, collen);
     if (pklen > 0) memcpy(scan->value_key + collen, pk, (size_t)pklen);
     scan->value_keylen = keylen;
-    scan->value = sqlite3_value_dup(value);
-    if (scan->value) scan->value_table = table;
+    scan->value = (value) ? sqlite3_value_dup(value) : NULL;
+    if (scan->value || !value) scan->value_table = table;
 }
 
 static void changes_scan_reset (cloudsync_changes_scan *scan) {

@@ -46,6 +46,8 @@ CREATE TABLE users (
 );
 ```
 
+A delete syncs as a delete marker that carries the row's primary key, and delete markers are delivered to every device that syncs the table, including under row-level security. If primary-key values are themselves sensitive, use opaque identifiers (UUID/ULID) or soft deletes (for example a `deleted_at` column).
+
 For more schema guidelines, see [Database Schema Recommendations](./schema.md). If you are running a self-hosted backend, also see the PostgreSQL/Supabase [RLS Reference](./postgresql/reference/rls.md).
 
 For full RLS documentation, see the [SQLite Cloud RLS documentation](https://docs.sqlitecloud.io/docs/rls).

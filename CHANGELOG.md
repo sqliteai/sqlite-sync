@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Fixed a data race between connections** in the fractional-indexing allocator.
 - **`cloudsync_changes` accepts `rowid` filters**, and tables that only look like metadata tables are no longer treated as such.
 - **PostgreSQL: trigger and function names longer than 63 bytes no longer collide.**
+- **Hardened row-level security checks when reading changes.**
 - **API.md: `send.serverVersion` is documented as the accepted version**, not the confirmed one. Only `send.status == "synced"` means every sent change is confirmed.
 
 ## [1.2.0] - 2026-09-28

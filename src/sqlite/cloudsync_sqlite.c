@@ -289,6 +289,28 @@ void dbsync_is_sync (sqlite3_context *context, int argc, sqlite3_value **argv) {
 int64_t col_value_lookup_count = 0;
 #endif
 
+static void dbsync_block_value (sqlite3_context *context, cloudsync_context *data, cloudsync_table_context *table, cloudsync_changes_scan *scan, const char *col_name, const void *pk, int pklen) {
+    dbvm_t *bvm = table_block_value_read_stmt(table);
+    if (!bvm) {
+        sqlite3_result_null(context);
+        return;
+    }
+    int rc = databasevm_bind_blob(bvm, 1, pk, pklen);
+    if (rc == DBRES_OK) rc = databasevm_bind_text(bvm, 2, col_name, -1);
+    if (rc == DBRES_OK) rc = databasevm_step(bvm);
+    if (rc == SQLITE_ROW) {
+        sqlite3_value *value = database_column_value(bvm, 0);
+        sqlite3_result_value(context, value);
+        if (scan) changes_scan_keep_value(scan, table, col_name, pk, pklen, value);
+    } else if (rc == SQLITE_DONE) {
+        sqlite3_result_null(context);
+        if (scan) changes_scan_keep_value(scan, table, col_name, pk, pklen, NULL);
+    } else {
+        sqlite3_result_error(context, database_errmsg(data), -1);
+    }
+    databasevm_reset(bvm);
+}
+
 void dbsync_col_value (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // DEBUG_FUNCTION("cloudsync_col_value");
     
@@ -304,12 +326,6 @@ void dbsync_col_value (sqlite3_context *context, int argc, sqlite3_value **argv)
         return;
     }
     
-    // check for special tombstone value
-    if (strcmp(col_name, CLOUDSYNC_TOMBSTONE_VALUE) == 0) {
-        sqlite3_result_null(context);
-        return;
-    }
-
     // lookup table
     const char *table_name = (const char *)database_value_text(argv[0]);
     cloudsync_context *data = (cloudsync_context *)sqlite3_user_data(context);
@@ -319,32 +335,11 @@ void dbsync_col_value (sqlite3_context *context, int argc, sqlite3_value **argv)
         return;
     }
 
-    // Block column: if col_name contains \x1F, read from blocks table
-    if (block_is_block_colname(col_name) && table_has_block_cols(table)) {
-        dbvm_t *bvm = table_block_value_read_stmt(table);
-        if (!bvm) {
-            sqlite3_result_null(context);
-            return;
-        }
-        int rc = databasevm_bind_blob(bvm, 1, database_value_blob(argv[2]), database_value_bytes(argv[2]));
-        if (rc != DBRES_OK) { databasevm_reset(bvm); sqlite3_result_error(context, database_errmsg(data), -1); return; }
-        rc = databasevm_bind_text(bvm, 2, col_name, -1);
-        if (rc != DBRES_OK) { databasevm_reset(bvm); sqlite3_result_error(context, database_errmsg(data), -1); return; }
-
-        rc = databasevm_step(bvm);
-        if (rc == SQLITE_ROW) {
-            sqlite3_result_value(context, database_column_value(bvm, 0));
-        } else if (rc == SQLITE_DONE) {
-            sqlite3_result_null(context);
-        } else {
-            sqlite3_result_error(context, database_errmsg(data), -1);
-        }
-        databasevm_reset(bvm);
-        return;
-    }
-
-    // extract the right col_value vm associated to the column name
-    sqlite3_stmt *vm = table_column_lookup(table, col_name, false, NULL);
+    // every change is returned only when the caller can read its base row: the sentinel
+    // (NULL) and block columns (read from the blocks table) check it with a row lookup
+    bool is_sentinel = (strcmp(col_name, CLOUDSYNC_TOMBSTONE_VALUE) == 0);
+    bool is_block = (!is_sentinel && block_is_block_colname(col_name) && table_has_block_cols(table));
+    sqlite3_stmt *vm = (is_sentinel || is_block) ? table_row_lookup_stmt(table) : table_column_lookup(table, col_name, false, NULL);
     if (!vm) {
         sqlite3_result_error(context, "Unable to retrieve column value precompiled statement in clousdsync_colvalue.", -1);
         return;
@@ -375,10 +370,16 @@ void dbsync_col_value (sqlite3_context *context, int argc, sqlite3_value **argv)
         sqlite3_result_text(context, CLOUDSYNC_RLS_RESTRICTED_VALUE, -1, SQLITE_STATIC);
         if (scan) changes_scan_note_hidden(scan, table);
     } else if (rc == SQLITE_ROW) {
-        // store value result
         rc = SQLITE_OK;
-        sqlite3_value *value = database_column_value(vm, 0);
-        sqlite3_result_value(context, value);
+        if (is_block) {
+            databasevm_reset(vm);
+            dbsync_block_value(context, data, table, scan, col_name, pk, pklen);
+            return;
+        }
+        // store value result
+        sqlite3_value *value = (is_sentinel) ? NULL : database_column_value(vm, 0);
+        if (value) sqlite3_result_value(context, value);
+        else sqlite3_result_null(context);
         if (scan) changes_scan_keep_value(scan, table, col_name, pk, pklen, value);
     }
 

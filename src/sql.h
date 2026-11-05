@@ -46,6 +46,7 @@ extern const char * const SQL_BUILD_INSERT_PK_IGNORE;
 extern const char * const SQL_BUILD_UPSERT_PK_AND_COL;
 extern const char * const SQL_SELECT_COLS_BY_ROWID_FMT;
 extern const char * const SQL_BUILD_SELECT_COLS_BY_PK_FMT;
+extern const char * const SQL_BUILD_SELECT_ROW_BY_PK_FMT;
 extern const char * const SQL_CLOUDSYNC_ROW_EXISTS_BY_PK;
 extern const char * const SQL_CLOUDSYNC_UPDATE_COL_BUMP_VERSION;
 extern const char * const SQL_CLOUDSYNC_UPSERT_COL_INIT_OR_BUMP_VERSION;

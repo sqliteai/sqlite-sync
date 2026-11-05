@@ -210,6 +210,7 @@ bool table_enabled (cloudsync_table_context *table);
 void table_set_enabled (cloudsync_table_context *table, bool value);
 bool table_add_to_context (cloudsync_context *data, table_algo algo, const char *table_name);
 bool table_pk_exists (cloudsync_table_context *table, const char *value, size_t len);
+dbvm_t *table_row_lookup_stmt (cloudsync_table_context *table);
 int table_count_cols (cloudsync_table_context *table);
 int table_count_pks (cloudsync_table_context *table);
 const char *table_colname (cloudsync_table_context *table, int index);

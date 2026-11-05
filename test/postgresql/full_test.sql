@@ -82,6 +82,7 @@
 \ir 72_rls_isolation.sql
 \ir 73_payload_chunks_null_values.sql
 \ir 74_review_followup.sql
+\ir 75_changes_visibility.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'
