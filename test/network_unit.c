@@ -1281,24 +1281,24 @@ static bool test_response_limits(void) {
         NETWORK_RESULT r = network_test_receive(url, zero_terminated);
         ok = ok && expect(r.code == CLOUDSYNC_NETWORK_ERROR && r.buffer && strcmp(r.buffer, "upstream failure") == 0 &&
                           r.blen == strlen("upstream failure"), "an error body is a bounded C string", r.buffer);
-        if (r.buffer) free(r.buffer);
+        if (r.buffer) cloudsync_memory_free(r.buffer);
     }
 
     snprintf(url, sizeof(url), "http://127.0.0.1:%u/big60000", http_port);
     NETWORK_RESULT r = network_test_receive(url, false);
     ok = ok && expect(r.code == CLOUDSYNC_NETWORK_BUFFER && r.blen == 60000 && r.buffer && r.buffer[60000] == 0, "a response under the cap is kept", NULL);
-    if (r.buffer) free(r.buffer);
+    if (r.buffer) cloudsync_memory_free(r.buffer);
 
     snprintf(url, sizeof(url), "http://127.0.0.1:%u/big200000", http_port);
     r = network_test_receive(url, false);
     ok = ok && expect(r.code == CLOUDSYNC_NETWORK_ERROR && r.http_status == 0, "a response past the cap aborts the transfer", NULL);
-    if (r.buffer) free(r.buffer);
+    if (r.buffer) cloudsync_memory_free(r.buffer);
 
     // a redirect is not a success and is not followed
     snprintf(url, sizeof(url), "http://127.0.0.1:%u/redir", http_port);
     r = network_test_receive(url, true);
     ok = ok && expect(r.code == CLOUDSYNC_NETWORK_ERROR && r.http_status == 302, "a 3xx answer is not a success", NULL);
-    if (r.buffer) free(r.buffer);
+    if (r.buffer) cloudsync_memory_free(r.buffer);
 
     http_shutdown(thread);
     return ok;
@@ -1335,10 +1335,10 @@ static bool test_network_robustness(void) {
     // strict JSON: a truncated or trailing-garbage document yields nothing
     char *v = network_test_extract_string("{\"a\":\"x\"}", "a");
     ok = ok && expect(v && strcmp(v, "x") == 0, "valid JSON is read", v);
-    free(v);
+    cloudsync_memory_free(v);
     v = network_test_extract_string("{\"a\":\"x\" garbage", "a");
     ok = ok && expect(v == NULL, "malformed JSON is rejected", v);
-    free(v);
+    cloudsync_memory_free(v);
 
     stream_close(live);
     stream_close(other);
