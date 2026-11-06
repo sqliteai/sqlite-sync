@@ -83,6 +83,7 @@
 \ir 73_payload_chunks_null_values.sql
 \ir 74_review_followup.sql
 \ir 75_changes_visibility.sql
+\ir 76_block_columns_sync_role.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

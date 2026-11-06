@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Block columns work for roles that can't create tables.** A new session whose first cloudsync call ran as such a role (for example a sync role on PostgreSQL or a token user on SQLite Cloud) failed every block write, because loading the column ran `CREATE TABLE IF NOT EXISTS` on the existing blocks table. The blocks table is now created only when it is missing.
+
 ## [1.2.1] - 2026-11-05
 
 ### Added
