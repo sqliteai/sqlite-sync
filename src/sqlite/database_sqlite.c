@@ -337,6 +337,11 @@ char *database_build_blocks_ref (const char *schema, const char *table_name) {
     return cloudsync_memory_mprintf("%s_cloudsync_blocks", table_name);
 }
 
+// blocks_ref is the unquoted table name in SQLite
+bool database_blocks_table_exists (cloudsync_context *data, const char *blocks_ref) {
+    return database_table_exists(data, blocks_ref, NULL);
+}
+
 // SQLite version: schema parameter unused (SQLite has no schemas).
 char *sql_build_delete_cols_not_in_schema_query (const char *schema, const char *table_name, const char *meta_ref, const char *pkcol) {
     UNUSED_PARAMETER(schema);

@@ -9908,6 +9908,119 @@ cleanup:
     return result;
 }
 
+// Denies every schema change, as SQLite Cloud does for a sync user.
+static int deny_ddl_authorizer(void *pUserData, int action, const char *zArg1,
+                               const char *zArg2, const char *zDbName, const char *zTrigger) {
+    (void)pUserData; (void)zArg1; (void)zArg2; (void)zDbName; (void)zTrigger;
+    switch (action) {
+        case SQLITE_CREATE_INDEX: case SQLITE_CREATE_TABLE: case SQLITE_CREATE_TEMP_INDEX:
+        case SQLITE_CREATE_TEMP_TABLE: case SQLITE_CREATE_TEMP_TRIGGER: case SQLITE_CREATE_TEMP_VIEW:
+        case SQLITE_CREATE_TRIGGER: case SQLITE_CREATE_VIEW: case SQLITE_CREATE_VTABLE:
+        case SQLITE_DROP_INDEX: case SQLITE_DROP_TABLE: case SQLITE_DROP_TEMP_INDEX:
+        case SQLITE_DROP_TEMP_TABLE: case SQLITE_DROP_TEMP_TRIGGER: case SQLITE_DROP_TEMP_VIEW:
+        case SQLITE_DROP_TRIGGER: case SQLITE_DROP_VIEW: case SQLITE_DROP_VTABLE:
+        case SQLITE_ALTER_TABLE:
+            return SQLITE_DENY;
+        default:
+            return SQLITE_OK;
+    }
+}
+
+static sqlite3 *block_reopen_without_create (const char *dbpath) {
+    sqlite3 *db = NULL;
+    if (sqlite3_open(dbpath, &db) != SQLITE_OK) { sqlite3_close(db); return NULL; }
+    sqlite3_set_authorizer(db, deny_ddl_authorizer, NULL);
+    sqlite3_cloudsync_init(db, NULL, NULL);
+    return db;
+}
+
+// A connection that may not change the schema (as for a sync user on SQLite Cloud) loads a
+// block column without DDL, and a failed setup can be retried in the same connection.
+bool do_test_block_lww_load_without_create(bool cleanup_databases) {
+    sqlite3 *db = NULL;
+    bool result = false;
+    char dbpath[256];
+    unsigned int suffix = 0;
+    sqlite3_randomness(sizeof(suffix), &suffix);
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blocknoddl-%ld-%08x.sqlite", test_directory, (long)time(NULL), suffix);
+
+    int rc = sqlite3_open(dbpath, &db);
+    if (rc != SQLITE_OK) return false;
+    sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+    sqlite3_cloudsync_init(db, NULL, NULL);
+    rc = sqlite3_exec(db, "CREATE TABLE docs (id TEXT PRIMARY KEY NOT NULL, body TEXT);"
+                          "SELECT cloudsync_init('docs');"
+                          "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');"
+                          "INSERT INTO docs (id, body) VALUES ('d1', 'a\nb\nc');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_load_without_create: setup failed: %s\n", sqlite3_errmsg(db)); goto cleanup; }
+    sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+    sqlite3_close(db);
+
+    // 1. The blocks table exists: writes work although every schema change is denied.
+    db = block_reopen_without_create(dbpath);
+    if (!db) goto cleanup;
+    rc = sqlite3_exec(db, "INSERT INTO docs (id, body) VALUES ('d2', 'x\ny');"
+                          "UPDATE docs SET body = 'a\nB\nc\nd' WHERE id = 'd1';", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_load_without_create: write failed: %s\n", sqlite3_errmsg(db)); goto cleanup; }
+    int64_t blocks = do_select_int(db, "SELECT count(*) FROM docs_cloudsync_blocks;");
+    if (blocks != 6) { printf("block_load_without_create: expected 6 blocks, got %" PRId64 "\n", blocks); goto cleanup; }
+
+    // 2. The blocks table is missing: loading doesn't recreate it and the write reports why.
+    sqlite3_set_authorizer(db, NULL, NULL);
+    sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+    sqlite3_close(db);
+    db = NULL;
+    rc = sqlite3_open(dbpath, &db);
+    if (rc == SQLITE_OK) rc = sqlite3_exec(db, "DROP TABLE docs_cloudsync_blocks;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_load_without_create: drop failed: %s\n", sqlite3_errmsg(db)); goto cleanup; }
+    sqlite3_close(db);
+    db = block_reopen_without_create(dbpath);
+    if (!db) goto cleanup;
+    rc = sqlite3_exec(db, "INSERT INTO docs (id, body) VALUES ('d3', 'p\nq');", NULL, NULL, NULL);
+    if (rc == SQLITE_OK || !strstr(sqlite3_errmsg(db), "blocks table of \"docs\" is missing")) {
+        printf("block_load_without_create: expected a 'blocks table is missing' write error, got: %s\n", rc == SQLITE_OK ? "success" : sqlite3_errmsg(db));
+        goto cleanup;
+    }
+    sqlite3_set_authorizer(db, NULL, NULL);
+
+    // 3. Cleanup drops a blocks table this session never set up.
+    rc = sqlite3_exec(db, "CREATE TABLE docs_cloudsync_blocks (pk BLOB NOT NULL, col_name TEXT NOT NULL, col_value BLOB, PRIMARY KEY (pk, col_name)) WITHOUT ROWID;"
+                          "SELECT cloudsync_cleanup('docs');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_load_without_create: cleanup failed: %s\n", sqlite3_errmsg(db)); goto cleanup; }
+    if (do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE name = 'docs_cloudsync_blocks';") != 0) {
+        printf("block_load_without_create: cleanup left the blocks table behind\n");
+        goto cleanup;
+    }
+
+    // 4. Setting the table and column up again works in the same connection.
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('docs');"
+                          "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');"
+                          "INSERT INTO docs (id, body) VALUES ('d3', 'p\nq');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_load_without_create: retry failed: %s\n", sqlite3_errmsg(db)); goto cleanup; }
+    char *val = do_select_text(db, "SELECT body FROM docs WHERE id = 'd3';");
+    bool ok = val && strcmp(val, "p\nq") == 0;
+    if (val) sqlite3_free(val);
+    if (!ok) { printf("block_load_without_create: unexpected body after retry\n"); goto cleanup; }
+
+    result = true;
+
+cleanup:
+    if (db) {
+        sqlite3_set_authorizer(db, NULL, NULL);
+        sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+        sqlite3_close(db);
+    }
+    if (cleanup_databases) {
+        file_delete_internal(dbpath);
+        char walpath[280];
+        snprintf(walpath, sizeof(walpath), "%s-wal", dbpath);
+        file_delete_internal(walpath);
+        snprintf(walpath, sizeof(walpath), "%s-shm", dbpath);
+        file_delete_internal(walpath);
+    }
+    return result;
+}
+
 bool do_test_block_lww_insert(int nclients, bool print_result, bool cleanup_databases) {
     // Test: INSERT into a table with a block column properly splits text into blocks
     sqlite3 *db[2] = {NULL, NULL};
@@ -14997,6 +15110,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Uninit Error Messages:", do_test_uninit_error_messages());
     result += test_report("Site ID Resolution:", do_test_site_id_resolution(print_result, cleanup_databases));
     result += test_report("Block LWW Existing Data:", do_test_block_lww_existing_data(cleanup_databases));
+    result += test_report("Block LWW Load No CREATE:", do_test_block_lww_load_without_create(cleanup_databases));
     result += test_report("Block Column Reload:", do_test_block_column_reload(cleanup_databases));
     result += test_report("Block LWW Double Tombstone:", do_test_block_lww_double_tombstone(print_result, cleanup_databases));
     result += test_report("Block LWW UPSERT Tombstone Bug:", do_test_block_lww_upsert_tombstone_bug(2, print_result, cleanup_databases));
