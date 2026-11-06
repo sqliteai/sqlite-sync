@@ -9965,8 +9965,7 @@ bool do_test_block_lww_load_without_create(bool cleanup_databases) {
     int64_t blocks = do_select_int(db, "SELECT count(*) FROM docs_cloudsync_blocks;");
     if (blocks != 6) { printf("block_load_without_create: expected 6 blocks, got %" PRId64 "\n", blocks); goto cleanup; }
 
-    // 2. The blocks table is missing: loading doesn't recreate it, the write reports why,
-    //    and setting the column up again works in the same connection.
+    // 2. The blocks table is missing: loading doesn't recreate it and the write reports why.
     sqlite3_set_authorizer(db, NULL, NULL);
     sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
     sqlite3_close(db);
@@ -9983,7 +9982,19 @@ bool do_test_block_lww_load_without_create(bool cleanup_databases) {
         goto cleanup;
     }
     sqlite3_set_authorizer(db, NULL, NULL);
-    rc = sqlite3_exec(db, "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');"
+
+    // 3. Cleanup drops a blocks table this session never set up.
+    rc = sqlite3_exec(db, "CREATE TABLE docs_cloudsync_blocks (pk BLOB NOT NULL, col_name TEXT NOT NULL, col_value BLOB, PRIMARY KEY (pk, col_name)) WITHOUT ROWID;"
+                          "SELECT cloudsync_cleanup('docs');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { printf("block_load_without_create: cleanup failed: %s\n", sqlite3_errmsg(db)); goto cleanup; }
+    if (do_select_int(db, "SELECT count(*) FROM sqlite_master WHERE name = 'docs_cloudsync_blocks';") != 0) {
+        printf("block_load_without_create: cleanup left the blocks table behind\n");
+        goto cleanup;
+    }
+
+    // 4. Setting the table and column up again works in the same connection.
+    rc = sqlite3_exec(db, "SELECT cloudsync_init('docs');"
+                          "SELECT cloudsync_set_column('docs', 'body', 'algo', 'block');"
                           "INSERT INTO docs (id, body) VALUES ('d3', 'p\nq');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) { printf("block_load_without_create: retry failed: %s\n", sqlite3_errmsg(db)); goto cleanup; }
     char *val = do_select_text(db, "SELECT body FROM docs WHERE id = 'd3';");

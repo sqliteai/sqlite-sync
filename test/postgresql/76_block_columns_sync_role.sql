@@ -49,6 +49,7 @@ SELECT has_schema_privilege('test_block_sync_role', 'public', 'CREATE') AS role_
 \set peer1_body ''
 \set block_changes 0
 \set long_body ''
+\set long_block_changes 0
 \connect cloudsync_test_76_dst
 \ir helper_psql_conn_setup.sql
 SET ROLE test_block_sync_role;
@@ -59,14 +60,18 @@ INSERT INTO block_docs_with_a_long_name_to_test_63_byte_limit VALUES ('l1', E'x\
 SELECT body AS d1_body FROM docs WHERE id = 'd1' \gset
 SELECT body AS long_body FROM block_docs_with_a_long_name_to_test_63_byte_limit WHERE id = 'l1' \gset
 SELECT body AS peer1_body FROM docs WHERE id = 'peer1' \gset
-SELECT count(*) AS block_changes FROM cloudsync_changes WHERE col_name LIKE 'body' || chr(31) || '%' \gset
+SELECT count(*) FILTER (WHERE tbl = 'docs') AS block_changes,
+       count(*) FILTER (WHERE tbl = 'block_docs_with_a_long_name_to_test_63_byte_limit'
+                          AND col_value IN (cloudsync_encode_value('x'::text), cloudsync_encode_value('y'::text))) AS long_block_changes
+FROM cloudsync_changes WHERE col_name LIKE 'body' || chr(31) || '%' \gset
 RESET ROLE;
 
 SELECT (NOT :'role_can_create'::boolean
         AND :'d1_body' = E'a\nB\nc\nd'
         AND :'peer1_body' = E'p1\np2\np3'
         AND :'long_body' = E'x\ny'
-        AND :block_changes::int > 0) AS block_role_ok \gset
+        AND :block_changes::int > 0
+        AND :long_block_changes::int = 2) AS block_role_ok \gset
 \if :block_role_ok
 \echo [PASS] (:testid) a role without CREATE writes, applies and reads block columns in a new session
 \else

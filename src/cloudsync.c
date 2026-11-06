@@ -5247,11 +5247,17 @@ int cloudsync_cleanup_internal (cloudsync_context *data, cloudsync_table_context
         return cloudsync_set_error(data, buffer, rc);
     }
 
-    // drop blocks table if this table has block LWW columns
-    if (table->blocks_ref) {
-        sql = cloudsync_memory_mprintf(SQL_DROP_CLOUDSYNC_TABLE, table->blocks_ref);
-        rc = database_exec(data, sql);
-        cloudsync_memory_free(sql);
+    // drop blocks table if this table has block LWW columns, also when this session
+    // could not set it up (blocks_ref unset)
+    char *blocks_ref = table->blocks_ref ? NULL : database_build_blocks_ref(table->schema, table->name);
+    bool drop_blocks = table->blocks_ref || (blocks_ref && database_blocks_table_exists(data, blocks_ref));
+    if (drop_blocks) {
+        sql = cloudsync_memory_mprintf(SQL_DROP_CLOUDSYNC_TABLE, table->blocks_ref ? table->blocks_ref : blocks_ref);
+        rc = sql ? database_exec(data, sql) : DBRES_NOMEM;
+        if (sql) cloudsync_memory_free(sql);
+    }
+    if (blocks_ref) cloudsync_memory_free(blocks_ref);
+    if (drop_blocks) {
         if (rc != DBRES_OK) {
             char buffer[1024];
             snprintf(buffer, sizeof(buffer), "Unable to drop blocks table %s_cloudsync_blocks in cloudsync_cleanup", table_name);
