@@ -50,7 +50,7 @@ function generatePackageJson(version) {
       'database-sync',
     ],
     author: 'SQLite AI',
-    license: 'SEE LICENSE IN LICENSE.md',
+    license: 'Apache-2.0',
     repository: {
       type: 'git',
       url: 'https://github.com/sqliteai/sqlite-sync.git',
@@ -384,7 +384,7 @@ console.log('SQLite Sync Version:', result.rows[0].version);
 
 ## License
 
-See [LICENSE.md](./LICENSE.md)
+See [LICENSE](./LICENSE)
 `;
 }
 
@@ -409,10 +409,10 @@ function main() {
     process.exit(1);
   }
 
-  // Find LICENSE.md (should be in repo root)
-  const licensePath = path.resolve(__dirname, '../../LICENSE.md');
+  // Find LICENSE (should be in repo root)
+  const licensePath = path.resolve(__dirname, '../../LICENSE');
   if (!fs.existsSync(licensePath)) {
-    console.error(`Error: LICENSE.md not found at ${licensePath}`);
+    console.error(`Error: LICENSE not found at ${licensePath}`);
     process.exit(1);
   }
 
@@ -453,9 +453,9 @@ function main() {
   fs.writeFileSync(path.join(outputDir, 'README.md'), generateReadme(version));
   console.log('  ✓ README.md');
 
-  // LICENSE.md
-  fs.copyFileSync(licensePath, path.join(outputDir, 'LICENSE.md'));
-  console.log('  ✓ LICENSE.md');
+  // LICENSE
+  fs.copyFileSync(licensePath, path.join(outputDir, 'LICENSE'));
+  console.log('  ✓ LICENSE');
 
   // Copy iOS xcframework
   console.log('\nCopying iOS binaries...');

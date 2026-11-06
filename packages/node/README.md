@@ -1,7 +1,7 @@
 # @sqliteai/sqlite-sync
 
 [![npm version](https://badge.fury.io/js/@sqliteai%2Fsqlite-sync.svg)](https://www.npmjs.com/package/@sqliteai/sqlite-sync)
-[![License](https://img.shields.io/badge/license-Elastic%202.0-blue.svg)](LICENSE.md)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![sqlite-sync coverage](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fsqliteai.github.io%2Fsqlite-sync%2F&search=%3Ctd%20class%3D%22headerItem%22%3EFunctions%3A%3C%5C%2Ftd%3E%5Cs*%3Ctd%20class%3D%22headerCovTableEntryHi%22%3E(%5B%5Cd.%5D%2B)%26nbsp%3B%25%3C%5C%2Ftd%3E&replace=%241%25&label=coverage&labelColor=rgb(85%2C%2085%2C%2085)%3B&color=rgb(167%2C%20252%2C%20157)%3B&link=https%3A%2F%2Fsqliteai.github.io%2Fsqlite-sync%2F)](https://sqliteai.github.io/sqlite-sync/)
 
 > SQLite Sync extension packaged for Node.js
@@ -144,7 +144,7 @@ Error thrown when the SQLite Sync extension cannot be found for the current plat
 
 ## License
 
-This project is licensed under the [Elastic License 2.0](LICENSE.md).
+This project is licensed under the [Apache License 2.0](LICENSE).
 
 For production or managed service use, please [contact SQLite Cloud, Inc](mailto:info@sqlitecloud.io) for a commercial license.
 

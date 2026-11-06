@@ -42,7 +42,7 @@ expo-package/
 │       ├── armeabi-v7a/cloudsync.so
 │       └── x86_64/cloudsync.so
 ├── README.md
-└── LICENSE.md
+└── LICENSE
 ```
 
 ## Testing Locally
