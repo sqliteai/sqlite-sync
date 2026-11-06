@@ -9908,27 +9908,41 @@ cleanup:
     return result;
 }
 
-static int deny_create_table_authorizer(void *pUserData, int action, const char *zArg1,
-                                        const char *zArg2, const char *zDbName, const char *zTrigger) {
+// Denies every schema change, as SQLite Cloud does for a sync user.
+static int deny_ddl_authorizer(void *pUserData, int action, const char *zArg1,
+                               const char *zArg2, const char *zDbName, const char *zTrigger) {
     (void)pUserData; (void)zArg1; (void)zArg2; (void)zDbName; (void)zTrigger;
-    return (action == SQLITE_CREATE_TABLE) ? SQLITE_DENY : SQLITE_OK;
+    switch (action) {
+        case SQLITE_CREATE_INDEX: case SQLITE_CREATE_TABLE: case SQLITE_CREATE_TEMP_INDEX:
+        case SQLITE_CREATE_TEMP_TABLE: case SQLITE_CREATE_TEMP_TRIGGER: case SQLITE_CREATE_TEMP_VIEW:
+        case SQLITE_CREATE_TRIGGER: case SQLITE_CREATE_VIEW: case SQLITE_CREATE_VTABLE:
+        case SQLITE_DROP_INDEX: case SQLITE_DROP_TABLE: case SQLITE_DROP_TEMP_INDEX:
+        case SQLITE_DROP_TEMP_TABLE: case SQLITE_DROP_TEMP_TRIGGER: case SQLITE_DROP_TEMP_VIEW:
+        case SQLITE_DROP_TRIGGER: case SQLITE_DROP_VIEW: case SQLITE_DROP_VTABLE:
+        case SQLITE_ALTER_TABLE:
+            return SQLITE_DENY;
+        default:
+            return SQLITE_OK;
+    }
 }
 
 static sqlite3 *block_reopen_without_create (const char *dbpath) {
     sqlite3 *db = NULL;
     if (sqlite3_open(dbpath, &db) != SQLITE_OK) { sqlite3_close(db); return NULL; }
-    sqlite3_set_authorizer(db, deny_create_table_authorizer, NULL);
+    sqlite3_set_authorizer(db, deny_ddl_authorizer, NULL);
     sqlite3_cloudsync_init(db, NULL, NULL);
     return db;
 }
 
-// A connection that may not create tables (as for a sync user on SQLite Cloud) loads a
+// A connection that may not change the schema (as for a sync user on SQLite Cloud) loads a
 // block column without DDL, and a failed setup can be retried in the same connection.
 bool do_test_block_lww_load_without_create(bool cleanup_databases) {
     sqlite3 *db = NULL;
     bool result = false;
     char dbpath[256];
-    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blocknocreate-%ld.sqlite", test_directory, (long)time(NULL));
+    unsigned int suffix = 0;
+    sqlite3_randomness(sizeof(suffix), &suffix);
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-blocknoddl-%ld-%08x.sqlite", test_directory, (long)time(NULL), suffix);
 
     int rc = sqlite3_open(dbpath, &db);
     if (rc != SQLITE_OK) return false;
@@ -9942,7 +9956,7 @@ bool do_test_block_lww_load_without_create(bool cleanup_databases) {
     sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
     sqlite3_close(db);
 
-    // 1. The blocks table exists: writes work although CREATE TABLE is denied.
+    // 1. The blocks table exists: writes work although every schema change is denied.
     db = block_reopen_without_create(dbpath);
     if (!db) goto cleanup;
     rc = sqlite3_exec(db, "INSERT INTO docs (id, body) VALUES ('d2', 'x\ny');"
@@ -9951,8 +9965,8 @@ bool do_test_block_lww_load_without_create(bool cleanup_databases) {
     int64_t blocks = do_select_int(db, "SELECT count(*) FROM docs_cloudsync_blocks;");
     if (blocks != 6) { printf("block_load_without_create: expected 6 blocks, got %" PRId64 "\n", blocks); goto cleanup; }
 
-    // 2. The blocks table is missing and can't be created: the write reports why, and
-    //    setting the column up again once creation is allowed works in the same connection.
+    // 2. The blocks table is missing: loading doesn't recreate it, the write reports why,
+    //    and setting the column up again works in the same connection.
     sqlite3_set_authorizer(db, NULL, NULL);
     sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
     sqlite3_close(db);
@@ -9964,8 +9978,8 @@ bool do_test_block_lww_load_without_create(bool cleanup_databases) {
     db = block_reopen_without_create(dbpath);
     if (!db) goto cleanup;
     rc = sqlite3_exec(db, "INSERT INTO docs (id, body) VALUES ('d3', 'p\nq');", NULL, NULL, NULL);
-    if (rc == SQLITE_OK || !strstr(sqlite3_errmsg(db), "not authorized")) {
-        printf("block_load_without_create: expected a 'not authorized' write error, got: %s\n", rc == SQLITE_OK ? "success" : sqlite3_errmsg(db));
+    if (rc == SQLITE_OK || !strstr(sqlite3_errmsg(db), "blocks table of \"docs\" is missing")) {
+        printf("block_load_without_create: expected a 'blocks table is missing' write error, got: %s\n", rc == SQLITE_OK ? "success" : sqlite3_errmsg(db));
         goto cleanup;
     }
     sqlite3_set_authorizer(db, NULL, NULL);

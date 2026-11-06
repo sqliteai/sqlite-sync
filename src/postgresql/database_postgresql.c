@@ -955,6 +955,37 @@ static bool database_system_exists (cloudsync_context *data, const char *name, c
       return exists;
   }
 
+// Resolves blocks_ref as the block statements do: identifiers cut at 63 bytes, and an
+// unqualified name through search_path.
+bool database_blocks_table_exists (cloudsync_context *data, const char *blocks_ref) {
+    if (!blocks_ref) return false;
+    bool exists = false;
+    Datum datum_ref = CStringGetTextDatum(blocks_ref);
+    MemoryContext oldcontext = CurrentMemoryContext;
+    PG_TRY();
+    {
+        Oid argtypes[1] = {TEXTOID};
+        Datum values[1] = {datum_ref};
+        char nulls[1] = {' '};
+        int rc = SPI_execute_with_args("SELECT 1 WHERE to_regclass($1) IS NOT NULL", 1, argtypes, values, nulls, true, 0);
+        exists = (rc >= 0 && SPI_processed > 0);
+        if (SPI_tuptable) SPI_freetuptable(SPI_tuptable);
+    }
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(oldcontext);
+        ErrorData *edata = CopyErrorData();
+        cloudsync_set_error(data, edata->message, map_sqlerrcode(edata->sqlerrcode));
+        cloudsync_set_sqlstate(data, edata->sqlerrcode);
+        FreeErrorData(edata);
+        FlushErrorState();
+        exists = false;
+    }
+    PG_END_TRY();
+    pfree(DatumGetPointer(datum_ref));
+    return exists;
+}
+
 // MARK: - GENERAL -
 
 int database_exec (cloudsync_context *data, const char *sql) {

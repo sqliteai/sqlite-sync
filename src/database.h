@@ -168,6 +168,7 @@ char *database_table_schema(const char *table_name);
 char *database_build_meta_ref(const char *schema, const char *table_name);
 char *database_build_base_ref(const char *schema, const char *table_name);
 char *database_build_blocks_ref(const char *schema, const char *table_name);
+bool database_blocks_table_exists(cloudsync_context *data, const char *blocks_ref);
 
 // OPAQUE STRUCT used by pk_context functions
 typedef struct cloudsync_pk_decode_bind_context cloudsync_pk_decode_bind_context;

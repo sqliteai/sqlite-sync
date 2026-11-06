@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- **Block columns work for roles that can't create tables.** A new session whose first cloudsync call ran as such a role (for example a sync role on PostgreSQL or a token user on SQLite Cloud) failed every block write, because loading the column ran `CREATE TABLE IF NOT EXISTS` on the existing blocks table. The blocks table is now created only when it is missing.
+- **Block columns work for roles that can't create tables.** A new session whose first cloudsync call ran as such a role (for example a sync role on PostgreSQL or a token user on SQLite Cloud) failed every block write, because loading the column ran `CREATE TABLE IF NOT EXISTS` on the existing blocks table. Loading now runs no DDL: only `cloudsync_set_column` creates the blocks table, and if it is missing a block write says so.
 
 ## [1.2.1] - 2026-11-05
 

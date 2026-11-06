@@ -35,6 +35,10 @@ CREATE EXTENSION IF NOT EXISTS cloudsync;
 CREATE TABLE docs (id TEXT PRIMARY KEY NOT NULL, body TEXT);
 SELECT cloudsync_init('docs') AS _init \gset
 SELECT cloudsync_set_column('docs', 'body', 'algo', 'block') AS _setcol \gset
+-- 49 characters: PostgreSQL cuts its blocks table name to 63 bytes
+CREATE TABLE block_docs_with_a_long_name_to_test_63_byte_limit (id TEXT PRIMARY KEY NOT NULL, body TEXT);
+SELECT cloudsync_init('block_docs_with_a_long_name_to_test_63_byte_limit') AS _init_long \gset
+SELECT cloudsync_set_column('block_docs_with_a_long_name_to_test_63_byte_limit', 'body', 'algo', 'block') AS _setcol_long \gset
 GRANT USAGE ON SCHEMA public TO test_block_sync_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO test_block_sync_role;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO test_block_sync_role;
@@ -44,13 +48,16 @@ SELECT has_schema_privilege('test_block_sync_role', 'public', 'CREATE') AS role_
 \set d1_body ''
 \set peer1_body ''
 \set block_changes 0
+\set long_body ''
 \connect cloudsync_test_76_dst
 \ir helper_psql_conn_setup.sql
 SET ROLE test_block_sync_role;
 INSERT INTO docs VALUES ('d1', E'a\nb\nc');
 UPDATE docs SET body = E'a\nB\nc\nd' WHERE id = 'd1';
 SELECT cloudsync_payload_apply(decode(:'peer_payload', 'hex')) AS applied \gset
+INSERT INTO block_docs_with_a_long_name_to_test_63_byte_limit VALUES ('l1', E'x\ny');
 SELECT body AS d1_body FROM docs WHERE id = 'd1' \gset
+SELECT body AS long_body FROM block_docs_with_a_long_name_to_test_63_byte_limit WHERE id = 'l1' \gset
 SELECT body AS peer1_body FROM docs WHERE id = 'peer1' \gset
 SELECT count(*) AS block_changes FROM cloudsync_changes WHERE col_name LIKE 'body' || chr(31) || '%' \gset
 RESET ROLE;
@@ -58,6 +65,7 @@ RESET ROLE;
 SELECT (NOT :'role_can_create'::boolean
         AND :'d1_body' = E'a\nB\nc\nd'
         AND :'peer1_body' = E'p1\np2\np3'
+        AND :'long_body' = E'x\ny'
         AND :block_changes::int > 0) AS block_role_ok \gset
 \if :block_role_ok
 \echo [PASS] (:testid) a role without CREATE writes, applies and reads block columns in a new session

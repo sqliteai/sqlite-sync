@@ -2083,13 +2083,24 @@ int merge_sentinel_only_insert (cloudsync_context *data, cloudsync_table_context
 
 // MARK: - Block-level merge helpers -
 
+// Reports a block failure. When the session couldn't set up the blocks table, the saved
+// cause is reported instead of the database error, which it already includes.
+static int block_set_error (cloudsync_context *data, cloudsync_table_context *table, const char *message, int rc) {
+    if (rc == DBRES_OK) rc = DBRES_ERROR;
+    if (!table->blocks_error) return cloudsync_set_error(data, message, rc);
+    snprintf(data->errmsg, sizeof(data->errmsg), "%s: %s", message, table->blocks_error);
+    data->errcode = rc;
+    data->sqlstate = 0;
+    return rc;
+}
+
 // Store a block value in the blocks table
 static int block_store_value (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen, const char *block_colname, dbvalue_t *col_value) {
     dbvm_t *vm = table->block_value_write_stmt;
     if (!vm) {
         char message[512];
-        snprintf(message, sizeof(message), "Unable to write the blocks of table \"%s\": %s", table->name, table->blocks_error ? table->blocks_error : "blocks table not initialized");
-        return cloudsync_set_error(data, message, DBRES_MISUSE);
+        snprintf(message, sizeof(message), "Unable to write the blocks of table \"%s\"", table->name);
+        return block_set_error(data, table, message, DBRES_MISUSE);
     }
 
     int rc = databasevm_bind_blob(vm, 1, pk, pklen);
@@ -2144,12 +2155,10 @@ static int block_materialize_fail (cloudsync_context *data, cloudsync_table_cont
     if (!database_error) cloudsync_reset_error(data);
     if (rc == DBRES_NOMEM) {
         snprintf(message, sizeof(message), "Not enough memory to %s the blocks of column \"%s\" of table \"%s\"", stage, column, table->name);
-    } else if (table->blocks_error) {
-        snprintf(message, sizeof(message), "Unable to %s the blocks of column \"%s\" of table \"%s\": %s", stage, column, table->name, table->blocks_error);
     } else {
         snprintf(message, sizeof(message), "Unable to %s the blocks of column \"%s\" of table \"%s\"", stage, column, table->name);
     }
-    return cloudsync_set_error(data, message, (rc > 0) ? rc : DBRES_ERROR);
+    return block_set_error(data, table, message, (rc > 0) ? rc : DBRES_ERROR);
 }
 
 int block_materialize_column (cloudsync_context *data, cloudsync_table_context *table, const void *pk, int pklen, const char *base_col_name) {
@@ -2596,24 +2605,32 @@ static int blocks_prepare (cloudsync_context *data, char *sql, dbvm_t **vm) {
     return rc;
 }
 
-// Creates the blocks table only when it is missing: CREATE TABLE IF NOT EXISTS needs the
-// CREATE privilege even when the table exists, which a role that only syncs doesn't have.
-// The table context is updated only once every statement is prepared, so a failed setup
-// can be retried.
-static int table_setup_blocks (cloudsync_context *data, cloudsync_table_context *table) {
+// Prepares the blocks table statements. Only cloudsync_set_column creates the table
+// (create_if_missing): loading a session runs no DDL, which a role that only syncs may not
+// run, even as a no-op CREATE TABLE IF NOT EXISTS. The table context is updated only once
+// every statement is prepared, so a failed setup can be retried.
+static int table_setup_blocks (cloudsync_context *data, cloudsync_table_context *table, bool create_if_missing) {
     dbvm_t *write_vm = NULL, *read_vm = NULL, *delete_vm = NULL, *list_vm = NULL;
     char *blocks_ref = database_build_blocks_ref(table->schema, table->name);
-    char *blocks_name = cloudsync_memory_mprintf("%s_cloudsync_blocks", table->name);
-    int rc = DBRES_NOMEM;
-    if (!blocks_ref || !blocks_name) goto cleanup;
+    int rc = DBRES_OK;
+    if (!blocks_ref) {
+        rc = cloudsync_set_error(data, "Not enough memory to set up the blocks table", DBRES_NOMEM);
+        goto cleanup;
+    }
 
-    if (!database_table_exists(data, blocks_name, table->schema)) {
+    if (!database_blocks_table_exists(data, blocks_ref)) {
+        if (!create_if_missing) {
+            char message[512];
+            snprintf(message, sizeof(message), "the blocks table of \"%s\" is missing: set up the block column again with cloudsync_set_column as the table owner", table->name);
+            cloudsync_reset_error(data);
+            rc = cloudsync_set_error(data, message, DBRES_ERROR);
+            goto cleanup;
+        }
         char *sql = cloudsync_memory_mprintf(SQL_BLOCKS_CREATE_TABLE, blocks_ref);
-        if (!sql) goto cleanup;
-        rc = database_exec(data, sql);
-        cloudsync_memory_free(sql);
+        rc = sql ? database_exec(data, sql) : DBRES_NOMEM;
+        if (sql) cloudsync_memory_free(sql);
         if (rc != DBRES_OK) {
-            rc = cloudsync_set_error(data, "Unable to create blocks table", rc);
+            rc = cloudsync_set_error(data, (rc == DBRES_NOMEM) ? "Not enough memory to create the blocks table" : "Unable to create the blocks table", rc);
             goto cleanup;
         }
     }
@@ -2622,14 +2639,16 @@ static int table_setup_blocks (cloudsync_context *data, cloudsync_table_context 
     if (rc == DBRES_OK) rc = blocks_prepare(data, cloudsync_memory_mprintf(SQL_BLOCKS_SELECT, blocks_ref), &read_vm);
     if (rc == DBRES_OK) rc = blocks_prepare(data, cloudsync_memory_mprintf(SQL_BLOCKS_DELETE, blocks_ref), &delete_vm);
     if (rc == DBRES_OK) rc = blocks_prepare(data, cloudsync_memory_mprintf(SQL_BLOCKS_LIST_ALIVE, blocks_ref, table->meta_ref), &list_vm);
-    if (rc != DBRES_OK) goto cleanup;
+    if (rc != DBRES_OK) {
+        rc = cloudsync_set_error(data, (rc == DBRES_NOMEM) ? "Not enough memory to prepare the blocks statements" : "Unable to prepare the blocks statements", rc);
+        goto cleanup;
+    }
 
     table->blocks_ref = blocks_ref;
     table->block_value_write_stmt = write_vm;
     table->block_value_read_stmt = read_vm;
     table->block_value_delete_stmt = delete_vm;
     table->block_list_stmt = list_vm;
-    cloudsync_memory_free(blocks_name);
     return DBRES_OK;
 
 cleanup:
@@ -2638,7 +2657,6 @@ cleanup:
     if (delete_vm) databasevm_finalize(delete_vm);
     if (list_vm) databasevm_finalize(list_vm);
     if (blocks_ref) cloudsync_memory_free(blocks_ref);
-    if (blocks_name) cloudsync_memory_free(blocks_name);
     return rc;
 }
 
@@ -2668,7 +2686,7 @@ int cloudsync_setup_block_column (cloudsync_context *data, const char *table_nam
     }
 
     if (!table->blocks_ref) {
-        int rc = table_setup_blocks(data, table);
+        int rc = table_setup_blocks(data, table, persist);
         if (rc != DBRES_OK) {
             // A context load ignores this error: keep it for the block write that fails later.
             table_set_blocks_error(table, cloudsync_errmsg(data));
@@ -5022,12 +5040,8 @@ done:
     block_list_free(stored);
     if (rc != DBRES_OK) {
         char message[512];
-        if (table->blocks_error) {
-            snprintf(message, sizeof(message), "Unable to write the blocks of column \"%s\" of table \"%s\": %s", col, table->name, table->blocks_error);
-        } else {
-            snprintf(message, sizeof(message), "Unable to write the blocks of column \"%s\" of table \"%s\"", col, table->name);
-        }
-        cloudsync_set_error(data, message, rc);
+        snprintf(message, sizeof(message), "Unable to write the blocks of column \"%s\" of table \"%s\"", col, table->name);
+        block_set_error(data, table, message, rc);
     }
     return rc;
 }
