@@ -86,10 +86,12 @@ There are two equivalent ways to configure this: the **recommended default-privi
 
 #### Recommended: default-privileges pattern
 
-Run this **before** `CREATE EXTENSION cloudsync`, as the role that will install the extension (typically `postgres`). Objects created afterwards — including all CloudSync internal tables and future `cloudsync_init` shadows — inherit the grants automatically:
+Run this as the connection user configured in CloudSync (typically `postgres`): the role that creates your tables and runs the first `cloudsync_init`. Default privileges apply only to objects created by the role that set them. CloudSync creates its internal tables during the first `cloudsync_init`, and each `<table>_cloudsync` shadow during that table's `cloudsync_init`, so run this before the first `cloudsync_init`. Objects created afterwards inherit the grants automatically:
 
 ```sql
 GRANT USAGE ON SCHEMA public TO rls_role;
+-- Needed if your RLS policies call functions in the auth schema (the platform's
+-- auth.uid(), or the optional helpers below: on plain PostgreSQL create them first)
 GRANT USAGE ON SCHEMA auth   TO rls_role;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
@@ -101,11 +103,9 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
     GRANT EXECUTE ON FUNCTIONS TO rls_role;
-
-CREATE EXTENSION IF NOT EXISTS cloudsync;
 ```
 
-**If the extension is already installed**, `ALTER DEFAULT PRIVILEGES` doesn't apply retroactively — backfill existing objects with a one-time broad grant, then still set defaults for future creations:
+**If `cloudsync_init` has already run**, `ALTER DEFAULT PRIVILEGES` doesn't apply retroactively — backfill existing objects with a one-time broad grant, then still set defaults for future creations:
 
 ```sql
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES    IN SCHEMA public TO rls_role;
@@ -217,7 +217,9 @@ org_id = (current_setting('request.jwt.claims')::jsonb->>'org_id')::uuid
 
 CloudSync validates JWTs and passes all claims to PostgreSQL via `request.jwt.claims` — no PostgreSQL extension is required for JWT verification. The validation happens entirely in the CloudSync microservice.
 
-However, writing `(current_setting('request.jwt.claims')::jsonb->>'sub')::uuid` in every RLS policy is verbose. Following the pattern used by Supabase and Neon, you can optionally create a small set of helper functions in a dedicated schema:
+However, writing `(current_setting('request.jwt.claims')::jsonb->>'sub')::uuid` in every RLS policy is verbose. Following the pattern used by Supabase and Neon, you can optionally create a small set of helper functions in a dedicated schema.
+
+These are for plain PostgreSQL. If your platform already provides an `auth` schema with these functions, use those instead of redefining them:
 
 ```sql
 -- Create a schema for auth helpers (optional, but keeps things clean)
