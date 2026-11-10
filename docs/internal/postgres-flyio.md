@@ -807,12 +807,29 @@ SCRIPT
 chmod +x /data/startup.sh
 ```
 
-After any VM restart:
+#### Run it automatically on boot
+
+The machine was created with `sleep inf` as its command, so nothing runs the script after Fly restarts the VM (host maintenance, migrations, manual restarts). Change the machine's command to run the script on every boot, retry until it succeeds, and then keep the VM alive:
+
+```bash
+fly machine update <machine-id> --app <your-app-name> -y \
+  --command "bash -c 'until /data/startup.sh; do echo startup.sh failed, retrying in 30s; sleep 30; done; exec sleep inf'"
+```
+
+> The trailing `exec sleep inf` is required: `startup.sh` exits after `docker compose up -d`, and if the machine's main process exits, the VM stops.
+
+This restarts the machine once. The stack comes back about 90 seconds after each boot (most of that time is reinstalling Docker). Follow progress with `fly logs --app <your-app-name>`; the script prints `Done!` when the containers are up.
+
+> Fly's edge proxy accepts TCP connections on the public IP even while the backend is still booting, so a successful port check right after a restart does not mean Postgres is up. Check `docker ps` over `fly ssh console`, or wait for `Done!` in the logs.
+
+If the machine still runs `sleep inf`, start the stack manually after a restart:
 
 ```bash
 fly ssh console --app <your-app-name>
 /data/startup.sh
 ```
+
+> The JWKS auth server generates a new key pair on every start, so tokens issued before a restart stop verifying.
 
 ### Update CloudSync extension
 
@@ -968,7 +985,7 @@ docker compose logs -f auth   # Auth server only
 | Token verification fails (HS256) | Ensure `JWT_SECRET` matches exactly — CloudSync uses the raw string, not base64-decoded |
 | Token verification fails (JWKS) | Ensure CloudSync can reach the JWKS endpoint and `JWT_ISSUER` matches the `ISSUER` env var |
 | JWKS keys lost after restart | The JWKS server generates new keys on each start. For production, persist keys to a volume |
-| Docker commands not found after VM restart | Run `/data/startup.sh` — Fly VM root filesystem resets on stop/start |
+| Docker commands not found after VM restart | Fly VM root filesystem resets on stop/start. Run `/data/startup.sh`, or set it as the machine command so it runs on boot (see [Run it automatically on boot](#run-it-automatically-on-boot)) |
 | `fuse-overlayfs` not working | Install it: `apt-get install -y fuse-overlayfs` |
 | Manual artifact upgrade disappears after `docker compose up` recreation | This method only patches the running container. Rebuild or switch to an image that already contains the new CloudSync build for a durable upgrade. |
 | Can't connect to Postgres from outside Fly | Use `fly proxy 5432:5432 -a <your-app-name>` |
