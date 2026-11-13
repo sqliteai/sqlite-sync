@@ -84,6 +84,7 @@
 \ir 74_review_followup.sql
 \ir 75_changes_visibility.sql
 \ir 76_block_columns_sync_role.sql
+\ir 78_schema_hash_table_settings.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'

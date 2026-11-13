@@ -2104,7 +2104,8 @@ int database_update_schema_hash (cloudsync_context *data, uint64_t *hash) {
         "    ',' ORDER BY c.table_name, c.ordinal_position"
         ") "
         "FROM information_schema.columns c "
-        "JOIN cloudsync_table_settings cts ON LOWER(c.table_name) = LOWER(cts.tbl_name) "
+        // one row per table: a table has a settings row per configured column or key
+        "JOIN (SELECT DISTINCT LOWER(tbl_name) AS tbl_name FROM cloudsync_table_settings) cts ON LOWER(c.table_name) = cts.tbl_name "
         "LEFT JOIN information_schema.table_constraints tc "
         "    ON tc.table_name = c.table_name "
         "    AND tc.table_schema = c.table_schema "

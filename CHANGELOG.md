@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - **The Linux packages and the Supabase images load on older PostgreSQL minor releases again.** The packages were built against the newest PostgreSQL headers; they are now built against 15.14, 17.6 and 18.0 and load on those minors and later (the published Supabase images use 15.14 and 17.6 bases), and `Dockerfile.supabase` compiles against its base image's own server.
+- **PostgreSQL: peers keep accepting payloads after an upgrade when tables have column settings or filters.** The schema hash counted those tables once per setting; it now counts each table once, as on SQLite.
 
 ## [1.2.2] - 2026-11-06
 
