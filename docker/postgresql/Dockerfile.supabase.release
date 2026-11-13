@@ -7,6 +7,10 @@
 # artifact is installed in either case. Only the build-time userland tooling
 # differs (apt-get vs apk), which this file detects at runtime.
 #
+# The release package is built against PostgreSQL 15.14 / 17.6, so the base must
+# be at least 15.14.x / 17.6.x: older bases (the PG15 Ubuntu 15.8.1.x line, PG17
+# before 17.6) can't load it. Build those from source with Dockerfile.supabase.
+#
 # Usage:
 #   docker build \
 #     --build-arg SUPABASE_POSTGRES_TAG=17.6.1.170 \

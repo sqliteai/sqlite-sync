@@ -118,7 +118,10 @@ enabling the extension in the CLI-managed Postgres container.
 > image (`Dockerfile.supabase.release`, used for
 > `sqlitecloud/sqlite-sync-supabase:*`) and the local build-from-source flow
 > below (`make postgres-supabase-build`, `Dockerfile.supabase`) both detect the
-> userland automatically and work on either family.
+> userland automatically and work on either family. The release image needs a
+> base of at least `15.14.x` / `17.6.x`, so the older Ubuntu PG15 bases
+> (`15.8.1.x`) must use the build from source (`make postgres-supabase-build`,
+> `Dockerfile.supabase`).
 
 ### Prerequisites
 

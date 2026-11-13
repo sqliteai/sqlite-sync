@@ -396,13 +396,27 @@ jobs:
         with:
           submodules: true
 
+      # Built against the oldest supported minor of each major: a newer minor's headers can
+      # call symbols an older server lacks, while older headers work on every later minor
       - name: linux install postgresql dev headers
         if: matrix.name == 'linux'
         run: |
+          PG=${{ matrix.postgres_version }}
+          case "$PG" in
+            15) MINOR=15.14 ;;
+            17) MINOR=17.6 ;;
+            18) MINOR=18.0 ;;
+            *) echo "::error::no minimum minor set for PostgreSQL $PG"; exit 1 ;;
+          esac
           sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          sudo sh -c 'echo "deb http://apt-archive.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg-archive main" > /etc/apt/sources.list.d/pgdg-archive.list'
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
           sudo apt-get update
-          sudo apt-get install -y postgresql-server-dev-${{ matrix.postgres_version }}
+          VERSION=$(apt-cache madison "postgresql-server-dev-$PG" | awk '{print $3}' | grep "^${MINOR}-" | sort -V | tail -1)
+          if [ -z "$VERSION" ]; then echo "::error::postgresql-server-dev-$PG $MINOR not found"; exit 1; fi
+          sudo apt-get install -y --allow-downgrades "postgresql-client-$PG=$VERSION" "postgresql-server-dev-$PG=$VERSION"
+          grep -q "define PG_VERSION \"$MINOR " "/usr/include/postgresql/$PG/server/pg_config.h"
+          "/usr/lib/postgresql/$PG/bin/pg_config" --version | grep -q "^PostgreSQL $MINOR "
 
       - name: macos install postgresql
         if: matrix.name == 'macos'

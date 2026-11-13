@@ -50,7 +50,7 @@ docker compose up -d
 
 ### Option B: Existing PostgreSQL Without Docker
 
-If you already run PostgreSQL directly on a VM or bare metal, download the release tarball that matches your operating system, CPU architecture, and PostgreSQL major version.
+If you already run PostgreSQL directly on a VM or bare metal, download the release tarball that matches your operating system, CPU architecture, and PostgreSQL major version. The Linux tarballs require PostgreSQL 15.14, 17.6 or 18.0 or later within each major.
 
 Extract the archive, then copy the extension files into PostgreSQL's extension directories. The tarball ships `cloudsync.control`, a `cloudsync--<version>.sql` install script for the current release, and — from release 1.0.17 onward — any `cloudsync--<from>--<to>.sql` upgrade scripts needed so existing installations can run `ALTER EXTENSION cloudsync UPDATE`.
 
