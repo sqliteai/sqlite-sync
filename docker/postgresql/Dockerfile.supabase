@@ -4,17 +4,33 @@
 #   - Alpine-userland images, which both the PG15 and PG17 lines now ship
 #   - the older Ubuntu/glibc images (PG17 up to 17.6.1.071, PG15 up to 15.8.1.x)
 # Both families run a Nix-built, glibc-linked PostgreSQL, so the extension is
-# compiled in a glibc builder stage (official postgres image + PGDG headers,
-# the same toolchain that produces the release artifacts) and the identical
-# .so is installed on either base. The runtime stage needs no compiler, so
-# its userland (apt vs apk) never matters.
+# compiled in a glibc builder stage (official postgres image, the same toolchain
+# that produces the release artifacts) against the base image's own server
+# headers, and the identical .so is installed on either base. The runtime stage
+# needs no compiler, so its userland (apt vs apk) never matters.
 #
 # PG_MAJOR must match the major version of SUPABASE_POSTGRES_TAG; the
 # postgres-supabase-build Makefile target derives it automatically.
 ARG PG_MAJOR=17
 ARG SUPABASE_POSTGRES_TAG=17.6.1.170
 
-# Build stage for CloudSync extension (glibc toolchain, matching PG headers)
+# Server headers of the base image: newer minor releases can add symbols that an
+# older server lacks, so the extension is compiled against the server it runs on
+FROM supabase/postgres:${SUPABASE_POSTGRES_TAG} AS supabase-headers
+ARG CLOUDSYNC_PG_CONFIG=""
+RUN set -eu; \
+    PG_CONFIG="${CLOUDSYNC_PG_CONFIG:-}"; \
+    if [ -z "$PG_CONFIG" ]; then \
+      for c in /root/.nix-profile/bin/pg_config /nix/var/nix/profiles/default/bin/pg_config "$(command -v pg_config || true)"; do \
+        if [ -x "$c" ]; then PG_CONFIG="$c"; break; fi; \
+      done; \
+    fi; \
+    if [ ! -x "$PG_CONFIG" ]; then echo "Error: pg_config not found${PG_CONFIG:+ at $PG_CONFIG}"; exit 1; fi; \
+    mkdir -p /tmp/pg-server-include; \
+    cp -rL "$(${PG_CONFIG} --includedir-server)/." /tmp/pg-server-include/; \
+    ${PG_CONFIG} --version
+
+# Build stage for CloudSync extension (glibc toolchain)
 FROM postgres:${PG_MAJOR} AS cloudsync-builder
 ARG PG_MAJOR
 
@@ -33,8 +49,9 @@ COPY modules/ ./modules/
 COPY docker/ ./docker/
 COPY Makefile .
 
-# Build the CloudSync extension against the PGDG headers
-RUN make postgres-build PG_CONFIG=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
+# Build the CloudSync extension against the base image's server headers
+COPY --from=supabase-headers /tmp/pg-server-include/ /tmp/pg-server-include/
+RUN make postgres-build PG_CONFIG=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config PG_INCLUDEDIR=/tmp/pg-server-include
 
 # Collect build artifacts
 RUN mkdir -p /tmp/cloudsync-artifacts/lib /tmp/cloudsync-artifacts/extension && \

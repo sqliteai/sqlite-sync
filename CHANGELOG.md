@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **The Linux packages and the Supabase images load on older PostgreSQL minor releases again.** The packages were built against the newest PostgreSQL headers; they are now built against 15.14, 17.6 and 18.0 and load on those minors and later (the published Supabase images use 15.14 and 17.6 bases), and `Dockerfile.supabase` compiles against its base image's own server.
+
 ## [1.2.2] - 2026-11-06
 
 ### Fixed
