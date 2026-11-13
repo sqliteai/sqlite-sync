@@ -193,10 +193,14 @@ const char * const SQL_DATA_VERSION =
 const char * const SQL_SCHEMA_VERSION =
     "SELECT COALESCE(max(version), 0) FROM app_schema_version;";  // was "PRAGMA schema_version"
 
+// Read first: an upsert on every call writes a new version of the same row, and inside one
+// apply transaction those versions pile up. The DO UPDATE returns the id when a concurrent
+// apply inserts the same site first.
 const char * const SQL_SITEID_GETSET_ROWID_BY_SITEID =
-    "INSERT INTO cloudsync_site_id (site_id) VALUES ($1) "
-    "ON CONFLICT(site_id) DO UPDATE SET site_id = EXCLUDED.site_id "
-    "RETURNING id;";
+    "WITH s AS (SELECT id FROM cloudsync_site_id WHERE site_id = $1), "
+    "i AS (INSERT INTO cloudsync_site_id (site_id) SELECT $1 WHERE NOT EXISTS (SELECT 1 FROM s) "
+    "ON CONFLICT (site_id) DO UPDATE SET site_id = EXCLUDED.site_id RETURNING id) "
+    "SELECT id FROM s UNION ALL SELECT id FROM i;";
 
 const char * const SQL_BUILD_SELECT_NONPK_COLS_BY_ROWID =
     "SELECT string_agg(quote_ident(column_name), ',' ORDER BY ordinal_position) "
