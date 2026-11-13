@@ -85,6 +85,7 @@
 \ir 75_changes_visibility.sql
 \ir 76_block_columns_sync_role.sql
 \ir 78_schema_hash_table_settings.sql
+\ir 79_siteid_lookup.sql
 
 -- 'Test summary'
 \echo '\nTest summary:'
