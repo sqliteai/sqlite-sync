@@ -253,10 +253,7 @@ const char * const SQL_PRAGMA_TABLEINFO_PK_QUALIFIED_COLLIST_FMT =
 const char * const SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK =
     "DELETE FROM \"%w\" "
     "WHERE (\"col_name\" != '%s' OR (\"col_name\" = '%s' AND col_version %% 2 != 0)) "
-    "AND NOT EXISTS ("
-    "SELECT 1 FROM \"%w\" "
-    "WHERE \"%w\".pk = cloudsync_pk_encode(%s) LIMIT 1"
-    ");";
+    "AND pk NOT IN (SELECT cloudsync_pk_encode(%s) FROM \"%w\" WHERE cloudsync_pk_encode(%s) IS NOT NULL);";
 
 const char * const SQL_PRAGMA_TABLEINFO_PK_COLLIST =
     "SELECT group_concat('\"' || format('%%w', name) || '\"', ',') "

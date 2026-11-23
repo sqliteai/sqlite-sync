@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - **SQLite: after `cloudsync_commit_alter`, writes from a new connection are no longer skipped by sends.** A new connection reused db_versions already sent; databases that wrote this way on 1.2.3 or earlier should call `cloudsync_network_reset_sync_version()` once after upgrading so the skipped changes are sent.
+- **SQLite: `cloudsync_commit_alter` is no longer quadratic in the table's rows.** Removing the metadata of deleted rows scanned the table once per metadata row; it now builds the set of live keys once, so an alter on 4,000 rows takes milliseconds instead of seconds.
 
 ## [1.2.3] - 2026-11-17
 

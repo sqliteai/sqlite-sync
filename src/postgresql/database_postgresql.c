@@ -612,6 +612,10 @@ char *sql_build_insert_missing_pks_query(const char *schema, const char *table_n
     );
 }
 
+char *sql_build_gc_delete_orphaned_pk_query (const char *meta_ref, const char *base_ref, const char *pkvalues, const char *tombstone) {
+    return cloudsync_memory_mprintf(SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK, meta_ref, tombstone, tombstone, base_ref, meta_ref, pkvalues);
+}
+
 // MARK: - HELPER FUNCTIONS -
 
 // Map a PostgreSQL SQLSTATE to the closest DBRES code. The SQLSTATE itself is kept

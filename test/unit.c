@@ -14962,6 +14962,103 @@ cleanup:
     return result;
 }
 
+// Regression (#104): commit_alter deletes metadata of rows removed while sync
+// was paused, keeps tombstones of tracked deletes and the metadata of live rows,
+// for both a single-column and a multi-column primary key.
+static bool do_test_alter_gc_orphaned_table(sqlite3 *db, const char *table, const char *create_sql, const char *pkcols, const char *insert_sql) {
+    bool result = false;
+    char *sql = NULL;
+
+    if (sqlite3_exec(db, create_sql, NULL, NULL, NULL) != SQLITE_OK) return false;
+    if (sqlite3_exec(db, insert_sql, NULL, NULL, NULL) != SQLITE_OK) return false;
+
+    sql = sqlite3_mprintf("SELECT cloudsync_init('%q');"
+                          "CREATE TEMP TABLE tracked_%s AS SELECT cloudsync_pk_encode(%s) AS pk FROM \"%w\" WHERE rowid <= 3;"
+                          "CREATE TEMP TABLE orphan_%s AS SELECT cloudsync_pk_encode(%s) AS pk FROM \"%w\" WHERE rowid > 17;"
+                          "DELETE FROM \"%w\" WHERE rowid <= 3;"
+                          "SELECT cloudsync_begin_alter('%q');"
+                          "DELETE FROM \"%w\" WHERE rowid > 17;"
+                          "ALTER TABLE \"%w\" ADD COLUMN extra TEXT;"
+                          "SELECT cloudsync_commit_alter('%q');",
+                          table, table, pkcols, table, table, pkcols, table, table, table, table, table, table);
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) return false;
+
+    // metadata of rows deleted while sync was paused is gone
+    sql = sqlite3_mprintf("SELECT count(*) FROM \"%w_cloudsync\" WHERE pk IN (SELECT pk FROM orphan_%s);", table, table);
+    int64_t orphans = do_select_int(db, sql);
+    sqlite3_free(sql);
+    if (orphans != 0) goto done;
+
+    // tombstones of tracked deletes are kept, and nothing else of those rows
+    sql = sqlite3_mprintf("SELECT count(*) FROM \"%w_cloudsync\" WHERE pk IN (SELECT pk FROM tracked_%s) "
+                          "AND col_name = '%s' AND col_version %% 2 = 0;", table, table, CLOUDSYNC_TOMBSTONE_VALUE);
+    int64_t tombstones = do_select_int(db, sql);
+    sqlite3_free(sql);
+    sql = sqlite3_mprintf("SELECT count(*) FROM \"%w_cloudsync\" WHERE pk IN (SELECT pk FROM tracked_%s);", table, table);
+    int64_t tracked_rows = do_select_int(db, sql);
+    sqlite3_free(sql);
+    if (tombstones != 3 || tracked_rows != 3) goto done;
+
+    // every live row keeps its metadata (a, b and the added column)
+    sql = sqlite3_mprintf("SELECT count(DISTINCT m.pk) FROM \"%w_cloudsync\" m JOIN \"%w\" ON m.pk = cloudsync_pk_encode(%s);", table, table, pkcols);
+    int64_t live = do_select_int(db, sql);
+    sqlite3_free(sql);
+    sql = sqlite3_mprintf("SELECT count(*) FROM \"%w_cloudsync\" WHERE pk NOT IN (SELECT pk FROM tracked_%s);", table, table);
+    int64_t live_rows = do_select_int(db, sql);
+    sqlite3_free(sql);
+    if (live != 14 || live_rows != 14 * 3) goto done;
+
+    // the cleanup builds the set of live keys once instead of probing the base table per metadata row
+    char *meta_ref = sqlite3_mprintf("%s_cloudsync", table);
+    char *gc_sql = sql_build_gc_delete_orphaned_pk_query(meta_ref, table, pkcols, CLOUDSYNC_TOMBSTONE_VALUE);
+    sqlite3_free(meta_ref);
+    if (!gc_sql) goto done;
+    sql = sqlite3_mprintf("EXPLAIN QUERY PLAN %s", gc_sql);
+    cloudsync_memory_free(gc_sql);
+    sqlite3_stmt *vm = NULL;
+    rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) goto done;
+    bool correlated = false;
+    while (sqlite3_step(vm) == SQLITE_ROW) {
+        const char *detail = (const char *)sqlite3_column_text(vm, 3);
+        if (detail && strstr(detail, "CORRELATED")) correlated = true;
+    }
+    sqlite3_finalize(vm);
+    result = !correlated;
+
+done:
+    return result;
+}
+
+bool do_test_alter_gc_orphaned_pk(void) {
+    sqlite3 *db = NULL;
+    bool result = false;
+
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return false;
+    if (sqlite3_cloudsync_init(db, NULL, NULL) != SQLITE_OK) goto cleanup;
+
+    if (!do_test_alter_gc_orphaned_table(db, "gc_single",
+            "CREATE TABLE gc_single (id TEXT PRIMARY KEY NOT NULL, a TEXT, b TEXT);",
+            "\"gc_single\".\"id\"",
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20) "
+            "INSERT INTO gc_single SELECT 'r' || i, 'a', 'b' FROM n;")) goto cleanup;
+
+    if (!do_test_alter_gc_orphaned_table(db, "gc_multi",
+            "CREATE TABLE gc_multi (k1 INTEGER NOT NULL, k2 TEXT NOT NULL, a TEXT, b TEXT, PRIMARY KEY (k1, k2));",
+            "\"gc_multi\".\"k1\", \"gc_multi\".\"k2\"",
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20) "
+            "INSERT INTO gc_multi SELECT i, 'r' || i, 'a', 'b' FROM n;")) goto cleanup;
+
+    result = true;
+
+cleanup:
+    if (db) close_db(db);
+    return result;
+}
+
 int test_report(const char *description, bool result){
     printf("%-30s %s\n", description, (result) ? "OK" : "FAILED");
     return result ? 0 : 1;
@@ -15172,6 +15269,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Block LWW UPSERT Tombstone Bug:", do_test_block_lww_upsert_tombstone_bug(2, print_result, cleanup_databases));
     result += test_report("CB Error Cleanup:", do_test_context_cb_error_cleanup());
     result += test_report("Alter DBVersion Reopen:", do_test_alter_dbversion_reopen(cleanup_databases));
+    result += test_report("Alter GC Orphaned PK:", do_test_alter_gc_orphaned_pk());
 
 finalize:
     if (rc != SQLITE_OK) printf("%s (%d)\n", (db) ? sqlite3_errmsg(db) : "N/A", rc);
