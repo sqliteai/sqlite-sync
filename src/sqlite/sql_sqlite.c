@@ -82,7 +82,7 @@ const char * const SQL_DBVERSION_BUILD_QUERY =
     "SELECT 'SELECT max(db_version) as version FROM \"' || tbl_name || '\"' as part FROM table_names"
     "), "
     "combined_query AS ("
-    "SELECT GROUP_CONCAT(part, ' UNION ALL ') || ' UNION SELECT value as version FROM cloudsync_settings WHERE key = ''pre_alter_dbversion''' as full_query FROM query_parts"
+    "SELECT GROUP_CONCAT(part, ' UNION ALL ') || ' UNION SELECT CAST(value AS INTEGER) as version FROM cloudsync_settings WHERE key = ''pre_alter_dbversion''' as full_query FROM query_parts"
     ") "
     "SELECT 'SELECT max(version) as version FROM (' || full_query || ');' FROM combined_query;";
 

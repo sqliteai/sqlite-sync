@@ -422,7 +422,7 @@ int cloudsync_dbversion_build_query (cloudsync_context *data, char **sql_out) {
          UNION ALL
          SELECT max(db_version) as version FROM "table3_cloudsync"
          UNION
-         SELECT value as version FROM cloudsync_settings WHERE key = 'pre_alter_dbversion'
+         SELECT CAST(value AS INTEGER) as version FROM cloudsync_settings WHERE key = 'pre_alter_dbversion'
      )
      */
 

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **SQLite: after `cloudsync_commit_alter`, writes from a new connection are no longer skipped by sends.** A new connection reused db_versions already sent; databases that wrote this way on 1.2.3 or earlier should call `cloudsync_network_reset_sync_version()` once after upgrading so the skipped changes are sent.
+
 ## [1.2.3] - 2026-11-17
 
 ### Fixed

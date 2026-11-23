@@ -14906,6 +14906,62 @@ finalize:
     return result;
 }
 
+// Regression (#103): pre_alter_dbversion is stored as TEXT, which sorts above
+// every INTEGER in max(), so a new connection restarted its db_version counter
+// at the pre-alter value and reused already-sent versions.
+bool do_test_alter_dbversion_reopen(bool cleanup_databases) {
+    bool result = false;
+    char dbpath[256];
+    char path[280];
+    snprintf(dbpath, sizeof(dbpath), "%s/cloudsync-test-alter-dbv-%ld.sqlite", test_directory, (long)time(NULL));
+
+    // start from a fresh file even if a previous run left one behind
+    file_delete_internal(dbpath);
+    snprintf(path, sizeof(path), "%s-wal", dbpath);
+    file_delete_internal(path);
+    snprintf(path, sizeof(path), "%s-shm", dbpath);
+    file_delete_internal(path);
+
+    sqlite3 *db = NULL;
+    if (sqlite3_open(dbpath, &db) != SQLITE_OK) goto cleanup;
+    sqlite3_cloudsync_init(db, NULL, NULL);
+
+    const char *setup =
+        "CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, v TEXT);"
+        "SELECT cloudsync_init('t');"
+        "INSERT INTO t VALUES ('a', 'x');"
+        "INSERT INTO t VALUES ('b', 'x');"
+        "SELECT cloudsync_begin_alter('t');"
+        "ALTER TABLE t ADD COLUMN w TEXT;"
+        "SELECT cloudsync_commit_alter('t');";
+    if (sqlite3_exec(db, setup, NULL, NULL, NULL) != SQLITE_OK) goto cleanup;
+
+    int64_t max_before = do_select_int(db, "SELECT max(db_version) FROM cloudsync_changes;");
+    if (max_before <= 0) goto cleanup;
+
+    sqlite3_exec(db, "SELECT cloudsync_terminate();", NULL, NULL, NULL);
+    sqlite3_close(db);
+    db = NULL;
+
+    if (sqlite3_open(dbpath, &db) != SQLITE_OK) goto cleanup;
+    if (sqlite3_cloudsync_init(db, NULL, NULL) != SQLITE_OK) goto cleanup;
+    if (sqlite3_exec(db, "INSERT INTO t (id, v) VALUES ('c', 'y');", NULL, NULL, NULL) != SQLITE_OK) goto cleanup;
+
+    int64_t new_version = do_select_int(db, "SELECT max(db_version) FROM cloudsync_changes WHERE pk = cloudsync_pk_encode('c');");
+    result = (new_version > max_before);
+
+cleanup:
+    if (db) close_db(db);
+    if (cleanup_databases) {
+        file_delete_internal(dbpath);
+        snprintf(path, sizeof(path), "%s-wal", dbpath);
+        file_delete_internal(path);
+        snprintf(path, sizeof(path), "%s-shm", dbpath);
+        file_delete_internal(path);
+    }
+    return result;
+}
+
 int test_report(const char *description, bool result){
     printf("%-30s %s\n", description, (result) ? "OK" : "FAILED");
     return result ? 0 : 1;
@@ -15115,6 +15171,7 @@ int main (int argc, const char * argv[]) {
     result += test_report("Block LWW Double Tombstone:", do_test_block_lww_double_tombstone(print_result, cleanup_databases));
     result += test_report("Block LWW UPSERT Tombstone Bug:", do_test_block_lww_upsert_tombstone_bug(2, print_result, cleanup_databases));
     result += test_report("CB Error Cleanup:", do_test_context_cb_error_cleanup());
+    result += test_report("Alter DBVersion Reopen:", do_test_alter_dbversion_reopen(cleanup_databases));
 
 finalize:
     if (rc != SQLITE_OK) printf("%s (%d)\n", (db) ? sqlite3_errmsg(db) : "N/A", rc);
