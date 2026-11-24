@@ -15021,13 +15021,16 @@ static bool do_test_alter_gc_orphaned_table(sqlite3 *db, const char *table, cons
     rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
     sqlite3_free(sql);
     if (rc != SQLITE_OK) goto done;
-    bool correlated = false;
+    int plan_rows = 0;
+    bool list_subquery = false, correlated = false;
     while (sqlite3_step(vm) == SQLITE_ROW) {
         const char *detail = (const char *)sqlite3_column_text(vm, 3);
+        plan_rows++;
+        if (detail && strstr(detail, "LIST SUBQUERY")) list_subquery = true;
         if (detail && strstr(detail, "CORRELATED")) correlated = true;
     }
     sqlite3_finalize(vm);
-    result = !correlated;
+    result = (plan_rows > 0 && list_subquery && !correlated);
 
 done:
     return result;
