@@ -422,7 +422,7 @@ int cloudsync_dbversion_build_query (cloudsync_context *data, char **sql_out) {
          UNION ALL
          SELECT max(db_version) as version FROM "table3_cloudsync"
          UNION
-         SELECT value as version FROM cloudsync_settings WHERE key = 'pre_alter_dbversion'
+         SELECT CAST(value AS INTEGER) as version FROM cloudsync_settings WHERE key = 'pre_alter_dbversion'
      )
      */
 
@@ -2972,7 +2972,7 @@ int cloudsync_finalize_alter (cloudsync_context *data, cloudsync_table_context *
         char *pkvalues = (pkclause) ? pkclause : "rowid";
         
         // delete entries related to rows that no longer exist in the original table, but preserve tombstone
-        sql = cloudsync_memory_mprintf(SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK, table->meta_ref, CLOUDSYNC_TOMBSTONE_VALUE, CLOUDSYNC_TOMBSTONE_VALUE, table->base_ref, table->meta_ref, pkvalues);
+        sql = sql_build_gc_delete_orphaned_pk_query(table->meta_ref, table->base_ref, pkvalues, CLOUDSYNC_TOMBSTONE_VALUE);
         rc = database_exec(data, sql);
         if (pkclause) cloudsync_memory_free(pkclause);
         cloudsync_memory_free(sql);

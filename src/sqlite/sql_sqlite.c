@@ -82,7 +82,7 @@ const char * const SQL_DBVERSION_BUILD_QUERY =
     "SELECT 'SELECT max(db_version) as version FROM \"' || tbl_name || '\"' as part FROM table_names"
     "), "
     "combined_query AS ("
-    "SELECT GROUP_CONCAT(part, ' UNION ALL ') || ' UNION SELECT value as version FROM cloudsync_settings WHERE key = ''pre_alter_dbversion''' as full_query FROM query_parts"
+    "SELECT GROUP_CONCAT(part, ' UNION ALL ') || ' UNION SELECT CAST(value AS INTEGER) as version FROM cloudsync_settings WHERE key = ''pre_alter_dbversion''' as full_query FROM query_parts"
     ") "
     "SELECT 'SELECT max(version) as version FROM (' || full_query || ');' FROM combined_query;";
 
@@ -253,10 +253,7 @@ const char * const SQL_PRAGMA_TABLEINFO_PK_QUALIFIED_COLLIST_FMT =
 const char * const SQL_CLOUDSYNC_GC_DELETE_ORPHANED_PK =
     "DELETE FROM \"%w\" "
     "WHERE (\"col_name\" != '%s' OR (\"col_name\" = '%s' AND col_version %% 2 != 0)) "
-    "AND NOT EXISTS ("
-    "SELECT 1 FROM \"%w\" "
-    "WHERE \"%w\".pk = cloudsync_pk_encode(%s) LIMIT 1"
-    ");";
+    "AND pk NOT IN (SELECT cloudsync_pk_encode(%s) FROM \"%w\" WHERE cloudsync_pk_encode(%s) IS NOT NULL);";
 
 const char * const SQL_PRAGMA_TABLEINFO_PK_COLLIST =
     "SELECT group_concat('\"' || format('%%w', name) || '\"', ',') "
