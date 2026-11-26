@@ -48,7 +48,7 @@ Connect to SQLiteCloud using `~/go/bin/sqlc` (last command must be `quit`). Note
 
 1. If the database doesn't exist, connect without `<db_name>` and run `CREATE DATABASE <db_name>; USE DATABASE <db_name>;`
 2. `LIST TABLES` to check for existing tables
-3. For any table with a `_cloudsync` companion table, run `CLOUDSYNC DISABLE <table_name>;`
+3. For any table with a `_cloudsync` companion table, run `SELECT cloudsync_cleanup('<table_name>');`
 4. `DROP TABLE IF EXISTS <table_name>;`
 5. Create the test table (single-line DDL)
 6. If RLS mode is enabled:
