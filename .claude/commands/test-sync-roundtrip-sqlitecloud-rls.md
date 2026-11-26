@@ -79,7 +79,7 @@ Then, inside sqlc:
 1. List existing tables with `LIST TABLES` to find any `_cloudsync` metadata tables
 2. For each table already configured for cloudsync (has a `<table_name>_cloudsync` companion table), run:
    ```sql
-   CLOUDSYNC DISABLE <table_name>
+   SELECT cloudsync_cleanup('<table_name>');
    ```
 3. Drop the test table if it exists: `DROP TABLE IF EXISTS <table_name>;`
 5. Create the test table using the SQLite DDL
@@ -370,7 +370,7 @@ SELECT cloudsync_terminate();
 
 In SQLiteCloud (optional, for full cleanup):
 ```sql
-CLOUDSYNC DISABLE <table_name>);
+SELECT cloudsync_cleanup('<table_name>');
 DROP TABLE IF EXISTS <table_name>;
 ```
 
